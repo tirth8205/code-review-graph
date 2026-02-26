@@ -1,0 +1,155 @@
+"""Tests for graph visualization export."""
+
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import EdgeInfo, NodeInfo
+
+
+@pytest.fixture
+def store_with_data(tmp_path):
+    db_path = tmp_path / "test.db"
+    store = GraphStore(db_path)
+    file_node = NodeInfo(
+        kind="File",
+        name="auth.py",
+        file_path="src/auth.py",
+        line_start=1,
+        line_end=50,
+        language="python",
+        parent_name=None,
+        params=None,
+        return_type=None,
+        modifiers=None,
+        is_test=False,
+        extra={},
+    )
+    class_node = NodeInfo(
+        kind="Class",
+        name="AuthService",
+        file_path="src/auth.py",
+        line_start=5,
+        line_end=45,
+        language="python",
+        parent_name=None,
+        params=None,
+        return_type=None,
+        modifiers=None,
+        is_test=False,
+        extra={},
+    )
+    func_node = NodeInfo(
+        kind="Function",
+        name="login",
+        file_path="src/auth.py",
+        line_start=10,
+        line_end=20,
+        language="python",
+        parent_name="AuthService",
+        params="username, password",
+        return_type="bool",
+        modifiers=None,
+        is_test=False,
+        extra={},
+    )
+    test_file = NodeInfo(
+        kind="File",
+        name="test_auth.py",
+        file_path="tests/test_auth.py",
+        line_start=1,
+        line_end=10,
+        language="python",
+        parent_name=None,
+        params=None,
+        return_type=None,
+        modifiers=None,
+        is_test=False,
+        extra={},
+    )
+    test_node = NodeInfo(
+        kind="Test",
+        name="test_login",
+        file_path="tests/test_auth.py",
+        line_start=1,
+        line_end=10,
+        language="python",
+        parent_name=None,
+        params=None,
+        return_type=None,
+        modifiers=None,
+        is_test=True,
+        extra={},
+    )
+    store.upsert_node(file_node)
+    store.upsert_node(class_node)
+    store.upsert_node(func_node)
+    store.upsert_node(test_file)
+    store.upsert_node(test_node)
+    contains_edge = EdgeInfo(
+        kind="CONTAINS",
+        source="src/auth.py",
+        target="src/auth.py::AuthService",
+        file_path="src/auth.py",
+        line=5,
+        extra={},
+    )
+    calls_edge = EdgeInfo(
+        kind="CALLS",
+        source="tests/test_auth.py::test_login",
+        target="src/auth.py::AuthService.login",
+        file_path="tests/test_auth.py",
+        line=5,
+        extra={},
+    )
+    store.upsert_edge(contains_edge)
+    store.upsert_edge(calls_edge)
+    store.commit()
+    return store
+
+
+def test_export_graph_data(store_with_data):
+    from code_review_graph.visualization import export_graph_data
+
+    data = export_graph_data(store_with_data)
+    assert "nodes" in data
+    assert "edges" in data
+    assert "stats" in data
+    assert len(data["nodes"]) == 5
+    assert len(data["edges"]) == 2
+    node_names = {n["name"] for n in data["nodes"]}
+    assert "auth.py" in node_names
+    assert "AuthService" in node_names
+    assert "login" in node_names
+    edge_kinds = {e["kind"] for e in data["edges"]}
+    assert "CONTAINS" in edge_kinds
+    assert "CALLS" in edge_kinds
+    json.dumps(data)  # must be serializable
+
+
+def test_generate_html(store_with_data, tmp_path):
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store_with_data, output_path)
+    assert output_path.exists()
+    content = output_path.read_text()
+    assert "d3js.org" in content or "d3.v7" in content
+    assert "auth.py" in content
+    assert "AuthService" in content
+    assert "<!DOCTYPE html>" in content
+    assert "</html>" in content
+
+
+def test_generate_html_overwrites(store_with_data, tmp_path):
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    output_path.write_text("old content")
+    generate_html(store_with_data, output_path)
+    content = output_path.read_text()
+    assert "old content" not in content
+    assert "<!DOCTYPE html>" in content
