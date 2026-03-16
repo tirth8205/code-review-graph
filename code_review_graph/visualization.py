@@ -38,6 +38,14 @@ def _build_name_index(
             mod = fp.replace("/", ".").replace(".py", "")
             if n["kind"] == "File":
                 _add(mod, qn)
+                # Index by every path suffix so C/C++ bare includes resolve.
+                # e.g. "/abs/libs/trading/Foo.hpp" is also indexed as
+                # "Foo.hpp", "trading/Foo.hpp", "libs/trading/Foo.hpp", …
+                parts = fp.replace("\\", "/").split("/")
+                for i in range(len(parts)):
+                    suffix = "/".join(parts[i:])
+                    if suffix:
+                        _add(suffix, qn)
             else:
                 _add(mod + "." + n["name"], qn)
     return index
