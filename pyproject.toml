@@ -39,6 +39,7 @@ code-review-graph = "code_review_graph.cli:main"
 [project.optional-dependencies]
 embeddings = [
     "sentence-transformers>=3.0.0",
+    "google-generativeai>=0.8.0",
     "numpy>=1.26",
 ]
 dev = [
