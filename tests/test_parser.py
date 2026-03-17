@@ -89,6 +89,38 @@ class TestCodeParser:
         assert "test_authenticate_valid" in test_names
         assert "test_process_request_ok" in test_names
 
+    def test_calls_edge_same_file_resolution(self):
+        """Call targets defined in the same file should be qualified."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        file_path = str(FIXTURES / "sample_python.py")
+
+        # create_auth_service() calls AuthService() — a class defined in the same file
+        auth_service_calls = [
+            e for e in calls if e.target == f"{file_path}::AuthService"
+        ]
+        assert len(auth_service_calls) >= 1
+
+    def test_calls_edge_cross_file_resolution(self):
+        """Call targets imported from another file should resolve to that file's qualified name."""
+        _, edges = self.parser.parse_file(FIXTURES / "caller_example.py")
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        sample_path = str((FIXTURES / "sample_python.py").resolve())
+        # setup_and_run() calls create_auth_service(), imported from sample_python
+        resolved_calls = [
+            e for e in calls if e.target == f"{sample_path}::create_auth_service"
+        ]
+        assert len(resolved_calls) == 1
+
+    def test_unresolved_calls_stay_bare(self):
+        """Method calls and unknown calls should remain as bare names."""
+        _, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        # self._validate_token() is a method call — can't resolve the target file
+        bare_calls = [e for e in calls if e.target == "_validate_token"]
+        assert len(bare_calls) >= 1
+
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
         assert nodes == []
