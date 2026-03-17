@@ -37,3 +37,15 @@ def process_request(service: AuthService, token: str) -> dict:
     if service.authenticate(token):
         return {"status": "ok"}
     return {"status": "denied"}
+
+
+def _log_action(func):
+    """Simple decorator."""
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@_log_action
+def guarded_process(service: AuthService, token: str) -> dict:
+    return process_request(service, token)

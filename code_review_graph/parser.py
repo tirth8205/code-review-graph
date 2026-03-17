@@ -421,13 +421,26 @@ class CodeParser:
         func_types = set(_FUNCTION_TYPES.get(language, []))
         import_types = set(_IMPORT_TYPES.get(language, []))
 
+        # Node types that wrap a class/function with decorators/annotations
+        decorator_wrappers = {"decorated_definition", "decorator"}
+
         for child in root.children:
             node_type = child.type
 
+            # Unwrap decorator wrappers to reach the inner definition
+            target = child
+            if node_type in decorator_wrappers:
+                for inner in child.children:
+                    if inner.type in func_types or inner.type in class_types:
+                        target = inner
+                        break
+
+            target_type = target.type
+
             # Collect defined function/class names
-            if node_type in func_types or node_type in class_types:
-                name = self._get_name(child, language,
-                                      "class" if node_type in class_types else "function")
+            if target_type in func_types or target_type in class_types:
+                name = self._get_name(target, language,
+                                      "class" if target_type in class_types else "function")
                 if name:
                     defined_names.add(name)
 

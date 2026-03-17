@@ -121,6 +121,18 @@ class TestCodeParser:
         bare_calls = [e for e in calls if e.target == "_validate_token"]
         assert len(bare_calls) >= 1
 
+    def test_calls_edge_decorated_function_resolution(self):
+        """Decorated functions should be in defined_names and resolvable as call targets."""
+        _, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        file_path = str(FIXTURES / "sample_python.py")
+
+        # guarded_process() calls process_request() — both in the same file,
+        # but guarded_process is wrapped in a decorated_definition node
+        resolved = [e for e in calls if e.target == f"{file_path}::process_request"
+                    and "guarded_process" in e.source]
+        assert len(resolved) == 1
+
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
         assert nodes == []
