@@ -133,6 +133,14 @@ class TestCodeParser:
                     and "guarded_process" in e.source]
         assert len(resolved) == 1
 
+    def test_multiple_calls_to_same_function(self):
+        """Multiple calls to the same function on different lines should each produce an edge."""
+        _, edges = self.parser.parse_file(FIXTURES / "multi_call_example.py")
+        calls = [e for e in edges if e.kind == "CALLS" and "_internal_request" in e.target]
+        assert len(calls) == 2
+        lines = {e.line for e in calls}
+        assert len(lines) == 2  # distinct line numbers
+
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
         assert nodes == []

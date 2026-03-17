@@ -189,11 +189,12 @@ class GraphStore:
         now = time.time()
         extra = json.dumps(edge.extra) if edge.extra else "{}"
 
-        # Check for existing edge
+        # Check for existing edge (include line so multiple call sites are preserved)
         existing = self._conn.execute(
             """SELECT id FROM edges
-               WHERE kind=? AND source_qualified=? AND target_qualified=? AND file_path=?""",
-            (edge.kind, edge.source, edge.target, edge.file_path),
+               WHERE kind=? AND source_qualified=? AND target_qualified=?
+                     AND file_path=? AND line=?""",
+            (edge.kind, edge.source, edge.target, edge.file_path, edge.line),
         ).fetchone()
 
         if existing:

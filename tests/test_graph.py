@@ -155,6 +155,25 @@ class TestGraphStore:
         impacted_qns = {n.qualified_name for n in result["impacted_nodes"]}
         assert "/b.py::func_b" in impacted_qns or "/b.py" in impacted_qns
 
+    def test_upsert_edge_preserves_multiple_call_sites(self):
+        """Multiple CALLS edges to the same target from the same source on different lines."""
+        edge1 = EdgeInfo(
+            kind="CALLS", source="/test/file.py::caller",
+            target="/test/file.py::helper", file_path="/test/file.py", line=10,
+        )
+        edge2 = EdgeInfo(
+            kind="CALLS", source="/test/file.py::caller",
+            target="/test/file.py::helper", file_path="/test/file.py", line=20,
+        )
+        self.store.upsert_edge(edge1)
+        self.store.upsert_edge(edge2)
+        self.store.commit()
+
+        edges = self.store.get_edges_by_source("/test/file.py::caller")
+        assert len(edges) == 2
+        lines = {e.line for e in edges}
+        assert lines == {10, 20}
+
     def test_metadata(self):
         self.store.set_metadata("test_key", "test_value")
         assert self.store.get_metadata("test_key") == "test_value"
