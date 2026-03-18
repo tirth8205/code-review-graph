@@ -267,3 +267,199 @@ class TestSwiftParsing:
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
+
+
+class TestSolidityParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.sol")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Vault.sol")) == "solidity"
+
+    def test_finds_contracts_interfaces_libraries(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "StakingVault" in names
+        assert "BoostedPool" in names
+        assert "IStakingPool" in names
+        assert "RewardMath" in names
+
+    def test_finds_structs(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "StakerPosition" in names
+
+    def test_finds_enums(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "PoolStatus" in names
+
+    def test_finds_custom_errors(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "InsufficientStake" in names
+        assert "PoolNotActive" in names
+
+    def test_finds_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "stake" in names
+        assert "unstake" in names
+        assert "stakedBalance" in names
+        assert "pendingBonus" in names
+
+    def test_finds_constructors(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        constructors = [f for f in funcs if f.name == "constructor"]
+        assert len(constructors) == 2  # StakingVault + BoostedPool
+
+    def test_finds_modifiers(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "nonZero" in names
+        assert "whenPoolActive" in names
+
+    def test_finds_events(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "Staked" in names
+        assert "Unstaked" in names
+        assert "BonusClaimed" in names
+
+    def test_finds_file_level_events(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        # file-level events declared outside any contract
+        assert "Staked" in names or "Unstaked" in names
+
+    def test_finds_user_defined_value_types(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Price" in names
+        assert "PositionId" in names
+
+    def test_finds_file_level_constants(self):
+        constants = [
+            n for n in self.nodes
+            if n.extra.get("solidity_kind") == "constant"
+        ]
+        names = {c.name for c in constants}
+        assert "MAX_SUPPLY" in names
+        assert "ZERO_ADDRESS" in names
+
+    def test_finds_free_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        free = [f for f in funcs if f.name == "protocolFee"]
+        assert len(free) == 1
+        assert free[0].parent_name is None
+
+    def test_finds_using_directive(self):
+        depends = [e for e in self.edges if e.kind == "DEPENDS_ON"]
+        targets = {e.target for e in depends}
+        assert "RewardMath" in targets
+
+    def test_finds_selective_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol" in targets
+
+    def test_finds_state_variables(self):
+        state_vars = [
+            n for n in self.nodes
+            if n.extra.get("solidity_kind") == "state_variable"
+        ]
+        names = {v.name for v in state_vars}
+        assert "stakes" in names
+        assert "totalStaked" in names
+        assert "guardian" in names
+        assert "status" in names
+        assert "MIN_STAKE" in names
+        assert "launchTime" in names
+        assert "bonusRate" in names
+        assert "assetPrice" in names
+
+    def test_state_variable_types(self):
+        state_vars = {
+            n.name: n for n in self.nodes
+            if n.extra.get("solidity_kind") == "state_variable"
+        }
+        assert state_vars["totalStaked"].return_type == "uint256"
+        assert state_vars["guardian"].return_type == "address"
+        assert state_vars["stakes"].modifiers == "public"
+
+    def test_finds_receive_and_fallback(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "receive" in names
+        assert "fallback" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "@openzeppelin/contracts/token/ERC20/ERC20.sol" in targets
+        assert "@openzeppelin/contracts/access/Ownable.sol" in targets
+
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        pairs = {(e.source.split("::")[-1], e.target) for e in inherits}
+        assert ("StakingVault", "ERC20") in pairs
+        assert ("StakingVault", "Ownable") in pairs
+        assert ("StakingVault", "IStakingPool") in pairs
+        assert ("BoostedPool", "StakingVault") in pairs
+
+    def test_finds_function_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "require" in targets
+        assert "_mint" in targets
+        assert "_burn" in targets
+        assert "pendingBonus" in targets
+
+    def test_finds_emit_edges(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        call_pairs = {(e.source.split("::")[-1], e.target) for e in calls}
+        assert ("StakingVault.stake", "Staked") in call_pairs
+        assert ("StakingVault.unstake", "Unstaked") in call_pairs
+        assert ("BoostedPool.claimBonus", "BonusClaimed") in call_pairs
+
+    def test_finds_modifier_invocations(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        call_pairs = {(e.source.split("::")[-1], e.target) for e in calls}
+        assert ("StakingVault.stake", "nonZero") in call_pairs
+        assert ("StakingVault.stake", "whenPoolActive") in call_pairs
+        assert ("StakingVault.unstake", "nonZero") in call_pairs
+        assert ("StakingVault.emergencyWithdraw", "nonZero") in call_pairs
+
+    def test_finds_constructor_modifier_invocations(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        call_pairs = {(e.source.split("::")[-1], e.target) for e in calls}
+        assert ("StakingVault.constructor", "ERC20") in call_pairs
+        assert ("StakingVault.constructor", "Ownable") in call_pairs
+        assert ("BoostedPool.constructor", "StakingVault") in call_pairs
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split("::")[-1] for e in contains}
+        assert "StakingVault" in targets
+        assert "StakingVault.stake" in targets
+        assert "StakingVault.stakes" in targets
+        assert "StakingVault.Staked" not in targets  # Staked is file-level
+        assert "BoostedPool.claimBonus" in targets
+
+    def test_extracts_params(self):
+        funcs = {
+            n.name: n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "RewardMath"
+        }
+        assert funcs["mulPrecise"].params == "(uint256 a, uint256 b)"
+
+    def test_extracts_return_type(self):
+        funcs = {
+            n.name: n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "RewardMath"
+        }
+        assert "uint256" in funcs["mulPrecise"].return_type

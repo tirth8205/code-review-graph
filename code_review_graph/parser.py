@@ -72,6 +72,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".kt": "kotlin",
     ".swift": "swift",
     ".php": "php",
+    ".sol": "solidity",
 }
 
 # Tree-sitter node type mappings per language
@@ -94,6 +95,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "kotlin": ["class_declaration", "object_declaration"],
     "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
     "php": ["class_declaration", "interface_declaration"],
+    "solidity": [
+        "contract_declaration", "interface_declaration", "library_declaration",
+        "struct_declaration", "enum_declaration", "error_declaration",
+        "user_defined_type_definition",
+    ],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -111,6 +117,10 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "kotlin": ["function_declaration"],
     "swift": ["function_declaration"],
     "php": ["function_definition", "method_declaration"],
+    "solidity": [
+        "function_definition", "constructor_definition", "modifier_definition",
+        "event_definition", "fallback_receive_definition",
+    ],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -128,6 +138,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "kotlin": ["import_header"],
     "swift": ["import_declaration"],
     "php": ["namespace_use_declaration"],
+    "solidity": ["import_directive"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -145,6 +156,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "kotlin": ["call_expression"],
     "swift": ["call_expression"],
     "php": ["function_call_expression", "member_call_expression"],
+    "solidity": ["call_expression"],
 }
 
 # Patterns that indicate a test function
@@ -349,6 +361,23 @@ class CodeParser:
                         line=child.start_point[0] + 1,
                     ))
 
+                    # Solidity: modifier invocations on functions → CALLS edges
+                    if language == "solidity":
+                        for sub in child.children:
+                            if sub.type == "modifier_invocation":
+                                for ident in sub.children:
+                                    if ident.type == "identifier":
+                                        edges.append(EdgeInfo(
+                                            kind="CALLS",
+                                            source=qualified,
+                                            target=ident.text.decode(
+                                                "utf-8", errors="replace",
+                                            ),
+                                            file_path=file_path,
+                                            line=sub.start_point[0] + 1,
+                                        ))
+                                        break
+
                     # Recurse to find calls inside the function
                     self._extract_from_tree(
                         child, source, language, file_path, nodes, edges,
@@ -382,6 +411,132 @@ class CodeParser:
                         line=child.start_point[0] + 1,
                     ))
 
+            # --- Solidity-specific constructs ---
+            if language == "solidity":
+                # Emit statements: emit EventName(...) → CALLS edge
+                if node_type == "emit_statement" and enclosing_func:
+                    for sub in child.children:
+                        if sub.type == "expression":
+                            for ident in sub.children:
+                                if ident.type == "identifier":
+                                    caller = self._qualify(
+                                        enclosing_func, file_path, enclosing_class,
+                                    )
+                                    edges.append(EdgeInfo(
+                                        kind="CALLS",
+                                        source=caller,
+                                        target=ident.text.decode("utf-8", errors="replace"),
+                                        file_path=file_path,
+                                        line=child.start_point[0] + 1,
+                                    ))
+
+                # State variable declarations → Function nodes (public ones
+                # auto-generate getters, and all are critical for reviews)
+                if node_type == "state_variable_declaration" and enclosing_class:
+                    var_name = None
+                    var_visibility = None
+                    var_mutability = None
+                    var_type = None
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            var_name = sub.text.decode("utf-8", errors="replace")
+                        elif sub.type == "visibility":
+                            var_visibility = sub.text.decode("utf-8", errors="replace")
+                        elif sub.type == "type_name":
+                            var_type = sub.text.decode("utf-8", errors="replace")
+                        elif sub.type in ("constant", "immutable"):
+                            var_mutability = sub.type
+                    if var_name:
+                        qualified = self._qualify(var_name, file_path, enclosing_class)
+                        nodes.append(NodeInfo(
+                            kind="Function",
+                            name=var_name,
+                            file_path=file_path,
+                            line_start=child.start_point[0] + 1,
+                            line_end=child.end_point[0] + 1,
+                            language=language,
+                            parent_name=enclosing_class,
+                            return_type=var_type,
+                            modifiers=var_visibility,
+                            extra={
+                                "solidity_kind": "state_variable",
+                                "mutability": var_mutability,
+                            },
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS",
+                            source=self._qualify(
+                                enclosing_class, file_path, None,
+                            ),
+                            target=qualified,
+                            file_path=file_path,
+                            line=child.start_point[0] + 1,
+                        ))
+                        continue
+
+                # File-level and contract-level constant declarations
+                if node_type == "constant_variable_declaration":
+                    var_name = None
+                    var_type = None
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            var_name = sub.text.decode("utf-8", errors="replace")
+                        elif sub.type == "type_name":
+                            var_type = sub.text.decode("utf-8", errors="replace")
+                    if var_name:
+                        qualified = self._qualify(
+                            var_name, file_path, enclosing_class,
+                        )
+                        nodes.append(NodeInfo(
+                            kind="Function",
+                            name=var_name,
+                            file_path=file_path,
+                            line_start=child.start_point[0] + 1,
+                            line_end=child.end_point[0] + 1,
+                            language=language,
+                            parent_name=enclosing_class,
+                            return_type=var_type,
+                            extra={"solidity_kind": "constant"},
+                        ))
+                        container = (
+                            self._qualify(enclosing_class, file_path, None)
+                            if enclosing_class
+                            else file_path
+                        )
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS",
+                            source=container,
+                            target=qualified,
+                            file_path=file_path,
+                            line=child.start_point[0] + 1,
+                        ))
+                        continue
+
+                # Using directives: using LibName for Type → DEPENDS_ON edge
+                if node_type == "using_directive":
+                    lib_name = None
+                    for sub in child.children:
+                        if sub.type == "type_alias":
+                            for ident in sub.children:
+                                if ident.type == "identifier":
+                                    lib_name = ident.text.decode(
+                                        "utf-8", errors="replace",
+                                    )
+                    if lib_name:
+                        source_name = (
+                            self._qualify(enclosing_class, file_path, None)
+                            if enclosing_class
+                            else file_path
+                        )
+                        edges.append(EdgeInfo(
+                            kind="DEPENDS_ON",
+                            source=source_name,
+                            target=lib_name,
+                            file_path=file_path,
+                            line=child.start_point[0] + 1,
+                        ))
+                    continue
+
             # Recurse for other node types
             self._extract_from_tree(
                 child, source, language, file_path, nodes, edges,
@@ -396,6 +551,14 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        # Solidity: constructor and receive/fallback have no identifier child
+        if language == "solidity":
+            if node.type == "constructor_definition":
+                return "constructor"
+            if node.type == "fallback_receive_definition":
+                for child in node.children:
+                    if child.type in ("receive", "fallback"):
+                        return child.text.decode("utf-8", errors="replace")
         # For C/C++: function names are inside function_declarator/pointer_declarator
         # Check these first to avoid matching the return type_identifier
         if language in ("c", "cpp") and kind == "function":
@@ -423,12 +586,21 @@ class CodeParser:
         for child in node.children:
             if child.type in ("parameters", "formal_parameters", "parameter_list"):
                 return child.text.decode("utf-8", errors="replace")
+        # Solidity: parameters are direct children between ( and )
+        if language == "solidity":
+            params = [
+                c.text.decode("utf-8", errors="replace")
+                for c in node.children
+                if c.type == "parameter"
+            ]
+            if params:
+                return f"({', '.join(params)})"
         return None
 
     def _get_return_type(self, node, language: str, source: bytes) -> Optional[str]:
         """Extract return type annotation if present."""
         for child in node.children:
-            if child.type in ("type", "return_type", "type_annotation"):
+            if child.type in ("type", "return_type", "type_annotation", "return_type_definition"):
                 return child.text.decode("utf-8", errors="replace")
         # Python: look for -> annotation
         if language == "python":
@@ -470,6 +642,15 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type in ("identifier", "type_identifier", "nested_identifier"):
                             bases.append(sub.text.decode("utf-8", errors="replace"))
+        elif language == "solidity":
+            # contract Foo is Bar, Baz { ... }
+            for child in node.children:
+                if child.type == "inheritance_specifier":
+                    for sub in child.children:
+                        if sub.type == "user_defined_type":
+                            for ident in sub.children:
+                                if ident.type == "identifier":
+                                    bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language == "go":
             # Embedded structs / interface composition
             for child in node.children:
@@ -533,6 +714,13 @@ class CodeParser:
             parts = text.split()
             if len(parts) >= 2:
                 imports.append(parts[-1].rstrip(";"))
+        elif language == "solidity":
+            # import "path/to/file.sol" or import {Symbol} from "path"
+            for child in node.children:
+                if child.type == "string":
+                    val = child.text.decode("utf-8", errors="replace").strip('"')
+                    if val:
+                        imports.append(val)
         elif language == "ruby":
             # require 'module' or require_relative 'path'
             if "require" in text:
@@ -551,6 +739,10 @@ class CodeParser:
             return None
 
         first = node.children[0]
+
+        # Solidity wraps call targets in an 'expression' node – unwrap it
+        if first.type == "expression" and first.children:
+            first = first.children[0]
 
         # Simple call: func_name(args)
         if first.type == "identifier":
