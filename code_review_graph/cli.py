@@ -181,7 +181,8 @@ def main() -> None:
     vis_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     # serve
-    sub.add_parser("serve", help="Start MCP server (stdio transport)")
+    serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
+    serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     args = ap.parse_args()
 
@@ -195,7 +196,7 @@ def main() -> None:
 
     if args.command == "serve":
         from .main import main as serve_main
-        serve_main()
+        serve_main(repo_root=args.repo)
         return
 
     if args.command in ("init", "install"):

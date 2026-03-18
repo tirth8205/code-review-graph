@@ -21,6 +21,8 @@ from .tools import (
     semantic_search_nodes,
 )
 
+_default_repo_root: str | None = None
+
 mcp = FastMCP(
     "code-review-graph",
     instructions=(
@@ -204,11 +206,13 @@ def get_docs_section_tool(
     Args:
         section_name: The section to retrieve (e.g. "review-delta", "usage").
     """
-    return get_docs_section(section_name=section_name)
+    return get_docs_section(section_name=section_name, repo_root=_default_repo_root)
 
 
-def main() -> None:
+def main(repo_root: str | None = None) -> None:
     """Run the MCP server via stdio."""
+    global _default_repo_root
+    _default_repo_root = repo_root
     mcp.run(transport="stdio")
 
 

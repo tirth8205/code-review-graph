@@ -712,13 +712,7 @@ def embed_graph(repo_root: str | None = None) -> dict[str, Any]:
 # Tool 8: get_docs_section
 # ---------------------------------------------------------------------------
 
-# Search paths for the LLM-optimized reference file
-_REFERENCE_PATHS = [
-    "docs/LLM-OPTIMIZED-REFERENCE.md",
-]
-
-
-def get_docs_section(section_name: str) -> dict[str, Any]:
+def get_docs_section(section_name: str, repo_root: str | None = None) -> dict[str, Any]:
     """Return a specific section from the LLM-optimized reference.
 
     Used by skills and Claude Code to load only the exact documentation
@@ -728,41 +722,41 @@ def get_docs_section(section_name: str) -> dict[str, Any]:
         section_name: Exact section name. One of: usage, review-delta,
                       review-pr, commands, legal, watch, embeddings,
                       languages, troubleshooting.
+        repo_root: Repository root path. Auto-detected from current directory if omitted.
 
     Returns:
         The section content, or an error if not found.
     """
     import re as _re
 
-    # Try package-relative path first (works even outside a git repo)
-    pkg_dir = Path(__file__).resolve().parent.parent
-    search_roots = [pkg_dir]
+    search_roots: list[Path] = []
 
-    # Also try repo root if inside a git repo
+    if repo_root:
+        search_roots.append(Path(repo_root))
+
     try:
-        _, root = _get_store()
+        _, root = _get_store(repo_root)
         if root not in search_roots:
             search_roots.append(root)
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass
 
     for search_root in search_roots:
-        for rel_path in _REFERENCE_PATHS:
-            full_path = search_root / rel_path
-            if full_path.exists():
-                content = full_path.read_text()
-                match = _re.search(
-                    rf'<section name="{_re.escape(section_name)}">'
-                    r"(.*?)</section>",
-                    content,
-                    _re.DOTALL | _re.IGNORECASE,
-                )
-                if match:
-                    return {
-                        "status": "ok",
-                        "section": section_name,
-                        "content": match.group(1).strip(),
-                    }
+        candidate = search_root / "docs" / "LLM-OPTIMIZED-REFERENCE.md"
+        if candidate.exists():
+            content = candidate.read_text(encoding="utf-8")
+            match = _re.search(
+                rf'<section name="{_re.escape(section_name)}">'
+                r"(.*?)</section>",
+                content,
+                _re.DOTALL | _re.IGNORECASE,
+            )
+            if match:
+                return {
+                    "status": "ok",
+                    "section": section_name,
+                    "content": match.group(1).strip(),
+                }
 
     available = [
         "usage", "review-delta", "review-pr", "commands",
