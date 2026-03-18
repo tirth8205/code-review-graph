@@ -1,5 +1,4 @@
 {
-  "_comment": "PostEdit and PostGit are custom Claude Code hook events (confirmed working as of v1.6.4).",
   "hooks": {
     "SessionStart": [
       {
@@ -11,20 +10,9 @@
         ]
       }
     ],
-    "PostEdit": [
+    "PostToolUse": [
       {
-        "matcher": "Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "code-review-graph update 2>/dev/null || true"
-          }
-        ]
-      }
-    ],
-    "PostGit": [
-      {
-        "matcher": "commit",
+        "matcher": "Write|Edit|Bash",
         "hooks": [
           {
             "type": "command",
