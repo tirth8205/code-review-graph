@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.8.4] - 2026-03-20
+
+### Added
+- **Vue SFC parsing**: Parse `.vue` Single File Components by extracting `<script>` blocks with automatic `lang="ts"` detection
+- **Solidity support**: Full parsing for `.sol` files (functions, events, modifiers, inheritance)
+- **`find_large_functions_tool`**: New MCP tool to find functions, classes, or files exceeding a line-count threshold
+- **Call target resolution**: Bare call targets resolved to qualified names using same-file definitions (`_resolve_call_targets`)
+- **Multi-word AND search**: `search_nodes` now requires all words to match (case-insensitive)
+- **Impact radius pagination**: `get_impact_radius` returns `truncated` flag, `total_impacted` count, and accepts `max_results` parameter
+
+### Changed
+- Language count updated from 12 to 14 across all documentation
+- MCP tool count updated from 8 to 9 across all documentation
+- VS Code extension updated to v0.2.0 with 5 new commands documented
+
+### Fixed
+- Test assertions updated to handle qualified call targets from `_resolve_call_targets`
+
 ## [1.8.3] - 2026-03-20
 
 ### Fixed

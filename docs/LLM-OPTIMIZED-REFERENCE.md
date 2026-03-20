@@ -1,4 +1,4 @@
-# LLM-OPTIMIZED REFERENCE — code-review-graph v1.8.2
+# LLM-OPTIMIZED REFERENCE — code-review-graph v1.8.4
 
 Claude Code: Read ONLY the exact `<section>` you need. Never load the whole file.
 
@@ -22,7 +22,7 @@ Never include full files unless explicitly asked.
 </section>
 
 <section name="commands">
-MCP tools: build_or_update_graph_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool
+MCP tools: build_or_update_graph_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool, find_large_functions_tool
 Skills: build-graph, review-delta, review-pr
 CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve]
 </section>
@@ -44,7 +44,7 @@ Model: all-MiniLM-L6-v2 (384-dim, fast).
 </section>
 
 <section name="languages">
-Supported: Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
+Supported: Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++
 Parser: Tree-sitter via tree-sitter-language-pack
 </section>
 

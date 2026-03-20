@@ -7,7 +7,7 @@
 ## Architecture
 
 - **Core Package**: `code_review_graph/` (Python 3.10+)
-  - `parser.py` — Tree-sitter multi-language AST parser (13 languages + Vue SFC support)
+  - `parser.py` — Tree-sitter multi-language AST parser (14 languages including Vue SFC and Solidity)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
   - `tools.py` — 9 MCP tool implementations
   - `incremental.py` — Git-based change detection, file watching
@@ -26,7 +26,7 @@
 
 ```bash
 # Development
-uv run pytest tests/ --tb=short -q          # Run tests (145 tests)
+uv run pytest tests/ --tb=short -q          # Run tests (182 tests)
 uv run ruff check code_review_graph/        # Lint
 uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 
@@ -64,7 +64,7 @@ uv run code-review-graph serve              # Start MCP server
 - `tests/test_tools.py` — MCP tool integration tests
 - `tests/test_visualization.py` — Export, HTML generation, C++ resolution
 - `tests/test_incremental.py` — Build, update, migration, git ops
-- `tests/test_multilang.py` — 12 language parsing tests
+- `tests/test_multilang.py` — 14 language parsing tests (including Vue and Solidity)
 - `tests/test_embeddings.py` — Vector encode/decode, similarity, store
 - `tests/fixtures/` — Sample files for each supported language
 

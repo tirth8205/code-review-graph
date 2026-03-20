@@ -1,6 +1,6 @@
 # Code Review Graph — User Guide
 
-**Version:** v1.8.2 (Mar 17, 2026)
+**Version:** v1.8.4 (Mar 20, 2026)
 
 ## Installation
 
@@ -61,7 +61,7 @@ Then use `embed_graph_tool` to compute vectors. `semantic_search_nodes_tool` aut
 
 ## Supported Languages
 
-Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
+Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++
 
 ## What Gets Indexed
 

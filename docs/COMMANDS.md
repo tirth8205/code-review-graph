@@ -32,10 +32,11 @@ base: str = "HEAD~1"          # Git diff base
 ```
 changed_files: list[str] | None  # Auto-detected from git
 max_depth: int = 2               # Hops in graph
+max_results: int = 500           # Max impacted nodes to return
 repo_root: str | None
 base: str = "HEAD~1"
 ```
-> BFS traversal is capped at 500 nodes to prevent resource exhaustion.
+> BFS traversal is capped at `max_results` nodes. Response includes `truncated` (bool) and `total_impacted` (int).
 > `repo_root` must point to a directory containing `.git` or `.code-review-graph`.
 
 ### `query_graph_tool`
@@ -74,6 +75,17 @@ Requires: `pip install code-review-graph[embeddings]`
 ```
 repo_root: str | None
 ```
+
+### `find_large_functions_tool`
+```
+min_lines: int = 50                # Minimum line count threshold
+max_lines: int | None              # Optional maximum line count
+kind: str | None                   # File, Class, Function, or Test
+file_path_pattern: str | None      # Filter by file path substring
+limit: int = 50                    # Max results to return
+repo_root: str | None
+```
+> Find functions, classes, or files exceeding a line-count threshold. Results ordered by size (largest first).
 
 ### `get_docs_section_tool`
 ```
@@ -131,7 +143,9 @@ code-review-graph serve
   "impacted_files": ["src/routes.py", "src/middleware.py"],
   "edges": [
     {"id": 5, "kind": "CALLS", "source": "src/auth.py::login", "target": "src/db.py::get_user", "file_path": "src/auth.py", "line": 15}
-  ]
+  ],
+  "truncated": false,
+  "total_impacted": 3
 }
 ```
 

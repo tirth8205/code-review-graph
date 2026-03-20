@@ -10,7 +10,7 @@
   <a href="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml"><img src="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square" alt="Python 3.10+"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square" alt="MCP"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-1.8.2-purple.svg?style=flat-square" alt="v1.8.2"></a>
+  <a href="#"><img src="https://img.shields.io/badge/version-1.8.4-purple.svg?style=flat-square" alt="v1.8.4"></a>
 </p>
 
 <br>
@@ -84,10 +84,10 @@ On every git commit or file save, a hook fires. The graph diffs changed files, f
 </details>
 
 <details>
-<summary><strong>14 supported languages</strong></summary>
+<summary><strong>15 supported languages</strong></summary>
 <br>
 
-Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++, R
+Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, R
 
 Each language has full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection.
 
@@ -199,6 +199,7 @@ Claude uses these automatically once the graph is built.
 | `embed_graph_tool` | Compute vector embeddings for semantic search |
 | `list_graph_stats_tool` | Graph size and health |
 | `get_docs_section_tool` | Retrieve documentation sections |
+| `find_large_functions_tool` | Find functions/classes exceeding a line-count threshold |
 
 </details>
 
@@ -209,7 +210,7 @@ Claude uses these automatically once the graph is built.
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only changed files. Subsequent updates complete in under 2 seconds. |
-| **14 languages** | Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++, R |
+| **15 languages** | Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, R |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
 | **Semantic search** | Optional vector embeddings via sentence-transformers |

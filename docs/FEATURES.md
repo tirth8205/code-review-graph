@@ -1,6 +1,25 @@
 # Features
 
-## v1.8.2 (Current)
+## v1.8.4 (Current)
+- **Multi-word AND search**: `search_nodes` now requires all words to match (case-insensitive), producing more precise results.
+- **Call target resolution**: Bare call targets are resolved to qualified names using same-file definitions, improving `callers_of`/`callees_of` accuracy.
+- **Impact radius pagination**: `get_impact_radius` returns `truncated` flag and `total_impacted` count; `max_results` parameter controls output size.
+- **`find_large_functions_tool`**: New MCP tool to find functions, classes, or files exceeding a line-count threshold.
+- **14 languages**: Added Vue SFC and Solidity support.
+- **Documentation overhaul**: All docs updated with accurate language/tool counts, version references, and VS Code extension parity.
+
+## v1.8.3
+- **Parser recursion guard**: `_MAX_AST_DEPTH = 180` prevents stack overflow on deeply nested ASTs.
+- **Module cache bound**: `_MODULE_CACHE_MAX = 15,000` with automatic eviction.
+- **Embeddings thread safety**: `check_same_thread=False` on EmbeddingStore SQLite.
+- **Embeddings retry logic**: Exponential backoff for Google Gemini API calls.
+- **Visualization XSS hardening**: `</` escaped to `<\/` in JSON serialization.
+- **CLI error handling**: Split broad `except` into specific handlers.
+- **Git timeout**: Configurable via `CRG_GIT_TIMEOUT` env var.
+- **Governance files**: CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md.
+
+## v1.8.2
+- **C# parsing fix**: Renamed language identifier from `c_sharp` to `csharp`.
 - **Watch mode thread safety**: SQLite connections compatible with Python 3.10/3.11 watchdog threads.
 - **Full rebuild cleanup**: Purges stale data from deleted files during full rebuild.
 - **Dependency trim**: Removed unused `gitpython` dependency.
