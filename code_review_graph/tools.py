@@ -27,6 +27,48 @@ from .incremental import (
     incremental_update,
 )
 
+# Common JS/TS builtin method names filtered from callers_of results.
+# "Who calls .map()?" returns hundreds of hits and is never useful.
+# These are kept in the graph (callees_of still shows them) but excluded
+# when doing reverse call tracing to reduce noise.
+_BUILTIN_CALL_NAMES: set[str] = {
+    "map", "filter", "reduce", "reduceRight", "forEach", "find", "findIndex",
+    "some", "every", "includes", "indexOf", "lastIndexOf",
+    "push", "pop", "shift", "unshift", "splice", "slice",
+    "concat", "join", "flat", "flatMap", "sort", "reverse", "fill",
+    "keys", "values", "entries", "from", "isArray", "of", "at",
+    "trim", "trimStart", "trimEnd", "split", "replace", "replaceAll",
+    "match", "matchAll", "search", "substring", "substr",
+    "toLowerCase", "toUpperCase", "startsWith", "endsWith",
+    "padStart", "padEnd", "repeat", "charAt", "charCodeAt",
+    "assign", "freeze", "defineProperty", "getOwnPropertyNames",
+    "hasOwnProperty", "create", "is", "fromEntries",
+    "log", "warn", "error", "info", "debug", "trace", "dir", "table",
+    "time", "timeEnd", "assert", "clear", "count",
+    "then", "catch", "finally", "resolve", "reject", "all", "allSettled", "race", "any",
+    "parse", "stringify",
+    "floor", "ceil", "round", "random", "max", "min", "abs", "pow", "sqrt",
+    "addEventListener", "removeEventListener", "querySelector", "querySelectorAll",
+    "getElementById", "createElement", "appendChild", "removeChild",
+    "setAttribute", "getAttribute", "preventDefault", "stopPropagation",
+    "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+    "toString", "valueOf", "toJSON", "toISOString",
+    "getTime", "getFullYear", "now",
+    "isNaN", "parseInt", "parseFloat", "toFixed",
+    "encodeURIComponent", "decodeURIComponent",
+    "call", "apply", "bind", "next",
+    "emit", "on", "off", "once",
+    "pipe", "write", "read", "end", "close", "destroy",
+    "send", "status", "json", "redirect",
+    "set", "get", "delete", "has",
+    "findUnique", "findFirst", "findMany", "createMany",
+    "update", "updateMany", "deleteMany", "upsert",
+    "aggregate", "groupBy", "transaction",
+    "describe", "it", "test", "expect", "beforeEach", "afterEach",
+    "beforeAll", "afterAll", "mock", "spyOn",
+    "require", "fetch",
+}
+
 
 def _validate_repo_root(path: Path) -> Path:
     """Validate that a path is a plausible project root.
@@ -223,6 +265,16 @@ def query_graph(
         results: list[dict] = []
         edges_out: list[dict] = []
 
+        # For callers_of, skip common builtins early (before node resolution)
+        # "Who calls .map()?" returns hundreds of useless hits.
+        if pattern == "callers_of" and target in _BUILTIN_CALL_NAMES:
+            return {
+                "status": "ok", "pattern": pattern, "target": target,
+                "description": _QUERY_PATTERNS[pattern],
+                "summary": f"'{target}' is a common builtin — callers_of skipped to avoid noise.",
+                "results": [], "edges": [],
+            }
+
         # Resolve target - try as-is, then as absolute path, then search
         node = store.get_node(target)
         if not node:
@@ -256,7 +308,7 @@ def query_graph(
                     if caller:
                         results.append(node_to_dict(caller))
                     edges_out.append(edge_to_dict(e))
-            # Fallback: CALLS edges often store unqualified target names
+            # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
             if not results and node:
