@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 8 tools:
+Exposes 9 tools:
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -9,6 +9,7 @@ Exposes 8 tools:
 6. list_graph_stats       - aggregate statistics
 7. embed_graph            - compute vector embeddings for semantic search
 8. get_docs_section       - token-optimized documentation retrieval
+9. find_large_functions   - find oversized functions/classes by line count
 """
 
 from __future__ import annotations
@@ -775,3 +776,75 @@ def get_docs_section(section_name: str) -> dict[str, Any]:
             f"Available: {', '.join(available)}"
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool 9: find_large_functions
+# ---------------------------------------------------------------------------
+
+
+def find_large_functions(
+    min_lines: int = 50,
+    kind: str | None = None,
+    file_path_pattern: str | None = None,
+    limit: int = 50,
+    repo_root: str | None = None,
+) -> dict[str, Any]:
+    """Find functions, classes, or files exceeding a line-count threshold.
+
+    Useful for identifying decomposition targets, code-quality audits,
+    and enforcing size limits during code review.
+
+    Args:
+        min_lines: Minimum line count to flag (default: 50).
+        kind: Filter by node kind: Function, Class, File, or Test.
+        file_path_pattern: Filter by file path substring (e.g. "components/").
+        limit: Maximum results (default: 50).
+        repo_root: Repository root path. Auto-detected if omitted.
+
+    Returns:
+        Oversized nodes with line counts, ordered largest first.
+    """
+    store, root = _get_store(repo_root)
+    try:
+        nodes = store.get_nodes_by_size(
+            min_lines=min_lines,
+            kind=kind,
+            file_path_pattern=file_path_pattern,
+            limit=limit,
+        )
+
+        results = []
+        for n in nodes:
+            d = node_to_dict(n)
+            d["line_count"] = (n.line_end - n.line_start + 1) if n.line_start and n.line_end else 0
+            # Make file_path relative for readability
+            try:
+                d["relative_path"] = str(Path(n.file_path).relative_to(root))
+            except ValueError:
+                d["relative_path"] = n.file_path
+            results.append(d)
+
+        summary_parts = [
+            f"Found {len(results)} node(s) with >= {min_lines} lines"
+            + (f" (kind={kind})" if kind else "")
+            + (f" matching '{file_path_pattern}'" if file_path_pattern else "")
+            + ":",
+        ]
+        for r in results[:10]:
+            summary_parts.append(
+                f"  {r['line_count']:>4} lines | {r['kind']:>8} | "
+                f"{r['name']} ({r['relative_path']}:{r['line_start']})"
+            )
+        if len(results) > 10:
+            summary_parts.append(f"  ... and {len(results) - 10} more")
+
+        return {
+            "status": "ok",
+            "summary": "\n".join(summary_parts),
+            "total_found": len(results),
+            "min_lines": min_lines,
+            "results": results,
+        }
+    finally:
+        store.close()
