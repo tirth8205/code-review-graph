@@ -291,40 +291,30 @@ class GraphStore:
         return [r["file_path"] for r in rows]
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
-        """Simple keyword search across node names.
+        """Keyword search across node names with multi-word AND logic.
 
-        Multi-word queries match nodes containing ANY of the terms, ranked by
-        the number of terms matched (more matches first).  Single-word queries
-        behave exactly as before.
+        Each word in the query must match independently (case-insensitive)
+        against the node name or qualified name. For example,
+        ``"firebase auth"`` matches ``verify_firebase_token`` and
+        ``FirebaseAuth`` but not ``get_user``.
         """
-        terms = query.strip().split()
-        if len(terms) <= 1:
-            # Original single-term behavior
-            pattern = f"%{query}%"
-            rows = self._conn.execute(
-                "SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",
-                (pattern, pattern, limit),
-            ).fetchall()
-            return [self._row_to_node(r) for r in rows]
+        words = query.lower().split()
+        if not words:
+            return []
 
-        # Multi-term: match any term, rank by number of terms matched
-        seen: dict[str, tuple[GraphNode, int]] = {}
-        for term in terms:
-            pattern = f"%{term}%"
-            rows = self._conn.execute(
-                "SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",
-                (pattern, pattern, limit * 3),
-            ).fetchall()
-            for r in rows:
-                node = self._row_to_node(r)
-                if node.qualified_name in seen:
-                    seen[node.qualified_name] = (node, seen[node.qualified_name][1] + 1)
-                else:
-                    seen[node.qualified_name] = (node, 1)
+        conditions: list[str] = []
+        params: list[str | int] = []
+        for word in words:
+            conditions.append(
+                "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
+            )
+            params.extend([f"%{word}%", f"%{word}%"])
 
-        # Sort: more matches first, then by name relevance
-        items = sorted(seen.values(), key=lambda x: -x[1])
-        return [node for node, _ in items[:limit]]
+        where = " AND ".join(conditions)
+        sql = f"SELECT * FROM nodes WHERE {where} LIMIT ?"  # nosec B608
+        params.append(limit)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_node(r) for r in rows]
 
     # --- Impact / Graph traversal ---
 
@@ -389,11 +379,17 @@ class GraphStore:
             if node:
                 impacted_nodes.append(node)
 
+        # Truncation: cap impacted nodes and report total
+        total_impacted = len(impacted_nodes)
+        truncated = total_impacted > max_nodes
+        if truncated:
+            impacted_nodes = impacted_nodes[:max_nodes]
+
         impacted_files = list({n.file_path for n in impacted_nodes})
 
         # Collect relevant edges in a single batch query
         relevant_edges = []
-        all_qns = seeds | impacted
+        all_qns = seeds | {n.qualified_name for n in impacted_nodes}
         if all_qns:
             relevant_edges = self.get_edges_among(all_qns)
 
@@ -402,6 +398,8 @@ class GraphStore:
             "impacted_nodes": impacted_nodes,
             "impacted_files": impacted_files,
             "edges": relevant_edges,
+            "truncated": truncated,
+            "total_impacted": total_impacted,
         }
 
     def get_subgraph(self, qualified_names: list[str]) -> dict[str, Any]:

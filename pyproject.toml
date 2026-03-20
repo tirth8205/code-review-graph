@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "1.8.2"
+version = "1.8.3"
 description = "Persistent incremental knowledge graph for token-efficient, context-aware code reviews with Claude Code"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -32,6 +32,13 @@ dependencies = [
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/tirth8205/code-review-graph"
+Repository = "https://github.com/tirth8205/code-review-graph"
+Documentation = "https://github.com/tirth8205/code-review-graph/blob/main/docs/INDEX.md"
+Changelog = "https://github.com/tirth8205/code-review-graph/blob/main/CHANGELOG.md"
+Issues = "https://github.com/tirth8205/code-review-graph/issues"
 
 [project.scripts]
 code-review-graph = "code_review_graph.cli:main"

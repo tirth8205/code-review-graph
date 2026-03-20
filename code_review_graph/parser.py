@@ -73,6 +73,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".swift": "swift",
     ".php": "php",
     ".sol": "solidity",
+    ".vue": "vue",
     ".r": "r",  # .lower() in detect_language handles .R → .r
 }
 
@@ -222,6 +223,8 @@ def file_hash(path: Path) -> str:
 class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
+    _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
+
     def __init__(self) -> None:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
@@ -255,6 +258,10 @@ class CodeParser:
         if not language:
             return [], []
 
+        # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
+        if language == "vue":
+            return self._parse_vue(path, source)
+
         parser = self._get_parser(language)
         if not parser:
             return [], []
@@ -287,6 +294,9 @@ class CodeParser:
             import_map=import_map, defined_names=defined_names,
         )
 
+        # Resolve bare call targets to qualified names using same-file definitions
+        edges = self._resolve_call_targets(nodes, edges, file_path_str)
+
         # Generate TESTED_BY edges: when a test function calls a production
         # function, create an edge from the production function back to the test.
         if test_file:
@@ -307,6 +317,158 @@ class CodeParser:
 
         return nodes, edges
 
+    def _parse_vue(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a Vue SFC by extracting <script> blocks and delegating to JS/TS."""
+        vue_parser = self._get_parser("vue")
+        if not vue_parser:
+            return [], []
+
+        tree = vue_parser.parse(source)
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+
+        all_nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="vue",
+            is_test=test_file,
+        )]
+        all_edges: list[EdgeInfo] = []
+
+        # Find script_element blocks in the Vue AST
+        for child in tree.root_node.children:
+            if child.type != "script_element":
+                continue
+
+            # Detect language from lang="ts" attribute
+            script_lang = "javascript"
+            start_tag = None
+            raw_text_node = None
+            for sub in child.children:
+                if sub.type == "start_tag":
+                    start_tag = sub
+                elif sub.type == "raw_text":
+                    raw_text_node = sub
+
+            if start_tag:
+                for attr in start_tag.children:
+                    if attr.type == "attribute":
+                        attr_name = None
+                        attr_value = None
+                        for a in attr.children:
+                            if a.type == "attribute_name":
+                                attr_name = a.text.decode("utf-8", errors="replace")
+                            elif a.type == "quoted_attribute_value":
+                                for v in a.children:
+                                    if v.type == "attribute_value":
+                                        attr_value = v.text.decode(
+                                            "utf-8", errors="replace",
+                                        )
+                        if attr_name == "lang" and attr_value in ("ts", "typescript"):
+                            script_lang = "typescript"
+
+            if not raw_text_node:
+                continue
+
+            script_source = raw_text_node.text
+            line_offset = raw_text_node.start_point[0]  # 0-based line of raw_text start
+
+            # Parse the script block with the appropriate JS/TS parser
+            script_parser = self._get_parser(script_lang)
+            if not script_parser:
+                continue
+
+            script_tree = script_parser.parse(script_source)
+
+            # Collect imports and defined names from the script block
+            import_map, defined_names = self._collect_file_scope(
+                script_tree.root_node, script_lang, script_source,
+            )
+
+            nodes: list[NodeInfo] = []
+            edges: list[EdgeInfo] = []
+            self._extract_from_tree(
+                script_tree.root_node, script_source, script_lang,
+                file_path_str, nodes, edges,
+                import_map=import_map, defined_names=defined_names,
+            )
+
+            # Adjust line numbers to account for position within the .vue file
+            for node in nodes:
+                node.line_start += line_offset
+                node.line_end += line_offset
+                node.language = "vue"
+            for edge in edges:
+                edge.line += line_offset
+
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+
+        # Generate TESTED_BY edges
+        if test_file:
+            test_qnames = set()
+            for n in all_nodes:
+                if n.is_test:
+                    qn = self._qualify(n.name, n.file_path, n.parent_name)
+                    test_qnames.add(qn)
+            for edge in list(all_edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    all_edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+
+        return all_nodes, all_edges
+
+    def _resolve_call_targets(
+        self,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        file_path: str,
+    ) -> list[EdgeInfo]:
+        """Resolve bare call targets to qualified names using same-file definitions.
+
+        After parsing, CALLS edges store bare function names (e.g. ``FirebaseAuth``)
+        as targets. This method builds a symbol table from the parsed nodes and
+        qualifies any bare target that matches a local definition, so that
+        ``callers_of`` / ``callees_of`` queries produce correct results.
+
+        External calls (names not defined in this file) remain bare.
+        """
+        # Build symbol table: bare_name -> qualified_name
+        symbols: dict[str, str] = {}
+        for node in nodes:
+            if node.kind in ("Function", "Class", "Type", "Test"):
+                bare = node.name
+                qualified = self._qualify(bare, file_path, node.parent_name)
+                if bare not in symbols:
+                    symbols[bare] = qualified
+
+        resolved: list[EdgeInfo] = []
+        for edge in edges:
+            if edge.kind == "CALLS" and "::" not in edge.target:
+                if edge.target in symbols:
+                    edge = EdgeInfo(
+                        kind=edge.kind,
+                        source=edge.source,
+                        target=symbols[edge.target],
+                        file_path=edge.file_path,
+                        line=edge.line,
+                        extra=edge.extra,
+                    )
+            resolved.append(edge)
+        return resolved
+
+    _MAX_AST_DEPTH = 180  # Guard against pathologically nested source files
+
     def _extract_from_tree(
         self,
         root,
@@ -319,8 +481,11 @@ class CodeParser:
         enclosing_func: Optional[str] = None,
         import_map: Optional[dict[str, str]] = None,
         defined_names: Optional[set[str]] = None,
+        _depth: int = 0,
     ) -> None:
         """Recursively walk the AST and extract nodes/edges."""
+        if _depth > self._MAX_AST_DEPTH:
+            return
         class_types = set(_CLASS_TYPES.get(language, []))
         func_types = set(_FUNCTION_TYPES.get(language, []))
         import_types = set(_IMPORT_TYPES.get(language, []))
@@ -389,6 +554,7 @@ class CodeParser:
                         child, source, language, file_path, nodes, edges,
                         enclosing_class=name, enclosing_func=None,
                         import_map=import_map, defined_names=defined_names,
+                        _depth=_depth + 1,
                     )
                     continue
 
@@ -452,6 +618,7 @@ class CodeParser:
                         child, source, language, file_path, nodes, edges,
                         enclosing_class=enclosing_class, enclosing_func=name,
                         import_map=import_map, defined_names=defined_names,
+                        _depth=_depth + 1,
                     )
                     continue
 
@@ -616,6 +783,7 @@ class CodeParser:
                 child, source, language, file_path, nodes, edges,
                 enclosing_class=enclosing_class, enclosing_func=enclosing_func,
                 import_map=import_map, defined_names=defined_names,
+                _depth=_depth + 1,
             )
 
     def _collect_file_scope(
@@ -750,6 +918,8 @@ class CodeParser:
             return self._module_file_cache[cache_key]
 
         resolved = self._do_resolve_module(module, file_path, language)
+        if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
+            self._module_file_cache.clear()
         self._module_file_cache[cache_key] = resolved
         return resolved
 
@@ -773,11 +943,11 @@ class CodeParser:
                     break
                 current = current.parent
 
-        elif language in ("javascript", "typescript", "tsx"):
+        elif language in ("javascript", "typescript", "tsx", "vue"):
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
-                extensions = [".ts", ".tsx", ".js", ".jsx"]
+                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue"]
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())

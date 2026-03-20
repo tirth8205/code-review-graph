@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -127,7 +128,7 @@ def _is_binary(path: Path) -> bool:
         return True
 
 
-_GIT_TIMEOUT = 30  # seconds
+_GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
 
 def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:

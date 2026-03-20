@@ -164,6 +164,7 @@ def build_or_update_graph(
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
+    max_results: int = 500,
     repo_root: str | None = None,
     base: str = "HEAD~1",
 ) -> dict[str, Any]:
@@ -173,11 +174,13 @@ def get_impact_radius(
         changed_files: Explicit list of changed file paths (relative to repo root).
                        If omitted, auto-detects from git diff.
         max_depth: How many hops to traverse in the graph (default: 2).
+        max_results: Maximum impacted nodes to return (default: 500).
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
 
     Returns:
-        Changed nodes, impacted nodes, impacted files, and connecting edges.
+        Changed nodes, impacted nodes, impacted files, connecting edges,
+        plus ``truncated`` flag and ``total_impacted`` count.
     """
     store, root = _get_store(repo_root)
     try:
@@ -193,15 +196,21 @@ def get_impact_radius(
                 "changed_nodes": [],
                 "impacted_nodes": [],
                 "impacted_files": [],
+                "truncated": False,
+                "total_impacted": 0,
             }
 
         # Convert to absolute paths for graph lookup
         abs_files = [str(root / f) for f in changed_files]
-        result = store.get_impact_radius(abs_files, max_depth=max_depth)
+        result = store.get_impact_radius(
+            abs_files, max_depth=max_depth, max_nodes=max_results
+        )
 
         changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
         impacted_dicts = [node_to_dict(n) for n in result["impacted_nodes"]]
         edge_dicts = [edge_to_dict(e) for e in result["edges"]]
+        truncated = result["truncated"]
+        total_impacted = result["total_impacted"]
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
@@ -209,6 +218,11 @@ def get_impact_radius(
             f"  - {len(impacted_dicts)} nodes impacted (within {max_depth} hops)",
             f"  - {len(result['impacted_files'])} additional files affected",
         ]
+        if truncated:
+            summary_parts.append(
+                f"  - Results truncated: showing {len(impacted_dicts)}"
+                f" of {total_impacted} impacted nodes"
+            )
 
         return {
             "status": "ok",
@@ -218,6 +232,8 @@ def get_impact_radius(
             "impacted_nodes": impacted_dicts,
             "impacted_files": result["impacted_files"],
             "edges": edge_dicts,
+            "truncated": truncated,
+            "total_impacted": total_impacted,
         }
     finally:
         store.close()

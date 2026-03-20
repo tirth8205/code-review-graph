@@ -44,7 +44,7 @@ Model: all-MiniLM-L6-v2 (384-dim, fast).
 </section>
 
 <section name="languages">
-Supported: Python, TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
+Supported: Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
 Parser: Tree-sitter via tree-sitter-language-pack
 </section>
 

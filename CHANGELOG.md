@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.8.3] - 2026-03-20
+
+### Fixed
+- **Parser recursion guard**: Added `_MAX_AST_DEPTH = 180` limit to `_extract_from_tree()` preventing stack overflow on deeply nested ASTs
+- **Module cache bound**: Added `_MODULE_CACHE_MAX = 15_000` with automatic eviction to prevent unbounded memory growth in `_module_file_cache`
+- **Embeddings thread safety**: Added `check_same_thread=False` to `EmbeddingStore` SQLite connection
+- **Embeddings retry logic**: Added `_call_with_retry()` with exponential backoff for Google Gemini API calls
+- **Visualization XSS hardening**: Added `</` to `<\/` replacement in JSON serialization to prevent script injection
+- **CLI error handling**: Split broad `except` into specific `json.JSONDecodeError` and `(KeyError, TypeError)` handlers
+- **Git timeout**: Made configurable via `CRG_GIT_TIMEOUT` environment variable (default 30s)
+
+### Added
+- **Governance files**: Added CONTRIBUTING.md, SECURITY.md, CODE_OF_CONDUCT.md
+- **Project URLs**: Added Homepage, Repository, Issues, Changelog URLs to pyproject.toml metadata
+
 ## [1.8.2] - 2026-03-17
 
 ### Fixed

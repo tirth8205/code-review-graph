@@ -3,8 +3,8 @@
 import tempfile
 from pathlib import Path
 
-from code_review_graph.graph import GraphStore, GraphStats
-from code_review_graph.parser import NodeInfo, EdgeInfo
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import EdgeInfo, NodeInfo
 
 
 class TestGraphStore:
@@ -73,7 +73,7 @@ class TestGraphStore:
             file_path="/test/file.py",
             line=15,
         )
-        eid = self.store.upsert_edge(edge)
+        self.store.upsert_edge(edge)
         self.store.commit()
 
         edges = self.store.get_edges_by_source("/test/file.py::func_a")

@@ -61,7 +61,7 @@ Then use `embed_graph_tool` to compute vectors. `semantic_search_nodes_tool` aut
 
 ## Supported Languages
 
-Python, TypeScript, JavaScript, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
+Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, C/C++
 
 ## What Gets Indexed
 

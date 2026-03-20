@@ -136,7 +136,8 @@ def generate_html(store: GraphStore, output_path: str | Path) -> Path:
     """
     output_path = Path(output_path)
     data = export_graph_data(store)
-    data_json = json.dumps(data, default=str)
+    # Escape </script> inside JSON to prevent premature tag closure (XSS defense)
+    data_json = json.dumps(data, default=str).replace("</", "<\\/")
     html = _HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
     output_path.write_text(html, encoding="utf-8")
     return output_path
