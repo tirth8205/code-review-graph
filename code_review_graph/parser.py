@@ -247,7 +247,49 @@ class CodeParser:
             tree.root_node, source, language, file_path_str, nodes, edges
         )
 
+        # Resolve bare call targets to qualified names using same-file definitions
+        edges = self._resolve_call_targets(nodes, edges, file_path_str)
+
         return nodes, edges
+
+    def _resolve_call_targets(
+        self,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        file_path: str,
+    ) -> list[EdgeInfo]:
+        """Resolve bare call targets to qualified names using same-file definitions.
+
+        After parsing, CALLS edges store bare function names (e.g. ``FirebaseAuth``)
+        as targets. This method builds a symbol table from the parsed nodes and
+        qualifies any bare target that matches a local definition, so that
+        ``callers_of`` / ``callees_of`` queries produce correct results.
+
+        External calls (names not defined in this file) remain bare.
+        """
+        # Build symbol table: bare_name -> qualified_name
+        symbols: dict[str, str] = {}
+        for node in nodes:
+            if node.kind in ("Function", "Class", "Type", "Test"):
+                bare = node.name
+                qualified = self._qualify(bare, file_path, node.parent_name)
+                if bare not in symbols:
+                    symbols[bare] = qualified
+
+        resolved: list[EdgeInfo] = []
+        for edge in edges:
+            if edge.kind == "CALLS" and "::" not in edge.target:
+                if edge.target in symbols:
+                    edge = EdgeInfo(
+                        kind=edge.kind,
+                        source=edge.source,
+                        target=symbols[edge.target],
+                        file_path=edge.file_path,
+                        line=edge.line,
+                        extra=edge.extra,
+                    )
+            resolved.append(edge)
+        return resolved
 
     def _extract_from_tree(
         self,
