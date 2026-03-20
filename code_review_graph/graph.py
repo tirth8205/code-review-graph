@@ -268,6 +268,21 @@ class GraphStore:
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def search_edges_by_target_name(self, name: str, kind: str = "CALLS") -> list[GraphEdge]:
+        """Search for edges where target_qualified matches an unqualified name.
+
+        CALLS edges often store unqualified target names (e.g. ``generateTestCode``)
+        rather than fully qualified ones (``file.ts::generateTestCode``).  This
+        method finds those edges by exact match on the plain function name so that
+        reverse call tracing (callers_of) works even when qualified-name lookup
+        returns nothing.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM edges WHERE target_qualified = ? AND kind = ?",
+            (name, kind),
+        ).fetchall()
+        return [self._row_to_edge(r) for r in rows]
+
     def get_all_files(self) -> list[str]:
         rows = self._conn.execute(
             "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File'"
@@ -275,13 +290,40 @@ class GraphStore:
         return [r["file_path"] for r in rows]
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
-        """Simple keyword search across node names."""
-        pattern = f"%{query}%"
-        rows = self._conn.execute(
-            "SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",
-            (pattern, pattern, limit),
-        ).fetchall()
-        return [self._row_to_node(r) for r in rows]
+        """Simple keyword search across node names.
+
+        Multi-word queries match nodes containing ANY of the terms, ranked by
+        the number of terms matched (more matches first).  Single-word queries
+        behave exactly as before.
+        """
+        terms = query.strip().split()
+        if len(terms) <= 1:
+            # Original single-term behavior
+            pattern = f"%{query}%"
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",
+                (pattern, pattern, limit),
+            ).fetchall()
+            return [self._row_to_node(r) for r in rows]
+
+        # Multi-term: match any term, rank by number of terms matched
+        seen: dict[str, tuple[GraphNode, int]] = {}
+        for term in terms:
+            pattern = f"%{term}%"
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",
+                (pattern, pattern, limit * 3),
+            ).fetchall()
+            for r in rows:
+                node = self._row_to_node(r)
+                if node.qualified_name in seen:
+                    seen[node.qualified_name] = (node, seen[node.qualified_name][1] + 1)
+                else:
+                    seen[node.qualified_name] = (node, 1)
+
+        # Sort: more matches first, then by name relevance
+        items = sorted(seen.values(), key=lambda x: -x[1])
+        return [node for node, _ in items[:limit]]
 
     # --- Impact / Graph traversal ---
 

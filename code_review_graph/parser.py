@@ -166,6 +166,100 @@ _TEST_FILE_PATTERNS = [
     re.compile(r"tests?/"),
 ]
 
+# JS/TS builtin method names to exclude from CALLS edges.
+# These are Array, String, Object, Promise, Console, Math, DOM, Timer,
+# JSON, Date, encoding, Function.prototype, EventEmitter, Stream,
+# Express-style, Map/Set, Prisma/ORM, and test-framework methods that
+# produce noise rather than meaningful cross-function call relationships.
+_JS_BUILTIN_CALL_NAMES: set[str] = {
+    # Array.prototype & Array static
+    "map", "filter", "reduce", "reduceRight", "forEach", "find", "findIndex",
+    "some", "every", "includes", "indexOf", "lastIndexOf",
+    "push", "pop", "shift", "unshift", "splice", "slice",
+    "concat", "join", "flat", "flatMap", "sort", "reverse", "fill",
+    "keys", "values", "entries", "from", "isArray", "of", "at",
+    "copyWithin", "findLast", "findLastIndex", "toReversed", "toSorted", "toSpliced", "with",
+    # String.prototype
+    "trim", "trimStart", "trimEnd", "split", "replace", "replaceAll",
+    "match", "matchAll", "search", "substring", "substr",
+    "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase",
+    "startsWith", "endsWith", "padStart", "padEnd", "repeat",
+    "charAt", "charCodeAt", "codePointAt", "normalize", "localeCompare",
+    # Object static & prototype
+    "assign", "freeze", "defineProperty", "defineProperties",
+    "getOwnPropertyNames", "getOwnPropertyDescriptor", "getPrototypeOf",
+    "hasOwnProperty", "create", "is", "fromEntries", "getOwnPropertySymbols",
+    # Console / logging
+    "log", "warn", "error", "info", "debug", "trace", "dir", "table",
+    "time", "timeEnd", "timeLog", "group", "groupEnd", "groupCollapsed",
+    "assert", "clear", "count", "countReset",
+    # Promise / async
+    "then", "catch", "finally", "resolve", "reject", "all", "allSettled", "race", "any",
+    # JSON
+    "parse", "stringify",
+    # Math
+    "floor", "ceil", "round", "random", "max", "min", "abs", "pow", "sqrt",
+    "sign", "trunc", "log2", "log10", "hypot", "clz32", "fround", "imul",
+    # DOM / Node / Event
+    "addEventListener", "removeEventListener",
+    "querySelector", "querySelectorAll", "getElementById",
+    "getElementsByClassName", "getElementsByTagName",
+    "createElement", "createTextNode", "appendChild", "removeChild",
+    "insertBefore", "replaceChild", "cloneNode",
+    "setAttribute", "getAttribute", "removeAttribute", "hasAttribute",
+    "contains", "remove", "add", "toggle",
+    "preventDefault", "stopPropagation", "stopImmediatePropagation",
+    "dispatchEvent", "focus", "blur", "click", "scrollTo", "scrollIntoView",
+    # classList (overlaps with Set-like: add, remove, toggle, contains)
+    # Timer
+    "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+    "requestAnimationFrame", "cancelAnimationFrame",
+    # Common Object / conversion
+    "toString", "valueOf", "toJSON", "toISOString", "toLocaleDateString",
+    "toLocaleString", "toLocaleTimeString", "toDateString", "toTimeString",
+    # Date
+    "getTime", "getFullYear", "getMonth", "getDate", "getDay",
+    "getHours", "getMinutes", "getSeconds", "getMilliseconds",
+    "setFullYear", "setMonth", "setDate", "setHours", "setMinutes", "setSeconds",
+    "now", "toUTCString", "getTimezoneOffset",
+    # Number / globals
+    "isNaN", "isFinite", "isInteger", "isSafeInteger",
+    "parseInt", "parseFloat", "toFixed", "toPrecision", "toExponential",
+    # Encoding
+    "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
+    "btoa", "atob",
+    # Function.prototype
+    "call", "apply", "bind",
+    # Iteration / Generator
+    "next", "return", "throw",
+    # EventEmitter (Node)
+    "emit", "on", "off", "once", "removeListener", "removeAllListeners",
+    "listenerCount", "prependListener",
+    # Stream / IO (Node)
+    "pipe", "write", "read", "end", "close", "destroy", "cork", "uncork",
+    "resume", "pause", "unshift",
+    # Express-style response/request
+    "send", "status", "json", "redirect", "render", "cookie", "header",
+    "type", "format", "attachment", "download", "jsonp",
+    # Map / Set / WeakMap / WeakSet
+    "set", "get", "delete", "has", "clear", "size",
+    # Prisma / ORM
+    "findUnique", "findFirst", "findMany", "createMany",
+    "update", "updateMany", "deleteMany", "upsert",
+    "count", "aggregate", "groupBy", "transaction",
+    # Test frameworks (jest, mocha, vitest, playwright)
+    "describe", "it", "test", "expect", "beforeEach", "afterEach",
+    "beforeAll", "afterAll", "mock", "spyOn", "fn",
+    "toBe", "toEqual", "toBeTruthy", "toBeFalsy", "toContain",
+    "toHaveBeenCalled", "toHaveBeenCalledWith", "toThrow", "toMatch",
+    "toHaveLength", "toBeNull", "toBeUndefined", "toBeDefined",
+    "toBeGreaterThan", "toBeLessThan", "toHaveProperty",
+    # Misc utilities
+    "require", "fetch", "Symbol", "WeakRef", "FinalizationRegistry",
+}
+
+_JS_LANGUAGES = frozenset({"javascript", "typescript", "tsx"})
+
 
 def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
@@ -373,14 +467,19 @@ class CodeParser:
             if node_type in call_types:
                 call_name = self._get_call_name(child, language, source)
                 if call_name and enclosing_func:
-                    caller = self._qualify(enclosing_func, file_path, enclosing_class)
-                    edges.append(EdgeInfo(
-                        kind="CALLS",
-                        source=caller,
-                        target=call_name,
-                        file_path=file_path,
-                        line=child.start_point[0] + 1,
-                    ))
+                    # Skip JS/TS builtin method calls (map, filter, push, etc.)
+                    # — they add noise, not meaningful cross-function edges.
+                    if language in _JS_LANGUAGES and call_name in _JS_BUILTIN_CALL_NAMES:
+                        pass
+                    else:
+                        caller = self._qualify(enclosing_func, file_path, enclosing_class)
+                        edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=caller,
+                            target=call_name,
+                            file_path=file_path,
+                            line=child.start_point[0] + 1,
+                        ))
 
             # Recurse for other node types
             self._extract_from_tree(

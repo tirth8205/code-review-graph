@@ -256,6 +256,15 @@ def query_graph(
                     if caller:
                         results.append(node_to_dict(caller))
                     edges_out.append(edge_to_dict(e))
+            # Fallback: CALLS edges often store unqualified target names
+            # (e.g. "generateTestCode") while qn is fully qualified
+            # (e.g. "file.ts::generateTestCode"). Search by plain name too.
+            if not results and node:
+                for e in store.search_edges_by_target_name(node.name):
+                    caller = store.get_node(e.source_qualified)
+                    if caller:
+                        results.append(node_to_dict(caller))
+                    edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
             for e in store.get_edges_by_source(qn):
