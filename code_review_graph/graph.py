@@ -346,11 +346,17 @@ class GraphStore:
             if node:
                 impacted_nodes.append(node)
 
+        # Truncation: cap impacted nodes and report total
+        total_impacted = len(impacted_nodes)
+        truncated = total_impacted > max_nodes
+        if truncated:
+            impacted_nodes = impacted_nodes[:max_nodes]
+
         impacted_files = list({n.file_path for n in impacted_nodes})
 
         # Collect relevant edges in a single batch query
         relevant_edges = []
-        all_qns = seeds | impacted
+        all_qns = seeds | {n.qualified_name for n in impacted_nodes}
         if all_qns:
             relevant_edges = self.get_edges_among(all_qns)
 
@@ -359,6 +365,8 @@ class GraphStore:
             "impacted_nodes": impacted_nodes,
             "impacted_files": impacted_files,
             "edges": relevant_edges,
+            "truncated": truncated,
+            "total_impacted": total_impacted,
         }
 
     def get_subgraph(self, qualified_names: list[str]) -> dict[str, Any]:
