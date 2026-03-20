@@ -994,24 +994,16 @@ class CodeParser:
                         imports.append(val)
         elif language == "r":
             # library(pkg), require(pkg), source("file.R")
-            func_name = None
-            for child in node.children:
-                if child.type == "identifier":
-                    func_name = child.text.decode("utf-8", errors="replace")
-                    break
+            func_name = self._r_call_func_name(node)
             if func_name in ("library", "require", "source"):
-                for child in node.children:
-                    if child.type == "arguments":
-                        for arg in child.children:
-                            if arg.type == "argument":
-                                for sub in arg.children:
-                                    if sub.type == "identifier":
-                                        imports.append(sub.text.decode("utf-8", errors="replace"))
-                                    elif sub.type == "string":
-                                        for sc in sub.children:
-                                            if sc.type == "string_content":
-                                                val = sc.text.decode("utf-8", errors="replace")
-                                                imports.append(val)
+                for _name, value in self._r_iter_args(node):
+                    if value.type == "identifier":
+                        imports.append(value.text.decode("utf-8", errors="replace"))
+                    elif value.type == "string":
+                        val = self._r_first_string_arg(node)
+                        if val:
+                            imports.append(val)
+                    break  # Only first argument matters
         elif language == "ruby":
             # require 'module' or require_relative 'path'
             if "require" in text:
@@ -1062,6 +1054,74 @@ class CodeParser:
         if first.type == "namespace_operator":
             return first.text.decode("utf-8", errors="replace")
 
+        return None
+
+    # ------------------------------------------------------------------
+    # R-specific helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _r_call_func_name(call_node) -> Optional[str]:
+        """Extract the function name from an R call node."""
+        for child in call_node.children:
+            if child.type in ("identifier", "namespace_operator"):
+                return child.text.decode("utf-8", errors="replace")
+        return None
+
+    @staticmethod
+    def _r_first_string_arg(call_node) -> Optional[str]:
+        """Extract the first string argument value from an R call node."""
+        for child in call_node.children:
+            if child.type == "arguments":
+                for arg in child.children:
+                    if arg.type == "argument":
+                        for sub in arg.children:
+                            if sub.type == "string":
+                                for sc in sub.children:
+                                    if sc.type == "string_content":
+                                        return sc.text.decode("utf-8", errors="replace")
+                break
+        return None
+
+    @staticmethod
+    def _r_iter_args(call_node):
+        """Yield (name_str, value_node) pairs from an R call's arguments.
+
+        For named arguments like ``methods = list(...)``, yields
+        ``("methods", <call node>)``.  For positional arguments like
+        ``library(dplyr)``, yields ``(None, <identifier/string node>)``.
+        """
+        for child in call_node.children:
+            if child.type != "arguments":
+                continue
+            for arg in child.children:
+                if arg.type != "argument":
+                    continue
+                # Check if this is a named arg (has '=' child)
+                has_eq = any(sub.type == "=" for sub in arg.children)
+                if has_eq:
+                    name = None
+                    value = None
+                    for sub in arg.children:
+                        if sub.type == "identifier" and name is None:
+                            name = sub.text.decode("utf-8", errors="replace")
+                        elif sub.type not in ("=", ","):
+                            value = sub
+                    yield (name, value)
+                else:
+                    # Positional arg — first non-punctuation child is the value
+                    for sub in arg.children:
+                        if sub.type not in (",",):
+                            yield (None, sub)
+                            break
+            break
+
+    @classmethod
+    def _r_find_named_arg(cls, call_node, arg_name: str):
+        """Find a named argument's value node in an R call."""
+        for name, value in cls._r_iter_args(call_node):
+            if name == arg_name:
+                return value
         return None
 
     # ------------------------------------------------------------------
@@ -1127,14 +1187,9 @@ class CodeParser:
             )
             return True
 
-        # name <- setRefClass(...) / setClass(...) — handled by _handle_r_call
-        # but the call is wrapped in a binary_operator, so delegate
+        # name <- setRefClass(...) / setClass(...) — delegate to class handler
         if right.type == "call" and left.type == "identifier":
-            call_func = None
-            for child in right.children:
-                if child.type == "identifier":
-                    call_func = child.text.decode("utf-8", errors="replace")
-                    break
+            call_func = self._r_call_func_name(right)
             if call_func in ("setRefClass", "setClass", "setGeneric"):
                 assign_name = left.text.decode("utf-8", errors="replace")
                 return self._handle_r_class_call(
@@ -1157,16 +1212,7 @@ class CodeParser:
 
         Returns True if the node was fully handled, False to let generic logic proceed.
         """
-        func_name = None
-        for child in node.children:
-            if child.type == "identifier":
-                func_name = child.text.decode("utf-8", errors="replace")
-                break
-            if child.type == "namespace_operator":
-                # dplyr::filter() — not an import, treat as a regular call
-                func_name = child.text.decode("utf-8", errors="replace")
-                break
-
+        func_name = self._r_call_func_name(node)
         if not func_name:
             return False
 
@@ -1225,24 +1271,7 @@ class CodeParser:
         assign_name: Optional[str] = None,
     ) -> bool:
         """Handle setClass/setRefClass/setGeneric calls → Class nodes."""
-        # Extract class name from first string argument
-        class_name = None
-        for child in node.children:
-            if child.type == "arguments":
-                for arg in child.children:
-                    if arg.type == "argument":
-                        for sub in arg.children:
-                            if sub.type == "string":
-                                for sc in sub.children:
-                                    if sc.type == "string_content":
-                                        class_name = sc.text.decode("utf-8", errors="replace")
-                                        break
-                        if class_name:
-                            break
-                break
-
-        if not class_name:
-            class_name = assign_name
+        class_name = self._r_first_string_arg(node) or assign_name
         if not class_name:
             return False
 
@@ -1264,25 +1293,14 @@ class CodeParser:
             line=node.start_point[0] + 1,
         ))
 
-        # For setRefClass, extract methods
-        for child in node.children:
-            if child.type == "arguments":
-                for arg in child.children:
-                    if arg.type == "argument":
-                        # Look for methods = list(...)
-                        arg_name = None
-                        arg_value = None
-                        for sub in arg.children:
-                            if sub.type == "identifier":
-                                arg_name = sub.text.decode("utf-8", errors="replace")
-                            elif sub.type == "call":
-                                arg_value = sub
-                        if arg_name == "methods" and arg_value is not None:
-                            self._extract_r_methods(
-                                arg_value, source, language, file_path,
-                                nodes, edges, class_name,
-                                import_map, defined_names,
-                            )
+        # For setRefClass, extract methods from methods = list(...)
+        methods_list = self._r_find_named_arg(node, "methods")
+        if methods_list is not None:
+            self._extract_r_methods(
+                methods_list, source, language, file_path,
+                nodes, edges, class_name,
+                import_map, defined_names,
+            )
 
         return True
 
@@ -1294,42 +1312,36 @@ class CodeParser:
         defined_names: Optional[set[str]],
     ) -> None:
         """Extract methods from a setRefClass methods = list(...) call."""
-        for child in list_call.children:
-            if child.type == "arguments":
-                for arg in child.children:
-                    if arg.type == "argument":
-                        method_name = None
-                        func_def = None
-                        for sub in arg.children:
-                            if sub.type == "identifier":
-                                method_name = sub.text.decode("utf-8", errors="replace")
-                            elif sub.type == "function_definition":
-                                func_def = sub
-                        if method_name and func_def:
-                            qualified = self._qualify(method_name, file_path, class_name)
-                            params = self._get_params(func_def, language, source)
-                            nodes.append(NodeInfo(
-                                kind="Function",
-                                name=method_name,
-                                file_path=file_path,
-                                line_start=func_def.start_point[0] + 1,
-                                line_end=func_def.end_point[0] + 1,
-                                language=language,
-                                parent_name=class_name,
-                                params=params,
-                            ))
-                            edges.append(EdgeInfo(
-                                kind="CONTAINS",
-                                source=self._qualify(class_name, file_path, None),
-                                target=qualified,
-                                file_path=file_path,
-                                line=func_def.start_point[0] + 1,
-                            ))
-                            # Recurse into method body for calls
-                            self._extract_from_tree(
-                                func_def, source, language, file_path, nodes, edges,
-                                enclosing_class=class_name,
-                                enclosing_func=method_name,
-                                import_map=import_map,
-                                defined_names=defined_names,
-                            )
+        for method_name, func_def in self._r_iter_args(list_call):
+            if not method_name or func_def is None:
+                continue
+            if func_def.type != "function_definition":
+                continue
+
+            qualified = self._qualify(method_name, file_path, class_name)
+            params = self._get_params(func_def, language, source)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=method_name,
+                file_path=file_path,
+                line_start=func_def.start_point[0] + 1,
+                line_end=func_def.end_point[0] + 1,
+                language=language,
+                parent_name=class_name,
+                params=params,
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=self._qualify(class_name, file_path, None),
+                target=qualified,
+                file_path=file_path,
+                line=func_def.start_point[0] + 1,
+            ))
+            # Recurse into method body for calls
+            self._extract_from_tree(
+                func_def, source, language, file_path, nodes, edges,
+                enclosing_class=class_name,
+                enclosing_func=method_name,
+                import_map=import_map,
+                defined_names=defined_names,
+            )
