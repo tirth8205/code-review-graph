@@ -213,7 +213,7 @@ Claude uses these automatically once the graph is built.
 | **14 languages** | Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++ |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
-| **Semantic search** | Optional vector embeddings via sentence-transformers |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, or [MiniMax](https://www.minimaxi.com/) |
 | **Interactive visualisation** | D3.js force-directed graph with edge-type toggles and search |
 | **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
 | **Watch mode** | Continuous graph updates as you work |
@@ -235,6 +235,17 @@ For semantic search, install the optional embeddings dependencies:
 
 ```bash
 pip install code-review-graph[embeddings]
+```
+
+Alternatively, use a cloud embedding provider:
+
+```bash
+# Google Gemini embeddings
+pip install code-review-graph[google-embeddings]
+export GOOGLE_API_KEY=your-key
+
+# MiniMax embo-01 embeddings (1536 dimensions, no extra dependency needed)
+export MINIMAX_API_KEY=your-key
 ```
 
 </details>

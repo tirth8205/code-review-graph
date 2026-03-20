@@ -3,6 +3,7 @@
 Supports multiple providers:
 1. Local (sentence-transformers) - Private, fast, offline.
 2. Google Gemini - High-quality, cloud-based. Requires explicit opt-in.
+3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
 """
 
 from __future__ import annotations
@@ -153,12 +154,102 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
         return f"google:{self.model}"
 
 
+class MiniMaxEmbeddingProvider(EmbeddingProvider):
+    """MiniMax embo-01 embedding provider (1536 dimensions).
+
+    Uses the MiniMax Embeddings API (https://api.minimax.io/v1/embeddings)
+    with the embo-01 model. Supports distinct task types for indexing ("db")
+    and search queries ("query").
+
+    Requires the MINIMAX_API_KEY environment variable.
+    """
+
+    _ENDPOINT = "https://api.minimax.io/v1/embeddings"
+    _MODEL = "embo-01"
+    _DIMENSION = 1536
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    def _call_api(self, texts: list[str], task_type: str) -> list[list[float]]:
+        """Call the MiniMax embedding API.
+
+        Args:
+            texts: List of texts to embed.
+            task_type: "db" for indexing, "query" for search queries.
+        """
+        import json as _json
+        import urllib.request
+
+        payload = _json.dumps({
+            "model": self._MODEL,
+            "texts": texts,
+            "type": task_type,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            self._ENDPOINT,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    body = _json.loads(resp.read().decode("utf-8"))
+
+                base_resp = body.get("base_resp", {})
+                if base_resp.get("status_code", 0) != 0:
+                    raise RuntimeError(
+                        f"MiniMax API error: {base_resp.get('status_msg', 'unknown')}"
+                    )
+
+                return body["vectors"]
+            except Exception as e:
+                err_str = str(e)
+                is_retryable = "429" in err_str or "500" in err_str or "503" in err_str
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(
+                    "MiniMax API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+
+        return []  # unreachable, but keeps mypy happy
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        batch_size = 100
+        results: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            results.extend(self._call_api(batch, "db"))
+        return results
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._call_api([text], "query")[0]
+
+    @property
+    def dimension(self) -> int:
+        return self._DIMENSION
+
+    @property
+    def name(self) -> str:
+        return f"minimax:{self._MODEL}"
+
+
 def get_provider(provider: str | None = None) -> EmbeddingProvider | None:
     """Get an embedding provider by name.
 
     Args:
-        provider: Provider name. One of "local", "google", or None for local.
+        provider: Provider name. One of "local", "google", "minimax", or None for local.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
+                  MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
     """
     if provider == "google":
         api_key = os.environ.get("GOOGLE_API_KEY")
@@ -171,6 +262,15 @@ def get_provider(provider: str | None = None) -> EmbeddingProvider | None:
             return GoogleEmbeddingProvider(api_key=api_key)
         except ImportError:
             return None
+
+    if provider == "minimax":
+        api_key = os.environ.get("MINIMAX_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "MINIMAX_API_KEY environment variable is required for "
+                "the MiniMax embedding provider."
+            )
+        return MiniMaxEmbeddingProvider(api_key=api_key)
 
     # Default: local
     try:
