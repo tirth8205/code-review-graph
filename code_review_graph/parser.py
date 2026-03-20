@@ -74,6 +74,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".php": "php",
     ".sol": "solidity",
     ".vue": "vue",
+    ".scala": "scala",
+    ".sc": "scala",
 }
 
 # Tree-sitter node type mappings per language
@@ -101,6 +103,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
         "struct_declaration", "enum_declaration", "error_declaration",
         "user_defined_type_definition",
     ],
+    "scala": ["class_definition", "trait_definition", "object_definition"],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -126,6 +129,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_definition", "constructor_definition", "modifier_definition",
         "event_definition", "fallback_receive_definition",
     ],
+    "scala": ["function_definition", "function_declaration"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -144,6 +148,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "swift": ["import_declaration"],
     "php": ["namespace_use_declaration"],
     "solidity": ["import_directive"],
+    "scala": ["import_declaration"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -162,6 +167,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "swift": ["call_expression"],
     "php": ["function_call_expression", "member_call_expression"],
     "solidity": ["call_expression"],
+    "scala": ["call_expression"],
 }
 
 # Patterns that indicate a test function
@@ -1053,6 +1059,18 @@ class CodeParser:
                             for ident in sub.children:
                                 if ident.type == "identifier":
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
+        elif language == "scala":
+            # extends A with B with C
+            for child in node.children:
+                if child.type == "extends_clause":
+                    for sub in child.children:
+                        if sub.type in ("type_identifier", "generic_type"):
+                            for ident in sub.children:
+                                if ident.type == "type_identifier":
+                                    bases.append(ident.text.decode("utf-8", errors="replace"))
+                                    break
+                            else:
+                                bases.append(sub.text.decode("utf-8", errors="replace"))
         elif language == "go":
             # Embedded structs / interface composition
             for child in node.children:
@@ -1123,6 +1141,18 @@ class CodeParser:
                     val = child.text.decode("utf-8", errors="replace").strip('"')
                     if val:
                         imports.append(val)
+        elif language == "scala":
+            # import com.example.utils.{Helper, Logger} or import scala.collection.mutable
+            # Build the dotted path from identifier and '.' children
+            parts = []
+            for child in node.children:
+                if child.type == "identifier":
+                    parts.append(child.text.decode("utf-8", errors="replace"))
+                elif child.type == "namespace_selectors":
+                    # {A, B} — ignore, we just want the package path
+                    pass
+            if parts:
+                imports.append(".".join(parts))
         elif language == "ruby":
             # require 'module' or require_relative 'path'
             if "require" in text:

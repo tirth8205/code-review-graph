@@ -1,4 +1,4 @@
-"""Tests for Go, Rust, Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Solidity, and Vue parsing."""
+"""Tests for Go, Rust, Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Solidity, Vue, and Scala parsing."""
 
 from pathlib import Path
 
@@ -497,3 +497,53 @@ class TestVueParsing:
     def test_finds_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 1
+
+
+class TestScalaParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.scala")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Main.scala")) == "scala"
+
+    def test_finds_classes_and_traits(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Repository" in names
+        assert "User" in names
+        assert "UserService" in names
+
+    def test_finds_object(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "UserService" in names
+
+    def test_finds_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "createUser" in names
+        assert "getUser" in names
+        assert "apply" in names
+        assert "findById" in names
+        assert "save" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "scala.collection.mutable" in targets
+        assert "com.example.utils" in targets
+
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        assert "BaseService" in targets
+        assert "Logging" in targets
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 3
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        assert len(contains) >= 5
