@@ -40,7 +40,7 @@ async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -65,7 +65,7 @@ async def build_or_update_graph_tool(
             if msg is None:
                 break
             if ctx:
-                await ctx.session.send_log_message("info", msg)
+                await ctx.info(msg)
 
     def run() -> dict:
         try:
