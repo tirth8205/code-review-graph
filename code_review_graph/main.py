@@ -4,11 +4,10 @@ Run as: code-review-graph serve
 Communicates via stdio (standard MCP transport).
 """
 
-from __future__ import annotations
-
+import asyncio
 from typing import Optional
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 
 from .tools import (
     build_or_update_graph,
@@ -37,10 +36,11 @@ mcp = FastMCP(
 
 
 @mcp.tool()
-def build_or_update_graph_tool(
+async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
+    ctx: Context = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -53,13 +53,35 @@ def build_or_update_graph_tool(
         repo_root: Repository root path. Auto-detected from current directory if omitted.
         base: Git ref to diff against for incremental updates. Default: HEAD~1.
     """
-    return build_or_update_graph(
-        full_rebuild=full_rebuild, repo_root=repo_root, base=base
-    )
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    def on_progress(msg: str) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, msg)
+
+    async def drain() -> None:
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                break
+            if ctx:
+                await ctx.session.send_log_message("info", msg)
+
+    def run() -> dict:
+        try:
+            return build_or_update_graph(
+                full_rebuild=full_rebuild, repo_root=repo_root, base=base,
+                on_progress=on_progress,
+            )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    results = await asyncio.gather(loop.run_in_executor(None, run), drain())
+    return results[0]
 
 
 @mcp.tool()
-def get_impact_radius_tool(
+async def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
     repo_root: Optional[str] = None,
@@ -76,14 +98,17 @@ def get_impact_radius_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
     """
-    return get_impact_radius(
-        changed_files=changed_files, max_depth=max_depth,
-        repo_root=repo_root, base=base,
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: get_impact_radius(
+            changed_files=changed_files, max_depth=max_depth,
+            repo_root=repo_root, base=base,
+        )
     )
 
 
 @mcp.tool()
-def query_graph_tool(
+async def query_graph_tool(
     pattern: str,
     target: str,
     repo_root: Optional[str] = None,
@@ -105,11 +130,14 @@ def query_graph_tool(
         target: Node name, qualified name, or file path to query.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return query_graph(pattern=pattern, target=target, repo_root=repo_root)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: query_graph(pattern=pattern, target=target, repo_root=repo_root)
+    )
 
 
 @mcp.tool()
-def get_review_context_tool(
+async def get_review_context_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
     include_source: bool = True,
@@ -130,15 +158,18 @@ def get_review_context_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for change detection. Default: HEAD~1.
     """
-    return get_review_context(
-        changed_files=changed_files, max_depth=max_depth,
-        include_source=include_source, max_lines_per_file=max_lines_per_file,
-        repo_root=repo_root, base=base,
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: get_review_context(
+            changed_files=changed_files, max_depth=max_depth,
+            include_source=include_source, max_lines_per_file=max_lines_per_file,
+            repo_root=repo_root, base=base,
+        )
     )
 
 
 @mcp.tool()
-def semantic_search_nodes_tool(
+async def semantic_search_nodes_tool(
     query: str,
     kind: Optional[str] = None,
     limit: int = 20,
@@ -155,13 +186,14 @@ def semantic_search_nodes_tool(
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=repo_root
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: semantic_search_nodes(query=query, kind=kind, limit=limit, repo_root=repo_root)
     )
 
 
 @mcp.tool()
-def embed_graph_tool(
+async def embed_graph_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
@@ -176,11 +208,12 @@ def embed_graph_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return embed_graph(repo_root=repo_root)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: embed_graph(repo_root=repo_root))
 
 
 @mcp.tool()
-def list_graph_stats_tool(
+async def list_graph_stats_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
@@ -191,11 +224,12 @@ def list_graph_stats_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return list_graph_stats(repo_root=repo_root)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: list_graph_stats(repo_root=repo_root))
 
 
 @mcp.tool()
-def get_docs_section_tool(
+async def get_docs_section_tool(
     section_name: str,
 ) -> dict:
     """Get a specific section from the LLM-optimized documentation reference.
@@ -209,11 +243,14 @@ def get_docs_section_tool(
     Args:
         section_name: The section to retrieve (e.g. "review-delta", "usage").
     """
-    return get_docs_section(section_name=section_name, repo_root=_default_repo_root)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: get_docs_section(section_name=section_name, repo_root=_default_repo_root)
+    )
 
 
 @mcp.tool()
-def find_large_functions_tool(
+async def find_large_functions_tool(
     min_lines: int = 50,
     kind: Optional[str] = None,
     file_path_pattern: Optional[str] = None,
@@ -232,9 +269,12 @@ def find_large_functions_tool(
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return find_large_functions(
-        min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=repo_root,
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, lambda: find_large_functions(
+            min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
+            limit=limit, repo_root=repo_root,
+        )
     )
 
 

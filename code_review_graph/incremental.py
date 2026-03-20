@@ -12,6 +12,7 @@ import logging
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
@@ -253,7 +254,11 @@ def find_dependents(store: GraphStore, file_path: str) -> list[str]:
     return list(dependents)
 
 
-def full_build(repo_root: Path, store: GraphStore) -> dict:
+def full_build(
+    repo_root: Path,
+    store: GraphStore,
+    on_progress: Callable[[str], None] | None = None,
+) -> dict:
     """Full rebuild of the entire graph."""
     parser = CodeParser()
     files = collect_all_files(repo_root)
@@ -284,7 +289,10 @@ def full_build(repo_root: Path, store: GraphStore) -> dict:
             logger.warning("Error parsing %s: %s", rel_path, e)
             errors.append({"file": rel_path, "error": str(e)})
         if i % 50 == 0 or i == file_count:
-            logger.info("Progress: %d/%d files parsed", i, file_count)
+            msg = f"Parsed {i}/{file_count} files ({total_nodes} nodes so far)"
+            logger.info(msg)
+            if on_progress:
+                on_progress(msg)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
@@ -303,6 +311,7 @@ def incremental_update(
     store: GraphStore,
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict:
     """Incremental update: re-parse changed + dependent files only."""
     parser = CodeParser()
@@ -364,6 +373,8 @@ def incremental_update(
             store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
             total_nodes += len(nodes)
             total_edges += len(edges)
+            if on_progress:
+                on_progress(f"Updated {rel_path} ({len(nodes)} nodes)")
         except (OSError, PermissionError) as e:
             errors.append({"file": rel_path, "error": str(e)})
         except Exception as e:

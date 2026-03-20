@@ -14,6 +14,7 @@ Exposes 9 tools:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,7 @@ def build_or_update_graph(
     full_rebuild: bool = False,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    on_progress: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -122,7 +124,7 @@ def build_or_update_graph(
     store, root = _get_store(repo_root)
     try:
         if full_rebuild:
-            result = full_build(root, store)
+            result = full_build(root, store, on_progress=on_progress)
             return {
                 "status": "ok",
                 "build_type": "full",
@@ -133,7 +135,7 @@ def build_or_update_graph(
                 **result,
             }
         else:
-            result = incremental_update(root, store, base=base)
+            result = incremental_update(root, store, base=base, on_progress=on_progress)
             if result["files_updated"] == 0:
                 return {
                     "status": "ok",
