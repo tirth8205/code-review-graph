@@ -1,8 +1,6 @@
 """Tests for graph visualization export."""
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 

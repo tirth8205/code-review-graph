@@ -111,8 +111,10 @@ def _handle_init(args: argparse.Namespace) -> None:
                 return
             existing.setdefault("mcpServers", {}).update(mcp_config["mcpServers"])
             mcp_config = existing
-        except (json.JSONDecodeError, KeyError):
-            print(f"Warning: existing {mcp_path} is malformed, overwriting.")
+        except json.JSONDecodeError:
+            print(f"Warning: existing {mcp_path} has invalid JSON, overwriting.")
+        except (KeyError, TypeError):
+            print(f"Warning: existing {mcp_path} has unexpected structure, overwriting.")
 
     if dry_run:
         print(f"[dry-run] Would write to {mcp_path}:")

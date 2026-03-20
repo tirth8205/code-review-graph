@@ -8,14 +8,18 @@ Supports multiple providers:
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sqlite3
 import struct
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 from .graph import GraphNode, GraphStore, node_to_dict
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Provider Interface and Implementations
@@ -95,21 +99,42 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
         results = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            response = self._client.models.embed_content(
-                model=self.model,
-                contents=batch,
-                config={"task_type": "RETRIEVAL_DOCUMENT"},
+            response = self._call_with_retry(
+                lambda b=batch: self._client.models.embed_content(
+                    model=self.model,
+                    contents=b,
+                    config={"task_type": "RETRIEVAL_DOCUMENT"},
+                )
             )
             results.extend([e.values for e in response.embeddings])
         if self._dimension is None and results:
             self._dimension = len(results[0])
         return results
 
+    @staticmethod
+    def _call_with_retry(fn, max_retries: int = 3):
+        """Call fn with exponential backoff on transient API errors."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                # Retry on rate-limit (429) or server errors (5xx)
+                err_str = str(e)
+                is_retryable = "429" in err_str or "500" in err_str or "503" in err_str
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning("Gemini API error (attempt %d/%d), retrying in %ds: %s",
+                               attempt + 1, max_retries, wait, e)
+                time.sleep(wait)
+
     def embed_query(self, text: str) -> list[float]:
-        response = self._client.models.embed_content(
-            model=self.model,
-            contents=[text],
-            config={"task_type": "RETRIEVAL_QUERY"},
+        response = self._call_with_retry(
+            lambda: self._client.models.embed_content(
+                model=self.model,
+                contents=[text],
+                config={"task_type": "RETRIEVAL_QUERY"},
+            )
         )
         vec = response.embeddings[0].values
         if self._dimension is None:
@@ -223,7 +248,7 @@ class EmbeddingStore:
         self.provider = get_provider(provider)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
-        self._conn = sqlite3.connect(str(self.db_path), timeout=30)
+        self._conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
 
