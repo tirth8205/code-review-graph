@@ -74,6 +74,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".php": "php",
     ".sol": "solidity",
     ".vue": "vue",
+    ".dart": "dart",
 }
 
 # Tree-sitter node type mappings per language
@@ -101,6 +102,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
         "struct_declaration", "enum_declaration", "error_declaration",
         "user_defined_type_definition",
     ],
+    "dart": ["class_definition", "mixin_declaration", "enum_declaration"],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -126,6 +128,11 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_definition", "constructor_definition", "modifier_definition",
         "event_definition", "fallback_receive_definition",
     ],
+    # Dart: function_signature covers both top-level functions and class methods
+    # (class methods appear as method_signature > function_signature pairs;
+    # the parser recurses into method_signature generically and then matches
+    # function_signature inside it).
+    "dart": ["function_signature"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -144,6 +151,8 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "swift": ["import_declaration"],
     "php": ["namespace_use_declaration"],
     "solidity": ["import_directive"],
+    # Dart: import_or_export wraps library_import > import_specification > configurable_uri
+    "dart": ["import_or_export"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -181,6 +190,7 @@ _TEST_FILE_PATTERNS = [
     re.compile(r".*\.spec\.[jt]sx?$"),
     re.compile(r".*_test\.go$"),
     re.compile(r"tests?/"),
+    re.compile(r".*_test\.dart$"),
 ]
 
 
@@ -924,6 +934,17 @@ class CodeParser:
                         if target.is_file():
                             return str(target.resolve())
 
+        elif language == "dart":
+            if module.startswith("."):
+                # Dart relative imports include the .dart extension
+                base = caller_dir / module
+                if base.is_file():
+                    return str(base.resolve())
+                # Fallback: try appending .dart
+                target = base.with_suffix(".dart")
+                if target.is_file():
+                    return str(target.resolve())
+
         return None
 
     def _resolve_call_target(
@@ -953,6 +974,13 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        # Dart: function_signature has a return-type node before the identifier;
+        # search only for 'identifier' to avoid returning the return type name.
+        if language == "dart" and node.type == "function_signature":
+            for child in node.children:
+                if child.type == "identifier":
+                    return child.text.decode("utf-8", errors="replace")
+            return None
         # Solidity: constructor and receive/fallback have no identifier child
         if language == "solidity":
             if node.type == "constructor_definition":
@@ -986,7 +1014,7 @@ class CodeParser:
     def _get_params(self, node, language: str, source: bytes) -> Optional[str]:
         """Extract parameter list as a string."""
         for child in node.children:
-            if child.type in ("parameters", "formal_parameters", "parameter_list"):
+            if child.type in ("parameters", "formal_parameters", "parameter_list", "formal_parameter_list"):
                 return child.text.decode("utf-8", errors="replace")
         # Solidity: parameters are direct children between ( and )
         if language == "solidity":
@@ -1064,6 +1092,23 @@ class CodeParser:
                                     for f in field_node.children:
                                         if f.type == "type_identifier":
                                             bases.append(f.text.decode("utf-8", errors="replace"))
+        elif language == "dart":
+            # class Foo extends Bar with Mixin implements Iface { ... }
+            # AST: superclass contains type_identifier (base) and mixins (with clause);
+            #      interfaces is a sibling of superclass.
+            for child in node.children:
+                if child.type == "superclass":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                        elif sub.type == "mixins":
+                            for m in sub.children:
+                                if m.type == "type_identifier":
+                                    bases.append(m.text.decode("utf-8", errors="replace"))
+                elif child.type == "interfaces":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
         return bases
 
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:
@@ -1129,6 +1174,21 @@ class CodeParser:
                 match = re.search(r"""['"](.*?)['"]""", text)
                 if match:
                     imports.append(match.group(1))
+        elif language == "dart":
+            # import 'dart:async' or import 'package:flutter/material.dart'
+            # Node structure: import_or_export > library_import > import_specification
+            #                 > configurable_uri > uri > string_literal
+            def _find_string_literal(n) -> Optional[str]:
+                if n.type == "string_literal":
+                    return n.text.decode("utf-8", errors="replace").strip("'\"")
+                for c in n.children:
+                    result = _find_string_literal(c)
+                    if result is not None:
+                        return result
+                return None
+            val = _find_string_literal(node)
+            if val:
+                imports.append(val)
         else:
             # Fallback: just record the text
             imports.append(text)

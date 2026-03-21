@@ -273,3 +273,73 @@ class TestCodeParser:
         funcs = [n for n in nodes if n.kind == "Function"]
         func_names = {f.name for f in funcs}
         assert "greet" in func_names
+
+    # --- Dart tests ---
+
+    def test_detect_language_dart(self):
+        assert self.parser.detect_language(Path("main.dart")) == "dart"
+
+    def test_parse_dart_file(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+
+        file_nodes = [n for n in nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "dart"
+
+        classes = [n for n in nodes if n.kind == "Class"]
+        class_names = {c.name for c in classes}
+        assert "Animal" in class_names
+        assert "Dog" in class_names
+        assert "SwimmingMixin" in class_names
+        assert "PetType" in class_names
+
+        funcs = [n for n in nodes if n.kind == "Function"]
+        func_names = {f.name for f in funcs}
+        assert "speak" in func_names
+        assert "fetch" in func_names
+        assert "_run" in func_names
+        assert "create" in func_names
+        assert "createDog" in func_names
+        assert "swim" in func_names
+
+    def test_parse_dart_imports(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        import_targets = {e.target for e in imports}
+        assert "dart:async" in import_targets
+        assert "package:flutter/material.dart" in import_targets
+
+    def test_parse_dart_inheritance(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        inherits = [e for e in edges if e.kind == "INHERITS"]
+        assert any("Dog" in e.source and "Animal" in e.target for e in inherits)
+        assert any("Dog" in e.source and "SwimmingMixin" in e.target for e in inherits)
+
+    def test_parse_dart_contains_edges(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        contains = [e for e in edges if e.kind == "CONTAINS"]
+        # File should contain top-level classes and functions
+        file_path = str(FIXTURES / "sample.dart")
+        file_contains = [e for e in contains if e.source == file_path]
+        assert len(file_contains) >= 1
+        # Dog class should contain its methods
+        dog_contains = [e for e in contains if "Dog" in e.source]
+        dog_targets = {e.target for e in dog_contains}
+        assert any("speak" in t for t in dog_targets)
+        assert any("fetch" in t for t in dog_targets)
+
+    def test_parse_dart_method_parent(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        funcs = [n for n in nodes if n.kind == "Function"]
+        # Both Animal and Dog define speak(); check Dog's specifically
+        dog_speak = next(
+            (f for f in funcs if f.name == "speak" and f.parent_name == "Dog"), None,
+        )
+        assert dog_speak is not None
+
+    def test_parse_dart_top_level_function_no_parent(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        funcs = [n for n in nodes if n.kind == "Function"]
+        create_dog = next((f for f in funcs if f.name == "createDog"), None)
+        assert create_dog is not None
+        assert create_dog.parent_name is None
