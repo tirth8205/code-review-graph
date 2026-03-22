@@ -72,6 +72,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".kt": "kotlin",
     ".swift": "swift",
     ".php": "php",
+    ".scala": "scala",
     ".sol": "solidity",
     ".vue": "vue",
 }
@@ -96,6 +97,9 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "kotlin": ["class_declaration", "object_declaration"],
     "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
     "php": ["class_declaration", "interface_declaration"],
+    "scala": [
+        "class_definition", "trait_definition", "object_definition", "enum_definition",
+    ],
     "solidity": [
         "contract_declaration", "interface_declaration", "library_declaration",
         "struct_declaration", "enum_declaration", "error_declaration",
@@ -118,6 +122,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "kotlin": ["function_declaration"],
     "swift": ["function_declaration"],
     "php": ["function_definition", "method_declaration"],
+    "scala": ["function_definition", "function_declaration"],
     # Solidity: events and modifiers use kind="Function" because the graph
     # schema has no dedicated kind for them.  State variables are also modeled
     # as Function nodes (public ones auto-generate getters) and distinguished
@@ -143,6 +148,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "kotlin": ["import_header"],
     "swift": ["import_declaration"],
     "php": ["namespace_use_declaration"],
+    "scala": ["import_declaration"],
     "solidity": ["import_directive"],
 }
 
@@ -161,6 +167,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "kotlin": ["call_expression"],
     "swift": ["call_expression"],
     "php": ["function_call_expression", "member_call_expression"],
+    "scala": ["call_expression", "instance_expression", "generic_function"],
     "solidity": ["call_expression"],
 }
 
@@ -1030,6 +1037,19 @@ class CodeParser:
                 ):
                     text = child.text.decode("utf-8", errors="replace")
                     bases.append(text)
+        elif language == "scala":
+            for child in node.children:
+                if child.type == "extends_clause":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                        elif sub.type == "generic_type":
+                            for ident in sub.children:
+                                if ident.type == "type_identifier":
+                                    bases.append(
+                                        ident.text.decode("utf-8", errors="replace")
+                                    )
+                                    break
         elif language == "cpp":
             # C++: base_class_clause contains type_identifiers
             for child in node.children:
@@ -1123,6 +1143,27 @@ class CodeParser:
                     val = child.text.decode("utf-8", errors="replace").strip('"')
                     if val:
                         imports.append(val)
+        elif language == "scala":
+            parts = []
+            selectors = []
+            is_wildcard = False
+            for child in node.children:
+                if child.type == "identifier":
+                    parts.append(child.text.decode("utf-8", errors="replace"))
+                elif child.type == "namespace_selectors":
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            selectors.append(sub.text.decode("utf-8", errors="replace"))
+                elif child.type == "namespace_wildcard":
+                    is_wildcard = True
+            base = ".".join(parts)
+            if selectors:
+                for name in selectors:
+                    imports.append(f"{base}.{name}")
+            elif is_wildcard:
+                imports.append(f"{base}.*")
+            elif base:
+                imports.append(base)
         elif language == "ruby":
             # require 'module' or require_relative 'path'
             if "require" in text:
@@ -1141,6 +1182,13 @@ class CodeParser:
             return None
 
         first = node.children[0]
+
+        # Scala: instance_expression (new Foo(...)) – extract the type name
+        if node.type == "instance_expression":
+            for child in node.children:
+                if child.type in ("type_identifier", "identifier"):
+                    return child.text.decode("utf-8", errors="replace")
+            return None
 
         # Solidity wraps call targets in an 'expression' node – unwrap it
         if language == "solidity" and first.type == "expression" and first.children:

@@ -84,10 +84,10 @@ On every git commit or file save, a hook fires. The graph diffs changed files, f
 </details>
 
 <details>
-<summary><strong>14 supported languages</strong></summary>
+<summary><strong>15 supported languages</strong></summary>
 <br>
 
-Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++
+Python, TypeScript, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++
 
 Each language has full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection.
 
@@ -210,7 +210,7 @@ Claude uses these automatically once the graph is built.
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only changed files. Subsequent updates complete in under 2 seconds. |
-| **14 languages** | Python, TypeScript, JavaScript, Vue, Go, Rust, Java, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++ |
+| **15 languages** | Python, TypeScript, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++ |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
 | **Semantic search** | Optional vector embeddings via sentence-transformers |

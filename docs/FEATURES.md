@@ -5,7 +5,7 @@
 - **Call target resolution**: Bare call targets are resolved to qualified names using same-file definitions, improving `callers_of`/`callees_of` accuracy.
 - **Impact radius pagination**: `get_impact_radius` returns `truncated` flag and `total_impacted` count; `max_results` parameter controls output size.
 - **`find_large_functions_tool`**: New MCP tool to find functions, classes, or files exceeding a line-count threshold.
-- **14 languages**: Added Vue SFC and Solidity support.
+- **15 languages**: Added Vue SFC and Solidity support.
 - **Documentation overhaul**: All docs updated with accurate language/tool counts, version references, and VS Code extension parity.
 
 ## v1.8.3

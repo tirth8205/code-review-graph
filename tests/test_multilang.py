@@ -269,6 +269,53 @@ class TestSwiftParsing:
         assert "createUser" in names or "findById" in names or "save" in names
 
 
+class TestScalaParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.scala")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Main.scala")) == "scala"
+
+    def test_finds_classes_traits_objects(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Repository" in names
+        assert "User" in names
+        assert "InMemoryRepo" in names
+        assert "UserService" in names
+        assert "Color" in names
+
+    def test_finds_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "findById" in names
+        assert "save" in names
+        assert "createUser" in names
+        assert "getUser" in names
+        assert "apply" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "scala.util.Try" in targets
+        assert "scala.collection.mutable" in targets
+        assert "scala.collection.mutable.HashMap" in targets
+        assert "scala.collection.mutable.ListBuffer" in targets
+        assert "scala.concurrent.*" in targets
+        assert len(imports) >= 3
+
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        assert "Repository" in targets
+        assert "Serializable" in targets
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 3
+
+
 class TestSolidityParsing:
     def setup_method(self):
         self.parser = CodeParser()
