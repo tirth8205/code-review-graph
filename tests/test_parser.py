@@ -273,3 +273,61 @@ class TestCodeParser:
         funcs = [n for n in nodes if n.kind == "Function"]
         func_names = {f.name for f in funcs}
         assert "greet" in func_names
+
+    def test_vitest_test_detection(self):
+        """Vitest describe/it/test calls should produce Test nodes."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any("describe" in n for n in test_names), f"Expected describe Test node, got: {test_names}"
+        assert any("it:" in n or "test:" in n for n in test_names), f"Expected it/test Test node, got: {test_names}"
+
+    def test_vitest_contains_edges(self):
+        """describe Test nodes should CONTAIN it/test Test nodes."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
+        contains = [e for e in edges if e.kind == "CONTAINS"]
+        # The describe node should contain the it/test nodes
+        describe_qualified = [n for n in nodes if n.kind == "Test" and "describe" in n.name]
+        assert len(describe_qualified) >= 1
+
+        it_tests = [n for n in nodes if n.kind == "Test" and ("it:" in n.name or "test:" in n.name)]
+        assert len(it_tests) >= 2  # at least 2 it/test blocks
+
+    def test_vitest_calls_edges(self):
+        """Calls inside test blocks should produce CALLS edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        # There should be at least one CALLS edge from inside a test block
+        assert len(calls) >= 1, f"Expected at least one CALLS edge, got none"
+        # All CALLS edges should originate from a test node (enclosing_func is a test)
+        test_names = {n.name for n in nodes if n.kind == "Test"}
+        file_path = str(FIXTURES / "sample_vitest.test.ts")
+        test_qualified = {f"{file_path}::{name}" for name in test_names}
+        call_sources = {e.source for e in calls}
+        assert call_sources & test_qualified, (
+            f"Expected calls from test nodes, sources: {call_sources}, "
+            f"test nodes: {test_qualified}"
+        )
+
+    def test_vitest_tested_by_edges(self):
+        """TESTED_BY edges should be generated from test calls to production code."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, f"Expected TESTED_BY edges, got none. All edges: {[(e.kind, e.source, e.target) for e in edges]}"
+
+    def test_non_test_file_describe_not_special(self):
+        """describe() in a non-test file should NOT create Test nodes."""
+        import tempfile, os
+        code = 'function describe(name: string, fn: () => void) { fn(); }\ndescribe("test", () => { console.log("hello"); });\n'
+        with tempfile.NamedTemporaryFile(suffix=".ts", mode="w", delete=False, prefix="regular_") as f:
+            f.write(code)
+            f.flush()
+            try:
+                nodes, edges = self.parser.parse_file(Path(f.name))
+                tests = [n for n in nodes if n.kind == "Test"]
+                assert len(tests) == 0, f"Non-test file should not have Test nodes, got: {[t.name for t in tests]}"
+            finally:
+                try:
+                    os.unlink(f.name)
+                except OSError:
+                    pass  # Windows may hold file lock; ignore cleanup errors

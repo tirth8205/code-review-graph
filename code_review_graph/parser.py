@@ -183,6 +183,11 @@ _TEST_FILE_PATTERNS = [
     re.compile(r"tests?/"),
 ]
 
+_TEST_RUNNER_NAMES = frozenset({
+    "describe", "it", "test", "beforeEach", "afterEach",
+    "beforeAll", "afterAll",
+})
+
 
 def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
@@ -462,6 +467,21 @@ class CodeParser:
 
     _MAX_AST_DEPTH = 180  # Guard against pathologically nested source files
 
+    def _get_test_description(self, call_node, source: bytes) -> Optional[str]:
+        """Extract the description string from a test runner call.
+
+        For describe("user auth", () => {}), returns "user auth".
+        For it("should login", () => {}), returns "should login".
+        """
+        for child in call_node.children:
+            if child.type == "arguments":
+                for arg in child.children:
+                    if arg.type in ("string", "template_string"):
+                        text = arg.text.decode("utf-8", errors="replace")
+                        # Strip quotes
+                        return text.strip("'\"`")
+        return None
+
     def _extract_from_tree(
         self,
         root,
@@ -611,6 +631,58 @@ class CodeParser:
             # --- Calls ---
             if node_type in call_types:
                 call_name = self._get_call_name(child, language, source)
+
+                # Special handling: test runner calls in test files → Test nodes
+                if (
+                    call_name
+                    and language in ("javascript", "typescript", "tsx")
+                    and _is_test_file(file_path)
+                    and call_name in _TEST_RUNNER_NAMES
+                ):
+                    test_desc = self._get_test_description(child, source)
+                    synthetic_name = (
+                        f"{call_name}:{test_desc}" if test_desc else call_name
+                    )
+                    qualified = self._qualify(
+                        synthetic_name, file_path, enclosing_class,
+                    )
+
+                    nodes.append(NodeInfo(
+                        kind="Test",
+                        name=synthetic_name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        language=language,
+                        parent_name=enclosing_class,
+                        is_test=True,
+                    ))
+
+                    # CONTAINS edge: parent → this test
+                    container = (
+                        self._qualify(enclosing_func, file_path, enclosing_class)
+                        if enclosing_func
+                        else file_path
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=qualified,
+                        file_path=file_path,
+                        line=child.start_point[0] + 1,
+                    ))
+
+                    # Recurse into the call's children (the arrow function body)
+                    # with enclosing_func set to the synthetic test name
+                    self._extract_from_tree(
+                        child, source, language, file_path, nodes, edges,
+                        enclosing_class=enclosing_class,
+                        enclosing_func=synthetic_name,
+                        import_map=import_map, defined_names=defined_names,
+                        _depth=_depth + 1,
+                    )
+                    continue
+
                 if call_name and enclosing_func:
                     caller = self._qualify(enclosing_func, file_path, enclosing_class)
                     target = self._resolve_call_target(
