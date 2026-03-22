@@ -603,6 +603,7 @@ def semantic_search_nodes(
     kind: str | None = None,
     limit: int = 20,
     repo_root: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Search for nodes by name, keyword, or semantic similarity.
 
@@ -615,6 +616,9 @@ def semantic_search_nodes(
         kind: Optional filter by node kind (File, Class, Function, Type, Test).
         limit: Maximum results to return (default: 20).
         repo_root: Repository root path. Auto-detected if omitted.
+        model: Embedding model to use for query vectors. Must match the model
+               used during embed_graph. Falls back to CRG_EMBEDDING_MODEL env
+               var, then to all-MiniLM-L6-v2.
 
     Returns:
         Ranked list of matching nodes.
@@ -622,7 +626,7 @@ def semantic_search_nodes(
     store, root = _get_store(repo_root)
     try:
         db_path = get_db_path(root)
-        emb_store = EmbeddingStore(db_path)
+        emb_store = EmbeddingStore(db_path, model=model)
         search_mode = "keyword"
 
         try:

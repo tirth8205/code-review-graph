@@ -183,7 +183,7 @@ def get_provider(
         try:
             return GoogleEmbeddingProvider(
                 api_key=api_key,
-                model=model or "gemini-embedding-001",
+                **({"model": model} if model else {}),
             )
         except ImportError:
             return None

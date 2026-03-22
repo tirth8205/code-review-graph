@@ -143,6 +143,7 @@ def semantic_search_nodes_tool(
     kind: Optional[str] = None,
     limit: int = 20,
     repo_root: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -154,29 +155,36 @@ def semantic_search_nodes_tool(
         kind: Optional filter: File, Class, Function, Type, or Test.
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
+        model: Embedding model for query vectors. Must match the model used
+               during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var,
+               then all-MiniLM-L6-v2.
     """
     return semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=repo_root
+        query=query, kind=kind, limit=limit, repo_root=repo_root, model=model
     )
 
 
 @mcp.tool()
 def embed_graph_tool(
     repo_root: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
     Requires: pip install code-review-graph[embeddings]
-    Uses the all-MiniLM-L6-v2 model (fast, 384-dim vectors).
-    Only computes embeddings for nodes that don't already have them.
+    Default model: all-MiniLM-L6-v2. Override via `model` param or
+    CRG_EMBEDDING_MODEL env var (any sentence-transformers compatible model).
+    Changing the model re-embeds all nodes automatically.
 
     After running this, semantic_search_nodes_tool will use vector similarity
     instead of keyword matching for much better results.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        model: Embedding model name (HuggingFace ID or local path).
+               Falls back to CRG_EMBEDDING_MODEL env var, then all-MiniLM-L6-v2.
     """
-    return embed_graph(repo_root=repo_root)
+    return embed_graph(repo_root=repo_root, model=model)
 
 
 @mcp.tool()
