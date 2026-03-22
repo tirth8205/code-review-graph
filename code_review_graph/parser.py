@@ -463,14 +463,24 @@ class CodeParser:
         return resolved
 
     _MAX_AST_DEPTH = 180  # Guard against pathologically nested source files
+    _MAX_TEST_DESCRIPTION_LEN = 200  # Cap test description length in node names
 
     def _get_test_description(self, call_node, source: bytes) -> Optional[str]:
-        """Extract the first string argument from a test runner call node."""
+        """Extract the first string argument from a test runner call node.
+
+        Strips surrounding quotes/backticks, collapses internal whitespace, and
+        truncates to _MAX_TEST_DESCRIPTION_LEN to keep node names bounded.
+        """
         for child in call_node.children:
             if child.type == "arguments":
                 for arg in child.children:
                     if arg.type in ("string", "template_string"):
-                        return arg.text.decode("utf-8", errors="replace").strip("'\"`")
+                        raw = arg.text.decode("utf-8", errors="replace")
+                        stripped = raw.strip("'\"`")
+                        normalized = re.sub(r"\s+", " ", stripped).strip()
+                        if len(normalized) > self._MAX_TEST_DESCRIPTION_LEN:
+                            normalized = normalized[: self._MAX_TEST_DESCRIPTION_LEN]
+                        return normalized
         return None
 
     def _extract_from_tree(
@@ -623,17 +633,31 @@ class CodeParser:
             if node_type in call_types:
                 call_name = self._get_call_name(child, language, source)
 
-                # Special handling: test runner calls in test files → Test nodes
+                # For member expressions like describe.only / it.skip / test.each,
+                # _get_call_name returns the rightmost part (e.g. "only", "skip").
+                # Resolve the base call name so those are treated as test runner calls.
+                effective_call_name = call_name
                 if (
                     call_name
                     and language in ("javascript", "typescript", "tsx")
                     and _is_test_file(file_path)
-                    and call_name in _TEST_RUNNER_NAMES
+                    and call_name not in _TEST_RUNNER_NAMES
+                ):
+                    effective_call_name = self._get_base_call_name(child, source) or call_name
+
+                # Special handling: test runner calls in test files → Test nodes
+                if (
+                    effective_call_name
+                    and language in ("javascript", "typescript", "tsx")
+                    and _is_test_file(file_path)
+                    and effective_call_name in _TEST_RUNNER_NAMES
                 ):
                     test_desc = self._get_test_description(child, source)
-                    synthetic_name = (
-                        f"{call_name}:{test_desc}" if test_desc else call_name
+                    line_no = child.start_point[0] + 1
+                    synthetic_base = (
+                        f"{effective_call_name}:{test_desc}" if test_desc else effective_call_name
                     )
+                    synthetic_name = f"{synthetic_base}@L{line_no}"
                     qualified = self._qualify(
                         synthetic_name, file_path, enclosing_class,
                     )
@@ -1232,4 +1256,39 @@ class CodeParser:
         if first.type in ("scoped_identifier", "qualified_name"):
             return first.text.decode("utf-8", errors="replace")
 
+        return None
+
+    # Modifier suffixes used in JS/TS test runners: describe.only, it.skip, test.each, etc.
+    _TEST_MODIFIER_SUFFIXES = frozenset({"only", "skip", "each", "todo", "concurrent", "failing"})
+
+    def _get_base_call_name(self, node, source: bytes) -> Optional[str]:
+        """Return the base object name for member-expression calls like describe.only().
+
+        For ``describe.only("suite", () => {})`` the AST first child is a
+        member_expression whose leftmost identifier is "describe".  This method
+        extracts that base name so callers can treat it as the effective call
+        name when the rightmost part is a known modifier suffix.
+        """
+        if not node.children:
+            return None
+        first = node.children[0]
+        if first.type != "member_expression":
+            return None
+        # The rightmost part must be a known modifier; otherwise don't treat as a base.
+        rightmost: Optional[str] = None
+        for child in reversed(first.children):
+            if child.type in ("identifier", "property_identifier"):
+                rightmost = child.text.decode("utf-8", errors="replace")
+                break
+        if rightmost not in self._TEST_MODIFIER_SUFFIXES:
+            return None
+        # Walk left to find the base identifier (handles chained: describe.only → base=describe)
+        for child in first.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type == "member_expression":
+                # Recurse one level for patterns like it.concurrent.each
+                for inner in child.children:
+                    if inner.type == "identifier":
+                        return inner.text.decode("utf-8", errors="replace")
         return None

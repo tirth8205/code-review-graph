@@ -279,18 +279,29 @@ class TestCodeParser:
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         tests = [n for n in nodes if n.kind == "Test"]
         test_names = {t.name for t in tests}
-        assert any("describe" in n for n in test_names), f"Expected describe Test node, got: {test_names}"
-        assert any("it:" in n or "test:" in n for n in test_names), f"Expected it/test Test node, got: {test_names}"
+        assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
+            f"Expected describe Test node, got: {test_names}"
+        )
+        assert any(n.startswith("it:") or n.startswith("test:") for n in test_names), (
+            f"Expected it/test Test node, got: {test_names}"
+        )
 
     def test_vitest_contains_edges(self):
         """describe Test nodes should CONTAIN it/test Test nodes."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
 
         file_path = str(FIXTURES / "sample_vitest.test.ts")
-        describe_nodes = [n for n in nodes if n.kind == "Test" and "describe" in n.name]
+        describe_nodes = [
+            n for n in nodes
+            if n.kind == "Test"
+            and (n.name.startswith("describe") or n.name.startswith("describe:"))
+        ]
         assert len(describe_nodes) >= 1
 
-        it_tests = [n for n in nodes if n.kind == "Test" and ("it:" in n.name or "test:" in n.name)]
+        it_tests = [
+            n for n in nodes
+            if n.kind == "Test" and (n.name.startswith("it:") or n.name.startswith("test:"))
+        ]
         assert len(it_tests) >= 2  # at least 2 it/test blocks
 
         # Verify describe nodes appear as CONTAINS edge sources
