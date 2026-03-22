@@ -47,15 +47,21 @@ class EmbeddingProvider(ABC):
         pass
 
 
+LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
+
+
 class LocalEmbeddingProvider(EmbeddingProvider):
-    def __init__(self) -> None:
+    def __init__(self, model_name: str | None = None) -> None:
+        self._model_name = model_name or os.environ.get(
+            "CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL
+        )
         self._model = None  # Lazy-loaded
 
     def _get_model(self):
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer("all-MiniLM-L6-v2")
+                self._model = SentenceTransformer(self._model_name)
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
@@ -78,7 +84,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     @property
     def name(self) -> str:
-        return "local:all-MiniLM-L6-v2"
+        return f"local:{self._model_name}"
 
 
 class GoogleEmbeddingProvider(EmbeddingProvider):
@@ -153,12 +159,19 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
         return f"google:{self.model}"
 
 
-def get_provider(provider: str | None = None) -> EmbeddingProvider | None:
+def get_provider(
+    provider: str | None = None,
+    model: str | None = None,
+) -> EmbeddingProvider | None:
     """Get an embedding provider by name.
 
     Args:
         provider: Provider name. One of "local", "google", or None for local.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
+        model: Model name/path to use. For local provider this is any
+               sentence-transformers compatible model (HuggingFace ID or local
+               path). Falls back to CRG_EMBEDDING_MODEL env var, then to
+               all-MiniLM-L6-v2. For Google provider this is a Gemini model ID.
     """
     if provider == "google":
         api_key = os.environ.get("GOOGLE_API_KEY")
@@ -168,13 +181,16 @@ def get_provider(provider: str | None = None) -> EmbeddingProvider | None:
                 "the Google embedding provider."
             )
         try:
-            return GoogleEmbeddingProvider(api_key=api_key)
+            return GoogleEmbeddingProvider(
+                api_key=api_key,
+                model=model or "gemini-embedding-001",
+            )
         except ImportError:
             return None
 
     # Default: local
     try:
-        return LocalEmbeddingProvider()
+        return LocalEmbeddingProvider(model_name=model)
     except ImportError:
         return None
 
@@ -244,8 +260,13 @@ def _node_to_text(node: GraphNode) -> str:
 class EmbeddingStore:
     """Manages vector embeddings for graph nodes in SQLite."""
 
-    def __init__(self, db_path: str | Path, provider: str | None = None) -> None:
-        self.provider = get_provider(provider)
+    def __init__(
+        self,
+        db_path: str | Path,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.provider = get_provider(provider, model=model)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
         self._conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)

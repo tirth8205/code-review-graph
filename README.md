@@ -237,6 +237,25 @@ For semantic search, install the optional embeddings dependencies:
 pip install code-review-graph[embeddings]
 ```
 
+By default, the `all-MiniLM-L6-v2` model is used. To use a different [sentence-transformers](https://www.sbert.net/) model, set `CRG_EMBEDDING_MODEL` in your `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "uvx",
+      "args": ["code-review-graph", "serve"],
+      "env": {
+        "CRG_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5"
+      }
+    }
+  }
+}
+```
+
+Or pass the `model` parameter directly to the `embed_graph` MCP tool.
+Changing the model re-embeds all nodes automatically.
+
 </details>
 
 ---

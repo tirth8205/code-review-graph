@@ -742,23 +742,31 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def embed_graph(repo_root: str | None = None) -> dict[str, Any]:
+def embed_graph(
+    repo_root: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
     Requires: `pip install code-review-graph[embeddings]`
-    Uses the all-MiniLM-L6-v2 model (fast, 384-dim).
 
     Only embeds nodes that don't already have up-to-date embeddings.
+    Changing the model will re-embed all nodes automatically.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        model: Embedding model to use. Any sentence-transformers compatible
+               model name (HuggingFace ID or local path). Falls back to
+               CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
+               Examples: "all-MiniLM-L6-v2", "BAAI/bge-small-en-v1.5",
+               "intfloat/multilingual-e5-small".
 
     Returns:
         Number of nodes embedded and total embedding count.
     """
     store, root = _get_store(repo_root)
     db_path = get_db_path(root)
-    emb_store = EmbeddingStore(db_path)
+    emb_store = EmbeddingStore(db_path, model=model)
     try:
         if not emb_store.available:
             return {
