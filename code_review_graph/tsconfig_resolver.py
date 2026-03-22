@@ -73,16 +73,24 @@ class TsconfigResolver:
         """Find and load tsconfig.json for the given file.
 
         Walks up from the file's directory looking for tsconfig.json or
-        tsconfig.app.json.  Results are cached by the tsconfig's parent
-        directory so that all files in the same project share one entry.
+        tsconfig.app.json.  Results are cached by directory so that all files
+        in the same project share one entry and intermediate directories are
+        also memoized to avoid O(depth) repeated lookups.
         """
         start_dir = Path(file_path).parent.resolve()
         current = start_dir
+        visited: list[str] = []
 
         while True:
             dir_str = str(current)
             if dir_str in self._cache:
-                return self._cache[dir_str]
+                # Memoize all directories we walked so far to the cached result
+                result = self._cache[dir_str]
+                for visited_dir in visited:
+                    self._cache[visited_dir] = result
+                return result
+
+            visited.append(dir_str)
 
             for name in _TSCONFIG_NAMES:
                 candidate = current / name
@@ -90,13 +98,16 @@ class TsconfigResolver:
                     config = self._parse_tsconfig(candidate)
                     # Store tsconfig directory so callers can resolve baseUrl
                     config["_tsconfig_dir"] = dir_str
-                    self._cache[dir_str] = config
+                    # Cache this directory and all visited directories above it
+                    for visited_dir in visited:
+                        self._cache[visited_dir] = config
                     return config
 
             parent = current.parent
             if parent == current:
                 # Reached filesystem root without finding a tsconfig
-                self._cache[dir_str] = None
+                for visited_dir in visited:
+                    self._cache[visited_dir] = None
                 return None
             current = parent
 
@@ -112,8 +123,9 @@ class TsconfigResolver:
     def _resolve_extends(self, tsconfig_path: Path, seen: set[str]) -> dict:
         """Recursively resolve the tsconfig extends chain.
 
-        Deep-merges ``compilerOptions`` from parent configs, with child
-        values taking priority.  Cycle detection is performed via *seen*.
+        Shallow-merges ``compilerOptions`` from parent configs using
+        ``dict.update()``, with child values taking priority.  Cycle
+        detection is performed via *seen*.
         """
         canonical = str(tsconfig_path.resolve())
         if canonical in seen:
@@ -161,14 +173,63 @@ class TsconfigResolver:
         return result
 
     def _strip_jsonc_comments(self, text: str) -> str:
-        """Remove ``//`` and ``/* */`` comments and trailing commas from JSONC."""
-        # Block comments first (may span lines)
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-        # Line comments
-        text = re.sub(r"//[^\n]*", "", text)
+        """Remove ``//`` and ``/* */`` comments and trailing commas from JSONC.
+
+        Uses a state-machine to avoid incorrectly stripping ``//`` or ``/*``
+        that appear inside JSON string literals (e.g. URLs like
+        ``"https://example.com"``).
+        """
+        result: list[str] = []
+        i = 0
+        n = len(text)
+
+        while i < n:
+            ch = text[i]
+
+            # -- Inside a string literal: copy verbatim, handle escapes --
+            if ch == '"':
+                result.append(ch)
+                i += 1
+                while i < n:
+                    c = text[i]
+                    result.append(c)
+                    if c == "\\" and i + 1 < n:
+                        # Escaped character — consume both to avoid treating
+                        # an escaped quote as the end of the string.
+                        i += 1
+                        result.append(text[i])
+                    elif c == '"':
+                        break
+                    i += 1
+                i += 1
+                continue
+
+            # -- Block comment: skip until */ --
+            if ch == "/" and i + 1 < n and text[i + 1] == "*":
+                i += 2
+                while i < n - 1:
+                    if text[i] == "*" and text[i + 1] == "/":
+                        i += 2
+                        break
+                    i += 1
+                else:
+                    i = n  # unterminated block comment — consume to EOF
+                continue
+
+            # -- Line comment: skip until newline --
+            if ch == "/" and i + 1 < n and text[i + 1] == "/":
+                i += 2
+                while i < n and text[i] != "\n":
+                    i += 1
+                continue
+
+            result.append(ch)
+            i += 1
+
+        stripped = "".join(result)
         # Trailing commas before } or ]
-        text = re.sub(r",\s*([\]}])", r"\1", text)
-        return text
+        stripped = re.sub(r",\s*([\]}])", r"\1", stripped)
+        return stripped
 
     def _match_and_probe(
         self,
@@ -182,7 +243,16 @@ class TsconfigResolver:
         substituted into each mapped replacement path and probed with the
         known file extensions.
         """
-        for pattern, replacements in paths.items():
+        # Sort patterns by specificity: longest non-wildcard prefix first so
+        # that more specific aliases (e.g. "@/lib/*") win over broader ones
+        # (e.g. "@/*") regardless of JSON insertion order.
+        def _pattern_specificity(item: tuple[str, list[str]]) -> int:
+            pat = item[0]
+            return len(pat.partition("*")[0])
+
+        sorted_paths = sorted(paths.items(), key=_pattern_specificity, reverse=True)
+
+        for pattern, replacements in sorted_paths:
             suffix = _match_pattern(pattern, import_str)
             if suffix is None:
                 continue  # pattern did not match
@@ -234,9 +304,12 @@ def _probe_path(base: Path) -> Optional[Path]:
     # Exact path (may already have extension)
     if base.is_file():
         return base
-    # Try appending known extensions
+    # Try appending known extensions.
+    # Use Path.with_suffix() only when the base has no existing suffix so we
+    # don't replace it (e.g. "foo.test" + ".ts" should give "foo.test.ts",
+    # not "foo.ts").
     for ext in _PROBE_EXTENSIONS:
-        candidate = base.with_suffix(ext)
+        candidate = base.with_suffix(ext) if not base.suffix else Path(str(base) + ext)
         if candidate.is_file():
             return candidate
     # Try index file inside a directory

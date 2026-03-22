@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from code_review_graph.tsconfig_resolver import TsconfigResolver
@@ -41,7 +42,9 @@ class TestTsconfigResolver:
         assert result is None
 
     def test_no_tsconfig_returns_none(self):
-        result = self.resolver.resolve_alias("@/foo", "/tmp/no_tsconfig/file.ts")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = str(Path(tmp_dir) / "file.ts")
+            result = self.resolver.resolve_alias("@/foo", file_path)
         assert result is None
 
     def test_caching(self):
