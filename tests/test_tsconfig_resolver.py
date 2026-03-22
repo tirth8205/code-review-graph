@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import unittest
 from pathlib import Path
 
 from code_review_graph.tsconfig_resolver import TsconfigResolver
@@ -10,8 +9,8 @@ from code_review_graph.tsconfig_resolver import TsconfigResolver
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-class TestTsconfigResolver(unittest.TestCase):
-    def setUp(self):
+class TestTsconfigResolver:
+    def setup_method(self):
         self.resolver = TsconfigResolver()
 
     def test_strip_jsonc_comments(self):
@@ -48,6 +47,8 @@ class TestTsconfigResolver(unittest.TestCase):
     def test_caching(self):
         importer = str(FIXTURES / "alias_importer.ts")
         self.resolver.resolve_alias("@/lib/utils", importer)
-        # Second call should use cache
+        cache_size_after_first = len(self.resolver._cache)
+        assert cache_size_after_first >= 1
+        # Second call should reuse cache, not grow it
         self.resolver.resolve_alias("@/lib/utils", importer)
-        assert len(self.resolver._cache) >= 1
+        assert len(self.resolver._cache) == cache_size_after_first

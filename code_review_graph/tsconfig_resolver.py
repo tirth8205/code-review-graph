@@ -138,19 +138,14 @@ class TsconfigResolver:
 
         # Resolve parent first so child can override
         extends: Optional[str] = data.get("extends")
-        if extends and isinstance(extends, str):
-            # Skip npm-scoped or node_modules extends (e.g. @tsconfig/recommended)
-            if extends.startswith("@") or not extends.startswith("."):
-                pass  # cannot resolve npm packages — skip gracefully
-            else:
-                parent_path = (tsconfig_path.parent / extends).resolve()
-                # Add .json extension if missing
-                if not parent_path.suffix:
-                    parent_path = parent_path.with_suffix(".json")
-                if parent_path.is_file():
-                    parent_config = self._resolve_extends(parent_path, seen)
-                    parent_opts = parent_config.get("compilerOptions", {})
-                    result.setdefault("compilerOptions", {}).update(parent_opts)
+        if extends and isinstance(extends, str) and extends.startswith("."):
+            parent_path = (tsconfig_path.parent / extends).resolve()
+            if not parent_path.suffix:
+                parent_path = parent_path.with_suffix(".json")
+            if parent_path.is_file():
+                parent_config = self._resolve_extends(parent_path, seen)
+                parent_opts = parent_config.get("compilerOptions", {})
+                result.setdefault("compilerOptions", {}).update(parent_opts)
 
         # Merge child compilerOptions (child wins)
         child_opts: dict = data.get("compilerOptions", {})
@@ -220,16 +215,15 @@ def _match_pattern(pattern: str, import_str: str) -> Optional[str]:
         ``_match_pattern("@utils", "@utils")``   -> ``""``
         ``_match_pattern("@/*", "react")``       -> ``None``
     """
-    if "*" in pattern:
-        prefix, _, suffix_pat = pattern.partition("*")
-        if import_str.startswith(prefix) and import_str.endswith(suffix_pat):
-            return import_str[len(prefix):len(import_str) - len(suffix_pat) if suffix_pat else None]
+    if "*" not in pattern:
+        return "" if import_str == pattern else None
+
+    prefix, _, suffix_pat = pattern.partition("*")
+    if not (import_str.startswith(prefix) and import_str.endswith(suffix_pat)):
         return None
-    else:
-        # Exact match
-        if import_str == pattern:
-            return ""
-        return None
+
+    end = len(import_str) - len(suffix_pat) if suffix_pat else len(import_str)
+    return import_str[len(prefix):end]
 
 
 def _probe_path(base: Path) -> Optional[Path]:
