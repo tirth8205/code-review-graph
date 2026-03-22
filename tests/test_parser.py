@@ -273,3 +273,30 @@ class TestCodeParser:
         funcs = [n for n in nodes if n.kind == "Function"]
         func_names = {f.name for f in funcs}
         assert "greet" in func_names
+
+    def test_tsconfig_alias_resolution(self):
+        """Alias imports should resolve to absolute file paths."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "alias_importer.ts")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        resolved_imports = [e for e in imports if e.target.endswith("utils.ts")]
+        assert len(resolved_imports) >= 1, f"Expected resolved alias import, got targets: {[e.target for e in imports]}"
+
+    def test_tsconfig_missing_gracefully_handled(self):
+        """Files without a tsconfig should still parse without errors."""
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".ts", mode="w", delete=False) as f:
+            f.write('import { foo } from "@/bar";\nexport const x = 1;\n')
+            tmp_path = f.name
+        try:
+            nodes, edges = self.parser.parse_file(Path(tmp_path))
+            imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            # Should have the raw import string since no tsconfig exists
+            assert any("@/bar" in e.target for e in imports)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass  # Windows may keep file handle; cleanup best-effort
+
+    # --- Vitest/Jest test detection tests ---
+

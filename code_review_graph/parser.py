@@ -15,6 +15,8 @@ from typing import Optional
 
 import tree_sitter_language_pack as tslp
 
+from .tsconfig_resolver import TsconfigResolver
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -221,6 +223,7 @@ class CodeParser:
     def __init__(self) -> None:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
+        self._tsconfig_resolver = TsconfigResolver()
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
         if language not in self._parsers:
@@ -599,10 +602,11 @@ class CodeParser:
             if node_type in import_types:
                 imports = self._extract_import(child, language, source)
                 for imp_target in imports:
+                    resolved = self._resolve_module_to_file(imp_target, file_path, language)
                     edges.append(EdgeInfo(
                         kind="IMPORTS_FROM",
                         source=file_path,
-                        target=imp_target,
+                        target=resolved if resolved else imp_target,
                         file_path=file_path,
                         line=child.start_point[0] + 1,
                     ))
@@ -923,6 +927,11 @@ class CodeParser:
                         target = base / f"index{ext}"
                         if target.is_file():
                             return str(target.resolve())
+            else:
+                # Non-relative import — try tsconfig path alias resolution
+                resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
+                if resolved:
+                    return resolved
 
         return None
 
