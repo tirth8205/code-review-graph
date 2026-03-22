@@ -200,10 +200,7 @@ def _is_test_function(name: str, file_path: str) -> bool:
     if any(p.search(name) for p in _TEST_PATTERNS):
         return True
     # In test files, treat common JS/TS test-runner wrappers as tests
-    if _is_test_file(file_path) and name in (
-        "describe", "it", "test", "beforeEach", "afterEach",
-        "beforeAll", "afterAll",
-    ):
+    if _is_test_file(file_path) and name in _TEST_RUNNER_NAMES:
         return True
     return False
 
@@ -468,18 +465,12 @@ class CodeParser:
     _MAX_AST_DEPTH = 180  # Guard against pathologically nested source files
 
     def _get_test_description(self, call_node, source: bytes) -> Optional[str]:
-        """Extract the description string from a test runner call.
-
-        For describe("user auth", () => {}), returns "user auth".
-        For it("should login", () => {}), returns "should login".
-        """
+        """Extract the first string argument from a test runner call node."""
         for child in call_node.children:
             if child.type == "arguments":
                 for arg in child.children:
                     if arg.type in ("string", "template_string"):
-                        text = arg.text.decode("utf-8", errors="replace")
-                        # Strip quotes
-                        return text.strip("'\"`")
+                        return arg.text.decode("utf-8", errors="replace").strip("'\"`")
         return None
 
     def _extract_from_tree(

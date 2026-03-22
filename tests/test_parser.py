@@ -285,21 +285,27 @@ class TestCodeParser:
     def test_vitest_contains_edges(self):
         """describe Test nodes should CONTAIN it/test Test nodes."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
-        contains = [e for e in edges if e.kind == "CONTAINS"]
-        # The describe node should contain the it/test nodes
-        describe_qualified = [n for n in nodes if n.kind == "Test" and "describe" in n.name]
-        assert len(describe_qualified) >= 1
+
+        file_path = str(FIXTURES / "sample_vitest.test.ts")
+        describe_nodes = [n for n in nodes if n.kind == "Test" and "describe" in n.name]
+        assert len(describe_nodes) >= 1
 
         it_tests = [n for n in nodes if n.kind == "Test" and ("it:" in n.name or "test:" in n.name)]
         assert len(it_tests) >= 2  # at least 2 it/test blocks
+
+        # Verify describe nodes appear as CONTAINS edge sources
+        describe_qualified = {f"{file_path}::{n.name}" for n in describe_nodes}
+        contains_sources = {e.source for e in edges if e.kind == "CONTAINS"}
+        assert describe_qualified & contains_sources, (
+            f"Expected describe Test nodes in CONTAINS sources, got: {contains_sources}"
+        )
 
     def test_vitest_calls_edges(self):
         """Calls inside test blocks should produce CALLS edges."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         calls = [e for e in edges if e.kind == "CALLS"]
-        # There should be at least one CALLS edge from inside a test block
-        assert len(calls) >= 1, f"Expected at least one CALLS edge, got none"
-        # All CALLS edges should originate from a test node (enclosing_func is a test)
+        assert len(calls) >= 1, "Expected at least one CALLS edge"
+        # At least some CALLS edges should originate from inside a test block
         test_names = {n.name for n in nodes if n.kind == "Test"}
         file_path = str(FIXTURES / "sample_vitest.test.ts")
         test_qualified = {f"{file_path}::{name}" for name in test_names}
@@ -317,17 +323,14 @@ class TestCodeParser:
 
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
-        import tempfile, os
-        code = 'function describe(name: string, fn: () => void) { fn(); }\ndescribe("test", () => { console.log("hello"); });\n'
-        with tempfile.NamedTemporaryFile(suffix=".ts", mode="w", delete=False, prefix="regular_") as f:
+        import tempfile
+        code = b'function describe(name, fn) { fn(); }\ndescribe("test", () => { console.log("hello"); });\n'
+        with tempfile.NamedTemporaryFile(suffix=".ts", delete=False, prefix="regular_") as f:
             f.write(code)
-            f.flush()
-            try:
-                nodes, edges = self.parser.parse_file(Path(f.name))
-                tests = [n for n in nodes if n.kind == "Test"]
-                assert len(tests) == 0, f"Non-test file should not have Test nodes, got: {[t.name for t in tests]}"
-            finally:
-                try:
-                    os.unlink(f.name)
-                except OSError:
-                    pass  # Windows may hold file lock; ignore cleanup errors
+            tmp_path = Path(f.name)
+        try:
+            nodes, edges = self.parser.parse_file(tmp_path)
+            tests = [n for n in nodes if n.kind == "Test"]
+            assert len(tests) == 0, f"Non-test file should not have Test nodes, got: {[t.name for t in tests]}"
+        finally:
+            tmp_path.unlink(missing_ok=True)
