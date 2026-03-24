@@ -74,6 +74,9 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".php": "php",
     ".sol": "solidity",
     ".vue": "vue",
+    ".pl": "perl",
+    ".pm": "perl",
+    ".t": "perl",
 }
 
 # Tree-sitter node type mappings per language
@@ -101,6 +104,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
         "struct_declaration", "enum_declaration", "error_declaration",
         "user_defined_type_definition",
     ],
+    "perl": ["package_statement", "class_statement", "role_statement"],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -126,6 +130,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_definition", "constructor_definition", "modifier_definition",
         "event_definition", "fallback_receive_definition",
     ],
+    "perl": ["subroutine_declaration_statement", "method_declaration_statement"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -144,6 +149,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "swift": ["import_declaration"],
     "php": ["namespace_use_declaration"],
     "solidity": ["import_directive"],
+    "perl": ["use_statement", "require_expression"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -162,6 +168,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "swift": ["call_expression"],
     "php": ["function_call_expression", "member_call_expression"],
     "solidity": ["call_expression"],
+    "perl": ["function_call_expression", "method_call_expression"],
 }
 
 # Patterns that indicate a test function
@@ -961,6 +968,14 @@ class CodeParser:
                 for child in node.children:
                     if child.type in ("receive", "fallback"):
                         return child.text.decode("utf-8", errors="replace")
+        # Perl: bareword for subroutine names, package for package names
+        if language == "perl":
+            for child in node.children:
+                if child.type == "bareword":
+                    return child.text.decode("utf-8", errors="replace")
+                # For package_statement, the name is in a 'package' child (not the 'package' keyword)
+                if child.type == "package" and child.text != b"package":
+                    return child.text.decode("utf-8", errors="replace")
         # For C/C++: function names are inside function_declarator/pointer_declarator
         # Check these first to avoid matching the return type_identifier
         if language in ("c", "cpp") and kind == "function":
