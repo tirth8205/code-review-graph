@@ -146,7 +146,7 @@ def build_or_update_graph(
     try:
         if full_rebuild:
             result = full_build(root, store)
-            return {
+            build_result = {
                 "status": "ok",
                 "build_type": "full",
                 "summary": (
@@ -164,7 +164,7 @@ def build_or_update_graph(
                     "summary": "No changes detected. Graph is up to date.",
                     **result,
                 }
-            return {
+            build_result = {
                 "status": "ok",
                 "build_type": "incremental",
                 "summary": (
@@ -175,6 +175,69 @@ def build_or_update_graph(
                 ),
                 **result,
             }
+
+        # -- Post-build: compute signatures for nodes that don't have them --
+        try:
+            rows = store._conn.execute(
+                "SELECT id, name, kind, params, return_type "
+                "FROM nodes WHERE signature IS NULL"
+            ).fetchall()
+            for row in rows:
+                node_id, name, kind, params, ret = (
+                    row[0], row[1], row[2], row[3], row[4],
+                )
+                if kind in ("Function", "Test"):
+                    sig = f"def {name}({params or ''})"
+                    if ret:
+                        sig += f" -> {ret}"
+                elif kind == "Class":
+                    sig = f"class {name}"
+                else:
+                    sig = name
+                store._conn.execute(
+                    "UPDATE nodes SET signature = ? WHERE id = ?",
+                    (sig[:512], node_id),
+                )
+            store._conn.commit()
+        except Exception as e:
+            logger.warning("Signature computation failed: %s", e)
+
+        # -- Post-build: rebuild FTS index --
+        try:
+            from code_review_graph.search import rebuild_fts_index
+
+            fts_count = rebuild_fts_index(store)
+            build_result["fts_indexed"] = fts_count
+        except Exception as e:
+            logger.warning("FTS index rebuild failed: %s", e)
+
+        # -- Post-build: trace execution flows --
+        try:
+            from code_review_graph.flows import store_flows as _store_flows
+            from code_review_graph.flows import trace_flows as _trace_flows
+
+            flows = _trace_flows(store)
+            count = _store_flows(store, flows)
+            build_result["flows_detected"] = count
+        except Exception as e:
+            logger.warning("Flow detection failed: %s", e)
+
+        # -- Post-build: detect communities --
+        try:
+            from code_review_graph.communities import (
+                detect_communities as _detect_communities,
+            )
+            from code_review_graph.communities import (
+                store_communities as _store_communities,
+            )
+
+            comms = _detect_communities(store)
+            count = _store_communities(store, comms)
+            build_result["communities_detected"] = count
+        except Exception as e:
+            logger.warning("Community detection failed: %s", e)
+
+        return build_result
     finally:
         store.close()
 

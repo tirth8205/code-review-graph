@@ -10,6 +10,7 @@ Usage:
     code-review-graph serve
     code-review-graph visualize
     code-review-graph wiki
+    code-review-graph detect-changes [--base BASE] [--brief]
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -81,6 +82,7 @@ def _print_banner() -> None:
     {g}status{r}      Show graph statistics
     {g}visualize{r}   Generate interactive HTML graph
     {g}wiki{r}        Generate markdown wiki from communities
+    {g}detect-changes{r} Analyze change impact {d}(risk-scored review){r}
     {g}register{r}    Register a repository in the multi-repo registry
     {g}unregister{r}  Remove a repository from the registry
     {g}repos{r}       List registered repositories
@@ -280,6 +282,16 @@ def main() -> None:
     )
     eval_cmd.add_argument("--repo", default=None, help="Target repository for benchmarking")
 
+    # detect-changes
+    detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
+    detect_cmd.add_argument(
+        "--base", default="HEAD~1", help="Git diff base (default: HEAD~1)"
+    )
+    detect_cmd.add_argument(
+        "--brief", action="store_true", help="Show brief summary only"
+    )
+    detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
     # serve
     serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -354,11 +366,14 @@ def main() -> None:
         watch,
     )
 
-    if args.command == "update":
-        # update requires git for diffing
+    if args.command in ("update", "detect-changes"):
+        # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
         if not repo_root:
-            logging.error("Not in a git repository. 'update' requires git for diffing.")
+            logging.error(
+                "Not in a git repository. '%s' requires git for diffing.",
+                args.command,
+            )
             logging.error("Use 'build' for a full parse, or run 'git init' first.")
             sys.exit(1)
     else:
@@ -432,6 +447,29 @@ def main() -> None:
                 f"({total} total pages)"
             )
             print(f"Output: {wiki_dir}")
+
+        elif args.command == "detect-changes":
+            from .changes import analyze_changes
+            from .incremental import get_changed_files, get_staged_and_unstaged
+
+            base = args.base
+            changed = get_changed_files(repo_root, base)
+            if not changed:
+                changed = get_staged_and_unstaged(repo_root)
+
+            if not changed:
+                print("No changes detected.")
+            else:
+                result = analyze_changes(
+                    store,
+                    changed,
+                    repo_root=str(repo_root),
+                    base=base,
+                )
+                if args.brief:
+                    print(result.get("summary", "No summary available."))
+                else:
+                    print(json.dumps(result, indent=2, default=str))
 
     finally:
         store.close()
