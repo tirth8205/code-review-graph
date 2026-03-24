@@ -159,8 +159,13 @@ def run_migrations(conn: sqlite3.Connection) -> None:
         if version <= current:
             continue
         logger.info("Running migration v%d", version)
-        MIGRATIONS[version](conn)
-        _set_schema_version(conn, version)
-        conn.commit()
+        try:
+            MIGRATIONS[version](conn)
+            _set_schema_version(conn, version)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            logger.error("Migration v%d failed, rolling back", version, exc_info=True)
+            raise
 
     logger.info("Migrations complete, now at schema version %d", LATEST_VERSION)
