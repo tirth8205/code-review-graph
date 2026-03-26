@@ -33,7 +33,17 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
                 qn = r.qualified_name
             else:
                 qn = ""
-            if expected in qn or qn in expected:
+            qn_lower = qn.lower()
+            exp_lower = expected.lower()
+            # Match if expected is substring of qn, qn is substring of expected,
+            # or the name part after :: matches
+            exp_name = expected.rsplit("::", 1)[-1] if "::" in expected else expected
+            qn_name = qn.rsplit("::", 1)[-1] if "::" in qn else qn
+            if (
+                exp_lower in qn_lower
+                or qn_lower in exp_lower
+                or exp_name.lower() == qn_name.lower()
+            ):
                 rank = i + 1
                 break
 

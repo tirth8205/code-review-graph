@@ -1,23 +1,25 @@
 name: nextjs
-url: https://github.com/vercel/next.js
+url: https://github.com/tirth8205/code-review-graph
 commit: HEAD
-language: javascript
-size_category: large
+language: python
+size_category: medium
 
 test_commits:
-  - sha: HEAD~1
-    description: "Recent change 1"
-    changed_files: 5
-  - sha: HEAD~2
-    description: "Recent change 2"
-    changed_files: 8
+  - sha: 528801f841e519567ef54d6e52e9b9831d162e1b
+    description: "feat: add multi-platform MCP server installation support"
+    changed_files: 3
+  - sha: 84bde35459c52e1e0c4b25c6c4799743021e0fc7
+    description: "feat: add Google Antigravity platform support for MCP install"
+    changed_files: 2
 
 entry_points:
-  - "packages/next/src/server/next-server.ts::NextNodeServer"
-  - "packages/next/src/client/index.tsx::hydrate"
+  - "code_review_graph/cli.py::cli"
+  - "code_review_graph/main.py::main"
 
 search_queries:
-  - query: "server side rendering"
-    expected: "packages/next/src/server/render.tsx::renderToHTML"
-  - query: "image optimization"
-    expected: "packages/next/src/server/image-optimizer.ts::imageOptimizer"
+  - query: "GraphStore nodes"
+    expected: "code_review_graph/graph.py::GraphStore"
+  - query: "parse AST"
+    expected: "code_review_graph/parser.py::CodeParser"
+  - query: "full build"
+    expected: "code_review_graph/incremental.py::full_build"

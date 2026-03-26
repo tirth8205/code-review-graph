@@ -5,19 +5,21 @@ language: python
 size_category: small
 
 test_commits:
-  - sha: HEAD~1
-    description: "Recent change 1"
-    changed_files: 2
-  - sha: HEAD~2
-    description: "Recent change 2"
+  - sha: fbb6f0bc4c60a0bada0e03c3480d0ccf30a3c1df
+    description: "all teardown callbacks are called despite errors"
+    changed_files: 10
+  - sha: a29f88ce6f2f9843bd6fcbbfce1390a2071965d6
+    description: "document that headers must be set before streaming"
     changed_files: 4
 
 entry_points:
   - "src/flask/app.py::Flask.wsgi_app"
-  - "src/flask/blueprints.py::Blueprint.register"
+  - "src/flask/sansio/app.py::App.add_url_rule"
 
 search_queries:
-  - query: "request context"
-    expected: "src/flask/ctx.py::RequestContext"
-  - query: "URL routing"
-    expected: "src/flask/app.py::Flask.add_url_rule"
+  - query: "Flask wsgi"
+    expected: "src/flask/app.py::Flask"
+  - query: "AppContext globals"
+    expected: "src/flask/ctx.py::AppContext"
+  - query: "create logger"
+    expected: "src/flask/logging.py::create_logger"

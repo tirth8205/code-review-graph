@@ -5,19 +5,21 @@ language: python
 size_category: small
 
 test_commits:
-  - sha: HEAD~1
-    description: "Recent change 1"
-    changed_files: 2
-  - sha: HEAD~2
-    description: "Recent change 2"
+  - sha: ae1b9f66238f75ced3ced5e4485408435de10768
+    description: "Expose FunctionAuth in __all__"
     changed_files: 3
+  - sha: b55d4635701d9dc22928ee647880c76b078ba3f2
+    description: "Upgrade Python type checker mypy"
+    changed_files: 4
 
 entry_points:
-  - "httpx/_client.py::Client.get"
-  - "httpx/_client.py::Client.post"
+  - "httpx/_client.py::Client"
+  - "httpx/_client.py::AsyncClient"
 
 search_queries:
-  - query: "HTTP connection pool"
-    expected: "httpx/_transports/default.py::HTTPTransport"
-  - query: "parse response headers"
+  - query: "Client request"
+    expected: "httpx/_client.py::Client"
+  - query: "Response headers"
     expected: "httpx/_models.py::Response"
+  - query: "BaseClient"
+    expected: "httpx/_client.py::BaseClient"

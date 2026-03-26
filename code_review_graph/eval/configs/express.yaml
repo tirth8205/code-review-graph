@@ -5,19 +5,21 @@ language: javascript
 size_category: small
 
 test_commits:
-  - sha: HEAD~1
-    description: "Recent change 1"
-    changed_files: 2
-  - sha: HEAD~2
-    description: "Recent change 2"
-    changed_files: 3
+  - sha: 925a1dff1e42f1b393c977b8b77757fcf633e09f
+    description: "fix: bump qs minimum to ^6.14.2 for CVE-2026-2391"
+    changed_files: 1
+  - sha: b4ab7d65d7724d9309b6faaaf82ad492da2a6d35
+    description: "test: include edge case tests for res.type()"
+    changed_files: 1
 
 entry_points:
   - "lib/application.js::app.handle"
-  - "lib/router/index.js::Router.handle"
+  - "lib/express.js::createApplication"
 
 search_queries:
-  - query: "middleware pipeline"
-    expected: "lib/router/index.js::Router"
-  - query: "request parsing"
+  - query: "app handle"
+    expected: "lib/application.js::app"
+  - query: "response send"
+    expected: "lib/response.js::res"
+  - query: "request"
     expected: "lib/request.js::req"

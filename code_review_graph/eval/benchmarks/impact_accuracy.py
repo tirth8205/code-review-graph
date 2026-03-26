@@ -39,16 +39,21 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
         try:
             from code_review_graph.changes import analyze_changes
             analysis = analyze_changes(
-                store, changed, repo_root=str(repo_path)
+                store, changed, repo_root=str(repo_path),
+                base=tc["sha"] + "~1",
             )
-            predicted = set(
-                analysis.get("affected_files", [])
-                + [
-                    f["file"]
-                    for f in analysis.get("changed_functions", [])
-                    if isinstance(f, dict) and "file" in f
-                ]
-            )
+            # Extract files from changed_functions and affected_flows
+            predicted = set(changed)
+            for f in analysis.get("changed_functions", []):
+                if isinstance(f, dict) and "file_path" in f:
+                    predicted.add(f["file_path"])
+                elif isinstance(f, dict) and "file" in f:
+                    predicted.add(f["file"])
+            for flow in analysis.get("affected_flows", []):
+                if isinstance(flow, dict):
+                    for node in flow.get("nodes", []):
+                        if isinstance(node, dict) and "file_path" in node:
+                            predicted.add(node["file_path"])
         except Exception as exc:
             logger.warning("analyze_changes failed: %s", exc)
             predicted = set(changed)

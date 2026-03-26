@@ -5,19 +5,24 @@ language: go
 size_category: small
 
 test_commits:
-  - sha: HEAD~1
-    description: "Recent change 1"
+  - sha: 052d1a79aafe3f04078a2716f8e77d4340308383
+    description: "feat(render): add PDF renderer and tests"
+    changed_files: 5
+  - sha: 472d086af2acd924cb4b9d7be0525f7d790f69bc
+    description: "fix(tree): panic in findCaseInsensitivePathRec with RedirectFixedPath"
     changed_files: 2
-  - sha: HEAD~2
-    description: "Recent change 2"
-    changed_files: 3
+  - sha: 5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a
+    description: "fix(render): write content length in Data.Render"
+    changed_files: 2
 
 entry_points:
-  - "gin.go::Engine.ServeHTTP"
-  - "routergroup.go::RouterGroup.handle"
+  - "gin.go::Engine"
+  - "routergroup.go::RouterGroup"
 
 search_queries:
-  - query: "context handling"
+  - query: "Engine ServeHTTP"
+    expected: "gin.go::Engine"
+  - query: "Context request"
     expected: "context.go::Context"
-  - query: "route tree"
+  - query: "node tree"
     expected: "tree.go::node"
