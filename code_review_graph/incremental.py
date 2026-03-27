@@ -131,6 +131,13 @@ def _is_binary(path: Path) -> bool:
 
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
+# When True, `git ls-files --recurse-submodules` is used so that files
+# inside git submodules are included in the graph.  Opt-in via env var;
+# can also be overridden per-call through function parameters.
+_RECURSE_SUBMODULES = os.environ.get(
+    "CRG_RECURSE_SUBMODULES", ""
+).lower() in ("1", "true", "yes")
+
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 
 
@@ -185,11 +192,29 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         return []
 
 
-def get_all_tracked_files(repo_root: Path) -> list[str]:
-    """Get all files tracked by git."""
+def get_all_tracked_files(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+) -> list[str]:
+    """Get all files tracked by git.
+
+    Args:
+        repo_root: Repository root directory.
+        recurse_submodules: If True, pass ``--recurse-submodules`` to
+            ``git ls-files`` so that files inside git submodules are
+            included.  When *None* (default), falls back to the
+            ``CRG_RECURSE_SUBMODULES`` environment variable.
+    """
+    if recurse_submodules is None:
+        recurse_submodules = _RECURSE_SUBMODULES
+
+    cmd = ["git", "ls-files"]
+    if recurse_submodules:
+        cmd.append("--recurse-submodules")
+
     try:
         result = subprocess.run(
-            ["git", "ls-files"],
+            cmd,
             capture_output=True,
             text=True,
             cwd=str(repo_root),
@@ -200,14 +225,23 @@ def get_all_tracked_files(repo_root: Path) -> list[str]:
         return []
 
 
-def collect_all_files(repo_root: Path) -> list[str]:
-    """Collect all parseable files in the repo, respecting ignore patterns."""
+def collect_all_files(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+) -> list[str]:
+    """Collect all parseable files in the repo, respecting ignore patterns.
+
+    Args:
+        repo_root: Repository root directory.
+        recurse_submodules: If True, include files from git submodules.
+            When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+    """
     ignore_patterns = _load_ignore_patterns(repo_root)
     parser = CodeParser()
     files = []
 
     # Prefer git ls-files for tracked files
-    tracked = get_all_tracked_files(repo_root)
+    tracked = get_all_tracked_files(repo_root, recurse_submodules)
     if tracked:
         candidates = tracked
     else:
@@ -259,10 +293,21 @@ def find_dependents(store: GraphStore, file_path: str) -> list[str]:
     return list(dependents)
 
 
-def full_build(repo_root: Path, store: GraphStore) -> dict:
-    """Full rebuild of the entire graph."""
+def full_build(
+    repo_root: Path,
+    store: GraphStore,
+    recurse_submodules: bool | None = None,
+) -> dict:
+    """Full rebuild of the entire graph.
+
+    Args:
+        repo_root: Repository root directory.
+        store: Graph database store.
+        recurse_submodules: If True, include files from git submodules.
+            When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+    """
     parser = CodeParser()
-    files = collect_all_files(repo_root)
+    files = collect_all_files(repo_root, recurse_submodules)
 
     # Purge stale data from files no longer on disk
     existing_files = set(store.get_all_files())

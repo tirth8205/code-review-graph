@@ -16,6 +16,7 @@ def build_or_update_graph(
     full_rebuild: bool = False,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    recurse_submodules: bool | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -24,6 +25,10 @@ def build_or_update_graph(
                       only re-parse files changed since `base`.
         repo_root: Path to the repository root. Auto-detected if omitted.
         base: Git ref for incremental diff (default: HEAD~1).
+        recurse_submodules: If True, include files from git submodules
+            via ``git ls-files --recurse-submodules``. When None
+            (default), falls back to the CRG_RECURSE_SUBMODULES
+            environment variable. Default: disabled.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
@@ -31,7 +36,7 @@ def build_or_update_graph(
     store, root = _get_store(repo_root)
     try:
         if full_rebuild:
-            result = full_build(root, store)
+            result = full_build(root, store, recurse_submodules)
             build_result = {
                 "status": "ok",
                 "build_type": "full",
