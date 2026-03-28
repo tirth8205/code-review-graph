@@ -11,6 +11,9 @@
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square" alt="Python 3.10+"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square" alt="MCP"></a>
   <a href="#"><img src="https://img.shields.io/badge/version-2.0.0-purple.svg?style=flat-square" alt="v2.0.0"></a>
+  <a href="https://gitcgr.com/tirth8205/code-review-graph" target="_blank" rel="noopener noreferrer">
+    <img src="https://gitcgr.com/badge/tirth8205/code-review-graph.svg" alt="gitcgr" />
+  </a>
 </p>
 
 <br>
