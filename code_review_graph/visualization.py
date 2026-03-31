@@ -215,7 +215,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .legend-item { display: flex; align-items: center; gap: 10px; padding: 2px 0; cursor: default; }
   .legend-item[data-edge-kind] { cursor: pointer; user-select: none; }
   .legend-item[data-edge-kind].dimmed { opacity: 0.3; }
-  .legend-circle { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .legend-item svg { flex-shrink: 0; }
   .legend-line { width: 24px; height: 0; flex-shrink: 0; border-top-width: 2px; }
   .l-calls    { border-top: 2px solid #3fb950; }
   .l-imports  { border-top: 2px dashed #f0883e; }
@@ -330,11 +330,11 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="legend" role="complementary" aria-label="Graph legend">
   <h3>Nodes</h3>
   <div class="legend-section">
-    <div class="legend-item"><span class="legend-circle" style="background:#58a6ff"></span> File</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#f0883e"></span> Class</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#3fb950"></span> Function</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#d2a8ff"></span> Test</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#8b949e"></span> Type</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="6" fill="#58a6ff"/></svg> File</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><rect x="-5" y="-5" width="10" height="10" fill="#f0883e"/></svg> Class</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,5 -6,5" fill="#3fb950"/></svg> Function</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
   </div>
   <h3>Edges</h3>
   <div class="legend-section">
@@ -372,6 +372,8 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 var graphData = __GRAPH_DATA__;
 var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
 var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
 var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
@@ -545,8 +547,8 @@ function updateNodes() {
     .attr("fill","none")
     .attr("stroke", function(d) { return nodeColor(d); })
     .attr("stroke-width", 1.5).attr("opacity", 0.3).attr("filter","url(#glow)");
-  enter.append("circle").attr("class","node-circle")
-    .attr("r", function(d) { return KIND_RADIUS[d.kind] || 6; })
+  enter.append("path").attr("class","node-shape")
+    .attr("d", function(d) { return d3.symbol().type(KIND_SHAPE[d.kind] || d3.symbolCircle).size(KIND_AREA[d.kind] || 113)(); })
     .attr("fill", function(d) { return nodeColor(d); })
     .attr("stroke", function(d) { return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
     .attr("stroke-width", function(d) { return d.kind === "File" ? 2 : 1; })
@@ -593,7 +595,7 @@ function highlightConnected(d, on) {
       if (s === d.qualified_name) connected.add(t);
       if (t === d.qualified_name) connected.add(s);
     });
-    nodeGroup.selectAll("g.node-g").select(".node-circle")
+    nodeGroup.selectAll("g.node-g").select(".node-shape")
       .transition().duration(150).attr("opacity", function(n) { return connected.has(n.qualified_name) ? 1 : 0.15; });
     linkSel.transition().duration(150)
       .attr("opacity", function(e) {
@@ -608,7 +610,7 @@ function highlightConnected(d, on) {
       });
     labelSel.transition().duration(150).attr("opacity", function(n) { return connected.has(n.qualified_name) ? 1 : 0.1; });
   } else {
-    nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300).attr("opacity", 1);
+    nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
     linkSel.transition().duration(300)
       .attr("opacity", function(e) { return eStyle(e).opacity; })
       .attr("stroke-width", function(e) { return eStyle(e).width; });
@@ -681,7 +683,7 @@ document.querySelectorAll("#filter-panel input[data-kind]").forEach(function(el)
 document.getElementById("btn-community").addEventListener("click", function() {
   communityColoringOn = !communityColoringOn;
   this.classList.toggle("active");
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300)
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300)
     .attr("fill", function(d) { return nodeColor(d); });
   nodeGroup.selectAll("g.node-g").select(".glow-ring").transition().duration(300)
     .attr("stroke", function(d) { return nodeColor(d); });
@@ -699,7 +701,7 @@ flowSelect.addEventListener("change", function() {
 });
 function applyFlowHighlight() {
   if (!activeFlowQns || activeFlowQns.size === 0) { clearFlowHighlight(); return; }
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(200)
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(200)
     .attr("opacity", function(d) { return activeFlowQns.has(d.qualified_name) ? 1 : 0.2; });
   if (labelSel) labelSel.transition().duration(200)
     .attr("opacity", function(d) { return activeFlowQns.has(d.qualified_name) ? 1 : 0.1; });
@@ -711,7 +713,7 @@ function applyFlowHighlight() {
     });
 }
 function clearFlowHighlight() {
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300).attr("opacity", 1);
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
   if (linkSel) linkSel.transition().duration(300).attr("opacity", function(e) { return eStyle(e).opacity; });
   if (labelSel) labelSel.transition().duration(300).attr("opacity", 1);
   updateLabelVisibility();
@@ -807,7 +809,7 @@ function showSearchResults() {
 }
 function applySearchFilter() {
   if (!searchTerm) {
-    nodeGroup.selectAll("g.node-g").select(".node-circle").attr("opacity", 1);
+    nodeGroup.selectAll("g.node-g").select(".node-shape").attr("opacity", 1);
     if (labelSel) labelSel.attr("opacity", 1);
     if (linkSel) linkSel.attr("opacity", function(e) { return eStyle(e).opacity; });
     updateLabelVisibility();
@@ -819,7 +821,7 @@ function applySearchFilter() {
     var hay = (n.label + " " + n.qualified_name).toLowerCase();
     if (hay.indexOf(searchTerm) !== -1) matched.add(n.qualified_name);
   });
-  nodeGroup.selectAll("g.node-g").select(".node-circle")
+  nodeGroup.selectAll("g.node-g").select(".node-shape")
     .attr("opacity", function(d) { return matched.has(d.qualified_name) ? 1 : 0.08; });
   if (labelSel) labelSel
     .attr("opacity", function(d) { return matched.has(d.qualified_name) ? 1 : 0.05; })
