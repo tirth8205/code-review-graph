@@ -218,6 +218,18 @@ def test_export_includes_communities(store_with_data):
     assert isinstance(data["communities"], list)
 
 
+def test_generate_html_includes_all_edge_types(store_with_data, tmp_path):
+    """Generated HTML should define colors and legend entries for all 7 edge types."""
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store_with_data, output_path)
+    content = output_path.read_text()
+    for edge_kind in ["CALLS", "IMPORTS_FROM", "INHERITS", "CONTAINS",
+                       "IMPLEMENTS", "TESTED_BY", "DEPENDS_ON"]:
+        assert edge_kind in content, f"Edge type {edge_kind} missing from HTML"
+
+
 def test_generate_html_includes_interactive_features(store_with_data, tmp_path):
     """Generated HTML should include new interactive features."""
     from code_review_graph.visualization import generate_html
