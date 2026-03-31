@@ -416,11 +416,30 @@ export class GraphWebviewPanel {
       opacity: 1;
       border-color: currentColor;
     }
+    .edge-pill:focus-visible { outline: 2px solid var(--btn-bg, #89b4fa); outline-offset: 2px; }
     .edge-pill .pill-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
     }
+
+    /* Edge filter popover */
+    #edge-popover {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 4px;
+      background: var(--toolbar-bg);
+      border: 1px solid var(--toolbar-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      z-index: 100;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      min-width: 160px;
+    }
+    #edge-popover.visible { display: flex; flex-wrap: wrap; gap: 6px; }
+    #edge-filter-wrap { position: relative; }
 
     /* Depth slider */
     #depth-slider {
@@ -459,11 +478,14 @@ export class GraphWebviewPanel {
 
     /* Node count badge */
     #node-count {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
       font-size: 11px;
       color: var(--fg);
       opacity: 0.6;
-      margin-left: auto;
       white-space: nowrap;
+      z-index: 5;
     }
 
     /* ------------------------------------------------------------------ */
@@ -520,12 +542,12 @@ export class GraphWebviewPanel {
     #tooltip .tooltip-params {
       font-family: var(--font-mono);
       font-size: 11px;
-      color: var(--vscode-terminal-ansiGreen, #3fb950);
+      color: var(--vscode-debugTokenExpression-string, #a6e3a1);
     }
     #tooltip .tooltip-return {
       font-family: var(--font-mono);
       font-size: 11px;
-      color: var(--vscode-terminal-ansiBlue, #58a6ff);
+      color: var(--vscode-debugTokenExpression-number, #89b4fa);
     }
 
     /* ------------------------------------------------------------------ */
@@ -570,7 +592,7 @@ export class GraphWebviewPanel {
     <!-- Depth slider -->
     <div class="toolbar-group">
       <span class="toolbar-label">Depth</span>
-      <input id="depth-slider" type="range" min="0" max="10" value="0" disabled title="Select a node first, then adjust depth" />
+      <input id="depth-slider" type="range" min="0" max="10" value="0" aria-label="Graph depth limit" disabled title="Select a node first, then adjust depth" />
       <span id="depth-value">All</span>
     </div>
 
