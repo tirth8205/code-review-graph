@@ -409,24 +409,47 @@ export class GraphWebviewPanel {
       cursor: pointer;
       user-select: none;
       border: 1px solid transparent;
-      opacity: 0.45;
+      opacity: 0.55;
       transition: opacity 0.15s, border-color 0.15s;
     }
     .edge-pill.active {
       opacity: 1;
       border-color: currentColor;
     }
+    .edge-pill:focus-visible { outline: 2px solid var(--btn-bg, #89b4fa); outline-offset: 2px; }
     .edge-pill .pill-dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
     }
 
+    /* Edge filter popover */
+    #edge-popover {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      margin-top: 4px;
+      background: var(--toolbar-bg);
+      border: 1px solid var(--toolbar-border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      z-index: 100;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+      min-width: 160px;
+    }
+    #edge-popover.visible { display: flex; flex-wrap: wrap; gap: 6px; }
+    #edge-filter-wrap { position: relative; }
+
     /* Depth slider */
     #depth-slider {
       width: 80px;
       accent-color: var(--btn-bg);
       cursor: pointer;
+    }
+    #depth-slider:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
     }
     #depth-value {
       font-size: 11px;
@@ -455,11 +478,14 @@ export class GraphWebviewPanel {
 
     /* Node count badge */
     #node-count {
+      position: absolute;
+      bottom: 8px;
+      right: 12px;
       font-size: 11px;
       color: var(--fg);
       opacity: 0.6;
-      margin-left: auto;
       white-space: nowrap;
+      z-index: 5;
     }
 
     /* ------------------------------------------------------------------ */
@@ -516,12 +542,12 @@ export class GraphWebviewPanel {
     #tooltip .tooltip-params {
       font-family: var(--font-mono);
       font-size: 11px;
-      color: #a6e3a1;
+      color: var(--vscode-debugTokenExpression-string, #a6e3a1);
     }
     #tooltip .tooltip-return {
       font-family: var(--font-mono);
       font-size: 11px;
-      color: #89b4fa;
+      color: var(--vscode-debugTokenExpression-number, #89b4fa);
     }
 
     /* ------------------------------------------------------------------ */
@@ -534,6 +560,9 @@ export class GraphWebviewPanel {
     .pulse-ring {
       animation: pulse 0.6s ease-out;
     }
+
+    path.node-shape:focus { outline: none; }
+    path.node-shape:focus-visible { stroke: var(--btn-bg, #89b4fa) !important; stroke-width: 3 !important; }
   </style>
 </head>
 <body>
@@ -541,21 +570,23 @@ export class GraphWebviewPanel {
   <div id="toolbar">
     <!-- Search -->
     <div class="toolbar-group">
-      <input id="search-input" type="text" placeholder="Search nodes..." spellcheck="false" />
+      <input id="search-input" type="text" placeholder="Search nodes..." spellcheck="false" aria-label="Search nodes" />
     </div>
 
     <div class="toolbar-separator"></div>
 
-    <!-- Edge type pills -->
-    <div class="toolbar-group" id="edge-pills">
-      <span class="toolbar-label">Edges</span>
-      <span id="edge-CALLS" class="edge-pill active" style="color:#a6e3a1"><span class="pill-dot" style="background:#a6e3a1"></span>Calls</span>
-      <span id="edge-IMPORTS_FROM" class="edge-pill active" style="color:#89b4fa"><span class="pill-dot" style="background:#89b4fa"></span>Imports</span>
-      <span id="edge-INHERITS" class="edge-pill active" style="color:#cba6f7"><span class="pill-dot" style="background:#cba6f7"></span>Inherits</span>
-      <span id="edge-IMPLEMENTS" class="edge-pill active" style="color:#f9e2af"><span class="pill-dot" style="background:#f9e2af"></span>Implements</span>
-      <span id="edge-TESTED_BY" class="edge-pill active" style="color:#f38ba8"><span class="pill-dot" style="background:#f38ba8"></span>Tested</span>
-      <span id="edge-CONTAINS" class="edge-pill active" style="color:#585b70"><span class="pill-dot" style="background:#585b70"></span>Contains</span>
-      <span id="edge-DEPENDS_ON" class="edge-pill active" style="color:#fab387"><span class="pill-dot" style="background:#fab387"></span>Depends</span>
+    <!-- Edge type filter -->
+    <div class="toolbar-group" id="edge-filter-wrap">
+      <button id="btn-edge-filter" class="toolbar-btn" title="Toggle edge type filters" aria-label="Toggle edge type filters">Edges</button>
+      <div id="edge-popover">
+        <span id="edge-CALLS" class="edge-pill active" style="color:#3fb950" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Calls edges" title="Toggle CALLS edges"><span class="pill-dot" style="background:#3fb950"></span>Calls</span>
+        <span id="edge-IMPORTS_FROM" class="edge-pill active" style="color:#f0883e" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Imports edges" title="Toggle IMPORTS_FROM edges"><span class="pill-dot" style="background:#f0883e"></span>Imports</span>
+        <span id="edge-INHERITS" class="edge-pill active" style="color:#d2a8ff" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Inherits edges" title="Toggle INHERITS edges"><span class="pill-dot" style="background:#d2a8ff"></span>Inherits</span>
+        <span id="edge-IMPLEMENTS" class="edge-pill active" style="color:#f9e2af" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Implements edges" title="Toggle IMPLEMENTS edges"><span class="pill-dot" style="background:#f9e2af"></span>Implements</span>
+        <span id="edge-TESTED_BY" class="edge-pill active" style="color:#f38ba8" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Tested edges" title="Toggle TESTED_BY edges"><span class="pill-dot" style="background:#f38ba8"></span>Tested</span>
+        <span id="edge-CONTAINS" class="edge-pill active" style="color:#8b949e" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Contains edges" title="Toggle CONTAINS edges"><span class="pill-dot" style="background:#8b949e"></span>Contains</span>
+        <span id="edge-DEPENDS_ON" class="edge-pill active" style="color:#fab387" role="button" tabindex="0" aria-pressed="true" aria-label="Toggle Depends edges" title="Toggle DEPENDS_ON edges"><span class="pill-dot" style="background:#fab387"></span>Depends</span>
+      </div>
     </div>
 
     <div class="toolbar-separator"></div>
@@ -563,7 +594,7 @@ export class GraphWebviewPanel {
     <!-- Depth slider -->
     <div class="toolbar-group">
       <span class="toolbar-label">Depth</span>
-      <input id="depth-slider" type="range" min="0" max="10" value="0" />
+      <input id="depth-slider" type="range" min="0" max="10" value="0" aria-label="Graph depth limit" disabled title="Select a node first, then adjust depth" />
       <span id="depth-value">All</span>
     </div>
 
@@ -576,16 +607,20 @@ export class GraphWebviewPanel {
       <button id="btn-export-png" class="toolbar-btn">Export PNG</button>
     </div>
 
-    <!-- Node count -->
-    <span id="node-count"></span>
-    <span id="truncation-warning" style="display:none;color:var(--btn-bg);font-size:11px;margin-left:8px;cursor:pointer;" title="Increase codeReviewGraph.graph.maxNodes in settings"></span>
   </div>
 
   <!-- Graph -->
-  <div id="graph-area"></div>
+  <div id="graph-area">
+    <span id="node-count" aria-live="polite"></span>
+    <span id="truncation-warning" style="display:none;color:var(--btn-bg);font-size:11px;cursor:pointer;" title="Increase codeReviewGraph.graph.maxNodes in settings"></span>
+    <div id="empty-state" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--fg);opacity:0.6">
+      <p style="font-size:16px;margin-bottom:12px">No graph data available</p>
+      <p style="font-size:13px">Run <strong>Code Graph: Build Graph</strong> from the Command Palette to get started.</p>
+    </div>
+  </div>
 
   <!-- Tooltip -->
-  <div id="tooltip"></div>
+  <div id="tooltip" role="tooltip" aria-live="polite"></div>
 
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

@@ -70,28 +70,44 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
 // ---------------------------------------------------------------------------
 
 const NODE_RADIUS: Record<NodeKind, number> = {
-  File: 14,
+  File: 18,
   Class: 12,
-  Function: 10,
-  Test: 10,
-  Type: 10,
+  Function: 6,
+  Test: 6,
+  Type: 5,
 };
 
 const NODE_COLOR: Record<NodeKind, string> = {
-  File: "#cba6f7",
-  Class: "#f9e2af",
-  Function: "#a6e3a1",
-  Test: "#89b4fa",
-  Type: "#fab387",
+  File: "#58a6ff",
+  Class: "#f0883e",
+  Function: "#3fb950",
+  Test: "#d2a8ff",
+  Type: "#8b949e",
+};
+
+const NODE_SHAPE: Record<NodeKind, d3.SymbolType> = {
+  File: d3.symbolCircle,
+  Class: d3.symbolSquare,
+  Function: d3.symbolTriangle,
+  Test: d3.symbolDiamond,
+  Type: d3.symbolCross,
+};
+
+const NODE_AREA: Record<NodeKind, number> = {
+  File: 616,
+  Class: 452,
+  Function: 314,
+  Test: 314,
+  Type: 314,
 };
 
 const EDGE_COLOR: Record<EdgeKind, string> = {
-  CALLS: "#a6e3a1",
-  IMPORTS_FROM: "#89b4fa",
-  INHERITS: "#cba6f7",
+  CALLS: "#3fb950",
+  IMPORTS_FROM: "#f0883e",
+  INHERITS: "#d2a8ff",
   IMPLEMENTS: "#f9e2af",
   TESTED_BY: "#f38ba8",
-  CONTAINS: "#585b70",
+  CONTAINS: "rgba(139,148,158,0.15)",
   DEPENDS_ON: "#fab387",
 };
 
@@ -128,7 +144,7 @@ let labelGroup: d3.Selection<SVGGElement, unknown, null, undefined>;
 let zoomBehavior: d3.ZoomBehavior<SVGSVGElement, unknown>;
 
 let linkSelection: d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown>;
-let nodeSelection: d3.Selection<SVGCircleElement, SimNode, SVGGElement, unknown>;
+let nodeSelection: d3.Selection<SVGPathElement, SimNode, SVGGElement, unknown>;
 let labelSelection: d3.Selection<SVGTextElement, SimNode, SVGGElement, unknown>;
 
 let currentTheme: "dark" | "light" = "dark";
@@ -185,7 +201,7 @@ function createSvg(): void {
 
   // Initialize empty selections
   linkSelection = linkGroup.selectAll<SVGLineElement, SimLink>("line");
-  nodeSelection = nodeGroup.selectAll<SVGCircleElement, SimNode>("circle");
+  nodeSelection = nodeGroup.selectAll<SVGPathElement, SimNode>("path.node-shape");
   labelSelection = labelGroup.selectAll<SVGTextElement, SimNode>("text");
 
   // Zoom + pan
@@ -243,7 +259,26 @@ function setData(nodes: GraphNode[], edges: GraphEdge[]): void {
     depthValue.textContent = "All";
   }
 
+  // Show/hide empty state
+  const emptyState = document.getElementById("empty-state");
+  const graphArea = document.getElementById("graph-area");
+  if (nodes.length === 0) {
+    if (emptyState) emptyState.style.display = "block";
+    if (graphArea) {
+      // Hide the SVG but keep the container
+      const svgHide = graphArea.querySelector("svg");
+      if (svgHide) svgHide.style.display = "none";
+    }
+    updateDepthSliderState();
+    return;
+  }
+  if (emptyState) emptyState.style.display = "none";
+  const svgEl = graphArea?.querySelector("svg");
+  if (svgEl) svgEl.style.display = "";
+
   buildGraph();
+
+  updateDepthSliderState();
 }
 
 // ---------------------------------------------------------------------------
@@ -370,10 +405,11 @@ function buildGraph(): void {
 
   // --- Nodes ---
   nodeSelection = nodeGroup
-    .selectAll<SVGCircleElement, SimNode>("circle")
+    .selectAll<SVGPathElement, SimNode>("path.node-shape")
     .data(nodes, (d) => d.qualifiedName)
-    .join("circle")
-    .attr("r", (d) => NODE_RADIUS[d.kind] ?? 10)
+    .join("path")
+    .attr("class", "node-shape")
+    .attr("d", (d) => d3.symbol().type(NODE_SHAPE[d.kind] ?? d3.symbolCircle).size(NODE_AREA[d.kind] ?? 314)()!)
     .attr("fill", (d) => NODE_COLOR[d.kind] ?? "#cdd6f4")
     .attr("stroke", "none")
     .attr("stroke-width", 2)
@@ -408,7 +444,7 @@ function buildGraph(): void {
     })
     .call(
       d3
-        .drag<SVGCircleElement, SimNode>()
+        .drag<SVGPathElement, SimNode>()
         .on("start", (event, d) => {
           if (!event.active) simulation?.alphaTarget(0.3).restart();
           d.fx = d.x;
@@ -423,7 +459,61 @@ function buildGraph(): void {
           d.fx = null;
           d.fy = null;
         })
-    );
+    )
+    .attr("tabindex", 0)
+    .attr("role", "button")
+    .attr("aria-label", (d) => `${d.kind}: ${d.name}`)
+    .on("keydown", (event: KeyboardEvent, d: SimNode) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        selectNode(d);
+        vscodeApi.postMessage({
+          command: "nodeClicked",
+          qualifiedName: d.qualifiedName,
+          filePath: d.filePath,
+          lineStart: d.lineStart ?? 1,
+        });
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        selectedNode = null;
+        unhighlightAll();
+        nodeSelection.attr("stroke", "none");
+      } else if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+        event.preventDefault();
+        const visibleNodes = nodeSelection.data();
+        let best: SimNode | null = null;
+        let bestDist = Infinity;
+        for (const n of visibleNodes) {
+          if (n.qualifiedName === d.qualifiedName || n.x == null || n.y == null || d.x == null || d.y == null) continue;
+          const dx = n.x - d.x;
+          const dy = n.y - d.y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          let ok = false;
+          if (event.key === "ArrowRight" && dx > 0 && Math.abs(dy) < Math.abs(dx)) ok = true;
+          if (event.key === "ArrowLeft" && dx < 0 && Math.abs(dy) < Math.abs(dx)) ok = true;
+          if (event.key === "ArrowDown" && dy > 0 && Math.abs(dx) < Math.abs(dy)) ok = true;
+          if (event.key === "ArrowUp" && dy < 0 && Math.abs(dx) < Math.abs(dy)) ok = true;
+          if (ok && dist < bestDist) {
+            best = n;
+            bestDist = dist;
+          }
+        }
+        if (best) {
+          const target = nodeGroup.selectAll<SVGPathElement, SimNode>("path.node-shape")
+            .filter((n) => n.qualifiedName === best!.qualifiedName)
+            .node();
+          if (target) (target as HTMLElement).focus();
+        }
+      }
+    })
+    .on("focus", (_event: FocusEvent, d: SimNode) => {
+      showTooltip(d);
+      highlightConnected(d);
+    })
+    .on("blur", () => {
+      hideTooltip();
+      unhighlightAll();
+    });
 
   // Highlight search matches
   const searchInput = document.getElementById("search-input") as HTMLInputElement | null;
@@ -433,19 +523,19 @@ function buildGraph(): void {
       const matches =
         d.name.toLowerCase().includes(query) ||
         d.qualifiedName.toLowerCase().includes(query);
-      return matches ? "#f5e0dc" : "none";
+      return matches ? "#e6edf3" : "none";
     });
   }
 
   // Highlight selected node
   if (selectedNode) {
     nodeSelection.attr("stroke", (d) => {
-      if (d.qualifiedName === selectedNode!.qualifiedName) return "#f5e0dc";
+      if (d.qualifiedName === selectedNode!.qualifiedName) return "#e6edf3";
       if (query.length > 0) {
         const matches =
           d.name.toLowerCase().includes(query) ||
           d.qualifiedName.toLowerCase().includes(query);
-        return matches ? "#f5e0dc" : "none";
+        return matches ? "#e6edf3" : "none";
       }
       return "none";
     });
@@ -487,7 +577,7 @@ function buildGraph(): void {
         .attr("x2", (d) => (d.target as SimNode).x!)
         .attr("y2", (d) => (d.target as SimNode).y!);
 
-      nodeSelection.attr("cx", (d) => d.x!).attr("cy", (d) => d.y!);
+      nodeSelection.attr("transform", (d) => `translate(${d.x},${d.y})`);
 
       labelSelection.attr("x", (d) => d.x!).attr("y", (d) => d.y!);
     });
@@ -506,8 +596,22 @@ function buildGraph(): void {
 function selectNode(node: SimNode): void {
   selectedNode = node;
   nodeSelection.attr("stroke", (d) =>
-    d.qualifiedName === node.qualifiedName ? "#f5e0dc" : "none"
+    d.qualifiedName === node.qualifiedName ? "#e6edf3" : "none"
   );
+  updateDepthSliderState();
+}
+
+function updateDepthSliderState(): void {
+  const slider = document.getElementById("depth-slider") as HTMLInputElement | null;
+  const depthValue = document.getElementById("depth-value");
+  if (slider) {
+    if (selectedNode) {
+      slider.disabled = false;
+    } else {
+      slider.disabled = true;
+      if (depthValue) depthValue.textContent = "N/A";
+    }
+  }
 }
 
 function highlightConnected(node: SimNode): void {
@@ -613,7 +717,7 @@ function highlightNodeByName(qualifiedName: string): void {
     .attr("cy", node.y ?? 0)
     .attr("r", (NODE_RADIUS[node.kind] ?? 10) + 4)
     .attr("fill", "none")
-    .attr("stroke", "#f5e0dc")
+    .attr("stroke", "#e6edf3")
     .attr("stroke-width", 3)
     .attr("class", "pulse-ring");
 
@@ -636,7 +740,7 @@ function highlightNodeByName(qualifiedName: string): void {
       .attr("cy", node.y ?? 0)
       .attr("r", (NODE_RADIUS[node.kind] ?? 10) + 4)
       .attr("fill", "none")
-      .attr("stroke", "#f5e0dc")
+      .attr("stroke", "#e6edf3")
       .attr("stroke-width", 3);
 
     ring2
@@ -734,17 +838,38 @@ function bindToolbarEvents(): void {
   for (const kind of ALL_EDGE_KINDS) {
     const pill = document.getElementById(`edge-${kind}`);
     if (pill) {
-      pill.addEventListener("click", () => {
+      const toggle = () => {
         if (visibleEdgeKinds.has(kind)) {
           visibleEdgeKinds.delete(kind);
           pill.classList.remove("active");
+          pill.setAttribute("aria-pressed", "false");
         } else {
           visibleEdgeKinds.add(kind);
           pill.classList.add("active");
+          pill.setAttribute("aria-pressed", "true");
         }
         buildGraph();
+      };
+      pill.addEventListener("click", toggle);
+      pill.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggle(); }
       });
     }
+  }
+
+  // Edge filter popover toggle
+  const edgeFilterBtn = document.getElementById("btn-edge-filter");
+  const edgePopover = document.getElementById("edge-popover");
+  if (edgeFilterBtn && edgePopover) {
+    edgeFilterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      edgePopover.classList.toggle("visible");
+    });
+    document.addEventListener("click", (e) => {
+      if (!edgePopover.contains(e.target as Node) && e.target !== edgeFilterBtn) {
+        edgePopover.classList.remove("visible");
+      }
+    });
   }
 
   // Depth slider
