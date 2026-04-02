@@ -24,26 +24,56 @@ logger = logging.getLogger(__name__)
 # Default ignore patterns (in addition to .gitignore)
 DEFAULT_IGNORE_PATTERNS = [
     ".code-review-graph/**",
-    "node_modules/**",
     ".git/**",
+    # JavaScript / TypeScript / Node
+    "node_modules/**",
+    ".next/**",
+    ".nuxt/**",
+    # Python
     "__pycache__/**",
     "*.pyc",
     ".venv/**",
     "venv/**",
+    # PHP / Laravel / Composer
+    "vendor/**",
+    "storage/**",
+    "bootstrap/cache/**",
+    "public/build/**",
+    # Ruby / Rails
+    "vendor/bundle/**",
+    ".bundle/**",
+    # Java / Kotlin / Gradle / Maven
+    ".gradle/**",
+    "*.jar",
+    # .NET / C#
+    "bin/**",
+    "obj/**",
+    "packages/**",
+    # Rust
+    "target/**",
+    # Dart / Flutter
+    ".dart_tool/**",
+    ".pub-cache/**",
+    # Build outputs
     "dist/**",
     "build/**",
-    ".next/**",
-    "target/**",
+    "coverage/**",
+    # Minified / generated
     "*.min.js",
     "*.min.css",
     "*.map",
     "*.lock",
     "package-lock.json",
     "yarn.lock",
+    # Database files
     "*.db",
     "*.sqlite",
     "*.db-journal",
     "*.db-wal",
+    # Misc
+    ".cache/**",
+    ".tmp/**",
+    "tmp/**",
 ]
 
 
@@ -116,8 +146,26 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
 
 
 def _should_ignore(path: str, patterns: list[str]) -> bool:
-    """Check if a path matches any ignore pattern."""
-    return any(fnmatch.fnmatch(path, p) for p in patterns)
+    """Check if a path matches any ignore pattern.
+
+    For ** patterns like 'node_modules/**', matches any path segment — not just
+    the root. This ensures nested dependency directories (e.g.,
+    'packages/app/node_modules/react/index.js') are correctly ignored in
+    monorepos and workspaces.
+    """
+    from pathlib import PurePosixPath
+
+    pp = PurePosixPath(path)
+    for p in patterns:
+        if "**" in p:
+            prefix = p.split("/**")[0]
+            if any(part == prefix for part in pp.parts) or fnmatch.fnmatch(path, p):
+                return True
+        elif fnmatch.fnmatch(path, p) or any(
+            fnmatch.fnmatch(part, p) for part in pp.parts
+        ):
+            return True
+    return False
 
 
 def _is_binary(path: Path) -> bool:
