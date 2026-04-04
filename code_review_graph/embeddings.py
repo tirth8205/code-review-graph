@@ -1,9 +1,14 @@
 """Vector embedding support for semantic code search.
 
-Supports multiple providers:
-1. Local (sentence-transformers) - Private, fast, offline.
-2. Google Gemini - High-quality, cloud-based. Requires explicit opt-in.
+Supports multiple providers with auto-detection based on API key presence:
+1. Voyage AI (voyage-code-3) - Code-optimized cloud embeddings. Requires VOYAGEAI_API_KEY.
+2. Google Gemini - High-quality, cloud-based. Requires GOOGLE_API_KEY.
 3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
+4. Local (sentence-transformers) - Private, fast, offline. Default fallback.
+
+When no provider is explicitly requested, the first available API key wins
+(checked in the order above). Set EMBEDDING_MODEL to override the default
+model for whichever provider is active.
 """
 
 from __future__ import annotations
@@ -54,7 +59,8 @@ LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or os.environ.get(
-            "CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL
+            "EMBEDDING_MODEL",
+            os.environ.get("CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL),
         )
         self._model = None  # Lazy-loaded
 
@@ -246,21 +252,114 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
         return f"minimax:{self._MODEL}"
 
 
+class VoyageAIEmbeddingProvider(EmbeddingProvider):
+    """Voyage AI embedding provider.
+
+    Uses the Voyage AI Python SDK with the voyage-code-3 model (1024 dimensions,
+    optimized for code). Requires the VOYAGEAI_API_KEY environment variable.
+    """
+
+    _DEFAULT_MODEL = "voyage-code-3"
+    _DIMENSION = 1024
+
+    def __init__(self, api_key: str, model: str | None = None) -> None:
+        self.model = model or self._DEFAULT_MODEL
+        try:
+            import voyageai
+            self._client = voyageai.Client(api_key=api_key)
+        except ImportError:
+            raise ImportError(
+                "voyageai not installed. "
+                "Run: pip install code-review-graph[voyage-embeddings]"
+            )
+
+    @staticmethod
+    def _call_with_retry(fn, max_retries: int = 3):
+        """Call fn with exponential backoff on transient API errors."""
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                err_str = str(e)
+                is_retryable = "429" in err_str or "500" in err_str or "503" in err_str
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(
+                    "Voyage AI API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        batch_size = 128
+        results: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i + batch_size]
+            response = self._call_with_retry(
+                lambda b=batch: self._client.embed(
+                    texts=b, model=self.model, input_type="document",
+                )
+            )
+            results.extend([list(e) for e in response.embeddings])
+        return results
+
+    def embed_query(self, text: str) -> list[float]:
+        response = self._call_with_retry(
+            lambda: self._client.embed(
+                texts=[text], model=self.model, input_type="query",
+            )
+        )
+        return list(response.embeddings[0])
+
+    @property
+    def dimension(self) -> int:
+        return self._DIMENSION
+
+    @property
+    def name(self) -> str:
+        return f"voyageai:{self.model}"
+
+
 def get_provider(
     provider: str | None = None,
     model: str | None = None,
 ) -> EmbeddingProvider | None:
-    """Get an embedding provider by name.
+    """Get an embedding provider by name or auto-detect from environment.
+
+    When ``provider`` is explicitly set, the corresponding API key env var
+    is required (raises ``ValueError`` if missing).
+
+    When ``provider`` is ``None``, providers are tried in order by checking
+    for API keys: ``VOYAGEAI_API_KEY`` -> ``GOOGLE_API_KEY`` ->
+    ``MINIMAX_API_KEY`` -> local fallback.
 
     Args:
-        provider: Provider name. One of "local", "google", "minimax", or None for local.
-                  Google requires GOOGLE_API_KEY env var and explicit opt-in.
-                  MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
-        model: Model name/path to use. For local provider this is any
-               sentence-transformers compatible model. Falls back to
-               CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
-               For Google provider this is a Gemini model ID.
+        provider: Provider name. One of ``"voyage"``, ``"google"``,
+                  ``"minimax"``, ``"local"``, or ``None`` for auto-detect.
+        model: Model name override. Falls back to ``EMBEDDING_MODEL`` env
+               var, then to each provider's default.
     """
+    # Resolve model: explicit param > EMBEDDING_MODEL env var > provider default
+    if model is None:
+        model = os.environ.get("EMBEDDING_MODEL")
+
+    # --- Explicit provider requested ---
+    if provider == "voyage":
+        api_key = os.environ.get("VOYAGEAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "VOYAGEAI_API_KEY environment variable is required for "
+                "the Voyage AI embedding provider."
+            )
+        try:
+            return VoyageAIEmbeddingProvider(
+                api_key=api_key,
+                **({"model": model} if model else {}),
+            )
+        except ImportError:
+            return None
+
     if provider == "minimax":
         api_key = os.environ.get("MINIMAX_API_KEY")
         if not api_key:
@@ -285,7 +384,51 @@ def get_provider(
         except ImportError:
             return None
 
-    # Default: local
+    if provider == "local":
+        try:
+            return LocalEmbeddingProvider(model_name=model)
+        except ImportError:
+            return None
+
+    if provider is not None:
+        logger.warning("Unknown embedding provider '%s', falling back to local", provider)
+        try:
+            return LocalEmbeddingProvider(model_name=model)
+        except ImportError:
+            return None
+
+    # --- Auto-detect: check API keys in priority order ---
+    voyageai_key = os.environ.get("VOYAGEAI_API_KEY")
+    if voyageai_key:
+        try:
+            return VoyageAIEmbeddingProvider(
+                api_key=voyageai_key,
+                **({"model": model} if model else {}),
+            )
+        except ImportError:
+            logger.warning(
+                "VOYAGEAI_API_KEY is set but voyageai is not installed. "
+                "Install with: pip install code-review-graph[voyage-embeddings]"
+            )
+
+    google_key = os.environ.get("GOOGLE_API_KEY")
+    if google_key:
+        try:
+            return GoogleEmbeddingProvider(
+                api_key=google_key,
+                **({"model": model} if model else {}),
+            )
+        except ImportError:
+            logger.warning(
+                "GOOGLE_API_KEY is set but google-generativeai is not installed. "
+                "Install with: pip install code-review-graph[google-embeddings]"
+            )
+
+    minimax_key = os.environ.get("MINIMAX_API_KEY")
+    if minimax_key:
+        return MiniMaxEmbeddingProvider(api_key=minimax_key)
+
+    # Fall back to local
     try:
         return LocalEmbeddingProvider(model_name=model)
     except ImportError:

@@ -185,7 +185,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **19 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, or MiniMax |
+| **Semantic search** | Optional vector embeddings via Voyage AI, Google Gemini, MiniMax, or sentence-transformers |
 | **Interactive visualisation** | D3.js force-directed graph with edge-type toggles and search |
 | **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
 | **Watch mode** | Continuous graph updates as you work |
@@ -291,12 +291,25 @@ Optional dependency groups:
 
 ```bash
 pip install code-review-graph[embeddings]          # Local vector embeddings (sentence-transformers)
+pip install code-review-graph[voyage-embeddings]   # Voyage AI embeddings
 pip install code-review-graph[google-embeddings]   # Google Gemini embeddings
 pip install code-review-graph[communities]         # Community detection (igraph)
 pip install code-review-graph[eval]                # Evaluation benchmarks (matplotlib)
 pip install code-review-graph[wiki]                # Wiki generation with LLM summaries (ollama)
 pip install code-review-graph[all]                 # All optional dependencies
 ```
+
+Embedding provider auto-detection (first matching API key wins):
+
+| Priority | API Key Env Var | Provider | Default Model | Install |
+|----------|-----------------|----------|---------------|---------|
+| 1 | `VOYAGEAI_API_KEY` | Voyage AI | `voyage-code-3` | `[voyage-embeddings]` |
+| 2 | `GOOGLE_API_KEY` | Google Gemini | `gemini-embedding-001` | `[google-embeddings]` |
+| 3 | `MINIMAX_API_KEY` | MiniMax | `embo-01` | *(built-in)* |
+| 4 | *(none needed)* | Local (sentence-transformers) | `all-MiniLM-L6-v2` | `[embeddings]` |
+
+Set the API key for your preferred provider and the system auto-selects it.
+To override the default model, set `EMBEDDING_MODEL`.
 
 </details>
 

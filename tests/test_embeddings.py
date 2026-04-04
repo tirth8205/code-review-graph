@@ -2,6 +2,7 @@
 
 import json
 import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from code_review_graph.embeddings import (
     EmbeddingStore,
     LocalEmbeddingProvider,
     MiniMaxEmbeddingProvider,
+    VoyageAIEmbeddingProvider,
     _cosine_similarity,
     _decode_vector,
     _encode_vector,
@@ -149,6 +151,7 @@ class TestLocalEmbeddingProviderModelName:
     def test_default_model_name(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CRG_EMBEDDING_MODEL", None)
+            os.environ.pop("EMBEDDING_MODEL", None)
             provider = LocalEmbeddingProvider()
             assert provider._model_name == LOCAL_DEFAULT_MODEL
             assert provider.name == f"local:{LOCAL_DEFAULT_MODEL}"
@@ -159,11 +162,22 @@ class TestLocalEmbeddingProviderModelName:
             assert provider._model_name == "custom/model"
             assert provider.name == "local:custom/model"
 
-    def test_env_var_fallback(self):
+    def test_crg_env_var_fallback(self):
+        """CRG_EMBEDDING_MODEL still works for backward compat."""
         with patch.dict(os.environ, {"CRG_EMBEDDING_MODEL": "BAAI/bge-small-en-v1.5"}):
+            os.environ.pop("EMBEDDING_MODEL", None)
             provider = LocalEmbeddingProvider()
             assert provider._model_name == "BAAI/bge-small-en-v1.5"
             assert provider.name == "local:BAAI/bge-small-en-v1.5"
+
+    def test_embedding_model_env_var(self):
+        """EMBEDDING_MODEL takes precedence over CRG_EMBEDDING_MODEL."""
+        with patch.dict(os.environ, {
+            "EMBEDDING_MODEL": "new-model",
+            "CRG_EMBEDDING_MODEL": "old-model",
+        }):
+            provider = LocalEmbeddingProvider()
+            assert provider._model_name == "new-model"
 
 
 class TestGetProviderModel:
@@ -274,6 +288,122 @@ class TestMiniMaxEmbeddingProvider:
                 provider.embed_query("test")
 
 
+class TestVoyageAIEmbeddingProvider:
+    """Unit tests for VoyageAIEmbeddingProvider."""
+
+    @staticmethod
+    def _make_provider(model=None):
+        """Create a VoyageAIEmbeddingProvider with a mocked voyageai SDK."""
+        mock_voyageai = MagicMock()
+        mock_client = mock_voyageai.Client.return_value
+        with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+            if model:
+                provider = VoyageAIEmbeddingProvider(
+                    api_key="test-key", model=model
+                )
+            else:
+                provider = VoyageAIEmbeddingProvider(api_key="test-key")
+        return provider, mock_client
+
+    def test_name(self):
+        provider, _ = self._make_provider()
+        assert provider.name == "voyageai:voyage-code-3"
+
+    def test_name_custom_model(self):
+        provider, _ = self._make_provider(model="voyage-3")
+        assert provider.name == "voyageai:voyage-3"
+
+    def test_dimension(self):
+        provider, _ = self._make_provider()
+        assert provider.dimension == 1024
+
+    def test_embed_calls_api_with_document_type(self):
+        provider, mock_client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.embeddings = [[0.1] * 1024, [0.2] * 1024]
+        mock_client.embed.return_value = mock_response
+
+        result = provider.embed(["hello", "world"])
+
+        assert len(result) == 2
+        assert len(result[0]) == 1024
+        mock_client.embed.assert_called_once_with(
+            texts=["hello", "world"],
+            model="voyage-code-3",
+            input_type="document",
+        )
+
+    def test_embed_query_calls_api_with_query_type(self):
+        provider, mock_client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.embeddings = [[0.5] * 1024]
+        mock_client.embed.return_value = mock_response
+
+        result = provider.embed_query("search term")
+
+        assert len(result) == 1024
+        mock_client.embed.assert_called_once_with(
+            texts=["search term"],
+            model="voyage-code-3",
+            input_type="query",
+        )
+
+    def test_retry_on_transient_error(self):
+        provider, mock_client = self._make_provider()
+        mock_response = MagicMock()
+        mock_response.embeddings = [[0.1] * 1024]
+
+        # First call raises 429, second succeeds
+        mock_client.embed.side_effect = [
+            Exception("429 rate limit exceeded"),
+            mock_response,
+        ]
+
+        with patch("code_review_graph.embeddings.time.sleep"):
+            result = provider.embed(["test"])
+
+        assert len(result) == 1
+        assert mock_client.embed.call_count == 2
+
+    def test_permanent_error_raises_immediately(self):
+        provider, mock_client = self._make_provider()
+        mock_client.embed.side_effect = Exception("invalid request: bad input")
+
+        with pytest.raises(Exception, match="invalid request"):
+            provider.embed(["test"])
+
+        # Should not retry on non-transient error
+        assert mock_client.embed.call_count == 1
+
+    def test_import_error_without_sdk(self):
+        with patch.dict(sys.modules, {"voyageai": None}):
+            with pytest.raises(ImportError, match="voyage-embeddings"):
+                VoyageAIEmbeddingProvider(api_key="test-key")
+
+
+class TestGetProviderVoyage:
+    """Tests for get_provider() with Voyage AI."""
+
+    def test_get_provider_voyage_with_key(self):
+        mock_voyageai = MagicMock()
+        with patch.dict("os.environ", {"VOYAGEAI_API_KEY": "test-key"}):
+            with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+                provider = get_provider("voyage")
+        assert isinstance(provider, VoyageAIEmbeddingProvider)
+        assert provider.name == "voyageai:voyage-code-3"
+
+    def test_get_provider_voyage_without_key_raises(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with pytest.raises(ValueError, match="VOYAGEAI_API_KEY"):
+                get_provider("voyage")
+
+    def test_get_provider_voyage_missing_sdk_returns_none(self):
+        with patch.dict("os.environ", {"VOYAGEAI_API_KEY": "test-key"}):
+            with patch.dict(sys.modules, {"voyageai": None}):
+                provider = get_provider("voyage")
+        assert provider is None
+
+
 class TestGetProviderMiniMax:
     """Tests for get_provider() with MiniMax."""
 
@@ -287,3 +417,80 @@ class TestGetProviderMiniMax:
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
                 get_provider("minimax")
+
+
+class TestAutoDetectProvider:
+    """Tests for auto-detection of embedding provider based on API keys."""
+
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    def test_no_api_keys_falls_back_to_local(self, mock_local):
+        mock_local.return_value = MagicMock()
+        with patch.dict("os.environ", {}, clear=True):
+            provider = get_provider()
+        assert provider is not None
+        mock_local.assert_called_once()
+
+    def test_voyageai_key_auto_selects_voyage(self):
+        mock_voyageai = MagicMock()
+        with patch.dict("os.environ", {"VOYAGEAI_API_KEY": "vk"}, clear=True):
+            with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+                provider = get_provider()
+        assert isinstance(provider, VoyageAIEmbeddingProvider)
+
+    def test_google_key_auto_selects_google(self):
+        with patch.dict("os.environ", {"GOOGLE_API_KEY": "gk"}, clear=True):
+            with patch(
+                "code_review_graph.embeddings.GoogleEmbeddingProvider"
+            ) as mock_cls:
+                mock_cls.return_value = MagicMock()
+                mock_cls.return_value.name = "google:gemini-embedding-001"
+                provider = get_provider()
+        assert provider is not None
+        mock_cls.assert_called_once()
+
+    def test_minimax_key_auto_selects_minimax(self):
+        with patch.dict("os.environ", {"MINIMAX_API_KEY": "mk"}, clear=True):
+            provider = get_provider()
+        assert isinstance(provider, MiniMaxEmbeddingProvider)
+
+    def test_voyage_has_highest_priority(self):
+        mock_voyageai = MagicMock()
+        with patch.dict("os.environ", {
+            "VOYAGEAI_API_KEY": "vk",
+            "GOOGLE_API_KEY": "gk",
+            "MINIMAX_API_KEY": "mk",
+        }, clear=True):
+            with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+                provider = get_provider()
+        assert isinstance(provider, VoyageAIEmbeddingProvider)
+
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    def test_voyage_key_set_but_sdk_missing_skips_to_next(self, mock_local):
+        mock_local.return_value = MagicMock()
+        with patch.dict("os.environ", {"VOYAGEAI_API_KEY": "vk"}, clear=True):
+            with patch.dict(sys.modules, {"voyageai": None}):
+                provider = get_provider()
+        # Should fall through to local since SDK not installed
+        mock_local.assert_called_once()
+
+    def test_embedding_model_env_var_forwarded(self):
+        mock_voyageai = MagicMock()
+        with patch.dict("os.environ", {
+            "VOYAGEAI_API_KEY": "vk",
+            "EMBEDDING_MODEL": "voyage-3",
+        }, clear=True):
+            with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+                provider = get_provider()
+        assert isinstance(provider, VoyageAIEmbeddingProvider)
+        assert provider.model == "voyage-3"
+
+    def test_explicit_model_param_overrides_env_var(self):
+        mock_voyageai = MagicMock()
+        with patch.dict("os.environ", {
+            "VOYAGEAI_API_KEY": "vk",
+            "EMBEDDING_MODEL": "voyage-3",
+        }, clear=True):
+            with patch.dict(sys.modules, {"voyageai": mock_voyageai}):
+                provider = get_provider(model="voyage-code-3")
+        assert isinstance(provider, VoyageAIEmbeddingProvider)
+        assert provider.model == "voyage-code-3"

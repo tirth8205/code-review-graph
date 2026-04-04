@@ -105,3 +105,10 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - **type-check**: mypy
 - **security**: bandit scan
 - **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 50% coverage minimum
+
+## Active Technologies
+- Python 3.10+ + `voyageai` SDK (new optional), `fastmcp`, `tree-sitter`, `networkx` (001-voyage-ai-embeddings)
+- SQLite (existing `embeddings` table, no schema changes needed) (001-voyage-ai-embeddings)
+
+## Recent Changes
+- 001-voyage-ai-embeddings: Added Python 3.10+ + `voyageai` SDK (new optional), `fastmcp`, `tree-sitter`, `networkx`

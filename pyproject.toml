@@ -51,6 +51,9 @@ embeddings = [
 google-embeddings = [
     "google-generativeai>=0.8.0,<1",
 ]
+voyage-embeddings = [
+    "voyageai>=0.3.0",
+]
 communities = [
     "igraph>=0.11.0",
 ]
