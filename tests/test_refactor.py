@@ -191,6 +191,121 @@ class TestFindDeadCode:
         dead = find_dead_code(self.store, file_pattern="nonexistent")
         assert len(dead) == 0
 
+    def test_find_dead_code_excludes_dunder(self):
+        """Dunder methods are not flagged as dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="__init__", file_path="/repo/app.py",
+            line_start=90, line_end=95, language="python",
+            parent_name="MyClass",
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "__init__" not in dead_names
+
+    def test_find_dead_code_excludes_decorated_entry(self):
+        """Functions with framework decorators are not flagged as dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="get_users", file_path="/repo/app.py",
+            line_start=90, line_end=95, language="python",
+            extra={"decorators": ["app.get('/users')"]},
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "get_users" not in dead_names
+
+    def test_find_dead_code_excludes_type_referenced_class(self):
+        """Classes referenced in function type annotations are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="UserSchema", file_path="/repo/app.py",
+            line_start=5, line_end=15, language="python",
+        ))
+        # A function that uses UserSchema in its params
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="create_user", file_path="/repo/app.py",
+            line_start=20, line_end=30, language="python",
+            params="body: UserSchema",
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "UserSchema" not in dead_names
+
+    def test_find_dead_code_excludes_return_type_reference(self):
+        """Classes referenced in return types are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="UserResponse", file_path="/repo/app.py",
+            line_start=5, line_end=15, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="get_user", file_path="/repo/app.py",
+            line_start=20, line_end=30, language="python",
+            return_type="Optional[UserResponse]",
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "UserResponse" not in dead_names
+
+    def test_find_dead_code_excludes_orm_model(self):
+        """Classes inheriting from known ORM bases are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="User", file_path="/repo/app.py",
+            line_start=5, line_end=20, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="INHERITS", source="/repo/app.py::User",
+            target="Base", file_path="/repo/app.py", line=5,
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "User" not in dead_names
+
+    def test_find_dead_code_excludes_pydantic_settings(self):
+        """Classes inheriting from BaseSettings are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="AppConfig", file_path="/repo/app.py",
+            line_start=5, line_end=15, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="INHERITS", source="/repo/app.py::AppConfig",
+            target="BaseSettings", file_path="/repo/app.py", line=5,
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "AppConfig" not in dead_names
+
+    def test_find_dead_code_excludes_agent_tool(self):
+        """Functions with @agent.tool decorator are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="query_data", file_path="/repo/app.py",
+            line_start=10, line_end=20, language="python",
+            extra={"decorators": ["health_agent.tool"]},
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "query_data" not in dead_names
+
+    def test_find_dead_code_excludes_alembic_upgrade(self):
+        """upgrade() and downgrade() in alembic files are not dead code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="upgrade", file_path="/repo/alembic/versions/001.py",
+            line_start=5, line_end=15, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="downgrade", file_path="/repo/alembic/versions/001.py",
+            line_start=20, line_end=30, language="python",
+        ))
+        self.store.commit()
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "upgrade" not in dead_names
+        assert "downgrade" not in dead_names
+
 
 class TestSuggestRefactorings:
     """Tests for suggest_refactorings."""

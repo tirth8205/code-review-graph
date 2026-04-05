@@ -38,7 +38,7 @@
 
 ```bash
 # Development
-uv run pytest tests/ --tb=short -q          # Run tests (572 tests)
+uv run pytest tests/ --tb=short -q          # Run tests (609 tests)
 uv run ruff check code_review_graph/        # Lint
 uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 

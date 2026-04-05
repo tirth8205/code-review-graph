@@ -440,3 +440,147 @@ class TestCodeParser:
             )
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    def test_python_decorator_extraction(self):
+        """Decorated Python functions should have decorators in extra."""
+        import tempfile
+        code = b"""\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/users")
+def get_users():
+    return []
+
+@router.post("/users")
+@some_validator
+def create_user(body):
+    pass
+
+def plain_func():
+    pass
+"""
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = Path(f.name)
+        try:
+            nodes, _ = self.parser.parse_file(tmp_path)
+            funcs = {n.name: n for n in nodes if n.kind == "Function"}
+
+            assert "get_users" in funcs
+            assert funcs["get_users"].extra.get("decorators") == [
+                'router.get("/users")',
+            ]
+
+            assert "create_user" in funcs
+            decos = funcs["create_user"].extra.get("decorators")
+            assert len(decos) == 2
+            assert 'router.post("/users")' in decos
+            assert "some_validator" in decos
+
+            assert "plain_func" in funcs
+            assert not funcs["plain_func"].extra.get("decorators")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def test_python_class_decorator_extraction(self):
+        """Decorated Python classes should have decorators in extra."""
+        import tempfile
+        code = b"""\
+import dataclasses
+
+@dataclasses.dataclass
+class MyModel:
+    name: str
+
+class PlainClass:
+    pass
+"""
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = Path(f.name)
+        try:
+            nodes, _ = self.parser.parse_file(tmp_path)
+            classes = {n.name: n for n in nodes if n.kind == "Class"}
+
+            assert "MyModel" in classes
+            assert classes["MyModel"].extra.get("decorators") == [
+                "dataclasses.dataclass",
+            ]
+
+            assert "PlainClass" in classes
+            assert not classes["PlainClass"].extra.get("decorators")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def test_tsx_named_import_creates_per_symbol_edges(self):
+        """import { A, B } from './mod' should create per-symbol IMPORTS_FROM edges."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            # Source module with exported functions
+            mod_file = tmp_dir / "mod.ts"
+            mod_file.write_bytes(b"export function getUsers() { return []; }\n"
+                                 b"export function getItems() { return []; }\n")
+
+            # Importer
+            importer = tmp_dir / "page.tsx"
+            importer.write_bytes(
+                b"import { getUsers, getItems } from './mod';\n"
+                b"export function Page() { return getUsers(); }\n"
+            )
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            # File-level edge
+            assert resolved_mod in targets
+            # Per-symbol edges
+            assert f"{resolved_mod}::getUsers" in targets
+            assert f"{resolved_mod}::getItems" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+    def test_tsx_default_import_creates_per_symbol_edge(self):
+        """import Foo from './mod' should create a per-symbol IMPORTS_FROM edge."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            mod_file = tmp_dir / "mod.ts"
+            mod_file.write_bytes(b"export default function Foo() {}\n")
+
+            importer = tmp_dir / "app.tsx"
+            importer.write_bytes(b"import Foo from './mod';\n")
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            assert f"{resolved_mod}::Foo" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+    def test_tsx_aliased_import_uses_original_name(self):
+        """import { A as B } should create edge to ::A (original name)."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            mod_file = tmp_dir / "util.ts"
+            mod_file.write_bytes(b"export function helper() {}\n")
+
+            importer = tmp_dir / "main.tsx"
+            importer.write_bytes(b"import { helper as h } from './util';\n")
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            assert f"{resolved_mod}::helper" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)

@@ -9,6 +9,7 @@ traversal prevention.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -19,6 +20,14 @@ from .flows import _has_framework_decorator, _matches_entry_name
 from .graph import GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
+
+# Base class names that indicate a framework-managed class (ORM models,
+# Pydantic schemas, settings).  Classes inheriting from these are invoked
+# via metaclass/framework magic and should not be flagged as dead code.
+_FRAMEWORK_BASE_CLASSES = frozenset({
+    "Base", "DeclarativeBase", "Model", "BaseModel", "BaseSettings",
+    "db.Model", "TableBase",
+})
 
 # ---------------------------------------------------------------------------
 # Thread-safe pending refactors storage
@@ -173,6 +182,22 @@ def _is_entry_point(node: Any) -> bool:
     return False
 
 
+# Matches identifiers inside type annotations (e.g. "GoalCreate" in
+# "body: GoalCreate", "Optional[UserResponse]", "list[Item]").
+_TYPE_IDENT_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
+
+
+def _collect_type_referenced_names(store: GraphStore) -> set[str]:
+    """Collect class names that appear in function params or return types."""
+    funcs = store.get_nodes_by_kind(kinds=["Function", "Test"])
+    names: set[str] = set()
+    for f in funcs:
+        for text in (f.params, f.return_type):
+            if text:
+                names.update(_TYPE_IDENT_RE.findall(text))
+    return names
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -197,6 +222,9 @@ def find_dead_code(
         file_pattern=file_pattern,
     )
 
+    # Build set of class names referenced in function type annotations.
+    type_ref_names = _collect_type_referenced_names(store)
+
     dead: list[dict[str, Any]] = []
 
     for node in candidates:
@@ -205,9 +233,27 @@ def find_dead_code(
         if node.is_test:
             continue
 
+        # Skip dunder methods -- invoked by runtime, never have explicit callers.
+        if node.name.startswith("__") and node.name.endswith("__"):
+            continue
+
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
             continue
+
+        # Skip classes referenced in type annotations (Pydantic schemas, etc.).
+        if node.kind == "Class" and node.name in type_ref_names:
+            continue
+
+        # Skip classes inheriting from known framework bases (ORM models, etc.).
+        if node.kind == "Class":
+            outgoing = store.get_edges_by_source(node.qualified_name)
+            base_names = {
+                e.target_qualified.rsplit("::", 1)[-1]
+                for e in outgoing if e.kind == "INHERITS"
+            }
+            if base_names & _FRAMEWORK_BASE_CLASSES:
+                continue
 
         # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM).
         incoming = store.get_edges_by_target(node.qualified_name)

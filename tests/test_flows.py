@@ -109,6 +109,61 @@ class TestFlows:
         assert "regular_func" not in ep_names
 
     # ---------------------------------------------------------------
+    # detect_entry_points -- expanded decorator patterns
+    # ---------------------------------------------------------------
+
+    def test_detect_entry_points_pytest_fixture(self):
+        """pytest.fixture decorator marks function as entry point."""
+        self._add_func("my_fixture", extra={"decorators": ["pytest.fixture"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "my_fixture" in ep_names
+
+    def test_detect_entry_points_django_receiver(self):
+        """Django signal receiver decorator marks function as entry point."""
+        self._add_func("on_save", extra={"decorators": ["receiver(post_save)"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "on_save" in ep_names
+
+    def test_detect_entry_points_spring_scheduled(self):
+        """Java Spring @Scheduled marks function as entry point."""
+        self._add_func("cleanup_job", extra={"decorators": ["Scheduled(cron='0 0 * * *')"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "cleanup_job" in ep_names
+
+    def test_detect_entry_points_celery_task(self):
+        """Bare @task decorator marks function as entry point."""
+        self._add_func("process_data", extra={"decorators": ["task"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "process_data" in ep_names
+
+    def test_detect_entry_points_agent_tool(self):
+        """@agent.tool decorator marks function as entry point."""
+        self._add_func("query_health", extra={"decorators": ["health_agent.tool"]})
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "query_health" in ep_names
+
+    def test_detect_entry_points_alembic(self):
+        """upgrade/downgrade functions are entry points."""
+        self._add_func("upgrade")
+        self._add_func("downgrade")
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "upgrade" in ep_names
+        assert "downgrade" in ep_names
+
+    def test_detect_entry_points_lifespan(self):
+        """FastAPI lifespan function is an entry point."""
+        self._add_func("lifespan")
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "lifespan" in ep_names
+
+    # ---------------------------------------------------------------
     # trace_flows
     # ---------------------------------------------------------------
 

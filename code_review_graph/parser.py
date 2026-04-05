@@ -1456,6 +1456,40 @@ class CodeParser:
         )
         return True
 
+    @staticmethod
+    def _extract_decorators(child) -> list[str]:
+        """Extract decorator/annotation names from a definition node.
+
+        Handles Python (decorated_definition parent), Java/Kotlin/C#
+        (annotation in modifiers child), and TypeScript (decorator child).
+        """
+        decorators: list[str] = []
+
+        # Python: parent is decorated_definition wrapping the definition
+        parent = child.parent
+        if parent and parent.type == "decorated_definition":
+            for sibling in parent.children:
+                if sibling.type == "decorator":
+                    text = sibling.text.decode("utf-8", errors="replace")
+                    decorators.append(text.lstrip("@").strip())
+            return decorators
+
+        # Java/Kotlin/C#: annotations inside a modifiers child
+        for sub in child.children:
+            if sub.type == "modifiers":
+                for mod in sub.children:
+                    if mod.type in ("annotation", "marker_annotation"):
+                        text = mod.text.decode("utf-8", errors="replace")
+                        decorators.append(text.lstrip("@").strip())
+
+        # TypeScript: decorator children directly on class/method node
+        for sub in child.children:
+            if sub.type == "decorator":
+                text = sub.text.decode("utf-8", errors="replace")
+                decorators.append(text.lstrip("@").strip())
+
+        return decorators
+
     def _extract_classes(
         self,
         child,
@@ -1477,6 +1511,7 @@ class CodeParser:
         if not name:
             return False
 
+        decorators = self._extract_decorators(child)
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -1485,6 +1520,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            extra={"decorators": decorators} if decorators else {},
         )
         nodes.append(node)
 
@@ -1545,6 +1581,7 @@ class CodeParser:
         qualified = self._qualify(name, file_path, enclosing_class)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
+        decorators = self._extract_decorators(child)
 
         node = NodeInfo(
             kind=kind,
@@ -1557,6 +1594,7 @@ class CodeParser:
             params=params,
             return_type=ret_type,
             is_test=is_test,
+            extra={"decorators": decorators} if decorators else {},
         )
         nodes.append(node)
 
@@ -1614,13 +1652,55 @@ class CodeParser:
             resolved = self._resolve_module_to_file(
                 imp_target, file_path, language,
             )
+            target = resolved if resolved else imp_target
             edges.append(EdgeInfo(
                 kind="IMPORTS_FROM",
                 source=file_path,
-                target=resolved if resolved else imp_target,
+                target=target,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
             ))
+
+            # Per-symbol IMPORTS_FROM edges for JS/TS/TSX named imports.
+            # This lets dead-code detection see that individual functions/
+            # classes in the source file are referenced by importers.
+            if resolved and language in ("javascript", "typescript", "tsx"):
+                for name in self._get_js_import_names(child):
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=f"{resolved}::{name}",
+                        file_path=file_path,
+                        line=child.start_point[0] + 1,
+                    ))
+
+    @staticmethod
+    def _get_js_import_names(node) -> list[str]:
+        """Extract imported symbol names from a JS/TS import statement.
+
+        For ``import { A, B as C } from './mod'``, returns ``["A", "B"]``
+        (original export names, not local aliases).  For default imports
+        like ``import D from './mod'``, returns ``["D"]``.
+        """
+        names: list[str] = []
+        for child in node.children:
+            if child.type == "import_clause":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        # Default import
+                        names.append(sub.text.decode("utf-8", errors="replace"))
+                    elif sub.type == "named_imports":
+                        for spec in sub.children:
+                            if spec.type == "import_specifier":
+                                idents = [
+                                    s.text.decode("utf-8", errors="replace")
+                                    for s in spec.children
+                                    if s.type in ("identifier", "property_identifier")
+                                ]
+                                # First identifier is the original name
+                                if idents:
+                                    names.append(idents[0])
+        return names
 
     def _extract_calls(
         self,

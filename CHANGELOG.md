@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Decorator extraction in parser**: Functions and classes now store decorators/annotations in `node.extra["decorators"]` (Python, Java/Kotlin/C#, TypeScript)
+- **Expanded framework decorator patterns**: Dead code detection and entry point discovery now recognize pytest fixtures, Django signals, SQLAlchemy events, Spring annotations, Celery tasks, NestJS/Angular decorators, pydantic-ai agent tools
+- **Type annotation reference tracking**: Classes referenced in function parameter types or return types (e.g. Pydantic schemas) are no longer flagged as dead code
+- **Per-symbol IMPORTS_FROM edges**: JS/TS/TSX named imports (`import { A, B } from './mod'`) now create edges targeting individual functions/classes, not just the file -- eliminates ~320 FPs from frontend codebases
+- **ORM/framework base class exclusion**: Classes inheriting from known framework bases (Base, DeclarativeBase, BaseModel, BaseSettings, etc.) are no longer flagged as dead code
+
+### Fixed
+- **Dead code false positives**: Dunder methods (`__init__`, `__str__`, etc.) excluded from dead code results -- they are runtime-invoked and never have explicit callers
+- **Dead code false positives**: Decorated entry points (e.g. `@app.get`, `@pytest.fixture`) now correctly excluded via parser-populated decorator metadata
+- **Dead code false positives**: Alembic `upgrade`/`downgrade` and FastAPI `lifespan`/`get_db` recognized as entry points
+
 ## [2.1.0] - 2026-04-03
 
 ### Added

@@ -25,14 +25,32 @@ logger = logging.getLogger(__name__)
 
 # Decorator patterns that indicate a function is a framework entry point.
 _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"app\.(get|post|put|delete|patch|route|websocket)", re.IGNORECASE),
+    # Python web frameworks
+    re.compile(r"app\.(get|post|put|delete|patch|route|websocket|on_event)", re.IGNORECASE),
     re.compile(r"router\.(get|post|put|delete|patch|route)", re.IGNORECASE),
     re.compile(r"blueprint\.(route|before_request|after_request)", re.IGNORECASE),
+    re.compile(r"(before|after)_(request|response)", re.IGNORECASE),
+    # CLI frameworks
     re.compile(r"click\.(command|group)", re.IGNORECASE),
-    re.compile(r"celery\.(task|shared_task)", re.IGNORECASE),
+    # Task queues
+    re.compile(r"(celery\.)?(task|shared_task|periodic_task)", re.IGNORECASE),
+    # Django
+    re.compile(r"receiver", re.IGNORECASE),
     re.compile(r"api_view", re.IGNORECASE),
     re.compile(r"\baction\b", re.IGNORECASE),
-    re.compile(r"@(Get|Post|Put|Delete|Patch|RequestMapping)", re.IGNORECASE),
+    # Testing
+    re.compile(r"pytest\.(fixture|mark)"),
+    re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
+    # SQLAlchemy / event systems
+    re.compile(r"(event\.)?listens_for", re.IGNORECASE),
+    # Java Spring
+    re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
+    re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
+    # JS/TS frameworks
+    re.compile(r"(Component|Injectable|Controller|Module|Guard|Pipe)", re.IGNORECASE),
+    re.compile(r"(Subscribe|Mutation|Query|Resolver)", re.IGNORECASE),
+    # AI/agent frameworks (pydantic-ai, langchain, etc.)
+    re.compile(r"\w+\.tool\b", re.IGNORECASE),
 ]
 
 # Name patterns that indicate conventional entry points.
@@ -43,6 +61,12 @@ _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^Test[A-Z]"),
     re.compile(r"^on_"),
     re.compile(r"^handle_"),
+    # Alembic migration entry points
+    re.compile(r"^upgrade$"),
+    re.compile(r"^downgrade$"),
+    # FastAPI lifecycle / dependency injection
+    re.compile(r"^lifespan$"),
+    re.compile(r"^get_db$"),
 ]
 
 
