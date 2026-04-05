@@ -263,6 +263,12 @@ def _detect_leiden(
         else:
             final.append(comm)
 
+    # If Leiden produced no communities after min_size filtering, fall back
+    # to file-based grouping (e.g., when method call filtering reduces CALLS
+    # edges so much that all Leiden clusters are too small).
+    if not final:
+        return _detect_file_based(nodes, edges, min_size)
+
     return final
 
 

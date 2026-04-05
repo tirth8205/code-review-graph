@@ -199,9 +199,15 @@ _IMPORT_TYPES: dict[str, list[str]] = {
 
 _CALL_TYPES: dict[str, list[str]] = {
     "python": ["call"],
-    "javascript": ["call_expression", "new_expression"],
+    "javascript": [
+        "call_expression", "new_expression",
+        "jsx_self_closing_element", "jsx_opening_element",
+    ],
     "typescript": ["call_expression", "new_expression"],
-    "tsx": ["call_expression", "new_expression"],
+    "tsx": [
+        "call_expression", "new_expression",
+        "jsx_self_closing_element", "jsx_opening_element",
+    ],
     "go": ["call_expression"],
     "rust": ["call_expression", "macro_invocation"],
     "java": ["method_invocation", "object_creation_expression"],
@@ -248,6 +254,29 @@ _TEST_RUNNER_NAMES = frozenset({
     "describe", "it", "test", "beforeEach", "afterEach",
     "beforeAll", "afterAll",
 })
+
+_BUILTIN_NAMES: dict[str, frozenset[str]] = {
+    "python": frozenset({
+        "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
+        "print", "range", "enumerate", "zip", "map", "filter", "sorted",
+        "reversed", "isinstance", "issubclass", "type", "id", "hash",
+        "hasattr", "getattr", "setattr", "delattr", "callable",
+        "repr", "abs", "min", "max", "sum", "round", "pow", "divmod",
+        "iter", "next", "open", "super", "property", "staticmethod",
+        "classmethod", "vars", "dir", "help", "input", "format",
+        "bytes", "bytearray", "memoryview", "frozenset", "complex",
+        "chr", "ord", "hex", "oct", "bin", "any", "all",
+    }),
+    "go": frozenset({
+        "len", "cap", "make", "new", "delete", "append", "copy",
+        "close", "panic", "recover", "print", "println",
+    }),
+    "rust": frozenset({
+        "println", "eprintln", "format", "vec", "panic", "todo",
+        "unimplemented", "unreachable", "assert", "assert_eq", "assert_ne",
+        "dbg", "cfg",
+    }),
+}
 
 
 def _is_test_file(path: str) -> bool:
@@ -1642,7 +1671,14 @@ class CodeParser:
         should skip default recursion). Returns False if the caller should
         continue to Solidity handling and default recursion.
         """
-        call_name = self._get_call_name(child, language, source)
+        call_name = self._get_call_name(
+            child, language, source, is_test_file=_is_test_file(file_path),
+        )
+
+        # Skip calls to language builtins (len, print, etc.)
+        builtins = _BUILTIN_NAMES.get(language, frozenset())
+        if call_name and call_name in builtins:
+            call_name = None
 
         # For member expressions like describe.only / it.skip / test.each,
         # resolve the base call name so those are treated as test runner
@@ -2406,7 +2442,9 @@ class CodeParser:
 
         return imports
 
-    def _get_call_name(self, node, language: str, source: bytes) -> Optional[str]:
+    def _get_call_name(
+        self, node, language: str, source: bytes, is_test_file: bool = False,
+    ) -> Optional[str]:
         """Extract the function/method name being called."""
         if not node.children:
             return None
@@ -2418,6 +2456,16 @@ class CodeParser:
             for child in node.children:
                 if child.type in ("type_identifier", "identifier"):
                     return child.text.decode("utf-8", errors="replace")
+            return None
+
+        # JSX component invocation: <Foo /> or <Foo>...</Foo>
+        # Skip lowercase names (HTML elements: div, span, etc.)
+        if node.type in ("jsx_self_closing_element", "jsx_opening_element"):
+            for child in node.children:
+                if child.type in ("identifier", "nested_identifier", "member_expression"):
+                    name = child.text.decode("utf-8", errors="replace")
+                    if name and name[0].isupper():
+                        return name
             return None
 
         # Solidity wraps call targets in an 'expression' node – unwrap it
@@ -2458,27 +2506,29 @@ class CodeParser:
             "field_expression", "selector_expression",
         )
         if first.type in member_types:
-            # Check receiver (first child) -- only allow self/cls/this/super.
-            receiver = first.children[0] if first.children else None
-            if receiver is None:
-                return None
-            is_self_call = (
-                receiver.type in ("self", "this", "super")
-                or (
-                    receiver.type == "identifier"
-                    and receiver.text.decode("utf-8", errors="replace")
-                    in ("self", "cls", "this", "super")
+            # In test files, allow all method calls (needed for TESTED_BY edges).
+            # In production code, only allow self/cls/this/super receivers.
+            if not is_test_file:
+                receiver = first.children[0] if first.children else None
+                if receiver is None:
+                    return None
+                is_self_call = (
+                    receiver.type in ("self", "this", "super")
+                    or (
+                        receiver.type == "identifier"
+                        and receiver.text.decode("utf-8", errors="replace")
+                        in ("self", "cls", "this", "super")
+                    )
+                    # Python super().method() -- receiver is call(identifier:"super")
+                    or (
+                        receiver.type == "call"
+                        and receiver.children
+                        and receiver.children[0].type == "identifier"
+                        and receiver.children[0].text == b"super"
+                    )
                 )
-                # Python super().method() -- receiver is call(identifier:"super")
-                or (
-                    receiver.type == "call"
-                    and receiver.children
-                    and receiver.children[0].type == "identifier"
-                    and receiver.children[0].text == b"super"
-                )
-            )
-            if not is_self_call:
-                return None
+                if not is_self_call:
+                    return None
 
             # Get the rightmost identifier (the method name)
             for child in reversed(first.children):

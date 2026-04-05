@@ -67,11 +67,8 @@ class TestCodeParser:
         call_targets = {e.target for e in calls}
         # self._validate_token() resolves within the class
         assert any("_validate_token" in t for t in call_targets)
-        # service.authenticate() is an external method call -- filtered out
-        assert not any(
-            t.endswith("authenticate") for t in call_targets
-            if "::" in t and "self" not in t
-        )
+        # Fixture is in tests/ dir so it's treated as a test file --
+        # method calls are not filtered in test files (for TESTED_BY edges).
 
     def test_parse_typescript_file(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_typescript.ts")
@@ -149,7 +146,7 @@ class TestCodeParser:
     def test_method_call_filtering_python_self(self):
         """self.method() should emit a CALLS edge."""
         _, edges = self.parser.parse_bytes(
-            Path("/test/app.py"),
+            Path("/src/app.py"),
             b"class C:\n    def helper(self): pass\n"
             b"    def main(self):\n        self.helper()\n",
         )
@@ -159,7 +156,7 @@ class TestCodeParser:
     def test_method_call_filtering_python_external(self):
         """obj.method() should NOT emit a CALLS edge (unresolvable)."""
         _, edges = self.parser.parse_bytes(
-            Path("/test/app.py"),
+            Path("/src/app.py"),
             b"def main():\n    response.json()\n    data.get('k')\n",
         )
         calls = [e for e in edges if e.kind == "CALLS"]
@@ -170,7 +167,7 @@ class TestCodeParser:
     def test_method_call_filtering_python_super(self):
         """super().method() should emit a CALLS edge."""
         _, edges = self.parser.parse_bytes(
-            Path("/test/app.py"),
+            Path("/src/app.py"),
             b"class C:\n    def save(self):\n        super().save()\n",
         )
         calls = [e for e in edges if e.kind == "CALLS"]
@@ -179,7 +176,7 @@ class TestCodeParser:
     def test_method_call_filtering_ts_this(self):
         """this.method() should emit a CALLS edge in TS."""
         _, edges = self.parser.parse_bytes(
-            Path("/test/app.ts"),
+            Path("/src/app.ts"),
             b"class C {\n    helper() {}\n"
             b"    main() { this.helper(); }\n}\n",
         )
@@ -189,7 +186,7 @@ class TestCodeParser:
     def test_method_call_filtering_ts_external(self):
         """obj.method() should NOT emit a CALLS edge in TS."""
         _, edges = self.parser.parse_bytes(
-            Path("/test/app.ts"),
+            Path("/src/app.ts"),
             b"function main() { response.json(); data.get('k'); }\n",
         )
         calls = [e for e in edges if e.kind == "CALLS"]
@@ -283,8 +280,6 @@ class TestCodeParser:
         call_targets = {e.target for e in calls}
         # fetch() is a simple function call, should be present
         assert "fetch" in call_targets
-        # console.log() is an external method call, should be filtered
-        assert "log" not in call_targets
 
     def test_parse_vue_contains_edges(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vue.vue")
@@ -459,19 +454,18 @@ class TestCodeParser:
         assert describe_qualified & contains_sources
 
     def test_vitest_calls_edges(self):
-        """External method calls (service.findById) should be filtered out."""
+        """Test files should keep method calls (needed for TESTED_BY)."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         calls = [e for e in edges if e.kind == "CALLS"]
-        # service.findById() is an external method call -- should not produce a CALLS edge
-        assert not any("findById" in c.target for c in calls)
+        # Test files exempt from method call filtering -- service.findById kept
+        assert any("findById" in c.target for c in calls)
 
     def test_vitest_tested_by_edges(self):
-        """TESTED_BY edges need direct function calls (not method calls on locals)."""
+        """Test files with method calls should produce TESTED_BY edges."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         tested_by = [e for e in edges if e.kind == "TESTED_BY"]
-        # The fixture only has new X() and service.findById() -- no direct function calls
-        # from tests, so no TESTED_BY edges are expected.
-        assert len(tested_by) == 0
+        # service.findById() is kept in test files, so TESTED_BY edges exist
+        assert len(tested_by) >= 1
 
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
@@ -491,3 +485,50 @@ class TestCodeParser:
             )
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    def test_jsx_component_calls(self):
+        """JSX <Component /> should emit CALLS edges for uppercase components."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/App.tsx"),
+            b"function App() {\n"
+            b"  return <UserProfile />;\n"
+            b"}\n"
+            b"function UserProfile() { return <div />; }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert any("UserProfile" in t for t in targets)
+        # <div /> is lowercase HTML -- should NOT produce a CALLS edge
+        assert not any(t == "div" for t in targets)
+
+    def test_builtin_filtering_python(self):
+        """Python builtins (len, print, etc.) should not produce CALLS edges."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"def main():\n    x = len([1,2,3])\n    print(x)\n    my_func(x)\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "len" not in targets
+        assert "print" not in targets
+        assert "my_func" in targets
+
+    def test_test_file_keeps_method_calls(self):
+        """Test files should keep external method calls for TESTED_BY."""
+        _, edges = self.parser.parse_bytes(
+            Path("/project/tests/test_service.py"),
+            b"def test_fetch():\n    service.fetch_data()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "fetch_data" in targets
+
+    def test_prod_file_filters_method_calls(self):
+        """Production files should filter external method calls."""
+        _, edges = self.parser.parse_bytes(
+            Path("/project/src/service.py"),
+            b"def main():\n    service.fetch_data()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "fetch_data" not in targets
