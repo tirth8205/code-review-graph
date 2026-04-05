@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.2.0] - 2026-04-05
+
+### Added
+- **PreToolUse search enrichment**: New `code-review-graph enrich` CLI subcommand and Claude Code hook. When agents use Grep/Glob/Bash(rg/grep)/Read, results are automatically enriched with callers, callees, execution flows, community membership, and test coverage from the graph. Zero-friction adoption -- agents get structural context passively.
+- **Platform-aware instructions**: CLAUDE.md gets lighter instructions (hooks handle exploration), non-hook platforms (.cursorrules, AGENTS.md, etc.) get stronger "prefer graph tools" guidance with full tool table.
+
+### Changed
+- **CLAUDE.md instructions**: Removed "ALWAYS use graph tools BEFORE Grep/Glob/Read" directive -- the enrich hook now handles this passively. Instructions now focus on deep-analysis tools only (detect_changes, impact_radius, etc.), saving ~150 tokens per conversation.
+
+### Upgrade note
+If upgrading from v2.1.0, delete the `<!-- code-review-graph MCP tools -->` section from your CLAUDE.md (and .cursorrules, AGENTS.md, etc.) and re-run `code-review-graph install` to get the updated instructions.
+
+### Fixed
+- **Multi-word FTS5 search**: Queries now use AND logic (`"graph" AND "store"`) instead of phrase matching, so "graph store" finds GraphStore
+- **Deduplicated query results**: `callers_of`/`callees_of`/`inheritors_of` no longer return duplicate nodes when multiple call-site edges exist
+- **Ambiguous query auto-resolution**: Bare-name queries with multiple matches now auto-resolve to the production function when exactly one non-test candidate exists
+- **Test function deprioritization**: Search results apply 0.5x score penalty to test functions so production code ranks higher
+- **Composite edge index**: v6 migration adds composite index on edges for faster `upsert_edge` performance
+
 ## [2.1.0] - 2026-04-03
 
 ### Added

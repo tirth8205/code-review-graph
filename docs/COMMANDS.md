@@ -242,6 +242,9 @@ code-review-graph detect-changes               # Risk-scored change analysis
 code-review-graph detect-changes --base HEAD~3 # Custom base ref
 code-review-graph detect-changes --brief       # Compact output
 
+# Enrichment (PreToolUse hook)
+code-review-graph enrich                       # Enrich search results with graph context
+
 # Wiki
 code-review-graph wiki                         # Generate markdown wiki from communities
 

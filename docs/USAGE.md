@@ -95,6 +95,17 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search across all registered repositories.
 
+### 11. Enrich agent search results (v2.2)
+
+When installed via `code-review-graph install`, a PreToolUse hook automatically enriches Grep/Glob/Bash(rg/grep)/Read results with graph context:
+
+- **Callers and callees** of matched symbols
+- **Execution flows** the symbol participates in
+- **Community membership** (which module/area)
+- **Test coverage** (which tests cover the symbol)
+
+This is zero-friction -- agents get structural context passively alongside every search without needing to explicitly call graph tools.
+
 ## Token Savings
 
 | Scenario | Without graph | With graph |

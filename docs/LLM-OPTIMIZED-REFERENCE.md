@@ -1,4 +1,4 @@
-# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.1.0
+# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.2.0
 
 Claude Code: Read ONLY the exact `<section>` you need. Never load the whole file.
 
@@ -27,7 +27,7 @@ Never include full files unless explicitly asked.
 MCP tools (22): build_or_update_graph_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool, find_large_functions_tool, list_flows_tool, get_flow_tool, get_affected_flows_tool, list_communities_tool, get_community_tool, get_architecture_overview_tool, detect_changes_tool, refactor_tool, apply_refactor_tool, generate_wiki_tool, get_wiki_page_tool, list_repos_tool, cross_repo_search_tool
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check
 Skills: build-graph, review-delta, review-pr
-CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|register|unregister|repos|eval]
+CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|enrich|register|unregister|repos|eval]
 </section>
 
 <section name="legal">
@@ -37,6 +37,8 @@ MIT license. 100% local. No telemetry. DB file: .code-review-graph/graph.db
 <section name="watch">
 Run: code-review-graph watch (auto-updates graph on file save via watchdog)
 Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
+PreToolUse hooks with `if: "Bash(git commit*)"` run detect-changes before commits.
+PreToolUse hooks on Grep|Glob|Bash|Read run `code-review-graph enrich` to inject callers, callees, flows, and community context into search results.
 </section>
 
 <section name="embeddings">
@@ -48,7 +50,7 @@ Configure via CRG_EMBEDDING_MODEL env var or model parameter.
 </section>
 
 <section name="languages">
-Supported (18): Python, TypeScript/TSX, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl
+Supported (19): Python, TypeScript/TSX, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua
 Parser: Tree-sitter via tree-sitter-language-pack
 </section>
 

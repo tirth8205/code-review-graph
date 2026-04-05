@@ -14,10 +14,11 @@
   - `incremental.py` — Git-based change detection, file watching
   - `embeddings.py` — Optional vector embeddings (Local sentence-transformers, Google Gemini, MiniMax)
   - `visualization.py` — D3.js interactive HTML graph generator
-  - `cli.py` — CLI entry point (install, build, update, watch, status, visualize, serve, wiki, detect-changes, register, unregister, repos, eval)
+  - `cli.py` — CLI entry point (install, build, update, watch, status, visualize, serve, wiki, detect-changes, enrich, register, unregister, repos, eval)
   - `flows.py` — Execution flow detection and criticality scoring
   - `communities.py` — Community detection (Leiden algorithm or file-based grouping) and architecture overview
   - `search.py` — FTS5 hybrid search (keyword + vector)
+  - `enrich.py` — PreToolUse search enrichment (callers, callees, flows, communities for Grep/Glob/Read)
   - `changes.py` — Risk-scored change impact analysis (detect-changes)
   - `refactor.py` — Rename preview, dead code detection, refactoring suggestions
   - `hints.py` — Review hint generation
@@ -25,7 +26,7 @@
   - `wiki.py` — Markdown wiki generation from community structure
   - `skills.py` — Skill definitions for Claude Code plugin
   - `registry.py` — Multi-repo registry with connection pool
-  - `migrations.py` — Database schema migrations (v1-v5)
+  - `migrations.py` — Database schema migrations (v1-v6)
   - `tsconfig_resolver.py` — TypeScript path alias resolution
 
 - **VS Code Extension**: `code-review-graph-vscode/` (TypeScript)
@@ -38,7 +39,7 @@
 
 ```bash
 # Development
-uv run pytest tests/ --tb=short -q          # Run tests (572 tests)
+uv run pytest tests/ --tb=short -q          # Run tests (589 tests)
 uv run ruff check code_review_graph/        # Lint
 uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 
@@ -88,6 +89,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_changes.py` — Risk-scored change analysis
 - `tests/test_refactor.py` — Rename preview, dead code, suggestions
 - `tests/test_search.py` — FTS5 hybrid search
+- `tests/test_enrich.py` — PreToolUse search enrichment
 - `tests/test_hints.py` — Review hint generation
 - `tests/test_prompts.py` — MCP prompt template tests
 - `tests/test_wiki.py` — Wiki generation

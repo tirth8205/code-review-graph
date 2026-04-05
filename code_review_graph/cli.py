@@ -11,6 +11,7 @@ Usage:
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
+    code-review-graph enrich
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -294,6 +295,9 @@ def main() -> None:
     )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
+    # enrich (PreToolUse hook -- reads hook JSON from stdin)
+    sub.add_parser("enrich", help="Enrich search results with graph context (hook)")
+
     # serve
     serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -311,6 +315,11 @@ def main() -> None:
     if args.command == "serve":
         from .main import main as serve_main
         serve_main(repo_root=args.repo)
+        return
+
+    if args.command == "enrich":
+        from .enrich import run_hook
+        run_hook()
         return
 
     if args.command == "eval":

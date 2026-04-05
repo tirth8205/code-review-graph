@@ -2,6 +2,13 @@
 
 ## Shipped
 
+### v2.2.0
+- PreToolUse search enrichment (`code-review-graph enrich`)
+- Multi-word FTS5 AND search, deduplicated query results, ambiguous auto-resolution
+- Test function deprioritization in search
+- Composite edge index (v6 migration)
+- 589 tests across 23 test files
+
 ### v2.0.0
 - 22 MCP tools (up from 9) and 5 MCP prompts
 - 18 languages (added Dart, R, Perl)
@@ -13,7 +20,7 @@
 - Wiki generation from community structure
 - Multi-repo registry with cross-repo search
 - FTS5 full-text search with porter stemming
-- Database migrations (v1-v5)
+- Database migrations (v1-v6)
 - Evaluation framework with matplotlib visualization
 - TypeScript tsconfig path alias resolution
 - MiniMax embedding provider (embo-01)
