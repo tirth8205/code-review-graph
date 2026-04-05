@@ -143,8 +143,14 @@ def _fts_search(
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
     """
-    # Sanitize: wrap in double quotes to prevent FTS5 operator injection
-    safe_query = '"' + query.replace('"', '""') + '"'
+    # Split multi-word queries into AND-joined terms so "graph store" matches
+    # both "GraphStore" and nodes containing both words (not just exact phrase).
+    # Each term is quoted to prevent FTS5 operator injection.
+    terms = query.split()
+    if len(terms) <= 1:
+        safe_query = '"' + query.replace('"', '""') + '"'
+    else:
+        safe_query = " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
     try:
         rows = conn.execute(
@@ -357,6 +363,8 @@ def hybrid_search(
                 boost *= kind_boosts["_qualified"]
         if context_set and file_path in context_set:
             boost *= 1.5
+        if row["is_test"]:
+            boost *= 0.5
 
         boosted.append((node_id, score * boost))
 

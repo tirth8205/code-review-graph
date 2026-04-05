@@ -156,6 +156,15 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
         logger.info("Migration v5: created nodes_fts FTS5 virtual table")
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """v6: Add composite index on edges for upsert_edge performance."""
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_edges_composite
+        ON edges(kind, source_qualified, target_qualified, file_path, line)
+    """)
+    logger.info("Migration v6: created composite edge index")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -165,6 +174,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_v3,
     4: _migrate_v4,
     5: _migrate_v5,
+    6: _migrate_v6,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

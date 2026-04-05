@@ -306,24 +306,43 @@ class GraphStore:
         return [r["file_path"] for r in rows]
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
-        """Keyword search across node names with multi-word AND logic.
+        """Keyword search across node names.
 
-        Each word in the query must match independently (case-insensitive)
-        against the node name or qualified name. For example,
-        ``"firebase auth"`` matches ``verify_firebase_token`` and
-        ``FirebaseAuth`` but not ``get_user``.
+        Tries FTS5 first (fast, tokenized matching), then falls back to
+        LIKE-based substring search when FTS5 returns no results.
         """
-        words = query.lower().split()
+        words = query.split()
         if not words:
             return []
 
+        # Phase 1: FTS5 search (uses the indexed nodes_fts table)
+        try:
+            if len(words) == 1:
+                fts_query = '"' + query.replace('"', '""') + '"'
+            else:
+                fts_query = " AND ".join(
+                    '"' + w.replace('"', '""') + '"' for w in words
+                )
+            rows = self._conn.execute(
+                "SELECT n.* FROM nodes_fts f "
+                "JOIN nodes n ON f.rowid = n.id "
+                "WHERE nodes_fts MATCH ? LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+            if rows:
+                return [self._row_to_node(r) for r in rows]
+        except Exception:
+            pass  # FTS5 table may not exist on older schemas
+
+        # Phase 2: LIKE fallback (substring matching)
         conditions: list[str] = []
         params: list[str | int] = []
         for word in words:
+            w = word.lower()
             conditions.append(
                 "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
             )
-            params.extend([f"%{word}%", f"%{word}%"])
+            params.extend([f"%{w}%", f"%{w}%"])
 
         where = " AND ".join(conditions)
         sql = f"SELECT * FROM nodes WHERE {where} LIMIT ?"  # nosec B608
