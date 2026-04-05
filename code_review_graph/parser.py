@@ -2450,11 +2450,36 @@ class CodeParser:
             return None
 
         # Method call: obj.method(args)
+        # Only emit CALLS for self/cls/this/super receivers -- external method
+        # calls (session.execute(), data.get()) are unresolvable without type
+        # inference and create noise in the call graph.
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
         )
         if first.type in member_types:
+            # Check receiver (first child) -- only allow self/cls/this/super.
+            receiver = first.children[0] if first.children else None
+            if receiver is None:
+                return None
+            is_self_call = (
+                receiver.type in ("self", "this", "super")
+                or (
+                    receiver.type == "identifier"
+                    and receiver.text.decode("utf-8", errors="replace")
+                    in ("self", "cls", "this", "super")
+                )
+                # Python super().method() -- receiver is call(identifier:"super")
+                or (
+                    receiver.type == "call"
+                    and receiver.children
+                    and receiver.children[0].type == "identifier"
+                    and receiver.children[0].text == b"super"
+                )
+            )
+            if not is_self_call:
+                return None
+
             # Get the rightmost identifier (the method name)
             for child in reversed(first.children):
                 if child.type in (
