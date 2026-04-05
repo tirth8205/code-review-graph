@@ -2432,7 +2432,8 @@ class CodeParser:
             return None  # method child not found
 
         # Simple call: func_name(args)
-        if first.type == "identifier":
+        # Kotlin uses "simple_identifier" instead of "identifier".
+        if first.type in ("identifier", "simple_identifier"):
             return first.text.decode("utf-8", errors="replace")
 
         # Perl: function_call_expression / ambiguous_function_call_expression
@@ -2450,18 +2451,50 @@ class CodeParser:
             return None
 
         # Method call: obj.method(args)
+        # Only emit CALLS for self/cls/this/super receivers -- external method
+        # calls (session.execute(), data.get()) are unresolvable without type
+        # inference and create noise in the call graph.
+        # Kotlin uses "navigation_expression" for member access (obj.method).
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
+            "navigation_expression",
         )
         if first.type in member_types:
+            # Check receiver (first child) -- only allow self/cls/this/super.
+            receiver = first.children[0] if first.children else None
+            if receiver is None:
+                return None
+            is_self_call = (
+                receiver.type in ("self", "this", "super")
+                or (
+                    receiver.type in ("identifier", "simple_identifier")
+                    and receiver.text.decode("utf-8", errors="replace")
+                    in ("self", "cls", "this", "super")
+                )
+                # Python super().method() -- receiver is call(identifier:"super")
+                or (
+                    receiver.type == "call"
+                    and receiver.children
+                    and receiver.children[0].type == "identifier"
+                    and receiver.children[0].text == b"super"
+                )
+            )
+            if not is_self_call:
+                return None
+
             # Get the rightmost identifier (the method name)
+            # Kotlin navigation_expression uses navigation_suffix > simple_identifier.
             for child in reversed(first.children):
                 if child.type in (
                     "identifier", "property_identifier", "field_identifier",
-                    "field_name",
+                    "field_name", "simple_identifier",
                 ):
                     return child.text.decode("utf-8", errors="replace")
+                if child.type == "navigation_suffix":
+                    for sub in child.children:
+                        if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 
         # Scoped call (e.g., Rust path::func())
