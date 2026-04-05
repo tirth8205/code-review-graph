@@ -106,6 +106,7 @@
 - **6 MCP tools** for full graph interaction
 - **3 review-first skills**: build-graph, review-delta, review-pr
 - **PostToolUse hooks** (Write|Edit|Bash) for automatic background updates
+- **PreToolUse hooks** for pre-commit change analysis via `detect-changes`
 - **FastMCP 3.0 compatible** stdio MCP server
 
 ## Privacy & Data

@@ -229,11 +229,14 @@ code-review-graph install --dry-run # Preview without writing files
 
 # Build and update
 code-review-graph build                        # Full build
+code-review-graph build --quiet                # Full build, no output
 code-review-graph update                       # Incremental update
+code-review-graph update --quiet               # Incremental update, no output
 code-review-graph update --base origin/main    # Custom base ref
 
 # Monitor and inspect
 code-review-graph status                       # Graph statistics
+code-review-graph status --json                # Machine-readable JSON output
 code-review-graph watch                        # Auto-update on file changes
 code-review-graph visualize                    # Generate interactive HTML graph
 

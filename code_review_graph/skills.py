@@ -307,7 +307,7 @@ def generate_hooks_config() -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
     Returns a hooks config dict with PostToolUse, SessionStart, and
-    PreCommit hooks for automatic graph updates.
+    PreToolUse hooks for automatic graph updates and pre-commit analysis.
 
     Returns:
         Dict with hooks configuration suitable for .claude/settings.json.
@@ -317,20 +317,38 @@ def generate_hooks_config() -> dict[str, Any]:
             "PostToolUse": [
                 {
                     "matcher": "Edit|Write|Bash",
-                    "command": "code-review-graph update --quiet",
-                    "timeout": 5000,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph update --quiet",
+                            "timeout": 5000,
+                        }
+                    ],
                 },
             ],
             "SessionStart": [
                 {
-                    "command": "code-review-graph status --json",
-                    "timeout": 3000,
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph status --json",
+                            "timeout": 3000,
+                        }
+                    ],
                 },
             ],
-            "PreCommit": [
+            "PreToolUse": [
                 {
-                    "command": "code-review-graph detect-changes --brief",
-                    "timeout": 10000,
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "if": "Bash(git commit*)",
+                            "command": "code-review-graph detect-changes --brief",
+                            "timeout": 10000,
+                        }
+                    ],
                 },
             ],
         }

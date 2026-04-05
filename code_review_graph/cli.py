@@ -226,11 +226,13 @@ def main() -> None:
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    build_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
     update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    update_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
 
     # watch
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
@@ -239,6 +241,11 @@ def main() -> None:
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    status_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    status_cmd.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output as JSON",
+    )
 
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
@@ -421,42 +428,61 @@ def main() -> None:
     try:
         if args.command == "build":
             result = full_build(repo_root, store)
-            print(
-                f"Full build: {result['files_parsed']} files, "
-                f"{result['total_nodes']} nodes, {result['total_edges']} edges"
-            )
-            if result["errors"]:
-                print(f"Errors: {len(result['errors'])}")
+            if not args.quiet:
+                print(
+                    f"Full build: {result['files_parsed']} files, "
+                    f"{result['total_nodes']} nodes, {result['total_edges']} edges"
+                )
+                if result["errors"]:
+                    print(f"Errors: {len(result['errors'])}")
 
         elif args.command == "update":
             result = incremental_update(repo_root, store, base=args.base)
-            print(
-                f"Incremental: {result['files_updated']} files updated, "
-                f"{result['total_nodes']} nodes, {result['total_edges']} edges"
-            )
+            if not args.quiet:
+                print(
+                    f"Incremental: {result['files_updated']} files updated, "
+                    f"{result['total_nodes']} nodes, {result['total_edges']} edges"
+                )
 
         elif args.command == "status":
+            import json as json_mod
             stats = store.get_stats()
-            print(f"Nodes: {stats.total_nodes}")
-            print(f"Edges: {stats.total_edges}")
-            print(f"Files: {stats.files_count}")
-            print(f"Languages: {', '.join(stats.languages)}")
-            print(f"Last updated: {stats.last_updated or 'never'}")
-            # Show branch info and warn if stale
             stored_branch = store.get_metadata("git_branch")
             stored_sha = store.get_metadata("git_head_sha")
-            if stored_branch:
-                print(f"Built on branch: {stored_branch}")
-            if stored_sha:
-                print(f"Built at commit: {stored_sha[:12]}")
             from .incremental import _git_branch_info
             current_branch, current_sha = _git_branch_info(repo_root)
+            stale_warning = None
             if stored_branch and current_branch and stored_branch != current_branch:
-                print(
-                    f"WARNING: Graph was built on '{stored_branch}' "
+                stale_warning = (
+                    f"Graph was built on '{stored_branch}' "
                     f"but you are now on '{current_branch}'. "
                     f"Run 'code-review-graph build' to rebuild."
                 )
+
+            if getattr(args, "json_output", False):
+                data = {
+                    "nodes": stats.total_nodes,
+                    "edges": stats.total_edges,
+                    "files": stats.files_count,
+                    "languages": list(stats.languages),
+                    "last_updated": stats.last_updated,
+                    "branch": stored_branch,
+                    "commit": stored_sha[:12] if stored_sha else None,
+                    "stale": stale_warning,
+                }
+                print(json_mod.dumps(data))
+            elif not args.quiet:
+                print(f"Nodes: {stats.total_nodes}")
+                print(f"Edges: {stats.total_edges}")
+                print(f"Files: {stats.files_count}")
+                print(f"Languages: {', '.join(stats.languages)}")
+                print(f"Last updated: {stats.last_updated or 'never'}")
+                if stored_branch:
+                    print(f"Built on branch: {stored_branch}")
+                if stored_sha:
+                    print(f"Built at commit: {stored_sha[:12]}")
+                if stale_warning:
+                    print(f"WARNING: {stale_warning}")
 
         elif args.command == "watch":
             watch(repo_root, store)

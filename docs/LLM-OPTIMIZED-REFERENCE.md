@@ -37,6 +37,7 @@ MIT license. 100% local. No telemetry. DB file: .code-review-graph/graph.db
 <section name="watch">
 Run: code-review-graph watch (auto-updates graph on file save via watchdog)
 Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
+PreToolUse hooks with `if: "Bash(git commit*)"` run detect-changes before commits.
 </section>
 
 <section name="embeddings">

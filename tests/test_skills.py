@@ -66,32 +66,43 @@ class TestGenerateHooksConfig:
     def test_has_post_tool_use(self):
         config = generate_hooks_config()
         assert "PostToolUse" in config["hooks"]
-        hooks = config["hooks"]["PostToolUse"]
-        assert len(hooks) >= 1
-        assert hooks[0]["matcher"] == "Edit|Write|Bash"
-        assert "update" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 5000
+        entries = config["hooks"]["PostToolUse"]
+        assert len(entries) >= 1
+        assert entries[0]["matcher"] == "Edit|Write|Bash"
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "update" in inner[0]["command"]
+        assert inner[0]["timeout"] == 5000
 
     def test_has_session_start(self):
         config = generate_hooks_config()
         assert "SessionStart" in config["hooks"]
-        hooks = config["hooks"]["SessionStart"]
-        assert len(hooks) >= 1
-        assert "status" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 3000
+        entries = config["hooks"]["SessionStart"]
+        assert len(entries) >= 1
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "status" in inner[0]["command"]
+        assert inner[0]["timeout"] == 3000
 
-    def test_has_pre_commit(self):
+    def test_has_pre_tool_use(self):
         config = generate_hooks_config()
-        assert "PreCommit" in config["hooks"]
-        hooks = config["hooks"]["PreCommit"]
-        assert len(hooks) >= 1
-        assert "detect-changes" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 10000
+        assert "PreToolUse" in config["hooks"]
+        entries = config["hooks"]["PreToolUse"]
+        assert len(entries) >= 1
+        assert entries[0]["matcher"] == "Bash"
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert inner[0]["if"] == "Bash(git commit*)"
+        assert "detect-changes" in inner[0]["command"]
+        assert inner[0]["timeout"] == 10000
 
-    def test_has_all_three_hook_types(self):
+    def test_has_all_hook_types(self):
         config = generate_hooks_config()
         hook_types = set(config["hooks"].keys())
-        assert hook_types == {"PostToolUse", "SessionStart", "PreCommit"}
+        assert hook_types == {"PostToolUse", "SessionStart", "PreToolUse"}
 
 
 class TestInstallHooks:
@@ -114,7 +125,7 @@ class TestInstallHooks:
         assert data["customSetting"] is True
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
-        assert "PreCommit" in data["hooks"]
+        assert "PreToolUse" in data["hooks"]
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
