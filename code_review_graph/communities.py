@@ -433,6 +433,46 @@ def detect_communities(
     return results
 
 
+def incremental_detect_communities(
+    store: GraphStore,
+    changed_files: list[str],
+    min_size: int = 2,
+) -> int:
+    """Re-detect communities only if changed files affect existing communities.
+
+    If no existing communities contain nodes from changed files, skips
+    re-detection entirely (the common case for small changes). Otherwise
+    re-runs full community detection.
+
+    Args:
+        store: The GraphStore instance.
+        changed_files: List of file paths that have changed.
+        min_size: Minimum number of nodes for a community to be included.
+
+    Returns:
+        Number of communities detected, or 0 if skipped.
+    """
+    if not changed_files:
+        return 0
+
+    conn = store._conn
+
+    # Check if any communities are affected
+    placeholders = ",".join("?" * len(changed_files))
+    affected = conn.execute(
+        f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
+        f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
+        changed_files,
+    ).fetchone()
+
+    if not affected or affected[0] == 0:
+        return 0  # No communities affected, skip
+
+    # Re-run full community detection (correct and fast enough)
+    communities = detect_communities(store, min_size=min_size)
+    return store_communities(store, communities)
+
+
 def store_communities(
     store: GraphStore, communities: list[dict[str, Any]]
 ) -> int:

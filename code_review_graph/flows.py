@@ -117,6 +117,78 @@ def detect_entry_points(store: GraphStore) -> list[GraphNode]:
 # ---------------------------------------------------------------------------
 
 
+def _trace_single_flow(
+    store: GraphStore,
+    ep: GraphNode,
+    max_depth: int = 15,
+) -> Optional[dict]:
+    """Trace a single execution flow from *ep* via forward BFS.
+
+    Returns a flow dict (see :func:`trace_flows` for the schema) or ``None``
+    if the flow is trivial (single-node, no outgoing CALLS that resolve).
+    """
+    path_ids: list[int] = []
+    path_qnames: list[str] = []
+    visited: set[str] = set()
+    queue: deque[tuple[str, int]] = deque()
+
+    # Seed with the entry point itself.
+    queue.append((ep.qualified_name, 0))
+    visited.add(ep.qualified_name)
+    path_ids.append(ep.id)
+    path_qnames.append(ep.qualified_name)
+
+    actual_depth = 0
+
+    while queue:
+        current_qn, depth = queue.popleft()
+        if depth > actual_depth:
+            actual_depth = depth
+        if depth >= max_depth:
+            continue
+
+        # Follow forward CALLS edges.
+        edges = store.get_edges_by_source(current_qn)
+        for edge in edges:
+            if edge.kind != "CALLS":
+                continue
+            target_qn = edge.target_qualified
+            if target_qn in visited:
+                continue
+            # Resolve the target node to get its id.
+            target_node = store.get_node(target_qn)
+            if target_node is None:
+                continue
+            visited.add(target_qn)
+            path_ids.append(target_node.id)
+            path_qnames.append(target_qn)
+            queue.append((target_qn, depth + 1))
+
+    # Skip trivial single-node flows.
+    if len(path_ids) < 2:
+        return None
+
+    files = list({
+        n.file_path
+        for qn in path_qnames
+        if (n := store.get_node(qn)) is not None
+    })
+
+    flow: dict = {
+        "name": _sanitize_name(ep.name),
+        "entry_point": ep.qualified_name,
+        "entry_point_id": ep.id,
+        "path": path_ids,
+        "depth": actual_depth,
+        "node_count": len(path_ids),
+        "file_count": len(files),
+        "files": files,
+        "criticality": 0.0,
+    }
+    flow["criticality"] = compute_criticality(flow, store)
+    return flow
+
+
 def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
     """Trace execution flows from every entry point via forward BFS.
 
@@ -135,66 +207,9 @@ def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
     flows: list[dict] = []
 
     for ep in entry_points:
-        path_ids: list[int] = []
-        path_qnames: list[str] = []
-        visited: set[str] = set()
-        queue: deque[tuple[str, int]] = deque()
-
-        # Seed with the entry point itself.
-        queue.append((ep.qualified_name, 0))
-        visited.add(ep.qualified_name)
-        path_ids.append(ep.id)
-        path_qnames.append(ep.qualified_name)
-
-        actual_depth = 0
-
-        while queue:
-            current_qn, depth = queue.popleft()
-            if depth > actual_depth:
-                actual_depth = depth
-            if depth >= max_depth:
-                continue
-
-            # Follow forward CALLS edges.
-            edges = store.get_edges_by_source(current_qn)
-            for edge in edges:
-                if edge.kind != "CALLS":
-                    continue
-                target_qn = edge.target_qualified
-                if target_qn in visited:
-                    continue
-                # Resolve the target node to get its id.
-                target_node = store.get_node(target_qn)
-                if target_node is None:
-                    continue
-                visited.add(target_qn)
-                path_ids.append(target_node.id)
-                path_qnames.append(target_qn)
-                queue.append((target_qn, depth + 1))
-
-        # Skip trivial single-node flows.
-        if len(path_ids) < 2:
-            continue
-
-        files = list({
-            n.file_path
-            for qn in path_qnames
-            if (n := store.get_node(qn)) is not None
-        })
-
-        flow: dict = {
-            "name": _sanitize_name(ep.name),
-            "entry_point": ep.qualified_name,
-            "entry_point_id": ep.id,
-            "path": path_ids,
-            "depth": actual_depth,
-            "node_count": len(path_ids),
-            "file_count": len(files),
-            "files": files,
-            "criticality": 0.0,
-        }
-        flow["criticality"] = compute_criticality(flow, store)
-        flows.append(flow)
+        flow = _trace_single_flow(store, ep, max_depth)
+        if flow is not None:
+            flows.append(flow)
 
     # Sort by criticality descending.
     flows.sort(key=lambda f: f["criticality"], reverse=True)
@@ -324,6 +339,116 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
         flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # Insert memberships.
+        node_ids = flow.get("path", [])
+        for position, node_id in enumerate(node_ids):
+            conn.execute(
+                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                "VALUES (?, ?, ?)",
+                (flow_id, node_id, position),
+            )
+        count += 1
+
+    conn.commit()
+    return count
+
+
+def incremental_trace_flows(
+    store: GraphStore,
+    changed_files: list[str],
+    max_depth: int = 15,
+) -> int:
+    """Re-trace only flows that touch *changed_files*.  Much faster than full trace.
+
+    1. Find flow IDs whose memberships reference nodes in *changed_files*.
+    2. Collect the entry-point node IDs of those flows before deleting them.
+    3. Delete only the affected flows and their memberships.
+    4. Re-detect entry points, keeping those in *changed_files* **or** whose
+       node ID was an entry point of a deleted flow.
+    5. BFS-trace each relevant entry point via :func:`_trace_single_flow`.
+    6. INSERT the new flows (without clearing unrelated flows).
+
+    Returns the number of re-traced flows that were stored.
+    """
+    if not changed_files:
+        return 0
+
+    conn = store._conn
+    changed_file_set = set(changed_files)
+
+    # ------------------------------------------------------------------
+    # 1. Find affected flow IDs
+    # ------------------------------------------------------------------
+    placeholders = ",".join("?" * len(changed_files))
+    affected_rows = conn.execute(
+        f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
+        f"JOIN nodes n ON n.id = fm.node_id "
+        f"WHERE n.file_path IN ({placeholders})",
+        changed_files,
+    ).fetchall()
+    affected_ids = [r[0] for r in affected_rows]
+
+    # ------------------------------------------------------------------
+    # 2. Collect old entry-point node IDs before deletion
+    # ------------------------------------------------------------------
+    entry_point_ids: set[int] = set()
+    if affected_ids:
+        ep_placeholders = ",".join("?" * len(affected_ids))
+        ep_rows = conn.execute(
+            f"SELECT entry_point_id FROM flows "  # nosec B608
+            f"WHERE id IN ({ep_placeholders})",
+            affected_ids,
+        ).fetchall()
+        entry_point_ids = {r[0] for r in ep_rows}
+
+    # ------------------------------------------------------------------
+    # 3. Delete affected flows and their memberships
+    # ------------------------------------------------------------------
+    for fid in affected_ids:
+        conn.execute("DELETE FROM flow_memberships WHERE flow_id = ?", (fid,))
+        conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
+    conn.commit()
+
+    # ------------------------------------------------------------------
+    # 4. Re-detect entry points and filter to relevant ones
+    # ------------------------------------------------------------------
+    entry_points = detect_entry_points(store)
+    relevant_eps = [
+        ep for ep in entry_points
+        if ep.file_path in changed_file_set or ep.id in entry_point_ids
+    ]
+
+    # ------------------------------------------------------------------
+    # 5. BFS-trace each relevant entry point
+    # ------------------------------------------------------------------
+    new_flows: list[dict] = []
+    for ep in relevant_eps:
+        flow = _trace_single_flow(store, ep, max_depth)
+        if flow is not None:
+            new_flows.append(flow)
+
+    # ------------------------------------------------------------------
+    # 6. INSERT new flows without clearing unrelated ones
+    # ------------------------------------------------------------------
+    count = 0
+    for flow in new_flows:
+        path_json = json.dumps(flow.get("path", []))
+        conn.execute(
+            """INSERT INTO flows
+               (name, entry_point_id, depth, node_count, file_count,
+                criticality, path_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                flow["name"],
+                flow["entry_point_id"],
+                flow["depth"],
+                flow["node_count"],
+                flow["file_count"],
+                flow["criticality"],
+                path_json,
+            ),
+        )
+        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
         node_ids = flow.get("path", [])
         for position, node_id in enumerate(node_ids):
             conn.execute(

@@ -13,6 +13,7 @@ from code_review_graph.communities import (
     detect_communities,
     get_architecture_overview,
     get_communities,
+    incremental_detect_communities,
     store_communities,
 )
 from code_review_graph.graph import GraphEdge, GraphNode, GraphStore
@@ -295,3 +296,24 @@ class TestCommunities:
     def test_igraph_available_is_bool(self):
         """IGRAPH_AVAILABLE is a boolean."""
         assert isinstance(IGRAPH_AVAILABLE, bool)
+
+    def test_incremental_detect_no_affected_communities(self):
+        """incremental_detect_communities returns 0 when no communities are affected."""
+        self._seed_two_clusters()
+        communities = detect_communities(self.store, min_size=2)
+        store_communities(self.store, communities)
+
+        # Pass a file that has no nodes in any community
+        result = incremental_detect_communities(self.store, ["nonexistent.py"])
+        assert result == 0
+
+    def test_incremental_detect_redetects_affected(self):
+        """incremental_detect_communities re-detects when communities ARE affected."""
+        self._seed_two_clusters()
+        communities = detect_communities(self.store, min_size=2)
+        stored = store_communities(self.store, communities)
+        assert stored > 0
+
+        # Pass a file that IS part of existing communities
+        result = incremental_detect_communities(self.store, ["auth.py"])
+        assert result > 0

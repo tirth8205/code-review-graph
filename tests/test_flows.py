@@ -8,6 +8,7 @@ from code_review_graph.flows import (
     get_affected_flows,
     get_flow_by_id,
     get_flows,
+    incremental_trace_flows,
     store_flows,
     trace_flows,
 )
@@ -374,3 +375,97 @@ class TestFlows:
         assert len(by_depth) >= 2
         # Deepest flow first.
         assert by_depth[0]["depth"] >= by_depth[-1]["depth"]
+
+    # ---------------------------------------------------------------
+    # incremental_trace_flows
+    # ---------------------------------------------------------------
+
+    def test_incremental_trace_flows_no_changed_files(self):
+        """Empty changed_files returns 0 and does nothing."""
+        assert incremental_trace_flows(self.store, []) == 0
+
+    def test_incremental_trace_flows_preserves_unrelated(self):
+        """Flows not touching changed files survive an incremental update."""
+        # Flow A: routes.py -> services.py
+        self._add_func("handler", path="routes.py")
+        self._add_func("service", path="services.py")
+        self._add_call("routes.py::handler", "services.py::service", "routes.py")
+
+        # Flow B: cli.py -> utils.py (unrelated to routes/services)
+        self._add_func("main", path="cli.py")
+        self._add_func("helper", path="utils.py")
+        self._add_call("cli.py::main", "utils.py::helper", "cli.py")
+
+        # Store both flows
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        initial = get_flows(self.store)
+        initial_count = len(initial)
+        assert initial_count >= 2
+
+        # Incrementally update only services.py — Flow A gets re-traced,
+        # Flow B stays untouched.
+        incremental_trace_flows(self.store, ["services.py"])
+
+        after = get_flows(self.store)
+        # Flow B should still be present.
+        cli_flows = [f for f in after if f["name"] == "main"]
+        assert len(cli_flows) == 1
+
+    def test_incremental_trace_flows_retraces_affected(self):
+        """Affected flows are deleted and re-traced."""
+        self._add_func("handler", path="routes.py")
+        self._add_func("service", path="services.py")
+        self._add_func("repo", path="repo.py")
+        self._add_call("routes.py::handler", "services.py::service", "routes.py")
+        self._add_call("services.py::service", "repo.py::repo", "services.py")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        # Change services.py — the handler flow should be re-traced.
+        count = incremental_trace_flows(self.store, ["services.py"])
+        assert count >= 1
+
+        after = get_flows(self.store)
+        handler_flows = [f for f in after if f["name"] == "handler"]
+        assert len(handler_flows) == 1
+        assert handler_flows[0]["node_count"] == 3
+
+    def test_incremental_trace_flows_new_entry_point(self):
+        """New entry points in changed files are discovered."""
+        # Start with one flow.
+        self._add_func("old_entry", path="a.py")
+        self._add_func("old_callee", path="a.py")
+        self._add_call("a.py::old_entry", "a.py::old_callee", "a.py")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        # Now add a new entry point in b.py.
+        self._add_func("new_entry", path="b.py")
+        self._add_func("new_callee", path="b.py")
+        self._add_call("b.py::new_entry", "b.py::new_callee", "b.py")
+
+        count = incremental_trace_flows(self.store, ["b.py"])
+        assert count >= 1
+
+        after = get_flows(self.store)
+        new_flows = [f for f in after if f["name"] == "new_entry"]
+        assert len(new_flows) == 1
+
+    def test_incremental_trace_flows_no_affected_flows(self):
+        """When changed files have no existing flows, only new entry points are checked."""
+        self._add_func("handler", path="routes.py")
+        self._add_func("service", path="services.py")
+        self._add_call("routes.py::handler", "services.py::service", "routes.py")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        initial_count = len(get_flows(self.store))
+
+        # Change a file with no existing flow involvement and no entry points.
+        count = incremental_trace_flows(self.store, ["nonexistent.py"])
+        assert count == 0
+        # Original flows unchanged.
+        assert len(get_flows(self.store)) == initial_count

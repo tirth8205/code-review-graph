@@ -17,8 +17,13 @@ def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
     postprocess: str,
+    full_rebuild: bool = False,
+    changed_files: list[str] | None = None,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
+
+    When *full_rebuild* is False and *changed_files* are available,
+    uses incremental flow/community detection for faster updates.
 
     Returns a list of warning strings (empty on success).
     """
@@ -64,27 +69,41 @@ def _run_postprocess(
         return warnings
 
     # -- Expensive: flows + communities (only for "full") --
-    try:
-        from code_review_graph.flows import store_flows as _store_flows
-        from code_review_graph.flows import trace_flows as _trace_flows
+    use_incremental = not full_rebuild and bool(changed_files)
 
-        flows = _trace_flows(store)
-        count = _store_flows(store, flows)
+    try:
+        if use_incremental:
+            from code_review_graph.flows import incremental_trace_flows
+
+            count = incremental_trace_flows(store, changed_files)
+        else:
+            from code_review_graph.flows import store_flows as _store_flows
+            from code_review_graph.flows import trace_flows as _trace_flows
+
+            flows = _trace_flows(store)
+            count = _store_flows(store, flows)
         build_result["flows_detected"] = count
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Flow detection failed: %s", e)
         warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
 
     try:
-        from code_review_graph.communities import (
-            detect_communities as _detect_communities,
-        )
-        from code_review_graph.communities import (
-            store_communities as _store_communities,
-        )
+        if use_incremental:
+            from code_review_graph.communities import (
+                incremental_detect_communities,
+            )
 
-        comms = _detect_communities(store)
-        count = _store_communities(store, comms)
+            count = incremental_detect_communities(store, changed_files)
+        else:
+            from code_review_graph.communities import (
+                detect_communities as _detect_communities,
+            )
+            from code_review_graph.communities import (
+                store_communities as _store_communities,
+            )
+
+            comms = _detect_communities(store)
+            count = _store_communities(store, comms)
         build_result["communities_detected"] = count
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
@@ -156,7 +175,12 @@ def build_or_update_graph(
                 **result,
             }
 
-        warnings = _run_postprocess(store, build_result, postprocess)
+        # Pass changed_files for incremental flow/community detection
+        changed = result.get("changed_files") if not full_rebuild else None
+        warnings = _run_postprocess(
+            store, build_result, postprocess,
+            full_rebuild=full_rebuild, changed_files=changed,
+        )
         if warnings:
             build_result["warnings"] = warnings
         return build_result
