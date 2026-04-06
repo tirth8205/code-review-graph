@@ -267,20 +267,18 @@ def collect_all_files(repo_root: Path) -> list[str]:
     return files
 
 
-def find_dependents(store: GraphStore, file_path: str) -> list[str]:
-    """Find files that import from or depend on the given file.
+_MAX_DEPENDENT_HOPS = int(os.environ.get("CRG_DEPENDENT_HOPS", "2"))
+_MAX_DEPENDENT_FILES = 500
 
-    Looks at IMPORTS_FROM edges where target matches the file path.
-    """
-    dependents = set()
-    # Find edges where someone imports from this file
+
+def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
+    """Find files that directly depend on *file_path* (single hop)."""
+    dependents: set[str] = set()
     edges = store.get_edges_by_target(file_path)
     for e in edges:
         if e.kind == "IMPORTS_FROM":
-            # The source is a file path (for IMPORTS_FROM edges)
             dependents.add(e.file_path)
 
-    # Also check for DEPENDS_ON edges
     nodes = store.get_nodes_by_file(file_path)
     for node in nodes:
         for e in store.get_edges_by_target(node.qualified_name):
@@ -288,7 +286,41 @@ def find_dependents(store: GraphStore, file_path: str) -> list[str]:
                 dependents.add(e.file_path)
 
     dependents.discard(file_path)
-    return list(dependents)
+    return dependents
+
+
+def find_dependents(
+    store: GraphStore,
+    file_path: str,
+    max_hops: int = _MAX_DEPENDENT_HOPS,
+) -> list[str]:
+    """Find files that import from or depend on the given file.
+
+    Performs up to *max_hops* iterations of expansion (default 2).
+    Stops early if the total exceeds 500 files.
+    """
+    all_dependents: set[str] = set()
+    visited: set[str] = {file_path}
+    frontier: set[str] = {file_path}
+    for _hop in range(max_hops):
+        next_frontier: set[str] = set()
+        for fp in frontier:
+            deps = _single_hop_dependents(store, fp)
+            new_deps = deps - visited
+            all_dependents.update(new_deps)
+            next_frontier.update(new_deps)
+        visited.update(next_frontier)
+        frontier = next_frontier
+        if not frontier:
+            break
+        if len(all_dependents) > _MAX_DEPENDENT_FILES:
+            logger.warning(
+                "Dependent expansion capped at %d files for %s",
+                len(all_dependents), file_path,
+            )
+            # Truncate to the cap
+            return list(all_dependents)[:_MAX_DEPENDENT_FILES]
+    return list(all_dependents)
 
 
 def _parse_single_file(

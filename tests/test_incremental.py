@@ -9,6 +9,8 @@ from code_review_graph.incremental import (
     _load_ignore_patterns,
     _parse_single_file,
     _should_ignore,
+    _single_hop_dependents,
+    find_dependents,
     find_project_root,
     find_repo_root,
     full_build,
@@ -301,3 +303,99 @@ class TestParallelParsing:
         assert serial_files == parallel_files
         assert serial_nodes == parallel_nodes
         assert serial_edges == parallel_edges
+
+
+class TestMultiHopDependents:
+    """Tests for N-hop dependent discovery."""
+
+    def _make_chain_store(self, tmp_path):
+        """Build A -> B -> C chain in the graph."""
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        db_path = tmp_path / "chain.db"
+        store = GraphStore(db_path)
+        for name, path in [("a", "/a.py"), ("b", "/b.py"), ("c", "/c.py")]:
+            store.upsert_node(NodeInfo(
+                kind="File", name=path, file_path=path,
+                line_start=1, line_end=10, language="python",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name=f"func_{name}", file_path=path,
+                line_start=2, line_end=8, language="python",
+            ))
+        # A imports B, B imports C
+        store.upsert_edge(EdgeInfo(
+            kind="IMPORTS_FROM", source="/a.py::func_a",
+            target="/b.py::func_b", file_path="/a.py", line=1,
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="IMPORTS_FROM", source="/b.py::func_b",
+            target="/c.py::func_c", file_path="/b.py", line=1,
+        ))
+        store.commit()
+        return store
+
+    def test_single_hop_finds_direct_only(self, tmp_path):
+        store = self._make_chain_store(tmp_path)
+        try:
+            deps = _single_hop_dependents(store, "/c.py")
+            assert "/b.py" in deps
+            assert "/a.py" not in deps
+        finally:
+            store.close()
+
+    def test_one_hop_finds_b_not_a(self, tmp_path):
+        store = self._make_chain_store(tmp_path)
+        try:
+            deps = find_dependents(store, "/c.py", max_hops=1)
+            assert "/b.py" in deps
+            assert "/a.py" not in deps
+        finally:
+            store.close()
+
+    def test_two_hops_finds_b_and_a(self, tmp_path):
+        store = self._make_chain_store(tmp_path)
+        try:
+            deps = find_dependents(store, "/c.py", max_hops=2)
+            assert "/b.py" in deps
+            assert "/a.py" in deps
+        finally:
+            store.close()
+
+    def test_cap_triggers_on_many_files(self, tmp_path):
+        """The 500-file cap prevents runaway expansion."""
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        db_path = tmp_path / "big.db"
+        store = GraphStore(db_path)
+        try:
+            # Hub node that many files depend on
+            store.upsert_node(NodeInfo(
+                kind="File", name="/hub.py", file_path="/hub.py",
+                line_start=1, line_end=10, language="python",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="hub_func", file_path="/hub.py",
+                line_start=2, line_end=8, language="python",
+            ))
+            for i in range(600):
+                path = f"/dep{i}.py"
+                store.upsert_node(NodeInfo(
+                    kind="File", name=path, file_path=path,
+                    line_start=1, line_end=10, language="python",
+                ))
+                store.upsert_node(NodeInfo(
+                    kind="Function", name=f"func_{i}", file_path=path,
+                    line_start=2, line_end=8, language="python",
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="IMPORTS_FROM", source=f"{path}::func_{i}",
+                    target="/hub.py::hub_func", file_path=path, line=1,
+                ))
+            store.commit()
+
+            # Even with high max_hops, cap should limit results
+            deps = find_dependents(store, "/hub.py", max_hops=5)
+            assert len(deps) <= 500
+        finally:
+            store.close()
