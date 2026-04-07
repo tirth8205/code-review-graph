@@ -20,9 +20,7 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
         int: The schema version (0 if metadata table doesn't exist, 1 if not set).
     """
     try:
-        row = conn.execute(
-            "SELECT value FROM metadata WHERE key = 'schema_version'"
-        ).fetchone()
+        row = conn.execute("SELECT value FROM metadata WHERE key = 'schema_version'").fetchone()
         if row is None:
             return 1
         return int(row[0] if isinstance(row, (tuple, list)) else row["value"])
@@ -39,10 +37,20 @@ def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
     )
 
 
-_KNOWN_TABLES = frozenset({
-    "nodes", "edges", "metadata", "communities", "flows", "flow_memberships", "nodes_fts",
-    "community_summaries", "flow_snapshots", "risk_index",
-})
+_KNOWN_TABLES = frozenset(
+    {
+        "nodes",
+        "edges",
+        "metadata",
+        "communities",
+        "flows",
+        "flow_memberships",
+        "nodes_fts",
+        "community_summaries",
+        "flow_snapshots",
+        "risk_index",
+    }
+)
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -59,8 +67,7 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     if table not in _KNOWN_TABLES:
         raise ValueError(f"Unknown table: {table}")
     row = conn.execute(
-        "SELECT count(*) FROM sqlite_master WHERE type IN ('table', 'view') "
-        "AND name = ?",
+        "SELECT count(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
         (table,),
     ).fetchone()
     return row[0] > 0
@@ -102,12 +109,8 @@ def _migrate_v3(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (flow_id, node_id)
         )
     """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_flows_criticality ON flows(criticality DESC)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_flows_entry ON flows(entry_point_id)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_criticality ON flows(criticality DESC)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flows_entry ON flows(entry_point_id)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_flow_memberships_node ON flow_memberships(node_id)"
     )
@@ -132,12 +135,8 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     if not _has_column(conn, "nodes", "community_id"):
         conn.execute("ALTER TABLE nodes ADD COLUMN community_id INTEGER")
         logger.info("Migration v4: added 'community_id' column to nodes")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_nodes_community ON nodes(community_id)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_communities_parent ON communities(parent_id)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_community ON nodes(community_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_communities_parent ON communities(parent_id)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_communities_cohesion ON communities(cohesion DESC)"
     )
@@ -195,12 +194,21 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
             FOREIGN KEY (node_id) REFERENCES nodes(id)
         )
     """)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_risk_index_score "
-        "ON risk_index(risk_score DESC)"
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_risk_index_score ON risk_index(risk_score DESC)")
+    logger.info(
+        "Migration v6: created summary tables (community_summaries, flow_snapshots, risk_index)"
     )
-    logger.info("Migration v6: created summary tables "
-                "(community_summaries, flow_snapshots, risk_index)")
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v7: Add compound edge indexes for summary and risk queries."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind)"
+    )
+    logger.info("Migration v7: added compound edge indexes")
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +221,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_v4,
     5: _migrate_v5,
     6: _migrate_v6,
+    7: _migrate_v7,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

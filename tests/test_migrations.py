@@ -34,9 +34,7 @@ class TestMigrations:
 
         # Manually create a v1 database (base schema only, version=1)
         conn = sqlite3.connect(str(self.tmp.name))
-        conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '1')"
-        )
+        conn.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', '1')")
         conn.commit()
         # Drop migration artifacts to simulate v1
         conn.execute("DROP TABLE IF EXISTS flows")
@@ -98,9 +96,7 @@ class TestMigrations:
     def test_get_schema_version_no_key(self):
         """get_schema_version returns 1 when metadata exists but key is missing."""
         conn = sqlite3.connect(":memory:")
-        conn.execute(
-            "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-        )
+        conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         conn.commit()
         assert get_schema_version(conn) == 1
         conn.close()
@@ -116,7 +112,6 @@ class TestMigrations:
         run_migrations(self.store._conn)
         version_after = get_schema_version(self.store._conn)
         assert version_before == version_after == LATEST_VERSION
-
 
     def test_v6_summary_tables_exist(self):
         """v6 summary tables should exist after migration."""
@@ -134,10 +129,16 @@ class TestMigrations:
         tables = _get_table_names(self.store._conn)
         assert "community_summaries" in tables
 
+    def test_v7_compound_edge_indexes_exist(self):
+        """v7 compound edge indexes should exist after migration."""
+        rows = self.store._conn.execute("PRAGMA index_list(edges)").fetchall()
+        indexes = {row[1] if isinstance(row, tuple) else row["name"] for row in rows}
+
+        assert "idx_edges_target_kind" in indexes
+        assert "idx_edges_source_kind" in indexes
+
 
 def _get_table_names(conn: sqlite3.Connection) -> set[str]:
     """Helper: return all table/view names in the database."""
-    rows = conn.execute(
-        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-    ).fetchall()
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").fetchall()
     return {row[0] if isinstance(row, (tuple, list)) else row["name"] for row in rows}
