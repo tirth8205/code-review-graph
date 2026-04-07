@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import shutil
 from pathlib import Path
@@ -18,6 +19,73 @@ logger = logging.getLogger(__name__)
 
 
 # --- Multi-platform MCP install ---
+
+def _copilot_vscode_detected() -> bool:
+    """Check if the GitHub Copilot VS Code extension is installed.
+
+    Checks for the Copilot extension directory rather than just VS Code
+    itself, to avoid injecting config for users who have VS Code but not Copilot.
+    """
+    extensions_dir = Path.home() / ".vscode" / "extensions"
+    if extensions_dir.exists():
+        return any(p.name.startswith("github.copilot-") for p in extensions_dir.iterdir())
+    return False
+
+
+def _copilot_cli_detected() -> bool:
+    """Check if GitHub Copilot CLI is installed."""
+    cli_config_primary = Path.home() / ".config" / "github-copilot"
+    cli_config_alt = Path.home() / ".github-copilot"
+    return cli_config_primary.exists() or cli_config_alt.exists()
+
+
+def _vscode_user_settings_path() -> Path:
+    """Return VS Code User/settings.json path for the current OS."""
+    system = platform.system()
+    if system == "Darwin":
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Code"
+            / "User"
+            / "settings.json"
+        )
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "Code" / "User" / "settings.json"
+        return Path.home() / "AppData" / "Roaming" / "Code" / "User" / "settings.json"
+    return Path.home() / ".config" / "Code" / "User" / "settings.json"
+
+
+def _validate_copilot_vscode_settings(existing: Any, config_path: Path) -> bool:
+    """Validate VS Code settings.json is safe to modify before writing.
+
+    VS Code's global settings.json is a critical file — a corrupt write
+    could break the entire editor. Only proceed if the file already exists
+    and contains a valid JSON object.
+
+    When ``settings.json`` is missing, this returns ``False`` and the
+    install is skipped. That is intentional: we do not create a brand-new
+    global settings file from this tool; the user should open VS Code at
+    least once (or create settings manually) so the file exists.
+    """
+    if not config_path.exists():
+        logger.warning(
+            "Copilot: VS Code settings.json not found at %s; skipping to avoid "
+            "creating an incomplete settings file. Open VS Code first.",
+            config_path,
+        )
+        return False
+    if not isinstance(existing, dict):
+        logger.warning(
+            "Copilot: %s has unexpected structure (not a JSON object); "
+            "skipping to avoid corrupting VS Code settings.",
+            config_path,
+        )
+        return False
+    return True
 
 
 def _zed_settings_path() -> Path:
@@ -97,6 +165,23 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": lambda root: Path.home() / ".qwen" / "settings.json",
         "key": "mcpServers",
         "detect": lambda: (Path.home() / ".qwen").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
+    "copilot": {
+        "name": "GitHub Copilot (VS Code)",
+        "config_path": lambda root: _vscode_user_settings_path(),
+        "key": "copilot.advanced.mcpServers",
+        "detect": _copilot_vscode_detected,
+        "format": "object",
+        "needs_type": True,
+        "validate": _validate_copilot_vscode_settings,
+    },
+    "copilot-cli": {
+        "name": "GitHub Copilot CLI",
+        "config_path": lambda root: Path.home() / ".config" / "github-copilot" / "mcp_servers.json",
+        "key": "servers",
+        "detect": _copilot_cli_detected,
         "format": "object",
         "needs_type": True,
     },
@@ -214,14 +299,18 @@ def install_platform_configs(
             configured.append(plat["name"])
             continue
 
-        # Read existing config
-        existing: dict[str, Any] = {}
+        # Read existing config (may be dict, list, or other JSON value)
+        existing: Any = {}
         if config_path.exists():
             try:
                 existing = json.loads(config_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 logger.warning("Invalid JSON in %s, will overwrite.", config_path)
                 existing = {}
+
+        # Platform-specific pre-write safety check (e.g., VS Code settings.json)
+        if "validate" in plat and not plat["validate"](existing, config_path):
+            continue
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])
