@@ -6,6 +6,8 @@ Communicates via stdio (standard MCP transport).
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -44,9 +46,14 @@ from .tools import (
     semantic_search_nodes,
 )
 
+from .graph import GraphStore
+from .incremental import find_project_root, get_db_path, start_watch_thread
+
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
 _default_repo_root: str | None = None
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     "code-review-graph",
@@ -687,11 +694,24 @@ def pre_merge_check(base: str = "HEAD~1") -> list[dict]:
     return pre_merge_check_prompt(base=base)
 
 
-def main(repo_root: str | None = None) -> None:
+def main(repo_root: str | None = None, auto_watch: bool = False) -> None:
     """Run the MCP server via stdio."""
     global _default_repo_root
-    _default_repo_root = repo_root
-    mcp.run(transport="stdio")
+    root = Path(repo_root) if repo_root else find_project_root()
+    _default_repo_root = str(root)
+
+    watch_store: GraphStore | None = None
+    if auto_watch:
+        watch_store = GraphStore(get_db_path(root))
+        thread = start_watch_thread(root, watch_store, daemon=True)
+        if thread is None:
+            logger.warning("Auto-watch was requested but could not be started")
+
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        if watch_store is not None:
+            watch_store.close()
 
 
 if __name__ == "__main__":

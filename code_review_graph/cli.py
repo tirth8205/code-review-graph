@@ -7,7 +7,8 @@ Usage:
     code-review-graph update [--base BASE]
     code-review-graph watch
     code-review-graph status
-    code-review-graph serve
+    code-review-graph serve [--auto-watch]
+    code-review-graph mcp [--auto-watch]
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
@@ -327,9 +328,22 @@ def main() -> None:
     )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
-    # serve
+    # serve / mcp
     serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    serve_cmd.add_argument(
+        "--auto-watch",
+        action="store_true",
+        help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
+
+    mcp_cmd = sub.add_parser("mcp", help="Alias for serve")
+    mcp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    mcp_cmd.add_argument(
+        "--auto-watch",
+        action="store_true",
+        help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
 
     args = ap.parse_args()
 
@@ -341,9 +355,12 @@ def main() -> None:
         _print_banner()
         return
 
-    if args.command == "serve":
+    if args.command in ("serve", "mcp"):
         from .main import main as serve_main
-        serve_main(repo_root=args.repo)
+        serve_main(
+            repo_root=args.repo,
+            auto_watch=getattr(args, "auto_watch", False),
+        )
         return
 
     if args.command == "eval":

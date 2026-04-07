@@ -19,7 +19,10 @@ from code_review_graph.incremental import (
     get_db_path,
     get_staged_and_unstaged,
     incremental_update,
+    start_watch_thread,
 )
+
+ORIGINAL_IMPORT = __import__
 
 
 class TestFindRepoRoot:
@@ -361,6 +364,33 @@ class TestMultiHopDependents:
             assert "/a.py" in deps
         finally:
             store.close()
+
+
+class TestStartWatchThread:
+    def test_starts_daemon_thread(self, tmp_path):
+        store = MagicMock()
+        with patch.dict("sys.modules", {"watchdog": MagicMock()}):
+            with patch("threading.Thread") as mock_thread:
+                thread = MagicMock()
+                mock_thread.return_value = thread
+                started = start_watch_thread(tmp_path, store, daemon=True)
+
+        assert started is thread
+        mock_thread.assert_called_once()
+        thread.start.assert_called_once()
+
+    @patch("builtins.__import__")
+    def test_returns_none_when_watchdog_missing(self, mock_import, tmp_path):
+        real_import = ORIGINAL_IMPORT
+
+        def _import_side_effect(name, *args, **kwargs):
+            if name == "watchdog":
+                raise ImportError("watchdog missing")
+            return real_import(name, *args, **kwargs)
+
+        mock_import.side_effect = _import_side_effect
+        started = start_watch_thread(tmp_path, MagicMock(), daemon=True)
+        assert started is None
 
     def test_cap_triggers_on_many_files(self, tmp_path):
         """The 500-file cap prevents runaway expansion."""
