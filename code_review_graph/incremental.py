@@ -12,7 +12,9 @@ import hashlib
 import logging
 import os
 import re
+import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -544,9 +546,267 @@ def incremental_update(
 
 
 _DEBOUNCE_SECONDS = 0.3
+_WATCH_LOCK_FILE = "watch.lock"
+_WATCH_PID_FILE = "watch.pid"
+_WATCH_LOG_FILE = "watch-daemon.log"
 
 
-def watch(repo_root: Path, store: GraphStore) -> None:
+def _watch_runtime_dir(repo_root: Path) -> Path:
+    """Return the runtime directory used by watcher metadata files."""
+    get_db_path(repo_root)
+    return repo_root / ".code-review-graph"
+
+
+def _watch_lock_path(repo_root: Path) -> Path:
+    return _watch_runtime_dir(repo_root) / _WATCH_LOCK_FILE
+
+
+def _watch_pid_path(repo_root: Path) -> Path:
+    return _watch_runtime_dir(repo_root) / _WATCH_PID_FILE
+
+
+def _watch_log_path(repo_root: Path) -> Path:
+    return _watch_runtime_dir(repo_root) / _WATCH_LOG_FILE
+
+
+def _is_pid_running(pid: int) -> bool:
+    """Return True if a process with *pid* appears alive."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            win_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                creationflags=win_flags,
+            )
+            out = (result.stdout or "") + (result.stderr or "")
+            if str(pid) in out:
+                return True
+        except OSError:
+            pass
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        # A live process can still reject signal probes.
+        return True
+    except OSError:
+        return False
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _write_pid_file(repo_root: Path, pid: int) -> None:
+    _watch_pid_path(repo_root).write_text(f"{pid}\n")
+
+
+def _remove_pid_file(repo_root: Path) -> None:
+    try:
+        _watch_pid_path(repo_root).unlink()
+    except OSError:
+        pass
+
+
+def _acquire_watch_lock(repo_root: Path, owner_pid: int) -> tuple[bool, str]:
+    """Acquire single-writer lock for watch mode.
+
+    Returns ``(acquired, reason)``.
+    """
+    lock_path = _watch_lock_path(repo_root)
+
+    if lock_path.exists():
+        lock_pid = _read_pid_file(lock_path)
+        if lock_pid and _is_pid_running(lock_pid):
+            return False, f"watcher already running (pid={lock_pid})"
+        try:
+            lock_path.unlink()
+        except OSError:
+            return False, "failed to clear stale watch lock"
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w", encoding="utf-8") as lock_file:
+            lock_file.write(f"{owner_pid}\n")
+        return True, "acquired"
+    except FileExistsError:
+        return False, "watch lock is already held"
+    except OSError as exc:
+        return False, f"failed to create watch lock: {exc}"
+
+
+def _release_watch_lock(repo_root: Path, owner_pid: int) -> None:
+    lock_path = _watch_lock_path(repo_root)
+    lock_pid = _read_pid_file(lock_path)
+    if lock_pid is not None and lock_pid != owner_pid:
+        return
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
+def get_watch_daemon_status(repo_root: Path) -> dict:
+    """Return daemon/watch status for the repository."""
+    pid_path = _watch_pid_path(repo_root)
+    lock_path = _watch_lock_path(repo_root)
+    daemon_pid = _read_pid_file(pid_path)
+    lock_pid = _read_pid_file(lock_path)
+    daemon_running = bool(daemon_pid and _is_pid_running(daemon_pid))
+    lock_active = bool(lock_pid and _is_pid_running(lock_pid))
+    return {
+        "running": daemon_running,
+        "pid": daemon_pid,
+        "lock_active": lock_active,
+        "lock_pid": lock_pid,
+        "pid_file": str(pid_path),
+        "lock_file": str(lock_path),
+    }
+
+
+def start_watch_daemon(repo_root: Path) -> dict:
+    """Start offline watch daemon process for the repository."""
+    status = get_watch_daemon_status(repo_root)
+    if status["running"]:
+        return {
+            "started": False,
+            "pid": status["pid"],
+            "message": f"Watch daemon already running (pid={status['pid']})",
+        }
+
+    py_exe = sys.executable
+    if os.name == "nt":
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        if pyw.exists():
+            py_exe = str(pyw)
+
+    cmd = [
+        py_exe,
+        "-m",
+        "code_review_graph.cli",
+        "daemon",
+        "start",
+        "--repo",
+        str(repo_root),
+        "--foreground",
+    ]
+
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{repo_root}{os.pathsep}{existing}" if existing else str(repo_root)
+    )
+
+    log_path = _watch_log_path(repo_root)
+    if os.name == "nt":
+        subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            cwd=str(repo_root),
+            env=env,
+            creationflags=(
+                subprocess.DETACHED_PROCESS
+                | subprocess.CREATE_NEW_PROCESS_GROUP
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            ),
+        )
+    else:
+        with log_path.open("a", encoding="utf-8") as log_file:
+            subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=log_file,
+                stderr=log_file,
+                close_fds=True,
+                cwd=str(repo_root),
+                env=env,
+                start_new_session=True,
+            )
+
+    pid_path = _watch_pid_path(repo_root)
+    for _ in range(100):
+        pid = _read_pid_file(pid_path)
+        if pid and _is_pid_running(pid):
+            return {
+                "started": True,
+                "pid": pid,
+                "message": f"Watch daemon started (pid={pid})",
+            }
+        time.sleep(0.1)
+
+    return {
+        "started": False,
+        "pid": None,
+        "message": (
+            f"Watch daemon start timed out. Check {log_path} "
+            "or run 'code-review-graph daemon start --foreground'."
+        ),
+    }
+
+
+def stop_watch_daemon(repo_root: Path) -> dict:
+    """Stop offline watch daemon process for the repository."""
+    pid = _read_pid_file(_watch_pid_path(repo_root))
+    if not pid:
+        _remove_pid_file(repo_root)
+        return {"stopped": False, "message": "Watch daemon is not running."}
+
+    if not _is_pid_running(pid):
+        _remove_pid_file(repo_root)
+        _release_watch_lock(repo_root, pid)
+        return {"stopped": False, "message": "Watch daemon was stale; cleaned up metadata."}
+
+    try:
+        if os.name == "nt":
+            win_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                creationflags=win_flags,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        return {"stopped": False, "message": f"Failed to stop watch daemon: {exc}"}
+
+    for _ in range(20):
+        if not _is_pid_running(pid):
+            break
+        time.sleep(0.1)
+
+    _remove_pid_file(repo_root)
+    _release_watch_lock(repo_root, pid)
+    return {"stopped": True, "message": f"Watch daemon stopped (pid={pid})."}
+
+
+def run_watch_daemon_foreground(repo_root: Path) -> None:
+    """Run watch daemon loop in foreground (internal entrypoint)."""
+    _write_pid_file(repo_root, os.getpid())
+    db_path = get_db_path(repo_root)
+    store = GraphStore(db_path)
+    try:
+        watch(repo_root, store, owner_pid=os.getpid())
+    finally:
+        _remove_pid_file(repo_root)
+        store.close()
+
+
+def watch(repo_root: Path, store: GraphStore, owner_pid: int | None = None) -> None:
     """Watch for file changes and auto-update the graph.
 
     Uses a 300ms debounce to batch rapid-fire saves into a single update.
@@ -558,115 +818,123 @@ def watch(repo_root: Path, store: GraphStore) -> None:
 
     parser = CodeParser()
     ignore_patterns = _load_ignore_patterns(repo_root)
+    owner_pid = owner_pid or os.getpid()
 
-    class GraphUpdateHandler(FileSystemEventHandler):
-        def __init__(self):
-            self._pending: set[str] = set()
-            self._lock = threading.Lock()
-            self._timer: threading.Timer | None = None
+    acquired, reason = _acquire_watch_lock(repo_root, owner_pid)
+    if not acquired:
+        raise RuntimeError(f"Unable to start watcher: {reason}")
 
-        def _should_handle(self, path: str) -> bool:
-            if Path(path).is_symlink():
-                return False
-            try:
-                rel = str(Path(path).relative_to(repo_root))
-            except ValueError:
-                return False
-            if _should_ignore(rel, ignore_patterns):
-                return False
-            if parser.detect_language(Path(path)) is None:
-                return False
-            return True
-
-        def on_modified(self, event):
-            if event.is_directory:
-                return
-            if self._should_handle(event.src_path):
-                self._schedule(event.src_path)
-
-        def on_created(self, event):
-            if event.is_directory:
-                return
-            if self._should_handle(event.src_path):
-                self._schedule(event.src_path)
-
-        def on_deleted(self, event):
-            if event.is_directory:
-                return
-            # Only handle files we would normally track
-            try:
-                rel = str(Path(event.src_path).relative_to(repo_root))
-            except ValueError:
-                return
-            if _should_ignore(rel, ignore_patterns):
-                return
-            try:
-                store.remove_file_data(event.src_path)
-                store.commit()
-                logger.info("Removed: %s", rel)
-            except Exception as e:
-                logger.error("Error removing %s: %s", rel, e)
-
-        def _schedule(self, abs_path: str):
-            """Add file to pending set and reset the debounce timer."""
-            with self._lock:
-                self._pending.add(abs_path)
-                if self._timer is not None:
-                    self._timer.cancel()
-                self._timer = threading.Timer(
-                    _DEBOUNCE_SECONDS, self._flush
-                )
-                self._timer.start()
-
-        def _flush(self):
-            """Process all pending files after the debounce window."""
-            with self._lock:
-                paths = list(self._pending)
-                self._pending.clear()
-                self._timer = None
-
-            for abs_path in paths:
-                self._update_file(abs_path)
-
-        def _update_file(self, abs_path: str):
-            path = Path(abs_path)
-            if not path.is_file():
-                return
-            if path.is_symlink():
-                return
-            if _is_binary(path):
-                return
-            try:
-                source = path.read_bytes()
-                fhash = hashlib.sha256(source).hexdigest()
-                nodes, edges = parser.parse_bytes(path, source)
-                store.store_file_nodes_edges(abs_path, nodes, edges, fhash)
-                store.set_metadata(
-                    "last_updated", time.strftime("%Y-%m-%dT%H:%M:%S")
-                )
-                store.commit()
-                rel = str(path.relative_to(repo_root))
-                logger.info(
-                    "Updated: %s (%d nodes, %d edges)",
-                    rel, len(nodes), len(edges),
-                )
-            except Exception as e:
-                logger.error("Error updating %s: %s", abs_path, e)
-
-    handler = GraphUpdateHandler()
-    observer = Observer()
-    observer.schedule(handler, str(repo_root), recursive=True)
-    observer.start()
-
-    logger.info("Watching %s for changes... (Ctrl+C to stop)", repo_root)
     try:
-        import time as _time
-        while True:
-            _time.sleep(1)
-    except KeyboardInterrupt:
-        observer.stop()
-    observer.join()
-    logger.info("Watch stopped.")
+        class GraphUpdateHandler(FileSystemEventHandler):
+            def __init__(self):
+                self._pending: set[str] = set()
+                self._lock = threading.Lock()
+                self._timer: threading.Timer | None = None
+
+            def _should_handle(self, path: str) -> bool:
+                if Path(path).is_symlink():
+                    return False
+                try:
+                    rel = str(Path(path).relative_to(repo_root))
+                except ValueError:
+                    return False
+                if _should_ignore(rel, ignore_patterns):
+                    return False
+                if parser.detect_language(Path(path)) is None:
+                    return False
+                return True
+
+            def on_modified(self, event):
+                if event.is_directory:
+                    return
+                if self._should_handle(event.src_path):
+                    self._schedule(event.src_path)
+
+            def on_created(self, event):
+                if event.is_directory:
+                    return
+                if self._should_handle(event.src_path):
+                    self._schedule(event.src_path)
+
+            def on_deleted(self, event):
+                if event.is_directory:
+                    return
+                # Only handle files we would normally track
+                try:
+                    rel = str(Path(event.src_path).relative_to(repo_root))
+                except ValueError:
+                    return
+                if _should_ignore(rel, ignore_patterns):
+                    return
+                try:
+                    store.remove_file_data(event.src_path)
+                    store.commit()
+                    logger.info("Removed: %s", rel)
+                except Exception as e:
+                    logger.error("Error removing %s: %s", rel, e)
+
+            def _schedule(self, abs_path: str):
+                """Add file to pending set and reset the debounce timer."""
+                with self._lock:
+                    self._pending.add(abs_path)
+                    if self._timer is not None:
+                        self._timer.cancel()
+                    self._timer = threading.Timer(
+                        _DEBOUNCE_SECONDS, self._flush
+                    )
+                    self._timer.start()
+
+            def _flush(self):
+                """Process all pending files after the debounce window."""
+                with self._lock:
+                    paths = list(self._pending)
+                    self._pending.clear()
+                    self._timer = None
+
+                for abs_path in paths:
+                    self._update_file(abs_path)
+
+            def _update_file(self, abs_path: str):
+                path = Path(abs_path)
+                if not path.is_file():
+                    return
+                if path.is_symlink():
+                    return
+                if _is_binary(path):
+                    return
+                try:
+                    source = path.read_bytes()
+                    fhash = hashlib.sha256(source).hexdigest()
+                    nodes, edges = parser.parse_bytes(path, source)
+                    store.store_file_nodes_edges(abs_path, nodes, edges, fhash)
+                    store.set_metadata(
+                        "last_updated", time.strftime("%Y-%m-%dT%H:%M:%S")
+                    )
+                    store.commit()
+                    rel = str(path.relative_to(repo_root))
+                    logger.info(
+                        "Updated: %s (%d nodes, %d edges)",
+                        rel, len(nodes), len(edges),
+                    )
+                except Exception as e:
+                    logger.error("Error updating %s: %s", abs_path, e)
+
+        handler = GraphUpdateHandler()
+        observer = Observer()
+        observer.schedule(handler, str(repo_root), recursive=True)
+        observer.start()
+
+        logger.info("Watching %s for changes... (Ctrl+C to stop)", repo_root)
+        try:
+            import time as _time
+            while True:
+                _time.sleep(1)
+        except KeyboardInterrupt:
+            observer.stop()
+        observer.join()
+        logger.info("Watch stopped.")
+    finally:
+        _release_watch_lock(repo_root, owner_pid)
 
 
 def start_watch_thread(

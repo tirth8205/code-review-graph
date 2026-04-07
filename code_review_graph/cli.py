@@ -6,6 +6,7 @@ Usage:
     code-review-graph build [--base BASE]
     code-review-graph update [--base BASE]
     code-review-graph watch
+    code-review-graph daemon <start|stop|status>
     code-review-graph status
     code-review-graph serve [--auto-watch]
     code-review-graph mcp [--auto-watch]
@@ -80,6 +81,7 @@ def _print_banner() -> None:
     {g}build{r}       Full graph build {d}(parse all files){r}
     {g}update{r}      Incremental update {d}(changed files only){r}
     {g}watch{r}       Auto-update on file changes
+    {g}daemon{r}      Offline watch daemon management
     {g}status{r}      Show graph statistics
     {g}visualize{r}   Generate interactive HTML graph
     {g}wiki{r}        Generate markdown wiki from communities
@@ -264,6 +266,20 @@ def main() -> None:
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
     watch_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
+    # daemon
+    daemon_cmd = sub.add_parser("daemon", help="Manage offline watch daemon")
+    daemon_cmd.add_argument(
+        "action",
+        choices=["start", "stop", "status"],
+        help="Daemon action to perform",
+    )
+    daemon_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    daemon_cmd.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in foreground (recommended with process managers/services)",
+    )
+
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -446,9 +462,36 @@ def main() -> None:
     from .incremental import (
         find_project_root,
         find_repo_root,
+        get_watch_daemon_status,
         get_db_path,
+        run_watch_daemon_foreground,
+        start_watch_daemon,
+        stop_watch_daemon,
         watch,
     )
+
+    if args.command == "daemon":
+        repo_root = Path(args.repo) if args.repo else find_project_root()
+        action = args.action
+        if action == "start":
+            if getattr(args, "foreground", False):
+                run_watch_daemon_foreground(repo_root)
+            else:
+                result = start_watch_daemon(repo_root)
+                print(result["message"])
+            return
+        if action == "stop":
+            result = stop_watch_daemon(repo_root)
+            print(result["message"])
+            return
+        status = get_watch_daemon_status(repo_root)
+        if status["running"]:
+            print(f"Watch daemon is running (pid={status['pid']}).")
+        else:
+            print("Watch daemon is not running.")
+        print(f"PID file: {status['pid_file']}")
+        print(f"Lock file: {status['lock_file']}")
+        return
 
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
@@ -552,7 +595,11 @@ def main() -> None:
                 )
 
         elif args.command == "watch":
-            watch(repo_root, store)
+            try:
+                watch(repo_root, store)
+            except RuntimeError as exc:
+                logging.error(str(exc))
+                sys.exit(1)
 
         elif args.command == "visualize":
             from .visualization import generate_html
@@ -618,3 +665,7 @@ def main() -> None:
 
     finally:
         store.close()
+
+
+if __name__ == "__main__":
+    main()

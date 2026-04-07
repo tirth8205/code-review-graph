@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
+    _acquire_watch_lock,
+    _release_watch_lock,
     _is_binary,
     _load_ignore_patterns,
     _parse_single_file,
@@ -14,12 +16,15 @@ from code_review_graph.incremental import (
     find_project_root,
     find_repo_root,
     full_build,
+    get_watch_daemon_status,
     get_all_tracked_files,
     get_changed_files,
     get_db_path,
     get_staged_and_unstaged,
     incremental_update,
+    start_watch_daemon,
     start_watch_thread,
+    stop_watch_daemon,
 )
 
 ORIGINAL_IMPORT = __import__
@@ -429,3 +434,53 @@ class TestStartWatchThread:
             assert len(deps) <= 500
         finally:
             store.close()
+
+
+class TestWatchDaemon:
+    def test_status_not_running(self, tmp_path):
+        status = get_watch_daemon_status(tmp_path)
+        assert status["running"] is False
+        assert status["pid"] is None
+
+    def test_lock_roundtrip(self, tmp_path):
+        ok, _reason = _acquire_watch_lock(tmp_path, owner_pid=12345)
+        assert ok is True
+        status = get_watch_daemon_status(tmp_path)
+        assert status["lock_pid"] == 12345
+        _release_watch_lock(tmp_path, owner_pid=12345)
+        status = get_watch_daemon_status(tmp_path)
+        assert status["lock_active"] is False
+
+    @patch("code_review_graph.incremental.subprocess.Popen")
+    @patch("code_review_graph.incremental._is_pid_running")
+    def test_start_daemon_returns_started(self, mock_running, mock_popen, tmp_path):
+        mock_running.return_value = True
+
+        def _fake_start(_cmd, **_kwargs):
+            pid_file = tmp_path / ".code-review-graph" / "watch.pid"
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text("4321\n")
+            return MagicMock()
+
+        mock_popen.side_effect = _fake_start
+        result = start_watch_daemon(tmp_path)
+        assert result["started"] is True
+        assert result["pid"] == 4321
+
+    @patch("code_review_graph.incremental._is_pid_running")
+    def test_stop_daemon_not_running(self, mock_running, tmp_path):
+        mock_running.return_value = False
+        result = stop_watch_daemon(tmp_path)
+        assert result["stopped"] is False
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    @patch("code_review_graph.incremental._is_pid_running")
+    def test_stop_daemon_windows_taskkill(self, mock_running, mock_run, tmp_path):
+        pid_file = tmp_path / ".code-review-graph" / "watch.pid"
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text("5555\n")
+        mock_running.side_effect = [True, False]
+        with patch("code_review_graph.incremental.os.name", "nt"):
+            result = stop_watch_daemon(tmp_path)
+        assert result["stopped"] is True
+        mock_run.assert_called_once()
