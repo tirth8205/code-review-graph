@@ -203,6 +203,19 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
                 "(community_summaries, flow_snapshots, risk_index)")
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v7: Add compound edge indexes for summary and risk queries."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_edges_target_kind "
+        "ON edges(target_qualified, kind)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_edges_source_kind "
+        "ON edges(source_qualified, kind)"
+    )
+    logger.info("Migration v7: added compound edge indexes")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -213,6 +226,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_v4,
     5: _migrate_v5,
     6: _migrate_v6,
+    7: _migrate_v7,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

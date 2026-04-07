@@ -70,6 +70,8 @@ CREATE INDEX IF NOT EXISTS idx_nodes_qualified ON nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind);
+CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 """
 
