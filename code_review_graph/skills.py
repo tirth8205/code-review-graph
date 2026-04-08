@@ -1,7 +1,7 @@
-"""Claude Code skills and hooks auto-install.
+"""Claude Code and Kilo CLI skills and hooks auto-install.
 
-Generates Claude Code agent skill files, hooks configuration, and
-CLAUDE.md integration for seamless code-review-graph usage.
+Generates Claude Code and Kilo CLI agent skill files, hooks configuration,
+and CLAUDE.md integration for seamless code-review-graph usage.
 Also supports multi-platform MCP server installation.
 """
 
@@ -72,6 +72,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": lambda root: root / ".opencode.json",
         "key": "mcpServers",
         "detect": lambda: True,
+        "format": "object",
+        "needs_type": True,
+    },
+    "kilocode": {
+        "name": "Kilo CLI",
+        "config_path": lambda root: root / ".opencode" / "opencode.jsonc",
+        "key": "mcpServers",
+        "detect": lambda: (Path.cwd() / ".opencode" / "opencode.jsonc").exists(),
         "format": "object",
         "needs_type": True,
     },
@@ -327,6 +335,51 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
         )
         path.write_text(content, encoding="utf-8")
         logger.info("Wrote skill: %s", path)
+
+    return skills_dir
+
+
+# Kilo CLI skill files — same body, directory-per-skill format
+# Written to .kilocode/skills/<slug>/SKILL.md so Kilo agents discover them
+# Slug is derived from the skill name: "Explore Codebase" → "explore-codebase"
+
+_KILO_SKILL_SLUG = {name: name.lower().replace(" ", "-").removesuffix(".md") for name in _SKILLS}
+
+
+def generate_kilo_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
+    """Generate Kilo CLI skill files.
+
+    Creates `.kilocode/skills/<slug>/SKILL.md` for each skill — Kilo's
+    directory-per-skill format required for its agent to discover skills.
+
+    Kilo skill files use YAML frontmatter (name, description) and a
+    markdown body.
+
+    Args:
+        repo_root: Repository root directory.
+        skills_dir: Custom skills directory. Defaults to repo_root/.kilocode/skills.
+
+    Returns:
+        Path to the skills directory.
+    """
+    if skills_dir is None:
+        skills_dir = repo_root / ".kilocode" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, skill in _SKILLS.items():
+        slug = _KILO_SKILL_SLUG[name]
+        skill_dir = skills_dir / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {skill['name']}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        path.write_text(content)
+        logger.info("Wrote Kilo skill: %s", path)
 
     return skills_dir
 
