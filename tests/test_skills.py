@@ -258,9 +258,49 @@ class TestInstallPlatformConfigs:
         assert entry["type"] == "stdio"
         assert entry["env"] == []
 
+    @patch("code_review_graph.skills.subprocess.run")
+    def test_install_codex_config(self, mock_run, tmp_path):
+        mock_run.side_effect = [
+            type("Result", (), {"returncode": 1, "stderr": "", "stdout": ""})(),
+            type("Result", (), {"returncode": 0, "stderr": "", "stdout": ""})(),
+        ]
+
+        with patch.dict(PLATFORMS, {
+            "codex": {**PLATFORMS["codex"], "detect": lambda: True},
+        }):
+            configured = install_platform_configs(tmp_path, target="codex")
+
+        assert "Codex" in configured
+        assert mock_run.call_count == 2
+        get_call = mock_run.call_args_list[0]
+        add_call = mock_run.call_args_list[1]
+        assert get_call.args[0] == [
+            "codex", "mcp", "get", "code-review-graph", "--json",
+        ]
+        assert add_call.args[0][:5] == [
+            "codex", "mcp", "add", "code-review-graph", "--",
+        ]
+
+    @patch("code_review_graph.skills.subprocess.run")
+    def test_install_codex_dry_run(self, mock_run, tmp_path):
+        mock_run.return_value = type(
+            "Result", (), {"returncode": 1, "stderr": "", "stdout": ""}
+        )()
+
+        with patch.dict(PLATFORMS, {
+            "codex": {**PLATFORMS["codex"], "detect": lambda: True},
+        }):
+            configured = install_platform_configs(tmp_path, target="codex", dry_run=True)
+
+        assert "Codex" in configured
+        assert mock_run.call_count == 1
+
     def test_install_all_detected(self, tmp_path):
         """Installing 'all' configures claude and opencode (always detected)."""
-        configured = install_platform_configs(tmp_path, target="all")
+        with patch.dict(PLATFORMS, {
+            "codex": {**PLATFORMS["codex"], "detect": lambda: False},
+        }):
+            configured = install_platform_configs(tmp_path, target="all")
         assert "Claude Code" in configured
         assert "OpenCode" in configured
         assert (tmp_path / ".mcp.json").exists()

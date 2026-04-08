@@ -224,8 +224,9 @@ base: str = "HEAD~1"
 
 ```bash
 # Setup
-code-review-graph install           # Register MCP server with Claude Code (alias: init)
+code-review-graph install           # Register MCP server with supported AI tools (alias: init)
 code-review-graph install --dry-run # Preview without writing files
+code-review-graph install --platform codex  # Configure Codex only
 
 # Build and update
 code-review-graph build                        # Full build

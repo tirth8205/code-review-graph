@@ -1,4 +1,4 @@
-"""Claude Code skills and hooks auto-install.
+"""AI coding tool skills, hooks, and MCP auto-install.
 
 Generates Claude Code agent skill files, hooks configuration, and
 CLAUDE.md integration for seamless code-review-graph usage.
@@ -11,6 +11,7 @@ import json
 import logging
 import platform
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,53 @@ logger = logging.getLogger(__name__)
 
 
 # --- Multi-platform MCP install ---
+
+
+def _server_command_parts() -> list[str]:
+    """Return the stdio command used to launch the MCP server."""
+    if shutil.which("uvx"):
+        return ["uvx", "code-review-graph", "serve"]
+    return ["code-review-graph", "serve"]
+
+
+def _install_codex_config(repo_root: Path, dry_run: bool = False) -> bool:
+    """Install the MCP server into Codex via the official Codex CLI."""
+    del repo_root  # Codex stores MCP config in ~/.codex/config.toml.
+
+    config_path = Path.home() / ".codex" / "config.toml"
+
+    try:
+        existing = subprocess.run(
+            ["codex", "mcp", "get", "code-review-graph", "--json"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        logger.warning("Failed to invoke Codex CLI: %s", exc)
+        return False
+
+    if existing.returncode == 0:
+        print(f"  Codex: already configured in {config_path}")
+        return True
+
+    command = ["codex", "mcp", "add", "code-review-graph", "--", *_server_command_parts()]
+    if dry_run:
+        print(f"  [dry-run] Codex: would run {' '.join(command)}")
+        return True
+
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        logger.warning(
+            "Failed to configure Codex MCP server (exit %s): %s",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+
+    print(f"  Codex: configured {config_path}")
+    return True
+
 
 def _zed_settings_path() -> Path:
     """Return the Zed settings.json path for the current OS."""
@@ -67,6 +115,12 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "array",
         "needs_type": True,
     },
+    "codex": {
+        "name": "Codex",
+        "config_path": lambda root: Path.home() / ".codex" / "config.toml",
+        "detect": lambda: shutil.which("codex") is not None,
+        "installer": _install_codex_config,
+    },
     "opencode": {
         "name": "OpenCode",
         "config_path": lambda root: root / ".opencode.json",
@@ -88,16 +142,11 @@ PLATFORMS: dict[str, dict[str, Any]] = {
 
 def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
-    if shutil.which("uvx"):
-        entry: dict[str, Any] = {
-            "command": "uvx",
-            "args": ["code-review-graph", "serve"],
-        }
-    else:
-        entry = {
-            "command": "code-review-graph",
-            "args": ["serve"],
-        }
+    command_parts = _server_command_parts()
+    entry: dict[str, Any] = {
+        "command": command_parts[0],
+        "args": command_parts[1:],
+    }
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
@@ -133,6 +182,12 @@ def install_platform_configs(
     configured: list[str] = []
 
     for key, plat in platforms_to_install.items():
+        installer = plat.get("installer")
+        if installer is not None:
+            if installer(repo_root, dry_run=dry_run):
+                configured.append(plat["name"])
+            continue
+
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key)
@@ -467,7 +522,7 @@ def inject_claude_md(repo_root: Path) -> None:
 
 # Cross-platform instruction files so every AI coding tool uses the graph.
 _PLATFORM_INSTRUCTION_FILES = {
-    "AGENTS.md": "AGENTS.md",       # Cursor, OpenCode, Antigravity
+    "AGENTS.md": "AGENTS.md",       # Codex, Cursor, OpenCode, Antigravity
     "GEMINI.md": "GEMINI.md",       # Antigravity / Gemini CLI
     ".cursorrules": ".cursorrules",  # Cursor (legacy, widely used)
     ".windsurfrules": ".windsurfrules",  # Windsurf

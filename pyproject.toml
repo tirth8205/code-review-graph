@@ -5,14 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "code-review-graph"
 version = "2.2.1"
-description = "Persistent incremental knowledge graph for token-efficient, context-aware code reviews with Claude Code"
+description = "Persistent incremental knowledge graph for token-efficient, context-aware code reviews across AI coding tools"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
     { name = "Tirth" },
 ]
-keywords = ["code-review", "knowledge-graph", "tree-sitter", "claude-code", "mcp"]
+keywords = ["code-review", "knowledge-graph", "tree-sitter", "claude-code", "codex", "mcp"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

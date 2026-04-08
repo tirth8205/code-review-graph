@@ -16,6 +16,7 @@ To target a specific platform instead of auto-detecting all:
 
 ```bash
 code-review-graph install --platform cursor
+code-review-graph install --platform codex
 code-review-graph install --platform claude-code
 ```
 
@@ -25,10 +26,11 @@ code-review-graph install --platform claude-code
 |----------|-------------|
 | **Claude Code** | `.mcp.json` |
 | **Cursor** | `.cursor/mcp.json` |
-| **Windsurf** | `.windsurf/mcp.json` |
-| **Zed** | `.zed/settings.json` |
-| **Continue** | `.continue/config.json` |
-| **OpenCode** | `.opencode/config.json` |
+| **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
+| **Zed** | `~/.config/zed/settings.json` (Linux) or `~/Library/Application Support/Zed/settings.json` (macOS) |
+| **Continue** | `~/.continue/config.json` |
+| **Codex** | `~/.codex/config.toml` via `codex mcp add` |
+| **OpenCode** | `.opencode.json` |
 
 ## Core Workflow
 
