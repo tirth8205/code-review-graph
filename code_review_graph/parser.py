@@ -101,6 +101,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".t": "perl",
     ".xs": "c",  # Perl XS: parsed as C to capture functions/structs/includes
     ".lua": "lua",
+    ".luau": "luau",
     ".ipynb": "notebook",
 }
 
@@ -136,6 +137,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     ],
     "dart": ["class_definition", "mixin_declaration", "enum_declaration"],
     "lua": [],  # Lua has no class keyword; table-based OOP handled via constructs handler
+    "luau": ["type_definition"],  # Luau type aliases; table-based OOP via constructs handler
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -170,6 +172,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # function_signature inside it).
     "dart": ["function_signature"],
     "lua": ["function_declaration"],
+    "luau": ["function_declaration"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -193,8 +196,9 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "solidity": ["import_directive"],
     # Dart: import_or_export wraps library_import > import_specification > configurable_uri
     "dart": ["import_or_export"],
-    # Lua: require() is a function_call, handled via _extract_lua_constructs
+    # Lua/Luau: require() is a function_call, handled via _extract_lua_constructs
     "lua": [],
+    "luau": [],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -220,6 +224,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "scala": ["call_expression", "instance_expression", "generic_function"],
     "solidity": ["call_expression"],
     "lua": ["function_call"],
+    "luau": ["function_call"],
 }
 
 # Patterns that indicate a test function
@@ -908,8 +913,8 @@ class CodeParser:
             ):
                 continue
 
-            # --- Lua-specific constructs ---
-            if language == "lua" and self._extract_lua_constructs(
+            # --- Lua/Luau-specific constructs ---
+            if language in ("lua", "luau") and self._extract_lua_constructs(
                 child, node_type, source, language, file_path,
                 nodes, edges, enclosing_class, enclosing_func,
                 import_map, defined_names, _depth,
@@ -2161,11 +2166,11 @@ class CodeParser:
                 for child in node.children:
                     if child.type in ("receive", "fallback"):
                         return child.text.decode("utf-8", errors="replace")
-        # Lua: function_declaration names may be dot_index_expression or
+        # Lua/Luau: function_declaration names may be dot_index_expression or
         # method_index_expression (e.g. function Animal.new() / Animal:speak()).
         # Return only the method name; the table name is used as parent_name
         # in _extract_lua_constructs.
-        if language == "lua" and node.type == "function_declaration":
+        if language in ("lua", "luau") and node.type == "function_declaration":
             for child in node.children:
                 if child.type in ("dot_index_expression", "method_index_expression"):
                     # Last identifier child is the method name
@@ -2470,9 +2475,9 @@ class CodeParser:
         if first.type == "function":
             return first.text.decode("utf-8", errors="replace")
 
-        # Lua: dot_index_expression (obj.method) and method_index_expression
+        # Lua/Luau: dot_index_expression (obj.method) and method_index_expression
         # (obj:method) — extract the rightmost identifier as the call name.
-        if language == "lua" and first.type in (
+        if language in ("lua", "luau") and first.type in (
             "dot_index_expression", "method_index_expression",
         ):
             for child in reversed(first.children):
