@@ -1,7 +1,7 @@
-"""Claude Code skills and hooks auto-install.
+"""Claude Code and Kilo CLI skills and hooks auto-install.
 
-Generates Claude Code agent skill files, hooks configuration, and
-CLAUDE.md integration for seamless code-review-graph usage.
+Generates Claude Code and Kilo CLI agent skill files, hooks configuration,
+and CLAUDE.md integration for seamless code-review-graph usage.
 Also supports multi-platform MCP server installation.
 """
 
@@ -335,6 +335,57 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
         )
         path.write_text(content)
         logger.info("Wrote skill: %s", path)
+
+    return skills_dir
+
+
+# Kilo CLI skill files — same body, different filenames and directory
+# Written to .kilocode/skills/ so Kilo agents can discover them
+_KILO_SKILLS: dict[str, dict[str, str]] = {
+    f"kilo-{name}": info
+    for name, info in _SKILLS.items()
+}
+
+# Kilo CLI uses flat skill filenames (no subdirectory structure)
+# Map: internal key -> actual filename on disk
+_KILO_SKILL_FILENAME = {
+    f"kilo-{name}": name for name in _SKILLS
+}
+
+
+def generate_kilo_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
+    """Generate Kilo CLI skill files.
+
+    Creates `.kilocode/skills/` directory with 4 skill markdown files,
+    identical in content to the Claude Code skills but with Kilo-compatible
+    filenames (e.g. `explore-codebase.md` not `kilo-explore-codebase.md`).
+
+    Kilo skill files use YAML frontmatter with name/description and a body.
+
+    Args:
+        repo_root: Repository root directory.
+        skills_dir: Custom skills directory. Defaults to repo_root/.kilocode/skills.
+
+    Returns:
+        Path to the skills directory.
+    """
+    if skills_dir is None:
+        skills_dir = repo_root / ".kilocode" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _KILO_SKILLS.items():
+        # Kilo uses plain filenames, not prefixed
+        disk_name = _KILO_SKILL_FILENAME.get(filename, filename)
+        path = skills_dir / disk_name
+        content = (
+            "---\n"
+            f"name: {skill['name']}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        path.write_text(content)
+        logger.info("Wrote Kilo skill: %s", path)
 
     return skills_dir
 

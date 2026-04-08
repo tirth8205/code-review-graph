@@ -128,6 +128,7 @@ def _handle_init(args: argparse.Namespace) -> None:
 
     from .skills import (
         generate_skills,
+        generate_kilo_skills,
         inject_claude_md,
         inject_platform_instructions,
         install_hooks,
@@ -135,7 +136,9 @@ def _handle_init(args: argparse.Namespace) -> None:
 
     if not skip_skills:
         skills_dir = generate_skills(repo_root)
-        print(f"Generated skills in {skills_dir}")
+        print(f"Generated Claude Code skills in {skills_dir}")
+        kilo_skills_dir = generate_kilo_skills(repo_root)
+        print(f"Generated Kilo CLI skills in {kilo_skills_dir}")
         inject_claude_md(repo_root)
         updated = inject_platform_instructions(repo_root)
         if updated:
