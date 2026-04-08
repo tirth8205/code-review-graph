@@ -339,28 +339,21 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
-# Kilo CLI skill files — same body, different filenames and directory
-# Written to .kilocode/skills/ so Kilo agents can discover them
-_KILO_SKILLS: dict[str, dict[str, str]] = {
-    f"kilo-{name}": info
-    for name, info in _SKILLS.items()
-}
+# Kilo CLI skill files — same body, directory-per-skill format
+# Written to .kilocode/skills/<slug>/SKILL.md so Kilo agents discover them
+# Slug is derived from the skill name: "Explore Codebase" → "explore-codebase"
 
-# Kilo CLI uses flat skill filenames (no subdirectory structure)
-# Map: internal key -> actual filename on disk
-_KILO_SKILL_FILENAME = {
-    f"kilo-{name}": name for name in _SKILLS
-}
+_KILO_SKILL_SLUG = {name: name.lower().replace(" ", "-").removesuffix(".md") for name in _SKILLS}
 
 
 def generate_kilo_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     """Generate Kilo CLI skill files.
 
-    Creates `.kilocode/skills/` directory with 4 skill markdown files,
-    identical in content to the Claude Code skills but with Kilo-compatible
-    filenames (e.g. `explore-codebase.md` not `kilo-explore-codebase.md`).
+    Creates `.kilocode/skills/<slug>/SKILL.md` for each skill — Kilo's
+    directory-per-skill format required for its agent to discover skills.
 
-    Kilo skill files use YAML frontmatter with name/description and a body.
+    Kilo skill files use YAML frontmatter (name, description) and a
+    markdown body.
 
     Args:
         repo_root: Repository root directory.
@@ -373,10 +366,11 @@ def generate_kilo_skills(repo_root: Path, skills_dir: Path | None = None) -> Pat
         skills_dir = repo_root / ".kilocode" / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    for filename, skill in _KILO_SKILLS.items():
-        # Kilo uses plain filenames, not prefixed
-        disk_name = _KILO_SKILL_FILENAME.get(filename, filename)
-        path = skills_dir / disk_name
+    for name, skill in _SKILLS.items():
+        slug = _KILO_SKILL_SLUG[name]
+        skill_dir = skills_dir / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        path = skill_dir / "SKILL.md"
         content = (
             "---\n"
             f"name: {skill['name']}\n"
