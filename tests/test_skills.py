@@ -64,9 +64,7 @@ class TestGenerateSkills:
         skills_dir = generate_skills(tmp_path)
         for path in skills_dir.iterdir():
             content = path.read_text()
-            assert "detail_level" in content, (
-                f"{path.name} missing detail_level reference"
-            )
+            assert "detail_level" in content, f"{path.name} missing detail_level reference"
 
     def test_idempotent(self, tmp_path):
         """Running twice should not fail and files should still be valid."""
@@ -84,32 +82,43 @@ class TestGenerateHooksConfig:
     def test_has_post_tool_use(self):
         config = generate_hooks_config()
         assert "PostToolUse" in config["hooks"]
-        hooks = config["hooks"]["PostToolUse"]
-        assert len(hooks) >= 1
-        assert hooks[0]["matcher"] == "Edit|Write|Bash"
-        assert "update" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 5000
+        entries = config["hooks"]["PostToolUse"]
+        assert len(entries) >= 1
+        entry = entries[0]
+        assert entry["matcher"] == "Edit|Write|Bash"
+        inner = entry["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "update" in inner[0]["command"]
+        # Timeouts must be in seconds (not milliseconds)
+        assert inner[0]["timeout"] == 5
 
     def test_has_session_start(self):
         config = generate_hooks_config()
         assert "SessionStart" in config["hooks"]
-        hooks = config["hooks"]["SessionStart"]
-        assert len(hooks) >= 1
-        assert "status" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 3000
+        entries = config["hooks"]["SessionStart"]
+        assert len(entries) >= 1
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "status" in inner[0]["command"]
+        assert inner[0]["timeout"] == 3
 
-    def test_has_pre_commit(self):
+    def test_does_not_emit_precommit(self):
+        """PreCommit is not a valid Claude Code hook event and must not be emitted."""
         config = generate_hooks_config()
-        assert "PreCommit" in config["hooks"]
-        hooks = config["hooks"]["PreCommit"]
-        assert len(hooks) >= 1
-        assert "detect-changes" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 10000
+        assert "PreCommit" not in config["hooks"]
 
-    def test_has_all_three_hook_types(self):
+    def test_all_commands_wrapped_in_inner_hooks_array(self):
+        """Every event entry must have an inner `hooks` array with type=command."""
         config = generate_hooks_config()
-        hook_types = set(config["hooks"].keys())
-        assert hook_types == {"PostToolUse", "SessionStart", "PreCommit"}
+        for event, entries in config["hooks"].items():
+            for entry in entries:
+                assert "hooks" in entry, f"{event} entry missing inner 'hooks' array"
+                assert isinstance(entry["hooks"], list)
+                for handler in entry["hooks"]:
+                    assert handler.get("type") == "command"
+                    assert "command" in handler
 
 
 class TestInstallHooks:
@@ -132,7 +141,6 @@ class TestInstallHooks:
         assert data["customSetting"] is True
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
-        assert "PreCommit" in data["hooks"]
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
@@ -184,9 +192,12 @@ class TestInjectClaudeMd:
 
 class TestInstallPlatformConfigs:
     def test_install_cursor_config(self, tmp_path):
-        with patch.dict(PLATFORMS, {
-            "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
-        }):
+        with patch.dict(
+            PLATFORMS,
+            {
+                "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
+            },
+        ):
             configured = install_platform_configs(tmp_path, target="cursor")
         assert "Cursor" in configured
         config_path = tmp_path / ".cursor" / "mcp.json"
@@ -199,32 +210,39 @@ class TestInstallPlatformConfigs:
         windsurf_dir = tmp_path / ".codeium" / "windsurf"
         windsurf_dir.mkdir(parents=True)
         config_path = windsurf_dir / "mcp_config.json"
-        with patch.dict(PLATFORMS, {
-            "windsurf": {
-                **PLATFORMS["windsurf"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "windsurf": {
+                    **PLATFORMS["windsurf"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="windsurf")
         assert "Windsurf" in configured
         data = json.loads(config_path.read_text())
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
         import shutil
+
         expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
         assert entry["command"] == expected_cmd
 
     def test_install_zed_config(self, tmp_path):
         zed_settings = tmp_path / "zed" / "settings.json"
         zed_settings.parent.mkdir(parents=True)
-        with patch.dict(PLATFORMS, {
-            "zed": {
-                **PLATFORMS["zed"],
-                "config_path": lambda root: zed_settings,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "zed": {
+                    **PLATFORMS["zed"],
+                    "config_path": lambda root: zed_settings,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="zed")
         assert "Zed" in configured
         data = json.loads(zed_settings.read_text())
@@ -235,13 +253,16 @@ class TestInstallPlatformConfigs:
         continue_dir = tmp_path / ".continue"
         continue_dir.mkdir()
         config_path = continue_dir / "config.json"
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="continue")
         assert "Continue" in configured
         data = json.loads(config_path.read_text())
@@ -277,9 +298,7 @@ class TestInstallPlatformConfigs:
         assert "code-review-graph" in data["mcpServers"]
 
     def test_dry_run_no_write(self, tmp_path):
-        configured = install_platform_configs(
-            tmp_path, target="claude", dry_run=True
-        )
+        configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
         assert "Claude Code" in configured
         assert not (tmp_path / ".mcp.json").exists()
 
@@ -292,18 +311,19 @@ class TestInstallPlatformConfigs:
         config_path = tmp_path / ".continue" / "config.json"
         config_path.parent.mkdir(parents=True)
         existing = {
-            "mcpServers": [
-                {"name": "code-review-graph", "command": "uvx", "args": ["serve"]}
-            ]
+            "mcpServers": [{"name": "code-review-graph", "command": "uvx", "args": ["serve"]}]
         }
         config_path.write_text(json.dumps(existing))
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="continue")
         data = json.loads(config_path.read_text())
         assert len(data["mcpServers"]) == 1
