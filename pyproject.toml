@@ -25,8 +25,8 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp>=1.0.0,<2",
-    "fastmcp>=0.1.0,<2",
+    "mcp>=2.0.0,<3",
+    "fastmcp>=2.14.0,<3",
     "tree-sitter>=0.23.0,<1",
     "tree-sitter-language-pack>=0.3.0,<1",
     "networkx>=3.2,<4",
