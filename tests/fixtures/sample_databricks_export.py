@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 
+
 def load_config():
     return {"env": os.getenv("ENV", "dev")}
 

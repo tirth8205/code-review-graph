@@ -705,6 +705,7 @@ class TestBuildPostprocess:
 
     def test_postprocess_none_produces_nodes_no_flows(self):
         from unittest.mock import patch
+
         from code_review_graph.tools.build import build_or_update_graph
 
         with patch(
@@ -724,6 +725,7 @@ class TestBuildPostprocess:
 
     def test_postprocess_minimal_has_fts_no_flows(self):
         from unittest.mock import patch
+
         from code_review_graph.tools.build import build_or_update_graph
 
         with patch(
@@ -742,6 +744,7 @@ class TestBuildPostprocess:
 
     def test_postprocess_full_matches_default(self):
         from unittest.mock import patch
+
         from code_review_graph.tools.build import build_or_update_graph
 
         with patch(
@@ -768,7 +771,6 @@ class TestGetMinimalContext:
         (self.root / ".git").mkdir()
         (self.root / ".code-review-graph").mkdir()
         # Create a small graph
-        import shutil
         db_path = self.root / ".code-review-graph" / "graph.db"
         self.store = GraphStore(str(db_path))
         self.store.upsert_node(NodeInfo(
@@ -798,6 +800,7 @@ class TestGetMinimalContext:
 
     def test_output_is_compact(self):
         import json
+
         from code_review_graph.tools.context import get_minimal_context
 
         result = get_minimal_context(

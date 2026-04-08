@@ -70,6 +70,7 @@ all = [
 dev = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
 ]
 
@@ -91,12 +92,19 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = [
+    "diagrams/",  # diagram DSL scripts — intentionally compact, non-standard style
+    "tests/fixtures/sample_databricks_notebook.ipynb",  # SQL/R/Scala cells are not valid Python
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "code_review_graph/visualization.py" = ["E501"]  # embedded HTML/JS template
+"tests/fixtures/sample_databricks_export.py" = ["F841", "W292"]  # intentional fixture patterns
+"tests/fixtures/sample_notebook.ipynb" = ["F401", "I001"]  # fixture imports: intentionally unused, split across cells
+"tests/test_multilang.py" = ["E501"]  # long assertions with explanatory comments
 
 [tool.bandit]
 # B101: assert used (fine in non-security code)
