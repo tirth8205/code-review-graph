@@ -440,3 +440,44 @@ class TestCodeParser:
             )
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    def test_junit_annotation_marks_test(self):
+        """Java @Test annotation should mark functions as tests."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyTest.java"),
+            b"class MyTest {\n"
+            b"  @Test\n"
+            b"  void verifyBehavior() { }\n"
+            b"  void helperMethod() { }\n"
+            b"}\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "verifyBehavior" in test_names
+        assert "helperMethod" not in test_names
+
+    def test_kotlin_test_annotation_marks_test(self):
+        """Kotlin @Test annotation should mark functions as tests."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/SampleTest.kt"),
+            b"class SampleTest {\n"
+            b"  @Test fun checkResult() { }\n"
+            b"  fun setup() { }\n"
+            b"}\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "checkResult" in test_names
+        assert "setup" not in test_names
+
+    def test_detects_test_functions(self):
+        """Functions with test-like names should be marked is_test=True."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/test_example.py"),
+            b"def test_something(): pass\n"
+            b"def helper(): pass\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "test_something" in test_names
+        assert "helper" not in test_names

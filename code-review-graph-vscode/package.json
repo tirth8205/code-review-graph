@@ -2,7 +2,7 @@
   "name": "code-review-graph",
   "displayName": "Code Review Graph",
   "description": "Visualize code dependencies, blast radius, and review context from your code-review-graph database directly in VS Code.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "tirth8205",
   "license": "MIT",
   "icon": "media/icons/icon.png",

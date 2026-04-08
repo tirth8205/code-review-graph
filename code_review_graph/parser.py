@@ -242,6 +242,8 @@ _TEST_FILE_PATTERNS = [
     re.compile(r".*_test\.dart$"),
     re.compile(r"test[_-].*\.[rR]$"),
     re.compile(r"tests/testthat/"),
+    re.compile(r".*Test\.kt$"),
+    re.compile(r".*Test\.java$"),
 ]
 
 _TEST_RUNNER_NAMES = frozenset({
@@ -249,19 +251,28 @@ _TEST_RUNNER_NAMES = frozenset({
     "beforeAll", "afterAll",
 })
 
+# Annotations/decorators that mark test methods (JUnit, TestNG, etc.)
+_TEST_ANNOTATIONS = frozenset({
+    "Test", "ParameterizedTest", "RepeatedTest", "TestFactory",
+    "org.junit.Test", "org.junit.jupiter.api.Test",
+})
+
 
 def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
 
 
-def _is_test_function(name: str, file_path: str) -> bool:
-    """A function is a test if its name matches test patterns or it lives
-    in a test file and has a test-runner name (describe, it, test, etc.).
+def _is_test_function(
+    name: str, file_path: str, decorators: tuple[str, ...] = (),
+) -> bool:
+    """A function is a test if its name matches test patterns, it lives
+    in a test file and has a test-runner name, or it has a @Test annotation.
     """
     if any(p.search(name) for p in _TEST_PATTERNS):
         return True
-    # In test files, treat common JS/TS test-runner wrappers as tests
     if _is_test_file(file_path) and name in _TEST_RUNNER_NAMES:
+        return True
+    if decorators and any(d in _TEST_ANNOTATIONS for d in decorators):
         return True
     return False
 
@@ -1540,7 +1551,26 @@ class CodeParser:
         if not name:
             return False
 
-        is_test = _is_test_function(name, file_path)
+        # Extract annotations/decorators for test detection
+        decorators: tuple[str, ...] = ()
+        deco_list: list[str] = []
+        for sub in child.children:
+            # Java/Kotlin/C#: annotations inside a modifiers child
+            if sub.type == "modifiers":
+                for mod in sub.children:
+                    if mod.type in ("annotation", "marker_annotation"):
+                        text = mod.text.decode("utf-8", errors="replace")
+                        deco_list.append(text.lstrip("@").strip())
+        # Python: check parent decorated_definition for decorator siblings
+        if child.parent and child.parent.type == "decorated_definition":
+            for sib in child.parent.children:
+                if sib.type == "decorator":
+                    text = sib.text.decode("utf-8", errors="replace")
+                    deco_list.append(text.lstrip("@").strip())
+        if deco_list:
+            decorators = tuple(deco_list)
+
+        is_test = _is_test_function(name, file_path, decorators)
         kind = "Test" if is_test else "Function"
         qualified = self._qualify(name, file_path, enclosing_class)
         params = self._get_params(child, language, source)
@@ -2432,7 +2462,8 @@ class CodeParser:
             return None  # method child not found
 
         # Simple call: func_name(args)
-        if first.type == "identifier":
+        # Kotlin uses "simple_identifier" instead of "identifier".
+        if first.type in ("identifier", "simple_identifier"):
             return first.text.decode("utf-8", errors="replace")
 
         # Perl: function_call_expression / ambiguous_function_call_expression
@@ -2450,18 +2481,25 @@ class CodeParser:
             return None
 
         # Method call: obj.method(args)
+        # Kotlin uses "navigation_expression" for member access (obj.method).
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
+            "navigation_expression",
         )
         if first.type in member_types:
             # Get the rightmost identifier (the method name)
+            # Kotlin navigation_expression uses navigation_suffix > simple_identifier.
             for child in reversed(first.children):
                 if child.type in (
                     "identifier", "property_identifier", "field_identifier",
-                    "field_name",
+                    "field_name", "simple_identifier",
                 ):
                     return child.text.decode("utf-8", errors="replace")
+                if child.type == "navigation_suffix":
+                    for sub in child.children:
+                        if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 
         # Scoped call (e.g., Rust path::func())

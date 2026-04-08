@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "2.2.1"
+version = "2.2.2"
 description = "Persistent incremental knowledge graph for token-efficient, context-aware code reviews with Claude Code"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"

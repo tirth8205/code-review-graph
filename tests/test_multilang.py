@@ -249,6 +249,14 @@ class TestKotlinParsing:
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
 
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # Simple call: println(...)
+        assert "println" in targets
+        # Method call: repo.save(user)
+        assert any("save" in t for t in targets)
+
 
 class TestSwiftParsing:
     def setup_method(self):

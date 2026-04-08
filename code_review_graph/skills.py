@@ -141,7 +141,7 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text())
+                existing = json.loads(config_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 logger.warning("Invalid JSON in %s, will overwrite.", config_path)
                 existing = {}
@@ -176,7 +176,7 @@ def install_platform_configs(
             print(f"  [dry-run] {plat['name']}: would write {config_path}")
         else:
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(existing, indent=2) + "\n")
+            config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
             print(f"  {plat['name']}: configured {config_path}")
 
         configured.append(plat["name"])
@@ -325,7 +325,7 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
             "---\n\n"
             f"{skill['body']}\n"
         )
-        path.write_text(content)
+        path.write_text(content, encoding="utf-8")
         logger.info("Wrote skill: %s", path)
 
     return skills_dir
@@ -345,13 +345,13 @@ def generate_hooks_config() -> dict[str, Any]:
             "PostToolUse": [
                 {
                     "matcher": "Edit|Write|Bash",
-                    "command": "code-review-graph update --quiet --skip-flows",
+                    "command": "code-review-graph update --skip-flows",
                     "timeout": 5000,
                 },
             ],
             "SessionStart": [
                 {
-                    "command": "code-review-graph status --json",
+                    "command": "code-review-graph status",
                     "timeout": 3000,
                 },
             ],
@@ -381,14 +381,14 @@ def install_hooks(repo_root: Path) -> None:
     existing: dict[str, Any] = {}
     if settings_path.exists():
         try:
-            existing = json.loads(settings_path.read_text())
+            existing = json.loads(settings_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
     hooks_config = generate_hooks_config()
     existing.update(hooks_config)
 
-    settings_path.write_text(json.dumps(existing, indent=2) + "\n")
+    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
 
 
@@ -445,7 +445,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
     """
     existing = ""
     if file_path.exists():
-        existing = file_path.read_text()
+        existing = file_path.read_text(encoding="utf-8")
 
     if marker in existing:
         logger.info("%s already contains instructions, skipping.", file_path.name)
@@ -453,7 +453,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
 
     separator = "\n" if existing and not existing.endswith("\n") else ""
     extra_newline = "\n" if existing else ""
-    file_path.write_text(existing + separator + extra_newline + section)
+    file_path.write_text(existing + separator + extra_newline + section, encoding="utf-8")
     logger.info("Appended MCP tools section to %s", file_path)
     return True
 

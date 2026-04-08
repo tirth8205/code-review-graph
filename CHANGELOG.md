@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.2.2] - 2026-04-08
+
+### Added
+- **Kotlin call extraction**: `simple_identifier` + `navigation_expression` support for Kotlin method calls (PR #107)
+- **JUnit/Kotlin test detection**: Annotation-based test classification (`@Test`, `@ParameterizedTest`, etc.) for Java/Kotlin/C# (PR #107)
+
+### Fixed
+- **Windows encoding crash**: All `write_text`/`read_text` calls in `skills.py` now use `encoding='utf-8'` explicitly (PR #152, fixes #147, #148)
+- **Invalid `--quiet` flag in hooks**: Removed non-existent `--quiet` and `--json` flags from generated hook commands (PR #152, fixes #149)
+
+### Housekeeping
+- Untracked `.claude-plugin/` directory and added to `.gitignore`
+- GitHub issue triage: responded to 30+ issues, closed 14, reviewed 24 PRs
+
 ## [2.2.1] - 2026-04-07
 
 ### Added
