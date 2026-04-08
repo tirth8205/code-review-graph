@@ -113,3 +113,43 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - **type-check**: mypy
 - **security**: bandit scan
 - **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 50% coverage minimum
+
+## MCP Tools: code-review-graph
+
+**IMPORTANT: Use code-review-graph MCP tools BEFORE Grep/Glob/Read for any codebase exploration.**
+The graph is faster, cheaper (fewer tokens), and provides structural context unavailable from file scanning.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with `callers_of`/`callees_of`/`imports_of`/`tests_for`
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+### Key Tools
+
+| Tool | Use when |
+|------|----------|
+| `detect_changes` | Reviewing code changes — risk-scored analysis |
+| `get_review_context` | Source snippets for review — token-efficient |
+| `get_impact_radius` | Blast radius of a change |
+| `get_affected_flows` | Which execution paths are impacted |
+| `query_graph` | Callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Find functions/classes by name or keyword |
+| `get_architecture_overview` | High-level codebase structure |
+| `refactor_tool` | Plan renames, find dead code |
+
+### Target Codebase: claudecodeatgithub
+
+`code-review-graph build` must be run locally in the `claudecodeatgithub` repo:
+
+```bash
+cd /path/to/claudecodeatgithub
+code-review-graph build
+```
+
+Or register as secondary repo from this directory:
+```bash
+code-review-graph register /path/to/claudecodeatgithub
+```
