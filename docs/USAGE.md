@@ -28,7 +28,8 @@ code-review-graph install --platform claude-code
 | **Windsurf** | `.windsurf/mcp.json` |
 | **Zed** | `.zed/settings.json` |
 | **Continue** | `.continue/config.json` |
-| **OpenCode** | `.opencode/config.json` |
+| **OpenCode** | `.opencode.json` |
+| **Kilo CLI** | `.opencode/opencode.jsonc` |
 
 ## Core Workflow
 

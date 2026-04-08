@@ -75,6 +75,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "kilocode": {
+        "name": "Kilo CLI",
+        "config_path": lambda root: root / ".opencode" / "opencode.jsonc",
+        "key": "mcpServers",
+        "detect": lambda: (root / ".opencode" / "opencode.jsonc").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
     "antigravity": {
         "name": "Antigravity",
         "config_path": lambda root: Path.home() / ".gemini" / "antigravity" / "mcp_config.json",
