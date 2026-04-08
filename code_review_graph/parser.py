@@ -2188,6 +2188,13 @@ class CodeParser:
                     result = self._get_name(child, language, kind)
                     if result:
                         return result
+        # Go methods: tree-sitter-go uses field_identifier for the name
+        # (e.g. func (s *T) MethodName(...) { }). Must run before the generic
+        # loop, which would match the result type's type_identifier (e.g. int64).
+        if language == "go" and node.type == "method_declaration":
+            for child in node.children:
+                if child.type == "field_identifier":
+                    return child.text.decode("utf-8", errors="replace")                        
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
