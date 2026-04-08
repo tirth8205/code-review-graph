@@ -79,7 +79,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "Kilo CLI",
         "config_path": lambda root: root / ".opencode" / "opencode.jsonc",
         "key": "mcpServers",
-        "detect": lambda: (root / ".opencode" / "opencode.jsonc").exists(),
+        "detect": lambda: (Path.cwd() / ".opencode" / "opencode.jsonc").exists(),
         "format": "object",
         "needs_type": True,
     },
