@@ -295,6 +295,7 @@ class CodeParser:
     def __init__(self) -> None:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
+        self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
@@ -971,6 +972,17 @@ class CodeParser:
                     import_map, defined_names, _depth,
                 ):
                     continue
+
+            # --- JSX component invocations ---
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type in ("jsx_opening_element", "jsx_self_closing_element")
+            ):
+                self._extract_jsx_component_call(
+                    child, language, file_path, edges,
+                    enclosing_class, enclosing_func,
+                    import_map, defined_names,
+                )
 
             # --- Solidity-specific constructs ---
             if language == "solidity" and self._extract_solidity_constructs(
@@ -1761,6 +1773,70 @@ class CodeParser:
 
         return False
 
+    def _extract_jsx_component_call(
+        self,
+        child,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+    ) -> None:
+        """Emit a synthetic CALLS edge for JSX component usage.
+
+        React-style component invocations use JSX rather than ``call_expression``.
+        Treat uppercase component tags such as ``<MarkdownMsg />`` as call-like
+        edges so caller/impact queries can cross the JSX boundary. Intrinsic DOM
+        tags (``<div>``) are ignored.
+        """
+        if not enclosing_func:
+            return
+
+        target = self._resolve_jsx_component_target(
+            child, language, file_path, import_map or {}, defined_names or set(),
+        )
+        if not target:
+            return
+
+        caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=target,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+
+    def _resolve_jsx_component_target(
+        self,
+        node,
+        language: str,
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        """Resolve a JSX component element to a call target."""
+        component_ref = self._get_jsx_component_reference(node)
+        if component_ref is None:
+            return None
+
+        base_name, component_name = component_ref
+        if base_name is None:
+            return self._resolve_call_target(
+                component_name, file_path, language, import_map, defined_names,
+            )
+
+        if base_name in import_map:
+            resolved = self._resolve_imported_symbol(
+                component_name, import_map[base_name], file_path, language,
+            )
+            if resolved:
+                return resolved
+
+        return component_name
+
     def _extract_solidity_constructs(
         self,
         child,
@@ -1954,6 +2030,14 @@ class CodeParser:
                     if inner.type in func_types or inner.type in class_types:
                         target = inner
                         break
+            elif (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "export_statement"
+            ):
+                for inner in child.children:
+                    if inner.type in func_types or inner.type in class_types:
+                        target = inner
+                        break
 
             target_type = target.type
 
@@ -1975,12 +2059,34 @@ class CodeParser:
                                       "class" if target_type in class_types else "function")
                 if name:
                     defined_names.add(name)
+                    continue
+
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "export_statement"
+            ):
+                self._collect_js_exported_local_names(child, defined_names)
 
             # Collect import mappings: imported_name → module_path
             if node_type in import_types:
                 self._collect_import_names(child, language, source, import_map)
 
         return import_map, defined_names
+
+    def _collect_js_exported_local_names(
+        self, node, defined_names: set[str],
+    ) -> None:
+        """Collect locally exported JS/TS names from export statements."""
+        for child in node.children:
+            if child.type in ("lexical_declaration", "variable_declaration"):
+                for sub in child.children:
+                    if sub.type == "variable_declarator":
+                        for part in sub.children:
+                            if part.type == "identifier":
+                                defined_names.add(
+                                    part.text.decode("utf-8", errors="replace"),
+                                )
+                                break
 
     def _collect_import_names(
         self, node, language: str, source: bytes, import_map: dict[str, str],
@@ -2030,6 +2136,11 @@ class CodeParser:
             if child.type == "identifier":
                 # Default import
                 import_map[child.text.decode("utf-8", errors="replace")] = module
+            elif child.type == "namespace_import":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        import_map[sub.text.decode("utf-8", errors="replace")] = module
+                        break
             elif child.type == "named_imports":
                 for spec in child.children:
                     if spec.type == "import_specifier":
@@ -2131,12 +2242,134 @@ class CodeParser:
         if call_name in defined_names:
             return self._qualify(call_name, file_path, None)
         if call_name in import_map:
-            resolved = self._resolve_module_to_file(
-                import_map[call_name], file_path, language,
+            resolved = self._resolve_imported_symbol(
+                call_name, import_map[call_name], file_path, language,
             )
             if resolved:
-                return self._qualify(call_name, resolved, None)
+                return resolved
         return call_name
+
+    def _resolve_imported_symbol(
+        self,
+        symbol_name: str,
+        module: str,
+        file_path: str,
+        language: str,
+    ) -> Optional[str]:
+        """Resolve an imported symbol to its defining qualified name when possible."""
+        resolved = self._resolve_module_to_file(module, file_path, language)
+        if not resolved:
+            return None
+
+        export_target = self._resolve_exported_symbol(resolved, symbol_name)
+        if export_target:
+            return export_target
+        return self._qualify(symbol_name, resolved, None)
+
+    def _resolve_exported_symbol(
+        self,
+        module_file: str,
+        symbol_name: str,
+        seen: Optional[set[tuple[str, str]]] = None,
+    ) -> Optional[str]:
+        """Resolve a JS/TS symbol through common re-export/barrel patterns."""
+        cache_key = f"{module_file}::{symbol_name}"
+        if cache_key in self._export_symbol_cache:
+            return self._export_symbol_cache[cache_key]
+
+        key = (module_file, symbol_name)
+        if seen is None:
+            seen = set()
+        if key in seen:
+            return None
+        seen.add(key)
+
+        path = Path(module_file)
+        language = self.detect_language(path)
+        if language not in ("javascript", "typescript", "tsx", "vue"):
+            return None
+
+        try:
+            source = path.read_bytes()
+        except (OSError, PermissionError):
+            return None
+
+        parser = self._get_parser(language)
+        if not parser:
+            return None
+
+        tree = parser.parse(source)
+
+        # Direct local definition/export in the module file.
+        import_map, defined_names = self._collect_file_scope(
+            tree.root_node, language, source,
+        )
+        if symbol_name in defined_names:
+            result = self._qualify(symbol_name, module_file, None)
+            self._export_symbol_cache[cache_key] = result
+            return result
+
+        for child in tree.root_node.children:
+            if child.type != "export_statement":
+                continue
+
+            export_clause = None
+            target_module = None
+            has_star_export = False
+
+            for sub in child.children:
+                if sub.type == "export_clause":
+                    export_clause = sub
+                elif sub.type == "string":
+                    target_module = sub.text.decode("utf-8", errors="replace").strip("'\"")
+                elif sub.type == "*":
+                    has_star_export = True
+
+            # Re-exported names: export { Foo as Bar } from './x'
+            if export_clause is not None:
+                for spec in export_clause.children:
+                    if spec.type != "export_specifier":
+                        continue
+                    names = [
+                        part.text.decode("utf-8", errors="replace")
+                        for part in spec.children
+                        if part.type in ("identifier", "property_identifier")
+                    ]
+                    if not names:
+                        continue
+                    exported_name = names[-1]
+                    original_name = names[0]
+                    if exported_name != symbol_name:
+                        continue
+                    if target_module:
+                        resolved_module = self._resolve_module_to_file(
+                            target_module, module_file, language,
+                        )
+                        if resolved_module:
+                            result = self._resolve_exported_symbol(
+                                resolved_module, original_name, seen,
+                            ) or self._qualify(original_name, resolved_module, None)
+                            self._export_symbol_cache[cache_key] = result
+                            return result
+                    result = self._qualify(original_name, module_file, None)
+                    self._export_symbol_cache[cache_key] = result
+                    return result
+
+            # Star re-export: export * from './x'
+            if has_star_export and target_module:
+                resolved_module = self._resolve_module_to_file(
+                    target_module, module_file, language,
+                )
+                if resolved_module:
+                    result = self._resolve_exported_symbol(
+                        resolved_module, symbol_name, seen,
+                    )
+                    if result:
+                        self._export_symbol_cache[cache_key] = result
+                        return result
+
+        self._export_symbol_cache[cache_key] = None
+        return None
 
     def _qualify(self, name: str, file_path: str, enclosing_class: Optional[str]) -> str:
         """Create a qualified name: file_path::ClassName.name or file_path::name."""
@@ -2511,6 +2744,55 @@ class CodeParser:
             return first.text.decode("utf-8", errors="replace")
 
         return None
+
+    def _get_jsx_component_reference(self, node) -> Optional[tuple[Optional[str], str]]:
+        """Extract ``(base_name, component_name)`` for a JSX element.
+
+        ``base_name`` is set for member-style elements such as
+        ``<UI.MarkdownMsg />`` and ``None`` for plain component tags such as
+        ``<MarkdownMsg />``.
+        """
+        for child in node.children:
+            if child.type == "identifier":
+                name = child.text.decode("utf-8", errors="replace")
+                if self._looks_like_component_name(name):
+                    return (None, name)
+                return None
+            if child.type == "member_expression":
+                base_name = self._get_member_expression_root_name(child)
+                component_name = None
+                for sub in reversed(child.children):
+                    if sub.type in ("identifier", "property_identifier"):
+                        component_name = sub.text.decode("utf-8", errors="replace")
+                        break
+                if component_name and self._looks_like_component_name(component_name):
+                    return (base_name, component_name)
+                for sub in reversed(child.children):
+                    if sub.type in ("identifier", "property_identifier"):
+                        name = sub.text.decode("utf-8", errors="replace")
+                        if self._looks_like_component_name(name):
+                            return (None, name)
+                        return None
+                text = child.text.decode("utf-8", errors="replace")
+                tail = text.split(".")[-1]
+                if self._looks_like_component_name(tail):
+                    return (None, tail)
+                return None
+        return None
+
+    def _get_member_expression_root_name(self, node) -> Optional[str]:
+        """Return the leftmost identifier for a nested member expression."""
+        for child in node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type == "member_expression":
+                return self._get_member_expression_root_name(child)
+        return None
+
+    @staticmethod
+    def _looks_like_component_name(name: str) -> bool:
+        """Return True for JSX names that look like user components."""
+        return bool(name) and name[0].isupper()
 
     # Modifier suffixes used in JS/TS test runners
     _TEST_MODIFIER_SUFFIXES = frozenset({
