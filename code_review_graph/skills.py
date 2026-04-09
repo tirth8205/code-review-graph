@@ -334,8 +334,10 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
 def generate_hooks_config() -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
-    Returns a hooks config dict with PostToolUse, SessionStart, and
-    PreCommit hooks for automatic graph updates.
+    Returns a hooks config dict with PostToolUse and SessionStart hooks
+    for automatic graph updates. Each event entry wraps its command in the
+    Claude Code hook schema:
+    ``hooks: [{"type": "command", "command": ..., "timeout": ...}]``.
 
     Returns:
         Dict with hooks configuration suitable for .claude/settings.json.
@@ -344,21 +346,25 @@ def generate_hooks_config() -> dict[str, Any]:
         "hooks": {
             "PostToolUse": [
                 {
-                    "matcher": "Edit|Write|Bash",
-                    "command": "code-review-graph update --skip-flows",
-                    "timeout": 5000,
+                    "matcher": "Edit|Write",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph update --skip-flows",
+                            "timeout": 5000,
+                        },
+                    ],
                 },
             ],
             "SessionStart": [
                 {
-                    "command": "code-review-graph status",
-                    "timeout": 3000,
-                },
-            ],
-            "PreCommit": [
-                {
-                    "command": "code-review-graph detect-changes --brief",
-                    "timeout": 10000,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph status",
+                            "timeout": 3000,
+                        },
+                    ],
                 },
             ],
         }

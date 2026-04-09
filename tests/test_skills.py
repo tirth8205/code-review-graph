@@ -84,32 +84,63 @@ class TestGenerateHooksConfig:
     def test_has_post_tool_use(self):
         config = generate_hooks_config()
         assert "PostToolUse" in config["hooks"]
-        hooks = config["hooks"]["PostToolUse"]
-        assert len(hooks) >= 1
-        assert hooks[0]["matcher"] == "Edit|Write|Bash"
-        assert "update" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 5000
+        entries = config["hooks"]["PostToolUse"]
+        assert len(entries) >= 1
+        assert entries[0]["matcher"] == "Edit|Write"
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "update" in inner[0]["command"]
+        assert inner[0]["timeout"] == 5000
 
     def test_has_session_start(self):
         config = generate_hooks_config()
         assert "SessionStart" in config["hooks"]
-        hooks = config["hooks"]["SessionStart"]
-        assert len(hooks) >= 1
-        assert "status" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 3000
+        entries = config["hooks"]["SessionStart"]
+        assert len(entries) >= 1
+        inner = entries[0]["hooks"]
+        assert len(inner) >= 1
+        assert inner[0]["type"] == "command"
+        assert "status" in inner[0]["command"]
+        assert inner[0]["timeout"] == 3000
 
-    def test_has_pre_commit(self):
-        config = generate_hooks_config()
-        assert "PreCommit" in config["hooks"]
-        hooks = config["hooks"]["PreCommit"]
-        assert len(hooks) >= 1
-        assert "detect-changes" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 10000
+    def test_only_supported_hook_events(self):
+        """Only events valid under Claude Code's hook schema should be emitted.
 
-    def test_has_all_three_hook_types(self):
+        ``PreCommit`` is a git concept and not a Claude Code hook event; it
+        must not appear in the generated config.
+        """
         config = generate_hooks_config()
         hook_types = set(config["hooks"].keys())
-        assert hook_types == {"PostToolUse", "SessionStart", "PreCommit"}
+        assert hook_types == {"PostToolUse", "SessionStart"}
+        assert "PreCommit" not in hook_types
+
+    def test_entries_use_claude_code_hook_schema(self):
+        """Regression guard for the Claude Code hook schema.
+
+        Claude Code rejects entries that put ``command`` directly on the
+        event entry. Each entry must wrap its command(s) in a
+        ``hooks: [{"type": "command", "command": ..., "timeout": ...}]``
+        array — missing that wrapper causes the entire settings.json to
+        fail to parse ("Expected array, but received undefined").
+        """
+        config = generate_hooks_config()
+        for event_name, entries in config["hooks"].items():
+            for entry in entries:
+                assert "command" not in entry, (
+                    f"{event_name} entry has a flat `command` field; "
+                    "it must be wrapped in an inner `hooks` array"
+                )
+                assert "hooks" in entry, (
+                    f"{event_name} entry is missing the inner `hooks` array"
+                )
+                assert isinstance(entry["hooks"], list)
+                for hook in entry["hooks"]:
+                    assert hook.get("type") == "command", (
+                        f"{event_name} inner hook missing type=\"command\""
+                    )
+                    assert "command" in hook
+                    assert "timeout" in hook
 
 
 class TestInstallHooks:
@@ -132,7 +163,6 @@ class TestInstallHooks:
         assert data["customSetting"] is True
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
-        assert "PreCommit" in data["hooks"]
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)

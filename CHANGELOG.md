@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Invalid Claude Code hook schema in `.claude/settings.json`**: `generate_hooks_config()` now emits the schema Claude Code actually expects — each event entry wraps its command in an inner `hooks: [{type: "command", command, timeout}]` array instead of a flat `command:` field. Without this, Claude Code rejected the entire file with `Expected array, but received undefined` and neither `PostToolUse` nor `SessionStart` hooks fired. Also removed the bogus `PreCommit` event (not a Claude Code hook event — valid events are `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop`, `PreCompact`, `SessionStart`, `SessionEnd`) and narrowed the `PostToolUse` matcher from `Edit|Write|Bash` to `Edit|Write` since Bash invocations do not modify source files directly. Added a regression test that asserts the generated config conforms to the hook schema (fixes #97, #163, #172).
+
 ## [2.2.2] - 2026-04-08
 
 ### Added
