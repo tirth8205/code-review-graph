@@ -236,16 +236,28 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
-        self._conn.execute("BEGIN IMMEDIATE")
+        savepoint = "__crg_store_file_nodes_edges__"
+        use_savepoint = self._conn.in_transaction
+        if use_savepoint:
+            self._conn.execute(f"SAVEPOINT {savepoint}")  # nosec B608
+        else:
+            self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
             for node in nodes:
                 self.upsert_node(node, file_hash=fhash)
             for edge in edges:
                 self.upsert_edge(edge)
-            self._conn.commit()
+            if use_savepoint:
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")  # nosec B608
+            else:
+                self._conn.commit()
         except BaseException:
-            self._conn.rollback()
+            if use_savepoint:
+                self._conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")  # nosec B608
+                self._conn.execute(f"RELEASE SAVEPOINT {savepoint}")  # nosec B608
+            else:
+                self._conn.rollback()
             raise
         self._invalidate_cache()
 

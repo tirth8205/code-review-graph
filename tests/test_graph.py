@@ -107,6 +107,24 @@ class TestGraphStore:
         result = self.store.get_nodes_by_file("/test/file.py")
         assert len(result) == 2
 
+    def test_store_file_nodes_edges_with_existing_transaction(self):
+        """File replacement should work even if the caller already opened a transaction."""
+        self.store.upsert_node(self._make_file_node("/test/other.py"))
+        nodes = [self._make_file_node(), self._make_func_node()]
+        edges = [
+            EdgeInfo(
+                kind="CONTAINS", source="/test/file.py",
+                target="/test/file.py::my_func", file_path="/test/file.py",
+            )
+        ]
+
+        self.store.store_file_nodes_edges("/test/file.py", nodes, edges)
+        self.store.commit()
+
+        result = self.store.get_nodes_by_file("/test/file.py")
+        assert len(result) == 2
+        assert self.store.get_node("/test/other.py") is not None
+
     def test_search_nodes(self):
         self.store.upsert_node(self._make_func_node("authenticate"))
         self.store.upsert_node(self._make_func_node("authorize"))
