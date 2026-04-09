@@ -50,6 +50,8 @@ def parse_git_diff_ranges(
             ["git", "diff", "--unified=0", base, "--"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=repo_root,
             timeout=_GIT_TIMEOUT,
         )
