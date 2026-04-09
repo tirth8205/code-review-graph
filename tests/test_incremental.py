@@ -80,9 +80,9 @@ class TestGetDbPath:
 class TestIgnorePatterns:
     def test_default_patterns_loaded(self, tmp_path):
         patterns = _load_ignore_patterns(tmp_path)
-        assert "node_modules/**" in patterns
+        assert "**/node_modules/**" in patterns
         assert ".git/**" in patterns
-        assert "__pycache__/**" in patterns
+        assert "**/__pycache__/**" in patterns
 
     def test_custom_ignore_file(self, tmp_path):
         ignore = tmp_path / ".code-review-graphignore"
@@ -95,43 +95,67 @@ class TestIgnorePatterns:
         assert "" not in patterns
 
     def test_should_ignore_matches(self):
-        patterns = ["node_modules/**", "*.pyc", ".git/**"]
+        patterns = ["**/node_modules/**", "*.pyc", ".git/**"]
         assert _should_ignore("node_modules/foo/bar.js", patterns)
         assert _should_ignore("test.pyc", patterns)
         assert _should_ignore(".git/HEAD", patterns)
         assert not _should_ignore("src/main.py", patterns)
 
-    def test_should_ignore_nested_paths(self):
-        """Nested dependency dirs (monorepos/workspaces) must be ignored."""
-        patterns = ["node_modules/**", "vendor/**", "storage/**"]
-        # Nested node_modules (monorepo workspace)
+    def test_safe_anywhere_matches_nested_paths(self):
+        """**/name/** patterns match nested dependency dirs (monorepos)."""
+        patterns = ["**/node_modules/**", "**/vendor/**", "**/__pycache__/**"]
+        # Nested node_modules (npm workspaces, Lerna, Turborepo)
         assert _should_ignore("packages/app/node_modules/react/index.js", patterns)
         # Nested vendor (PHP monorepo)
         assert _should_ignore("services/api/vendor/guzzlehttp/Client.php", patterns)
-        # Nested storage
-        assert _should_ignore("app/storage/logs/laravel.log", patterns)
-        # Source files must not be affected
+        # Nested __pycache__
+        assert _should_ignore("src/utils/__pycache__/helpers.cpython-311.pyc", patterns)
+        # Actual source code must not be affected
         assert not _should_ignore("packages/app/src/main.ts", patterns)
         assert not _should_ignore("src/vendors/custom.php", patterns)
+
+    def test_root_relative_patterns_dont_match_nested(self):
+        """name/** patterns should only match at root, not nested `name/` dirs."""
+        patterns = ["packages/**", "bin/**", "build/**"]
+        # Root-level matches
+        assert _should_ignore("packages/nuget-cache/lib.dll", patterns)
+        assert _should_ignore("bin/Debug/net8.0/app.dll", patterns)
+        assert _should_ignore("build/output.txt", patterns)
+        # Nested `packages/` in monorepo must NOT match
+        assert not _should_ignore("apps/web/packages/src/main.ts", patterns)
+        assert not _should_ignore("services/api/bin/helper.sh", patterns)
+        assert not _should_ignore("docs/build/page.md", patterns)
+
+    def test_multi_segment_root_prefix(self):
+        """Multi-segment patterns like `bootstrap/cache/**` match only at root."""
+        patterns = ["bootstrap/cache/**"]
+        assert _should_ignore("bootstrap/cache/packages.php", patterns)
+        assert not _should_ignore("src/bootstrap/cache/file.php", patterns)
 
     def test_should_ignore_framework_patterns(self):
         """Framework-specific dirs from DEFAULT_IGNORE_PATTERNS."""
         from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
 
         patterns = DEFAULT_IGNORE_PATTERNS
-        # PHP / Laravel
+        # Safe-anywhere: dependency dirs never used as source
         assert _should_ignore("vendor/laravel/framework/src/Collection.php", patterns)
+        assert _should_ignore("services/api/vendor/pkg/file.go", patterns)  # nested
+        assert _should_ignore(".dart_tool/package_config.json", patterns)
+        assert _should_ignore(".gradle/caches/transforms-3/file.jar", patterns)
+        assert _should_ignore("node_modules/react/index.js", patterns)
+        assert _should_ignore("apps/api/node_modules/foo.js", patterns)  # nested
+        # Root-only: Laravel framework dirs
         assert _should_ignore("storage/logs/laravel.log", patterns)
         assert _should_ignore("bootstrap/cache/packages.php", patterns)
-        # .NET
+        assert _should_ignore("public/build/assets/app.js", patterns)
+        # Root-only: .NET
         assert _should_ignore("bin/Debug/net8.0/app.dll", patterns)
         assert _should_ignore("obj/Release/app.assets.cache", patterns)
-        # Dart / Flutter
-        assert _should_ignore(".dart_tool/package_config.json", patterns)
-        # Java / Gradle
-        assert _should_ignore(".gradle/caches/transforms-3/file.jar", patterns)
-        # Source files untouched
-        assert not _should_ignore("src/app/page.tsx", patterns)
+        # Monorepo-safe: `packages/` is NOT in defaults (npm/Lerna/Turborepo
+        # use it for source code; .NET users must add it to .code-review-graphignore)
+        assert not _should_ignore("packages/app/src/main.ts", patterns)
+        assert not _should_ignore("packages/Newtonsoft.Json.13.0.1/lib.dll", patterns)
+        assert not _should_ignore("apps/web/src/main.tsx", patterns)
         assert not _should_ignore("app/Http/Controllers/UserController.php", patterns)
 
 

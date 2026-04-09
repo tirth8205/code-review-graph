@@ -13,7 +13,7 @@ import os
 import re
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from .graph import GraphStore
@@ -22,58 +22,62 @@ from .parser import CodeParser
 logger = logging.getLogger(__name__)
 
 # Default ignore patterns (in addition to .gitignore)
+#
+# Two pattern styles:
+# 1. `**/name/**` — matches `name` as any path segment (safe-anywhere).
+#    Use only for directories that are NEVER legitimate source code names
+#    (node_modules, __pycache__, .venv, vendor, .gradle, .dart_tool, etc.).
+# 2. `name/**` — matches only at repo root.
+#    Use for directories that MAY be valid source names in some projects
+#    (packages/, bin/, build/, dist/, storage/, obj/).
 DEFAULT_IGNORE_PATTERNS = [
+    # Tool-owned (always safe anywhere)
     ".code-review-graph/**",
     ".git/**",
-    # JavaScript / TypeScript / Node
-    "node_modules/**",
+    # Dependency directories — never source code, safe to match anywhere
+    "**/node_modules/**",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "**/vendor/**",          # Composer (PHP), Go modules, Ruby/Rails
+    "**/.bundle/**",         # Ruby Bundler
+    "**/.gradle/**",         # Gradle cache
+    "**/.dart_tool/**",      # Dart/Flutter
+    "**/.pub-cache/**",      # Dart/Flutter
+    "**/.cache/**",
+    # Framework build/output dirs — at repo root only to avoid matching
+    # legit source dirs (e.g. src/build/, packages/, etc.)
     ".next/**",
     ".nuxt/**",
-    # Python
-    "__pycache__/**",
-    "*.pyc",
-    ".venv/**",
-    "venv/**",
-    # PHP / Laravel / Composer
-    "vendor/**",
-    "storage/**",
-    "bootstrap/cache/**",
-    "public/build/**",
-    # Ruby / Rails
-    "vendor/bundle/**",
-    ".bundle/**",
-    # Java / Kotlin / Gradle / Maven
-    ".gradle/**",
-    "*.jar",
-    # .NET / C#
-    "bin/**",
-    "obj/**",
-    "packages/**",
-    # Rust
-    "target/**",
-    # Dart / Flutter
-    ".dart_tool/**",
-    ".pub-cache/**",
-    # Build outputs
     "dist/**",
     "build/**",
+    "target/**",             # Rust (also used by Maven/SBT)
+    "bin/**",                # .NET (root only; src/bin/ not ignored)
+    "obj/**",                # .NET
+    # NOTE: `packages/**` (.NET NuGet) is NOT included because it conflicts
+    # with npm/Lerna/Turborepo monorepos where packages/ holds source code.
+    # .NET users should add it via .code-review-graphignore.
+    "storage/**",            # Laravel
+    "bootstrap/cache/**",    # Laravel
+    "public/build/**",       # Laravel Mix/Vite output
     "coverage/**",
-    # Minified / generated
+    ".tmp/**",
+    "tmp/**",
+    # Python cache file
+    "*.pyc",
+    # Minified / generated single files
     "*.min.js",
     "*.min.css",
     "*.map",
     "*.lock",
     "package-lock.json",
     "yarn.lock",
+    "*.jar",                 # Java compiled
     # Database files
     "*.db",
     "*.sqlite",
     "*.db-journal",
     "*.db-wal",
-    # Misc
-    ".cache/**",
-    ".tmp/**",
-    "tmp/**",
 ]
 
 
@@ -148,22 +152,30 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
 def _should_ignore(path: str, patterns: list[str]) -> bool:
     """Check if a path matches any ignore pattern.
 
-    For ** patterns like 'node_modules/**', matches any path segment — not just
-    the root. This ensures nested dependency directories (e.g.,
-    'packages/app/node_modules/react/index.js') are correctly ignored in
-    monorepos and workspaces.
+    Pattern semantics:
+    - ``**/name/**`` — matches ``name`` as any path segment (safe-anywhere).
+      Use for dirs that are never valid source code (node_modules, vendor).
+    - ``name/**``   — matches only at the repo root (first segment is ``name``).
+      Use for dirs that may be valid source names in some projects (packages,
+      bin, build).
+    - ``*.ext`` and other non-``**`` patterns fall back to ``fnmatch``.
     """
-    from pathlib import PurePosixPath
-
-    pp = PurePosixPath(path)
+    parts = PurePosixPath(path).parts
     for p in patterns:
-        if "**" in p:
-            prefix = p.split("/**")[0]
-            if any(part == prefix for part in pp.parts) or fnmatch.fnmatch(path, p):
+        # Safe-anywhere: **/name/**
+        if p.startswith("**/") and p.endswith("/**"):
+            segment = p[3:-3]
+            if segment in parts:
                 return True
-        elif fnmatch.fnmatch(path, p) or any(
-            fnmatch.fnmatch(part, p) for part in pp.parts
-        ):
+        # Root-relative: name/** — matches only if first segment is `name`
+        elif p.endswith("/**"):
+            prefix = p[:-3]
+            # Support multi-segment prefixes like "bootstrap/cache"
+            prefix_parts = prefix.split("/")
+            if len(parts) >= len(prefix_parts) and tuple(parts[: len(prefix_parts)]) == tuple(prefix_parts):
+                return True
+        # Plain glob (e.g. *.pyc, *.min.js)
+        elif fnmatch.fnmatch(path, p):
             return True
     return False
 
