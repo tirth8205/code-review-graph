@@ -129,6 +129,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
+        PLATFORMS,
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
@@ -148,8 +149,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
 
-        # OpenCode plugin (user-level, installed when target includes opencode)
-        if target in ("all", "opencode"):
+        # OpenCode plugin (user-level, gated by same detect() as MCP config)
+        if target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
             try:
                 plugin_path = install_opencode_plugin()
                 print(f"Installed OpenCode plugin in {plugin_path}")
