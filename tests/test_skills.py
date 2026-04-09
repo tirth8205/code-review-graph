@@ -1,8 +1,9 @@
 """Tests for skills and hooks auto-install."""
 
 import json
-import tomllib
 from unittest.mock import patch
+
+import tomllib
 
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
