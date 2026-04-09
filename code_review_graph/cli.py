@@ -96,7 +96,7 @@ def _print_banner() -> None:
 
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
-    from .incremental import find_repo_root
+    from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
     from .skills import install_platform_configs
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
@@ -117,8 +117,17 @@ def _handle_init(args: argparse.Namespace) -> None:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
     if dry_run:
+        print("[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
         print("\n[dry-run] No files were modified.")
         return
+
+    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
+    if gitignore_state == "created":
+        print("Created .gitignore and added .code-review-graph/.")
+    elif gitignore_state == "updated":
+        print("Updated .gitignore with .code-review-graph/.")
+    else:
+        print(".gitignore already contains .code-review-graph/.")
 
     # Skills and hooks are installed by default so Claude actually uses the
     # graph tools proactively.  Use --no-skills / --no-hooks to opt out.
