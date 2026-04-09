@@ -35,6 +35,8 @@ import os
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 def _get_version() -> str:
     """Get the installed package version."""
@@ -59,12 +61,12 @@ def _print_banner() -> None:
     version = _get_version()
 
     # ANSI escape codes
-    c = "\033[36m" if color else ""   # cyan — graph art
-    y = "\033[33m" if color else ""   # yellow — center node
-    b = "\033[1m" if color else ""    # bold
-    d = "\033[2m" if color else ""    # dim
-    g = "\033[32m" if color else ""   # green — commands
-    r = "\033[0m" if color else ""    # reset
+    c = "\033[36m" if color else ""  # cyan — graph art
+    y = "\033[33m" if color else ""  # yellow — center node
+    b = "\033[1m" if color else ""  # bold
+    d = "\033[2m" if color else ""  # dim
+    g = "\033[32m" if color else ""  # green — commands
+    r = "\033[0m" if color else ""  # reset
 
     print(f"""
 {c}  ●──●──●{r}
@@ -131,6 +133,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         inject_claude_md,
         inject_platform_instructions,
         install_hooks,
+        install_opencode_plugin,
     )
 
     if not skip_skills:
@@ -145,6 +148,14 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
 
+        # OpenCode plugin (user-level, installed when target includes opencode)
+        if target in ("all", "opencode"):
+            try:
+                plugin_path = install_opencode_plugin()
+                print(f"Installed OpenCode plugin in {plugin_path}")
+            except Exception as exc:
+                logger.warning("Could not install OpenCode plugin: %s", exc)
+
     print()
     print("Next steps:")
     print("  1. code-review-graph build    # build the knowledge graph")
@@ -157,68 +168,82 @@ def main() -> None:
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
     )
-    ap.add_argument(
-        "-v", "--version", action="store_true", help="Show version and exit"
-    )
+    ap.add_argument("-v", "--version", action="store_true", help="Show version and exit")
     sub = ap.add_subparsers(dest="command")
 
     # install (primary) + init (alias)
-    install_cmd = sub.add_parser(
-        "install", help="Register MCP server with AI coding platforms"
-    )
+    install_cmd = sub.add_parser("install", help="Register MCP server with AI coding platforms")
     install_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     install_cmd.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would be done without writing files",
     )
     install_cmd.add_argument(
-        "--no-skills", action="store_true",
+        "--no-skills",
+        action="store_true",
         help="Skip generating Claude Code skill files",
     )
     install_cmd.add_argument(
-        "--no-hooks", action="store_true",
+        "--no-hooks",
+        action="store_true",
         help="Skip installing Claude Code hooks",
     )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     install_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
-    install_cmd.add_argument("--all", action="store_true", dest="install_all",
-                             help=argparse.SUPPRESS)
+    install_cmd.add_argument(
+        "--all", action="store_true", dest="install_all", help=argparse.SUPPRESS
+    )
     install_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "all",
+            "claude",
+            "claude-code",
+            "cursor",
+            "windsurf",
+            "zed",
+            "continue",
+            "opencode",
+            "antigravity",
+            "all",
         ],
         default="all",
         help="Target platform for MCP config (default: all detected)",
     )
 
-    init_cmd = sub.add_parser(
-        "init", help="Alias for install"
-    )
+    init_cmd = sub.add_parser("init", help="Alias for install")
     init_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     init_cmd.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would be done without writing files",
     )
     init_cmd.add_argument(
-        "--no-skills", action="store_true",
+        "--no-skills",
+        action="store_true",
         help="Skip generating Claude Code skill files",
     )
     init_cmd.add_argument(
-        "--no-hooks", action="store_true",
+        "--no-hooks",
+        action="store_true",
         help="Skip installing Claude Code hooks",
     )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
-    init_cmd.add_argument("--all", action="store_true", dest="install_all",
-                             help=argparse.SUPPRESS)
+    init_cmd.add_argument("--all", action="store_true", dest="install_all", help=argparse.SUPPRESS)
     init_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "all",
+            "claude",
+            "claude-code",
+            "cursor",
+            "windsurf",
+            "zed",
+            "continue",
+            "opencode",
+            "antigravity",
+            "all",
         ],
         default="all",
         help="Target platform for MCP config (default: all detected)",
@@ -228,11 +253,13 @@ def main() -> None:
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     build_cmd.add_argument(
-        "--skip-flows", action="store_true",
+        "--skip-flows",
+        action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
     )
     build_cmd.add_argument(
-        "--skip-postprocess", action="store_true",
+        "--skip-postprocess",
+        action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
 
@@ -241,11 +268,13 @@ def main() -> None:
     update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     update_cmd.add_argument(
-        "--skip-flows", action="store_true",
+        "--skip-flows",
+        action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
     )
     update_cmd.add_argument(
-        "--skip-postprocess", action="store_true",
+        "--skip-postprocess",
+        action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
 
@@ -277,7 +306,8 @@ def main() -> None:
         help="Rendering mode: auto (default), full, community, or file",
     )
     vis_cmd.add_argument(
-        "--serve", action="store_true",
+        "--serve",
+        action="store_true",
         help="Start a local HTTP server to view the visualization (localhost:8765)",
     )
 
@@ -285,7 +315,8 @@ def main() -> None:
     wiki_cmd = sub.add_parser("wiki", help="Generate markdown wiki from community structure")
     wiki_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     wiki_cmd.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Regenerate all pages even if content unchanged",
     )
 
@@ -308,9 +339,10 @@ def main() -> None:
     # eval
     eval_cmd = sub.add_parser("eval", help="Run evaluation benchmarks")
     eval_cmd.add_argument(
-        "--benchmark", default=None,
+        "--benchmark",
+        default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
-             "flow_completeness, search_quality, build_performance)",
+        "flow_completeness, search_quality, build_performance)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
@@ -319,12 +351,8 @@ def main() -> None:
 
     # detect-changes
     detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
-    detect_cmd.add_argument(
-        "--base", default="HEAD~1", help="Git diff base (default: HEAD~1)"
-    )
-    detect_cmd.add_argument(
-        "--brief", action="store_true", help="Show brief summary only"
-    )
+    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument("--brief", action="store_true", help="Show brief summary only")
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     # serve
@@ -343,6 +371,7 @@ def main() -> None:
 
     if args.command == "serve":
         from .main import main as serve_main
+
         serve_main(repo_root=args.repo)
         return
 
@@ -351,9 +380,7 @@ def main() -> None:
         from .eval.runner import run_eval
 
         if getattr(args, "report", False):
-            output_dir = Path(
-                getattr(args, "output_dir", None) or "evaluate/results"
-            )
+            output_dir = Path(getattr(args, "output_dir", None) or "evaluate/results")
             report = generate_full_report(output_dir)
             report_path = Path("evaluate/reports/summary.md")
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -365,9 +392,7 @@ def main() -> None:
             print(tables)
         else:
             repos = (
-                [r.strip() for r in args.repo.split(",")]
-                if getattr(args, "repo", None)
-                else None
+                [r.strip() for r in args.repo.split(",")] if getattr(args, "repo", None) else None
             )
             benchmarks = (
                 [b.strip() for b in args.benchmark.split(",")]
@@ -439,6 +464,7 @@ def main() -> None:
         store = GraphStore(db_path)
         try:
             from .tools.build import run_postprocess
+
             result = run_postprocess(
                 flows=not getattr(args, "no_flows", False),
                 communities=not getattr(args, "no_communities", False),
@@ -475,32 +501,38 @@ def main() -> None:
 
     try:
         if args.command == "build":
-            pp = "none" if getattr(args, "skip_postprocess", False) else (
-                "minimal" if getattr(args, "skip_flows", False) else "full"
+            pp = (
+                "none"
+                if getattr(args, "skip_postprocess", False)
+                else ("minimal" if getattr(args, "skip_flows", False) else "full")
             )
             from .tools.build import build_or_update_graph
+
             result = build_or_update_graph(
-                full_rebuild=True, repo_root=str(repo_root), postprocess=pp,
+                full_rebuild=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
             )
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Full build: {parsed} files, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
+            print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
 
         elif args.command == "update":
-            pp = "none" if getattr(args, "skip_postprocess", False) else (
-                "minimal" if getattr(args, "skip_flows", False) else "full"
+            pp = (
+                "none"
+                if getattr(args, "skip_postprocess", False)
+                else ("minimal" if getattr(args, "skip_flows", False) else "full")
             )
             from .tools.build import build_or_update_graph
+
             result = build_or_update_graph(
-                full_rebuild=False, repo_root=str(repo_root),
-                base=args.base, postprocess=pp,
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
             )
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
@@ -526,6 +558,7 @@ def main() -> None:
             if stored_sha:
                 print(f"Built at commit: {stored_sha[:12]}")
             from .incremental import _git_branch_info
+
             current_branch, current_sha = _git_branch_info(repo_root)
             if stored_branch and current_branch and stored_branch != current_branch:
                 print(
@@ -539,6 +572,7 @@ def main() -> None:
 
         elif args.command == "visualize":
             from .visualization import generate_html
+
             html_path = repo_root / ".code-review-graph" / "graph.html"
             vis_mode = getattr(args, "mode", "auto") or "auto"
             generate_html(store, html_path, mode=vis_mode)
@@ -565,6 +599,7 @@ def main() -> None:
 
         elif args.command == "wiki":
             from .wiki import generate_wiki
+
             wiki_dir = repo_root / ".code-review-graph" / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]

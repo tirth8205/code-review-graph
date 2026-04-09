@@ -6,10 +6,12 @@ from unittest.mock import patch
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
+    _opencode_plugin_content,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
     install_hooks,
+    install_opencode_plugin,
     install_platform_configs,
 )
 
@@ -64,9 +66,7 @@ class TestGenerateSkills:
         skills_dir = generate_skills(tmp_path)
         for path in skills_dir.iterdir():
             content = path.read_text()
-            assert "detail_level" in content, (
-                f"{path.name} missing detail_level reference"
-            )
+            assert "detail_level" in content, f"{path.name} missing detail_level reference"
 
     def test_idempotent(self, tmp_path):
         """Running twice should not fail and files should still be valid."""
@@ -184,9 +184,12 @@ class TestInjectClaudeMd:
 
 class TestInstallPlatformConfigs:
     def test_install_cursor_config(self, tmp_path):
-        with patch.dict(PLATFORMS, {
-            "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
-        }):
+        with patch.dict(
+            PLATFORMS,
+            {
+                "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
+            },
+        ):
             configured = install_platform_configs(tmp_path, target="cursor")
         assert "Cursor" in configured
         config_path = tmp_path / ".cursor" / "mcp.json"
@@ -199,32 +202,39 @@ class TestInstallPlatformConfigs:
         windsurf_dir = tmp_path / ".codeium" / "windsurf"
         windsurf_dir.mkdir(parents=True)
         config_path = windsurf_dir / "mcp_config.json"
-        with patch.dict(PLATFORMS, {
-            "windsurf": {
-                **PLATFORMS["windsurf"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "windsurf": {
+                    **PLATFORMS["windsurf"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="windsurf")
         assert "Windsurf" in configured
         data = json.loads(config_path.read_text())
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
         import shutil
+
         expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
         assert entry["command"] == expected_cmd
 
     def test_install_zed_config(self, tmp_path):
         zed_settings = tmp_path / "zed" / "settings.json"
         zed_settings.parent.mkdir(parents=True)
-        with patch.dict(PLATFORMS, {
-            "zed": {
-                **PLATFORMS["zed"],
-                "config_path": lambda root: zed_settings,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "zed": {
+                    **PLATFORMS["zed"],
+                    "config_path": lambda root: zed_settings,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="zed")
         assert "Zed" in configured
         data = json.loads(zed_settings.read_text())
@@ -235,13 +245,16 @@ class TestInstallPlatformConfigs:
         continue_dir = tmp_path / ".continue"
         continue_dir.mkdir()
         config_path = continue_dir / "config.json"
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="continue")
         assert "Continue" in configured
         data = json.loads(config_path.read_text())
@@ -277,9 +290,7 @@ class TestInstallPlatformConfigs:
         assert "code-review-graph" in data["mcpServers"]
 
     def test_dry_run_no_write(self, tmp_path):
-        configured = install_platform_configs(
-            tmp_path, target="claude", dry_run=True
-        )
+        configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
         assert "Claude Code" in configured
         assert not (tmp_path / ".mcp.json").exists()
 
@@ -292,18 +303,134 @@ class TestInstallPlatformConfigs:
         config_path = tmp_path / ".continue" / "config.json"
         config_path.parent.mkdir(parents=True)
         existing = {
-            "mcpServers": [
-                {"name": "code-review-graph", "command": "uvx", "args": ["serve"]}
-            ]
+            "mcpServers": [{"name": "code-review-graph", "command": "uvx", "args": ["serve"]}]
         }
         config_path.write_text(json.dumps(existing))
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="continue")
         data = json.loads(config_path.read_text())
         assert len(data["mcpServers"]) == 1
+
+
+class TestOpenCodePluginContent:
+    """Tests for _opencode_plugin_content()."""
+
+    def test_returns_non_empty_string(self):
+        content = _opencode_plugin_content()
+        assert isinstance(content, str)
+        assert len(content) > 100
+
+    def test_has_plugin_type_import(self):
+        content = _opencode_plugin_content()
+        assert "import type" in content
+        assert "@opencode-ai/plugin" in content
+
+    def test_has_default_export(self):
+        content = _opencode_plugin_content()
+        assert "export default" in content
+
+    def test_hooks_file_edited_event(self):
+        content = _opencode_plugin_content()
+        assert '"file.edited"' in content
+        assert "code-review-graph update --skip-flows" in content
+
+    def test_hooks_session_created_event(self):
+        content = _opencode_plugin_content()
+        assert '"session.created"' in content
+        assert "code-review-graph status" in content
+
+    def test_hooks_tool_execute_before_event(self):
+        content = _opencode_plugin_content()
+        assert '"tool.execute.before"' in content
+        assert "code-review-graph detect-changes --brief" in content
+
+    def test_has_git_commit_detection(self):
+        """Pre-commit hook should match git commit commands."""
+        content = _opencode_plugin_content()
+        assert "git" in content
+        assert "commit" in content
+
+    def test_all_handlers_have_try_catch(self):
+        """Every event handler must use try/catch for graceful failure."""
+        content = _opencode_plugin_content()
+        # Count the three event registrations and ensure catch blocks
+        assert content.count("} catch") >= 3
+
+
+class TestInstallOpenCodePlugin:
+    """Tests for install_opencode_plugin()."""
+
+    def test_creates_plugin_file(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        plugin_path = tmp_path / ".config" / "opencode" / "plugins" / "crg-plugin.ts"
+        assert plugin_path.exists()
+        assert result == plugin_path
+
+    def test_plugin_file_has_correct_content(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        content = result.read_text(encoding="utf-8")
+        assert "export default" in content
+        assert "file.edited" in content
+
+    def test_creates_parent_directories(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        assert plugins_dir.is_dir()
+
+    def test_overwrites_existing_plugin(self, tmp_path):
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        old_plugin = plugins_dir / "crg-plugin.ts"
+        old_plugin.write_text("// old version")
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+
+        content = old_plugin.read_text()
+        assert "// old version" not in content
+        assert "export default" in content
+
+    def test_idempotent(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+            result = install_opencode_plugin()
+        content = result.read_text()
+        assert "export default" in content
+        # Only one default export in the file
+        assert content.count("export default") == 1
+
+    def test_plugin_is_typescript(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        assert result.suffix == ".ts"
+
+    def test_preserves_other_plugins(self, tmp_path):
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        other_plugin = plugins_dir / "other-plugin.ts"
+        other_plugin.write_text("// other plugin")
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+
+        assert other_plugin.exists()
+        assert other_plugin.read_text() == "// other plugin"
+
+    def test_file_is_utf8(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        # Should be readable as UTF-8 without errors
+        content = result.read_text(encoding="utf-8")
+        assert len(content) > 0

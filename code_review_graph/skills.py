@@ -2,7 +2,8 @@
 
 Generates Claude Code agent skill files, hooks configuration, and
 CLAUDE.md integration for seamless code-review-graph usage.
-Also supports multi-platform MCP server installation.
+Also supports multi-platform MCP server installation and
+OpenCode plugin generation.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- Multi-platform MCP install ---
+
 
 def _zed_settings_path() -> Path:
     """Return the Zed settings.json path for the current OS."""
@@ -121,9 +123,7 @@ def install_platform_configs(
         List of platform names that were configured.
     """
     if target == "all":
-        platforms_to_install = {
-            k: v for k, v in PLATFORMS.items() if v["detect"]()
-        }
+        platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
     else:
         if target not in PLATFORMS:
             logger.error("Unknown platform: %s", target)
@@ -151,10 +151,7 @@ def install_platform_configs(
             if not isinstance(arr, list):
                 arr = []
             # Check if already present
-            if any(
-                isinstance(s, dict) and s.get("name") == "code-review-graph"
-                for s in arr
-            ):
+            if any(isinstance(s, dict) and s.get("name") == "code-review-graph" for s in arr):
                 print(f"  {plat['name']}: already configured in {config_path}")
                 configured.append(plat["name"])
                 continue
@@ -183,6 +180,7 @@ def install_platform_configs(
 
     return configured
 
+
 # --- Skill file contents ---
 
 _SKILLS: dict[str, dict[str, str]] = {
@@ -206,10 +204,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `children_of` on a file to see all its functions and classes.\n"
             "- Use `find_large_functions` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -224,7 +222,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "1. Run `detect_changes` to get risk-scored change analysis.\n"
             "2. Run `get_affected_flows` to find impacted execution paths.\n"
             "3. For each high-risk function, run `query_graph` with "
-            "pattern=\"tests_for\" to check test coverage.\n"
+            'pattern="tests_for" to check test coverage.\n'
             "4. Run `get_impact_radius` to understand the blast radius.\n"
             "5. For any untested changes, suggest specific test cases.\n\n"
             "### Output Format\n\n"
@@ -234,10 +232,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -260,10 +258,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -275,10 +273,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Refactor Safely\n\n"
             "Use the knowledge graph to plan and execute refactoring with confidence.\n\n"
             "### Steps\n\n"
-            "1. Use `refactor_tool` with mode=\"suggest\" for community-driven "
+            '1. Use `refactor_tool` with mode="suggest" for community-driven '
             "refactoring suggestions.\n"
-            "2. Use `refactor_tool` with mode=\"dead_code\" to find unreferenced code.\n"
-            "3. For renames, use `refactor_tool` with mode=\"rename\" to preview all "
+            '2. Use `refactor_tool` with mode="dead_code" to find unreferenced code.\n'
+            '3. For renames, use `refactor_tool` with mode="rename" to preview all '
             "affected locations.\n"
             "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
             "5. After changes, run `detect_changes` to verify the refactoring impact.\n\n"
@@ -288,10 +286,10 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `get_affected_flows` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            "- ALWAYS start with `get_minimal_context(task=\"<your task>\")` "
+            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
             "before any other graph tool.\n"
-            "- Use `detail_level=\"minimal\"` on all calls. Only escalate to "
-            "\"standard\" when minimal is insufficient.\n"
+            '- Use `detail_level="minimal"` on all calls. Only escalate to '
+            '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
             "and ≤800 total output tokens."
         ),
@@ -461,14 +459,16 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
 def inject_claude_md(repo_root: Path) -> None:
     """Append MCP tools section to CLAUDE.md."""
     _inject_instructions(
-        repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION,
+        repo_root / "CLAUDE.md",
+        _CLAUDE_MD_SECTION_MARKER,
+        _CLAUDE_MD_SECTION,
     )
 
 
 # Cross-platform instruction files so every AI coding tool uses the graph.
 _PLATFORM_INSTRUCTION_FILES = {
-    "AGENTS.md": "AGENTS.md",       # Cursor, OpenCode, Antigravity
-    "GEMINI.md": "GEMINI.md",       # Antigravity / Gemini CLI
+    "AGENTS.md": "AGENTS.md",  # Cursor, OpenCode, Antigravity
+    "GEMINI.md": "GEMINI.md",  # Antigravity / Gemini CLI
     ".cursorrules": ".cursorrules",  # Cursor (legacy, widely used)
     ".windsurfrules": ".windsurfrules",  # Windsurf
 }
@@ -489,3 +489,108 @@ def inject_platform_instructions(repo_root: Path) -> list[str]:
         if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
             updated.append(label)
     return updated
+
+
+# --- OpenCode plugin ---
+
+
+def _opencode_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode user-level plugin.
+
+    The plugin hooks into three OpenCode events to mirror the Claude Code
+    hook behaviors:
+
+    1. ``file.edited`` — runs ``code-review-graph update --skip-flows``
+    2. ``session.created`` — runs ``code-review-graph status``
+    3. ``tool.execute.before`` — when the tool is a shell command starting
+       with ``git commit``, runs ``code-review-graph detect-changes --brief``
+
+    All handlers use try/catch so errors never break the editor session.
+    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
+    context) for subprocess execution.
+    """
+    return """\
+import type { Plugin } from "@opencode-ai/plugin"
+
+/**
+ * code-review-graph plugin for OpenCode.
+ *
+ * Keeps the knowledge graph up-to-date and surfaces status
+ * information automatically during coding sessions.
+ *
+ * Installed by: code-review-graph install --platform opencode
+ */
+
+// Helper: run a shell command quietly, swallowing errors.
+async function run($: any, cmd: string): Promise<string> {
+  try {
+    const result = await $`${cmd}`.quiet()
+    return result.stdout?.toString().trim() ?? ""
+  } catch {
+    return ""
+  }
+}
+
+export default (app: any) => {
+  // 1. Auto-update graph after file edits
+  app.on("file.edited", async ({ $ }: { $: any }) => {
+    try {
+      await $`code-review-graph update --skip-flows`.quiet()
+    } catch {
+      // Swallow — graph may not be built yet for this project.
+    }
+  })
+
+  // 2. Show graph status when a new session starts
+  app.on("session.created", async ({ $ }: { $: any }) => {
+    try {
+      const result = await $`code-review-graph status`.quiet()
+      const output = result.stdout?.toString().trim()
+      if (output) {
+        console.log("[code-review-graph]", output)
+      }
+    } catch {
+      // Swallow — not every project has a graph.
+    }
+  })
+
+  // 3. Detect changes before git commit commands
+  app.on("tool.execute.before", async (ctx: any) => {
+    try {
+      const input = ctx?.input ?? ctx?.params ?? {}
+      const cmd =
+        input.command ?? input.cmd ?? input.content ?? ""
+      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
+        const result =
+          await ctx.$`code-review-graph detect-changes --brief`.quiet()
+        const output = result.stdout?.toString().trim()
+        if (output) {
+          console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
+        }
+      }
+    } catch {
+      // Swallow — never block a commit.
+    }
+  })
+}
+"""
+
+
+def install_opencode_plugin() -> Path:
+    """Install the OpenCode user-level plugin for code-review-graph.
+
+    Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
+    directories if they don't exist.  If the file already exists it is
+    overwritten (the plugin is self-contained and idempotent).
+
+    Returns:
+        Path to the plugin file that was written.
+    """
+    plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
+    plugin_path = plugins_dir / "crg-plugin.ts"
+
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    plugin_path.write_text(_opencode_plugin_content(), encoding="utf-8")
+    logger.info("Wrote OpenCode plugin: %s", plugin_path)
+
+    return plugin_path
