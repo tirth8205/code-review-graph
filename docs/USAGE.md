@@ -135,3 +135,5 @@ generated/**
 vendor/**
 *.generated.ts
 ```
+
+In git repos, indexing is based on tracked files (`git ls-files`), so gitignored files are skipped automatically. Use `.code-review-graphignore` to exclude tracked files or when git isn't available.

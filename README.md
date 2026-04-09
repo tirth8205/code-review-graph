@@ -287,6 +287,8 @@ vendor/**
 node_modules/**
 ```
 
+Note: in git repos, only tracked files are indexed (`git ls-files`), so gitignored files are skipped automatically. Use `.code-review-graphignore` to exclude tracked files or when git isn't available.
+
 Optional dependency groups:
 
 ```bash
