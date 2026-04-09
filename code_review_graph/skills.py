@@ -27,6 +27,14 @@ def _zed_settings_path() -> Path:
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
+    "codex": {
+        "name": "Codex",
+        "config_path": lambda root: Path.home() / ".codex" / "config.toml",
+        "key": "mcp_servers",
+        "detect": lambda: (Path.home() / ".codex").exists(),
+        "format": "toml",
+        "needs_type": True,
+    },
     "claude": {
         "name": "Claude Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -105,6 +113,50 @@ def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
     return entry
 
 
+def _format_toml_value(value: Any) -> str:
+    """Format a primitive Python value as TOML."""
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, list):
+        return "[" + ", ".join(_format_toml_value(item) for item in value) + "]"
+    raise TypeError(f"Unsupported TOML value: {type(value)!r}")
+
+
+def _merge_toml_mcp_server(
+    config_path: Path,
+    server_name: str,
+    server_entry: dict[str, Any],
+    dry_run: bool = False,
+) -> bool:
+    """Append a Codex MCP server section without clobbering the rest of the file."""
+    section_header = f"[mcp_servers.{server_name}]"
+    existing = ""
+    if config_path.exists():
+        existing = config_path.read_text(encoding="utf-8")
+        if section_header in existing:
+            return False
+
+    section_lines = [section_header]
+    for key, value in server_entry.items():
+        section_lines.append(f"{key} = {_format_toml_value(value)}")
+    section = "\n".join(section_lines) + "\n"
+
+    if dry_run:
+        return True
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = ""
+    if existing:
+        prefix = existing if existing.endswith("\n") else existing + "\n"
+        if not prefix.endswith("\n\n"):
+            prefix += "\n"
+    config_path.write_text(prefix + section, encoding="utf-8")
+    return True
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -136,6 +188,24 @@ def install_platform_configs(
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key)
+
+        if plat["format"] == "toml":
+            changed = _merge_toml_mcp_server(
+                config_path,
+                "code-review-graph",
+                server_entry,
+                dry_run=dry_run,
+            )
+            if not changed:
+                print(f"  {plat['name']}: already configured in {config_path}")
+                configured.append(plat["name"])
+                continue
+            if dry_run:
+                print(f"  [dry-run] {plat['name']}: would write {config_path}")
+            else:
+                print(f"  {plat['name']}: configured {config_path}")
+            configured.append(plat["name"])
+            continue
 
         # Read existing config
         existing: dict[str, Any] = {}

@@ -15,6 +15,7 @@ code-review-graph build      # parse your codebase
 To target a specific platform instead of auto-detecting all:
 
 ```bash
+code-review-graph install --platform codex
 code-review-graph install --platform cursor
 code-review-graph install --platform claude-code
 ```
@@ -23,6 +24,7 @@ code-review-graph install --platform claude-code
 
 | Platform | Config file |
 |----------|-------------|
+| **Codex** | `~/.codex/config.toml` |
 | **Claude Code** | `.mcp.json` |
 | **Cursor** | `.cursor/mcp.json` |
 | **Windsurf** | `.windsurf/mcp.json` |

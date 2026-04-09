@@ -1,6 +1,7 @@
 """Tests for skills and hooks auto-install."""
 
 import json
+import tomllib
 from unittest.mock import patch
 
 from code_review_graph.skills import (
@@ -183,6 +184,72 @@ class TestInjectClaudeMd:
 
 
 class TestInstallPlatformConfigs:
+    def test_install_codex_config(self, tmp_path):
+        codex_config = tmp_path / ".codex" / "config.toml"
+        with patch.dict(PLATFORMS, {
+            "codex": {
+                **PLATFORMS["codex"],
+                "config_path": lambda root: codex_config,
+                "detect": lambda: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="codex")
+        assert "Codex" in configured
+        data = tomllib.loads(codex_config.read_text())
+        entry = data["mcp_servers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == [
+            "serve"
+        ]
+
+    def test_install_codex_preserves_existing_toml(self, tmp_path):
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            'model = "gpt-5.4"\n\n[mcp_servers.other]\ncommand = "other"\n',
+            encoding="utf-8",
+        )
+        with patch.dict(PLATFORMS, {
+            "codex": {
+                **PLATFORMS["codex"],
+                "config_path": lambda root: codex_config,
+                "detect": lambda: True,
+            },
+        }):
+            install_platform_configs(tmp_path, target="codex")
+        data = tomllib.loads(codex_config.read_text())
+        assert data["model"] == "gpt-5.4"
+        assert data["mcp_servers"]["other"]["command"] == "other"
+        assert data["mcp_servers"]["code-review-graph"]["command"] in {
+            "uvx",
+            "code-review-graph",
+        }
+
+    def test_install_codex_no_duplicate(self, tmp_path):
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            '\n'.join(
+                [
+                    '[mcp_servers.code-review-graph]',
+                    'command = "uvx"',
+                    'args = ["code-review-graph", "serve"]',
+                    'type = "stdio"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(PLATFORMS, {
+            "codex": {
+                **PLATFORMS["codex"],
+                "config_path": lambda root: codex_config,
+                "detect": lambda: True,
+            },
+        }):
+            install_platform_configs(tmp_path, target="codex")
+        assert codex_config.read_text().count("[mcp_servers.code-review-graph]") == 1
+
     def test_install_cursor_config(self, tmp_path):
         with patch.dict(PLATFORMS, {
             "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
@@ -259,10 +326,27 @@ class TestInstallPlatformConfigs:
         assert entry["env"] == []
 
     def test_install_all_detected(self, tmp_path):
-        """Installing 'all' configures claude and opencode (always detected)."""
-        configured = install_platform_configs(tmp_path, target="all")
+        """Installing 'all' configures auto-detected platforms."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        with patch.dict(PLATFORMS, {
+            "codex": {
+                **PLATFORMS["codex"],
+                "config_path": lambda root: codex_config,
+                "detect": lambda: True,
+            },
+            "claude": {**PLATFORMS["claude"], "detect": lambda: True},
+            "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
+            "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
+            "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
+            "zed": {**PLATFORMS["zed"], "detect": lambda: False},
+            "continue": {**PLATFORMS["continue"], "detect": lambda: False},
+            "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
+        }):
+            configured = install_platform_configs(tmp_path, target="all")
+        assert "Codex" in configured
         assert "Claude Code" in configured
         assert "OpenCode" in configured
+        assert codex_config.exists()
         assert (tmp_path / ".mcp.json").exists()
         assert (tmp_path / ".opencode.json").exists()
 

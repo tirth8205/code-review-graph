@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Codex platform install support**: `code-review-graph install --platform codex` now appends a `mcp_servers.code-review-graph` section to `~/.codex/config.toml` without overwriting existing Codex settings
+
 ## [2.2.2] - 2026-04-08
 
 ### Added

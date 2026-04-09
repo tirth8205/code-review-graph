@@ -187,7 +187,7 @@ def main() -> None:
     install_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "claude-code", "cursor", "windsurf", "zed",
+            "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
             "continue", "opencode", "antigravity", "all",
         ],
         default="all",
@@ -217,7 +217,7 @@ def main() -> None:
     init_cmd.add_argument(
         "--platform",
         choices=[
-            "claude", "claude-code", "cursor", "windsurf", "zed",
+            "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
             "continue", "opencode", "antigravity", "all",
         ],
         default="all",
