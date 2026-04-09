@@ -1,7 +1,7 @@
 """CLI tests for MCP serve command wiring."""
 
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from code_review_graph import cli
 
@@ -73,3 +73,20 @@ class TestDaemonCommand:
                 cli.main()
 
         mock_stop.assert_called_once()
+
+
+class TestWatchInteraction:
+    def test_watch_exits_when_lock_is_held(self):
+        argv = ["code-review-graph", "watch", "--repo", "repo-root"]
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch("code_review_graph.incremental.watch") as mock_watch:
+                        mock_watch.side_effect = RuntimeError("watcher already running")
+                        try:
+                            cli.main()
+                            assert False, "Expected SystemExit"
+                        except SystemExit as exc:
+                            assert exc.code == 1

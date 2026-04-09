@@ -6,21 +6,21 @@ from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _acquire_watch_lock,
-    _release_watch_lock,
     _is_binary,
     _load_ignore_patterns,
     _parse_single_file,
+    _release_watch_lock,
     _should_ignore,
     _single_hop_dependents,
     find_dependents,
     find_project_root,
     find_repo_root,
     full_build,
-    get_watch_daemon_status,
     get_all_tracked_files,
     get_changed_files,
     get_db_path,
     get_staged_and_unstaged,
+    get_watch_daemon_status,
     incremental_update,
     start_watch_daemon,
     start_watch_thread,
@@ -450,6 +450,26 @@ class TestWatchDaemon:
         _release_watch_lock(tmp_path, owner_pid=12345)
         status = get_watch_daemon_status(tmp_path)
         assert status["lock_active"] is False
+
+    @patch("code_review_graph.incremental._is_pid_running", return_value=False)
+    def test_stale_lock_gets_replaced(self, _mock_running, tmp_path):
+        lock_file = tmp_path / ".code-review-graph" / "watch.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text("99999\n")
+
+        ok, _reason = _acquire_watch_lock(tmp_path, owner_pid=12345)
+        assert ok is True
+        assert lock_file.read_text().strip() == "12345"
+
+    @patch("code_review_graph.incremental._is_pid_running", return_value=True)
+    def test_active_lock_blocks_second_watcher(self, _mock_running, tmp_path):
+        lock_file = tmp_path / ".code-review-graph" / "watch.lock"
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_file.write_text("4242\n")
+
+        ok, reason = _acquire_watch_lock(tmp_path, owner_pid=12345)
+        assert ok is False
+        assert "already running" in reason
 
     @patch("code_review_graph.incremental.subprocess.Popen")
     @patch("code_review_graph.incremental._is_pid_running")

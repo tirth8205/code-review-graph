@@ -708,6 +708,9 @@ def start_watch_daemon(repo_root: Path) -> dict:
 
     log_path = _watch_log_path(repo_root)
     if os.name == "nt":
+        win_detached = getattr(subprocess, "DETACHED_PROCESS", 0)
+        win_new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        win_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
@@ -716,11 +719,7 @@ def start_watch_daemon(repo_root: Path) -> dict:
             close_fds=True,
             cwd=str(repo_root),
             env=env,
-            creationflags=(
-                subprocess.DETACHED_PROCESS
-                | subprocess.CREATE_NEW_PROCESS_GROUP
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            ),
+            creationflags=(win_detached | win_new_group | win_no_window),
         )
     else:
         with log_path.open("a", encoding="utf-8") as log_file:

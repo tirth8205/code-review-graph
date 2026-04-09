@@ -462,8 +462,8 @@ def main() -> None:
     from .incremental import (
         find_project_root,
         find_repo_root,
-        get_watch_daemon_status,
         get_db_path,
+        get_watch_daemon_status,
         run_watch_daemon_foreground,
         start_watch_daemon,
         stop_watch_daemon,
@@ -598,7 +598,11 @@ def main() -> None:
             try:
                 watch(repo_root, store)
             except RuntimeError as exc:
-                logging.error(str(exc))
+                logging.error(
+                    "%s. If daemon mode is running, stop it with "
+                    "'code-review-graph daemon stop' first.",
+                    exc,
+                )
                 sys.exit(1)
 
         elif args.command == "visualize":

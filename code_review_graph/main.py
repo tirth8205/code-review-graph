@@ -12,6 +12,8 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
+from .graph import GraphStore
+from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
     architecture_map_prompt,
     debug_issue_prompt,
@@ -45,9 +47,6 @@ from .tools import (
     run_postprocess,
     semantic_search_nodes,
 )
-
-from .graph import GraphStore
-from .incremental import find_project_root, get_db_path, start_watch_thread
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
