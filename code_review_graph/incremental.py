@@ -355,6 +355,8 @@ def full_build(repo_root: Path, store: GraphStore) -> dict:
     stale_files = existing_files - current_abs
     for stale in stale_files:
         store.remove_file_data(stale)
+    # Ensure deletions are persisted before store_file_nodes_edges()
+    # starts its own explicit transaction via BEGIN IMMEDIATE.
     if stale_files:
         store.commit()
 
@@ -488,8 +490,8 @@ def incremental_update(
             pass
         to_parse.append(rel_path)
 
-    # Flush implicit transaction left open by remove_file_data() calls
-    # before store_file_nodes_edges() issues BEGIN IMMEDIATE.
+    # Persist deletions before store_file_nodes_edges() opens its own
+    # explicit transaction — avoids nested transaction errors.
     if removed_any:
         store.commit()
 

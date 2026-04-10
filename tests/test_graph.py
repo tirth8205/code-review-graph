@@ -118,9 +118,10 @@ class TestGraphStore:
         self.store.store_file_nodes_edges("/test/a.py", nodes_a, [])
         self.store.store_file_nodes_edges("/test/b.py", nodes_b, [])
 
-        # remove_file_data leaves an implicit transaction open
+        # Without the isolation_level=None fix, this would leave an
+        # implicit transaction open and the next call would crash.
         self.store.remove_file_data("/test/a.py")
-        # This must NOT raise sqlite3.OperationalError
+        # Must not raise sqlite3.OperationalError
         nodes_c = [self._make_file_node("/test/c.py")]
         self.store.store_file_nodes_edges("/test/c.py", nodes_c, [])
 
@@ -138,12 +139,12 @@ class TestGraphStore:
                 path, [self._make_file_node(path)], [],
             )
 
-        # Remove multiple files without committing (simulates full_build
-        # stale-file purge loop before the fix)
+        # Simulates full_build's stale-file purge: multiple deletes in a
+        # row without explicit commit between them.
         for i in range(3):
             self.store.remove_file_data(f"/test/file_{i}.py")
 
-        # store_file_nodes_edges must handle the dirty transaction state
+        # Next store call must succeed regardless of prior connection state.
         new_path = "/test/new_file.py"
         nodes = [self._make_file_node(new_path)]
         self.store.store_file_nodes_edges(new_path, nodes, [])
