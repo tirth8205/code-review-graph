@@ -130,6 +130,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_git_hook,
         install_hooks,
     )
 
@@ -144,6 +145,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks:
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
+        git_hook = install_git_hook(repo_root)
+        if git_hook:
+            print(f"Installed git pre-commit hook in {git_hook}")
 
     print()
     print("Next steps:")

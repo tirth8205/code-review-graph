@@ -1,6 +1,8 @@
 """Tests for skills and hooks auto-install."""
 
 import json
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 from code_review_graph.skills import (
@@ -9,6 +11,7 @@ from code_review_graph.skills import (
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
+    install_git_hook,
     install_hooks,
     install_platform_configs,
 )
@@ -84,32 +87,67 @@ class TestGenerateHooksConfig:
     def test_has_post_tool_use(self):
         config = generate_hooks_config()
         assert "PostToolUse" in config["hooks"]
-        hooks = config["hooks"]["PostToolUse"]
-        assert len(hooks) >= 1
-        assert hooks[0]["matcher"] == "Edit|Write|Bash"
-        assert "update" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 5000
+        entry = config["hooks"]["PostToolUse"][0]
+        assert entry["matcher"] == "Edit|Write|Bash"
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "update" in inner["command"]
+        assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
         config = generate_hooks_config()
         assert "SessionStart" in config["hooks"]
-        hooks = config["hooks"]["SessionStart"]
-        assert len(hooks) >= 1
-        assert "status" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 3000
+        entry = config["hooks"]["SessionStart"][0]
+        assert "matcher" in entry
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "status" in inner["command"]
+        assert 0 < inner["timeout"] <= 600
 
-    def test_has_pre_commit(self):
+    def test_no_pre_commit(self):
         config = generate_hooks_config()
-        assert "PreCommit" in config["hooks"]
-        hooks = config["hooks"]["PreCommit"]
-        assert len(hooks) >= 1
-        assert "detect-changes" in hooks[0]["command"]
-        assert hooks[0]["timeout"] == 10000
+        assert "PreCommit" not in config["hooks"]
 
-    def test_has_all_three_hook_types(self):
+    def test_hook_entries_use_nested_hooks_array(self):
         config = generate_hooks_config()
-        hook_types = set(config["hooks"].keys())
-        assert hook_types == {"PostToolUse", "SessionStart", "PreCommit"}
+        for hook_type, entries in config["hooks"].items():
+            for entry in entries:
+                assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
+                assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
+
+
+class TestInstallGitHook:
+    def _make_git_repo(self, tmp_path: Path) -> Path:
+        (tmp_path / ".git" / "hooks").mkdir(parents=True)
+        return tmp_path
+
+    def test_creates_executable_pre_commit_hook(self, tmp_path):
+        hook_path = install_git_hook(self._make_git_repo(tmp_path))
+        assert hook_path is not None and hook_path.name == "pre-commit"
+        assert os.access(hook_path, os.X_OK)
+        content = hook_path.read_text()
+        assert content.startswith("#!/")
+        assert "code-review-graph detect-changes" in content
+
+    def test_appends_to_existing_hook(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        hook_path = repo / ".git" / "hooks" / "pre-commit"
+        hook_path.write_text("#!/bin/sh\nexisting-command\n", encoding="utf-8")
+        hook_path.chmod(0o755)
+        install_git_hook(repo)
+        content = hook_path.read_text()
+        assert "existing-command" in content
+        assert "code-review-graph detect-changes" in content
+
+    def test_idempotent(self, tmp_path):
+        repo = self._make_git_repo(tmp_path)
+        install_git_hook(repo)
+        install_git_hook(repo)
+        content = (repo / ".git" / "hooks" / "pre-commit").read_text()
+        assert content.count("code-review-graph detect-changes") == 1
+
+    def test_no_git_dir_returns_none(self, tmp_path):
+        assert install_git_hook(tmp_path) is None
 
 
 class TestInstallHooks:
@@ -132,7 +170,7 @@ class TestInstallHooks:
         assert data["customSetting"] is True
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
-        assert "PreCommit" in data["hooks"]
+        assert "PreCommit" not in data["hooks"]
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)

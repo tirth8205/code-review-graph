@@ -332,37 +332,78 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
 
 
 def generate_hooks_config() -> dict[str, Any]:
-    """Generate Claude Code hooks configuration.
+    """Return Claude Code hook definitions for .claude/settings.json.
 
-    Returns a hooks config dict with PostToolUse, SessionStart, and
-    PreCommit hooks for automatic graph updates.
-
-    Returns:
-        Dict with hooks configuration suitable for .claude/settings.json.
+    Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
+    ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
+    Claude Code event — pre-commit checks are handled by ``install_git_hook``.
     """
     return {
         "hooks": {
             "PostToolUse": [
                 {
                     "matcher": "Edit|Write|Bash",
-                    "command": "code-review-graph update --skip-flows",
-                    "timeout": 5000,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph update --skip-flows",
+                            "timeout": 30,
+                        },
+                    ],
                 },
             ],
             "SessionStart": [
                 {
-                    "command": "code-review-graph status",
-                    "timeout": 3000,
-                },
-            ],
-            "PreCommit": [
-                {
-                    "command": "code-review-graph detect-changes --brief",
-                    "timeout": 10000,
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph status",
+                            "timeout": 10,
+                        },
+                    ],
                 },
             ],
         }
     }
+
+
+def install_git_hook(repo_root: Path) -> Path | None:
+    """Install a git pre-commit hook that prints a risk summary before each commit.
+
+    Called automatically by ``code-review-graph install``
+    Creates ``.git/hooks/pre-commit`` if it doesn't exist, or appends to an
+    existing one — preserving any hooks already there. Returns None when no
+    ``.git`` directory is found.
+    """
+    _SCRIPT = """\
+#!/bin/sh
+# Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
+if command -v code-review-graph >/dev/null 2>&1; then
+    code-review-graph detect-changes --brief || true
+fi
+"""
+    _MARKER = "code-review-graph detect-changes"
+
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        logger.warning("No .git directory found at %s — skipping git hook install.", repo_root)
+        return None
+
+    hook_path = git_dir / "hooks" / "pre-commit"
+    hook_path.parent.mkdir(exist_ok=True)
+
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8")
+        if _MARKER in existing:
+            return hook_path
+        hook_path.write_text(existing.rstrip("\n") + "\n" + _SCRIPT, encoding="utf-8")
+    else:
+        hook_path.write_text(_SCRIPT, encoding="utf-8")
+
+    hook_path.chmod(0o755)
+    logger.info("Wrote git pre-commit hook: %s", hook_path)
+    return hook_path
 
 
 def install_hooks(repo_root: Path) -> None:
