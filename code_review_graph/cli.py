@@ -94,6 +94,63 @@ def _print_banner() -> None:
 """)
 
 
+def _preview_instructions(
+    repo_root: Path,
+    section: str,
+    marker: str,
+    platform_files: dict[str, str],
+) -> list[str]:
+    """Print a preview of files that would be modified by instruction injection.
+
+    Returns list of file names that would be modified (not already containing
+    the marker).
+    """
+    targets: list[str] = []
+
+    claude_md = repo_root / "CLAUDE.md"
+    if claude_md.exists():
+        content = claude_md.read_text(encoding="utf-8")
+        if marker not in content:
+            targets.append("CLAUDE.md")
+    else:
+        targets.append("CLAUDE.md (new)")
+
+    for label, filename in platform_files.items():
+        path = repo_root / filename
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            if marker not in content:
+                targets.append(label)
+        else:
+            targets.append(f"{label} (new)")
+
+    if targets:
+        print(f"\nGraph instructions will be appended to: {', '.join(targets)}")
+        print("Content to inject:")
+        for line in section.strip().splitlines():
+            print(f"  {line}")
+        print()
+    return targets
+
+
+def _confirm_inject(targets: list[str]) -> bool:
+    """Prompt user to confirm instruction injection.
+
+    Returns True if user confirms, False otherwise.  Non-interactive
+    environments (no TTY) default to True to preserve backwards
+    compatibility with CI/automation.
+    """
+    import sys
+    if not sys.stdin.isatty():
+        return True
+    try:
+        answer = input(f"Inject into {', '.join(targets)}? [Y/n] ").strip().lower()
+        return answer in ("", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+
+
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
     from .incremental import find_repo_root
@@ -116,30 +173,57 @@ def _handle_init(args: argparse.Namespace) -> None:
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
-    if dry_run:
-        print("\n[dry-run] No files were modified.")
-        return
-
-    # Skills and hooks are installed by default so Claude actually uses the
-    # graph tools proactively.  Use --no-skills / --no-hooks to opt out.
+    # Skills, hooks, and instructions are installed by default so Claude
+    # actually uses the graph tools proactively.  Use --no-skills /
+    # --no-hooks / --no-instructions to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
+    skip_instructions = getattr(args, "no_instructions", False)
+    auto_yes = getattr(args, "yes", False)
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
+        _CLAUDE_MD_SECTION,
+        _CLAUDE_MD_SECTION_MARKER,
+        _PLATFORM_INSTRUCTION_FILES,
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
         install_hooks,
     )
 
+    if dry_run:
+        # Show what would be injected into instruction files
+        _preview_instructions(
+            repo_root, _CLAUDE_MD_SECTION, _CLAUDE_MD_SECTION_MARKER,
+            _PLATFORM_INSTRUCTION_FILES,
+        )
+        print("\n[dry-run] No files were modified.")
+        return
+
     if not skip_skills:
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
-        inject_claude_md(repo_root)
-        updated = inject_platform_instructions(repo_root)
-        if updated:
-            print(f"Injected graph instructions into: {', '.join(updated)}")
+
+    if not skip_instructions:
+        # Preview and confirm before injecting into checked-in files
+        targets = _preview_instructions(
+            repo_root, _CLAUDE_MD_SECTION, _CLAUDE_MD_SECTION_MARKER,
+            _PLATFORM_INSTRUCTION_FILES,
+        )
+        if targets:
+            if auto_yes or _confirm_inject(targets):
+                inject_claude_md(repo_root)
+                updated = inject_platform_instructions(repo_root)
+                injected = ["CLAUDE.md"] + updated if (repo_root / "CLAUDE.md").exists() else updated
+                if injected:
+                    print(f"Injected graph instructions into: {', '.join(injected)}")
+            else:
+                print("Skipped instruction injection (user declined)")
+        else:
+            print("Graph instructions already present in all files, nothing to inject.")
+    else:
+        print("Skipped instruction injection (--no-instructions)")
 
     if not skip_hooks:
         install_hooks(repo_root)
@@ -179,6 +263,14 @@ def main() -> None:
         "--no-hooks", action="store_true",
         help="Skip installing Claude Code hooks",
     )
+    install_cmd.add_argument(
+        "--no-instructions", action="store_true",
+        help="Skip injecting graph instructions into CLAUDE.md and platform rule files",
+    )
+    install_cmd.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Auto-confirm instruction injection without prompting",
+    )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     install_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
@@ -209,6 +301,14 @@ def main() -> None:
     init_cmd.add_argument(
         "--no-hooks", action="store_true",
         help="Skip installing Claude Code hooks",
+    )
+    init_cmd.add_argument(
+        "--no-instructions", action="store_true",
+        help="Skip injecting graph instructions into CLAUDE.md and platform rule files",
+    )
+    init_cmd.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Auto-confirm instruction injection without prompting",
     )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
