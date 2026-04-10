@@ -16,6 +16,7 @@ from code_review_graph.incremental import (
     full_build,
     get_all_tracked_files,
     get_changed_files,
+    get_data_dir,
     get_db_path,
     get_staged_and_unstaged,
     incremental_update,
@@ -399,3 +400,66 @@ class TestMultiHopDependents:
             assert len(deps) <= 500
         finally:
             store.close()
+
+
+class TestGetDataDir:
+    def test_default_returns_code_review_graph_dir(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        assert get_data_dir(tmp_path) == tmp_path / ".code-review-graph"
+
+    def test_absolute_path_from_env(self, tmp_path, monkeypatch):
+        external = tmp_path / "external" / "data"
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        result = get_data_dir(tmp_path)
+        assert result == external
+        assert result.is_dir()
+
+    def test_relative_path_resolved_against_repo_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_DATA_DIR", "custom_dir")
+        result = get_data_dir(tmp_path)
+        assert result == tmp_path / "custom_dir"
+        assert result.is_dir()
+
+    def test_external_dir_has_no_gitignore(self, tmp_path, monkeypatch):
+        external = tmp_path / "outside"
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        get_db_path(tmp_path)
+        assert not (external / ".gitignore").exists()
+
+    def test_default_dir_gets_gitignore(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        get_db_path(tmp_path)
+        gi = tmp_path / ".code-review-graph" / ".gitignore"
+        assert gi.exists()
+        assert "*\n" in gi.read_text()
+
+    def test_db_path_uses_external_dir(self, tmp_path, monkeypatch):
+        external = tmp_path / "my_graph_store"
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        db = get_db_path(tmp_path)
+        assert db == external / "graph.db"
+
+
+class TestFindProjectRootEnvVar:
+    def test_crg_repo_root_overrides_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_REPO_ROOT", str(tmp_path))
+        assert find_project_root() == tmp_path
+
+    def test_crg_repo_root_overrides_git_detection(self, tmp_path, monkeypatch):
+        (tmp_path / ".git").mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        monkeypatch.setenv("CRG_REPO_ROOT", str(other))
+        # Even though tmp_path has .git, env var wins
+        assert find_project_root(tmp_path) == other
+
+    def test_no_env_var_falls_back_to_git(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        (tmp_path / ".git").mkdir()
+        assert find_project_root(tmp_path) == tmp_path
+
+    def test_no_env_var_falls_back_to_start(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        sub = tmp_path / "no_git"
+        sub.mkdir()
+        assert find_project_root(sub) == sub

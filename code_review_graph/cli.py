@@ -429,6 +429,7 @@ def main() -> None:
     from .incremental import (
         find_project_root,
         find_repo_root,
+        get_data_dir,
         get_db_path,
         watch,
     )
@@ -539,7 +540,7 @@ def main() -> None:
 
         elif args.command == "visualize":
             from .visualization import generate_html
-            html_path = repo_root / ".code-review-graph" / "graph.html"
+            html_path = get_data_dir(repo_root) / "graph.html"
             vis_mode = getattr(args, "mode", "auto") or "auto"
             generate_html(store, html_path, mode=vis_mode)
             print(f"Visualization ({vis_mode}): {html_path}")
@@ -565,7 +566,7 @@ def main() -> None:
 
         elif args.command == "wiki":
             from .wiki import generate_wiki
-            wiki_dir = repo_root / ".code-review-graph" / "wiki"
+            wiki_dir = get_data_dir(repo_root) / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(
