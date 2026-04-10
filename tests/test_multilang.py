@@ -307,12 +307,61 @@ class TestSwiftParsing:
     def test_finds_classes(self):
         classes = [n for n in self.nodes if n.kind == "Class"]
         names = {c.name for c in classes}
-        assert "User" in names or "InMemoryRepo" in names
+        assert "User" in names
+        assert "InMemoryRepo" in names
 
     def test_finds_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
+
+    def test_finds_enum(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Direction" in names
+
+    def test_finds_actor(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "DataStore" in names
+
+    def test_finds_extension(self):
+        """Extensions should be detected and linked to the extended type."""
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        # Extension of InMemoryRepo should produce a Class node named InMemoryRepo
+        # with swift_kind == "extension"
+        ext_nodes = [c for c in classes if c.extra.get("swift_kind") == "extension"]
+        assert len(ext_nodes) >= 1
+        assert ext_nodes[0].name == "InMemoryRepo"
+
+    def test_finds_protocol(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "UserRepository" in names
+
+    def test_swift_kind_extra(self):
+        """Each Swift type should have the correct swift_kind in extra."""
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert classes["User"].extra.get("swift_kind") == "struct"
+        assert classes["Direction"].extra.get("swift_kind") == "enum"
+        assert classes["DataStore"].extra.get("swift_kind") == "actor"
+        assert classes["UserRepository"].extra.get("swift_kind") == "protocol"
+        # InMemoryRepo appears twice (class + extension); check at least one is "class"
+        repo_nodes = [n for n in self.nodes if n.kind == "Class" and n.name == "InMemoryRepo"]
+        kinds = {n.extra.get("swift_kind") for n in repo_nodes}
+        assert "class" in kinds
+        assert "extension" in kinds
+
+    def test_inheritance_edges(self):
+        """Swift inheritance / conformance should produce INHERITS edges."""
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        # InMemoryRepo: UserRepository
+        assert "UserRepository" in targets
+        # Direction: String
+        assert "String" in targets
+        # extension InMemoryRepo: CustomStringConvertible
+        assert "CustomStringConvertible" in targets
 
 
 class TestScalaParsing:

@@ -1938,6 +1938,22 @@ class CodeParser:
         if not name:
             return False
 
+        # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
+        # and store it in extra["swift_kind"] for richer downstream analysis.
+        # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
+        # protocol uses its own protocol_declaration node type.
+        extra: dict = {}
+        if language == "swift":
+            if child.type == "class_declaration":
+                _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
+                for kw_child in child.children:
+                    kw_text = kw_child.text.decode("utf-8", errors="replace")
+                    if kw_text in _swift_keywords:
+                        extra["swift_kind"] = kw_text
+                        break
+            elif child.type == "protocol_declaration":
+                extra["swift_kind"] = "protocol"
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -1946,6 +1962,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            extra=extra,
         )
         nodes.append(node)
 
@@ -3182,6 +3199,14 @@ class CodeParser:
             for child in node.children:
                 if child.type == "field_identifier":
                     return child.text.decode("utf-8", errors="replace")
+        # Swift extensions: name is inside user_type > type_identifier
+        # (e.g. `extension MyClass: Protocol { ... }`)
+        if language == "swift" and node.type == "class_declaration":
+            for child in node.children:
+                if child.type == "user_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
@@ -3341,6 +3366,19 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type == "type_identifier":
                             bases.append(sub.text.decode("utf-8", errors="replace"))
+        elif language == "swift":
+            # Swift: class Foo: Bar, Baz { ... } / extension Foo: Protocol { ... }
+            # AST: inheritance_specifier > user_type > type_identifier
+            for child in node.children:
+                if child.type == "inheritance_specifier":
+                    for sub in child.children:
+                        if sub.type == "user_type":
+                            for ident in sub.children:
+                                if ident.type == "type_identifier":
+                                    bases.append(
+                                        ident.text.decode("utf-8", errors="replace")
+                                    )
+                                    break
         return bases
 
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:
