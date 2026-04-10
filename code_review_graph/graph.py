@@ -236,6 +236,16 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
+        # Flush any pending implicit transaction before starting an explicit
+        # one.  Python's sqlite3 with default isolation_level="" silently
+        # opens a DEFERRED transaction on the first DML statement.  If a
+        # prior remove_file_data() or set_metadata() left such a transaction
+        # open, the explicit BEGIN IMMEDIATE below would fail with
+        # "cannot start a transaction within a transaction".
+        # See: https://github.com/tirth8205/code-review-graph/issues/135
+        if self._conn.in_transaction:
+            logger.debug("Flushing implicit transaction before BEGIN IMMEDIATE")
+            self._conn.commit()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
@@ -261,6 +271,9 @@ class GraphStore:
 
     def commit(self) -> None:
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     # --- Read operations ---
 
