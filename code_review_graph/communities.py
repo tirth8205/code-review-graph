@@ -493,36 +493,42 @@ def store_communities(
     # that are tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear existing data
-    conn.execute("DELETE FROM communities")
-    conn.execute("UPDATE nodes SET community_id = NULL")
+    # Wrap in explicit transaction so the DELETE + INSERT + UPDATE
+    # sequence is atomic — no partial community data on crash.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM communities")
+        conn.execute("UPDATE nodes SET community_id = NULL")
 
-    count = 0
-    for comm in communities:
-        cursor = conn.execute(
-            """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                comm["name"],
-                comm.get("level", 0),
-                comm.get("cohesion", 0.0),
-                comm["size"],
-                comm.get("dominant_language", ""),
-                comm.get("description", ""),
-            ),
-        )
-        community_id = cursor.lastrowid
-
-        # Update community_id on member nodes
-        member_qns = comm.get("members", [])
-        for qn in member_qns:
-            conn.execute(
-                "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
-                (community_id, qn),
+        count = 0
+        for comm in communities:
+            cursor = conn.execute(
+                """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    comm["name"],
+                    comm.get("level", 0),
+                    comm.get("cohesion", 0.0),
+                    comm["size"],
+                    comm.get("dominant_language", ""),
+                    comm.get("description", ""),
+                ),
             )
-        count += 1
+            community_id = cursor.lastrowid
 
-    conn.commit()
+            # Update community_id on member nodes
+            member_qns = comm.get("members", [])
+            for qn in member_qns:
+                conn.execute(
+                    "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
+                    (community_id, qn),
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 

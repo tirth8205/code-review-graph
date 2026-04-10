@@ -314,41 +314,47 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear old data.
-    conn.execute("DELETE FROM flow_memberships")
-    conn.execute("DELETE FROM flows")
+    # Wrap the full DELETE + INSERT sequence in an explicit transaction
+    # so partial writes cannot occur if an exception interrupts the loop.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM flow_memberships")
+        conn.execute("DELETE FROM flows")
 
-    count = 0
-    for flow in flows:
-        path_json = json.dumps(flow.get("path", []))
-        conn.execute(
-            """INSERT INTO flows
-               (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                flow["name"],
-                flow["entry_point_id"],
-                flow["depth"],
-                flow["node_count"],
-                flow["file_count"],
-                flow["criticality"],
-                path_json,
-            ),
-        )
-        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Insert memberships.
-        node_ids = flow.get("path", [])
-        for position, node_id in enumerate(node_ids):
+        count = 0
+        for flow in flows:
+            path_json = json.dumps(flow.get("path", []))
             conn.execute(
-                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                "VALUES (?, ?, ?)",
-                (flow_id, node_id, position),
+                """INSERT INTO flows
+                   (name, entry_point_id, depth, node_count, file_count,
+                    criticality, path_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    flow["name"],
+                    flow["entry_point_id"],
+                    flow["depth"],
+                    flow["node_count"],
+                    flow["file_count"],
+                    flow["criticality"],
+                    path_json,
+                ),
             )
-        count += 1
+            flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.commit()
+            # Insert memberships.
+            node_ids = flow.get("path", [])
+            for position, node_id in enumerate(node_ids):
+                conn.execute(
+                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                    "VALUES (?, ?, ?)",
+                    (flow_id, node_id, position),
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 

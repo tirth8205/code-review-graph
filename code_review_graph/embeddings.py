@@ -366,7 +366,10 @@ class EmbeddingStore:
         self.provider = get_provider(provider, model=model)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
-        self._conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path), timeout=30, check_same_thread=False,
+            isolation_level=None,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
 
