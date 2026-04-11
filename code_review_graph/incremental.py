@@ -132,6 +132,33 @@ def get_db_path(repo_root: Path) -> Path:
     return new_db
 
 
+def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:
+    """Ensure repo-level .gitignore excludes ``.code-review-graph/``.
+
+    Returns one of:
+    - ``created``: .gitignore was created with the entry
+    - ``updated``: entry was appended to existing .gitignore
+    - ``already-present``: no changes were needed
+    """
+    gitignore_path = repo_root / ".gitignore"
+    existing = gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+
+    for raw_line in existing.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == ".code-review-graph" or line.startswith(".code-review-graph/"):
+            return "already-present"
+
+    block = "# Added by code-review-graph\n.code-review-graph/\n"
+    prefix = "\n" if existing and not existing.endswith("\n") else ""
+    gitignore_path.write_text(existing + prefix + block, encoding="utf-8")
+
+    if existing:
+        return "updated"
+    return "created"
+
+
 def _load_ignore_patterns(repo_root: Path) -> list[str]:
     """Load ignore patterns from .code-review-graphignore file."""
     patterns = list(DEFAULT_IGNORE_PATTERNS)
@@ -376,8 +403,13 @@ def full_build(repo_root: Path, store: GraphStore) -> dict:
     # Purge stale data from files no longer on disk
     existing_files = set(store.get_all_files())
     current_abs = {str(repo_root / f) for f in files}
-    for stale in existing_files - current_abs:
+    stale_files = existing_files - current_abs
+    for stale in stale_files:
         store.remove_file_data(stale)
+    # Ensure deletions are persisted before store_file_nodes_edges()
+    # starts its own explicit transaction via BEGIN IMMEDIATE.
+    if stale_files:
+        store.commit()
 
     total_nodes = 0
     total_edges = 0
@@ -487,12 +519,14 @@ def incremental_update(
 
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
+    removed_any = False
     for rel_path in all_files:
         if _should_ignore(rel_path, ignore_patterns):
             continue
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
             store.remove_file_data(str(abs_path))
+            removed_any = True
             continue
         if parser.detect_language(abs_path) is None:
             continue
@@ -506,6 +540,11 @@ def incremental_update(
         except (OSError, PermissionError):
             pass
         to_parse.append(rel_path)
+
+    # Persist deletions before store_file_nodes_edges() opens its own
+    # explicit transaction — avoids nested transaction errors.
+    if removed_any:
+        store.commit()
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 

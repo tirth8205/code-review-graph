@@ -48,7 +48,7 @@
 ## Data Flow
 
 ### Full Build
-1. `collect_all_files()` gathers all parseable files (respecting `.gitignore` and `.code-review-graphignore`)
+1. `collect_all_files()` gathers tracked files (`git ls-files`) and applies `.code-review-graphignore` (gitignored files are skipped automatically when git is available)
 2. For each file, `CodeParser.parse_file()` uses Tree-sitter to extract AST
 3. AST walker identifies structural nodes (classes, functions, imports) and edges (calls, inheritance)
 4. `GraphStore.store_file_nodes_edges()` persists to SQLite with file hash for change detection

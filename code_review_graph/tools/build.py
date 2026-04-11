@@ -126,13 +126,19 @@ def _run_postprocess(
 
 
 def _compute_summaries(store: Any) -> None:
-    """Populate community_summaries, flow_snapshots, and risk_index tables."""
+    """Populate community_summaries, flow_snapshots, and risk_index tables.
+
+    Each summary block (community_summaries, flow_snapshots, risk_index)
+    is wrapped in an explicit transaction so the DELETE + INSERT sequence
+    is atomic.  If a table doesn't exist yet the block is silently skipped.
+    """
     import json as _json
 
     conn = store._conn
 
     # -- community_summaries --
     try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM community_summaries")
         rows = conn.execute(
             "SELECT id, name, size, dominant_language FROM communities"
@@ -168,11 +174,13 @@ def _compute_summaries(store: Any) -> None:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (cid, cname, purpose, key_syms, csize, clang or ""),
             )
+        conn.commit()
     except sqlite3.OperationalError:
-        pass  # Table may not exist yet
+        conn.rollback()  # Table may not exist yet
 
     # -- flow_snapshots --
     try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM flow_snapshots")
         rows = conn.execute(
             "SELECT id, name, entry_point_id, criticality, node_count, "
@@ -217,11 +225,13 @@ def _compute_summaries(store: Any) -> None:
                 (fid, fname, ep_name, _json.dumps(critical_path),
                  crit, ncount, fcount),
             )
+        conn.commit()
     except sqlite3.OperationalError:
-        pass
+        conn.rollback()
 
     # -- risk_index --
     try:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM risk_index")
         # Per-node risk: caller_count, test coverage, security keywords
         nodes = conn.execute(
@@ -266,10 +276,9 @@ def _compute_summaries(store: Any) -> None:
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
                 (nid, qn, risk, caller_count, coverage, sec_relevant),
             )
+        conn.commit()
     except sqlite3.OperationalError:
-        pass
-
-    conn.commit()
+        conn.rollback()
 
 
 def build_or_update_graph(

@@ -101,6 +101,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".t": "perl",
     ".xs": "c",  # Perl XS: parsed as C to capture functions/structs/includes
     ".lua": "lua",
+    ".luau": "luau",
     ".ipynb": "notebook",
 }
 
@@ -136,6 +137,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     ],
     "dart": ["class_definition", "mixin_declaration", "enum_declaration"],
     "lua": [],  # Lua has no class keyword; table-based OOP handled via constructs handler
+    "luau": ["type_definition"],  # Luau type aliases; table-based OOP via constructs handler
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -170,6 +172,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # function_signature inside it).
     "dart": ["function_signature"],
     "lua": ["function_declaration"],
+    "luau": ["function_declaration"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -193,8 +196,9 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "solidity": ["import_directive"],
     # Dart: import_or_export wraps library_import > import_specification > configurable_uri
     "dart": ["import_or_export"],
-    # Lua: require() is a function_call, handled via _extract_lua_constructs
+    # Lua/Luau: require() is a function_call, handled via _extract_lua_constructs
     "lua": [],
+    "luau": [],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -220,6 +224,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "scala": ["call_expression", "instance_expression", "generic_function"],
     "solidity": ["call_expression"],
     "lua": ["function_call"],
+    "luau": ["function_call"],
 }
 
 # Patterns that indicate a test function
@@ -242,6 +247,8 @@ _TEST_FILE_PATTERNS = [
     re.compile(r".*_test\.dart$"),
     re.compile(r"test[_-].*\.[rR]$"),
     re.compile(r"tests/testthat/"),
+    re.compile(r".*Test\.kt$"),
+    re.compile(r".*Test\.java$"),
 ]
 
 _TEST_RUNNER_NAMES = frozenset({
@@ -249,19 +256,28 @@ _TEST_RUNNER_NAMES = frozenset({
     "beforeAll", "afterAll",
 })
 
+# Annotations/decorators that mark test methods (JUnit, TestNG, etc.)
+_TEST_ANNOTATIONS = frozenset({
+    "Test", "ParameterizedTest", "RepeatedTest", "TestFactory",
+    "org.junit.Test", "org.junit.jupiter.api.Test",
+})
+
 
 def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
 
 
-def _is_test_function(name: str, file_path: str) -> bool:
-    """A function is a test if its name matches test patterns or it lives
-    in a test file and has a test-runner name (describe, it, test, etc.).
+def _is_test_function(
+    name: str, file_path: str, decorators: tuple[str, ...] = (),
+) -> bool:
+    """A function is a test if its name matches test patterns, it lives
+    in a test file and has a test-runner name, or it has a @Test annotation.
     """
     if any(p.search(name) for p in _TEST_PATTERNS):
         return True
-    # In test files, treat common JS/TS test-runner wrappers as tests
     if _is_test_file(file_path) and name in _TEST_RUNNER_NAMES:
+        return True
+    if decorators and any(d in _TEST_ANNOTATIONS for d in decorators):
         return True
     return False
 
@@ -284,6 +300,7 @@ class CodeParser:
     def __init__(self) -> None:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
+        self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
@@ -897,8 +914,8 @@ class CodeParser:
             ):
                 continue
 
-            # --- Lua-specific constructs ---
-            if language == "lua" and self._extract_lua_constructs(
+            # --- Lua/Luau-specific constructs ---
+            if language in ("lua", "luau") and self._extract_lua_constructs(
                 child, node_type, source, language, file_path,
                 nodes, edges, enclosing_class, enclosing_func,
                 import_map, defined_names, _depth,
@@ -960,6 +977,17 @@ class CodeParser:
                     import_map, defined_names, _depth,
                 ):
                     continue
+
+            # --- JSX component invocations ---
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type in ("jsx_opening_element", "jsx_self_closing_element")
+            ):
+                self._extract_jsx_component_call(
+                    child, language, file_path, edges,
+                    enclosing_class, enclosing_func,
+                    import_map, defined_names,
+                )
 
             # --- Solidity-specific constructs ---
             if language == "solidity" and self._extract_solidity_constructs(
@@ -1540,7 +1568,26 @@ class CodeParser:
         if not name:
             return False
 
-        is_test = _is_test_function(name, file_path)
+        # Extract annotations/decorators for test detection
+        decorators: tuple[str, ...] = ()
+        deco_list: list[str] = []
+        for sub in child.children:
+            # Java/Kotlin/C#: annotations inside a modifiers child
+            if sub.type == "modifiers":
+                for mod in sub.children:
+                    if mod.type in ("annotation", "marker_annotation"):
+                        text = mod.text.decode("utf-8", errors="replace")
+                        deco_list.append(text.lstrip("@").strip())
+        # Python: check parent decorated_definition for decorator siblings
+        if child.parent and child.parent.type == "decorated_definition":
+            for sib in child.parent.children:
+                if sib.type == "decorator":
+                    text = sib.text.decode("utf-8", errors="replace")
+                    deco_list.append(text.lstrip("@").strip())
+        if deco_list:
+            decorators = tuple(deco_list)
+
+        is_test = _is_test_function(name, file_path, decorators)
         kind = "Test" if is_test else "Function"
         qualified = self._qualify(name, file_path, enclosing_class)
         params = self._get_params(child, language, source)
@@ -1730,6 +1777,70 @@ class CodeParser:
             ))
 
         return False
+
+    def _extract_jsx_component_call(
+        self,
+        child,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+    ) -> None:
+        """Emit a synthetic CALLS edge for JSX component usage.
+
+        React-style component invocations use JSX rather than ``call_expression``.
+        Treat uppercase component tags such as ``<MarkdownMsg />`` as call-like
+        edges so caller/impact queries can cross the JSX boundary. Intrinsic DOM
+        tags (``<div>``) are ignored.
+        """
+        if not enclosing_func:
+            return
+
+        target = self._resolve_jsx_component_target(
+            child, language, file_path, import_map or {}, defined_names or set(),
+        )
+        if not target:
+            return
+
+        caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=target,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+
+    def _resolve_jsx_component_target(
+        self,
+        node,
+        language: str,
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        """Resolve a JSX component element to a call target."""
+        component_ref = self._get_jsx_component_reference(node)
+        if component_ref is None:
+            return None
+
+        base_name, component_name = component_ref
+        if base_name is None:
+            return self._resolve_call_target(
+                component_name, file_path, language, import_map, defined_names,
+            )
+
+        if base_name in import_map:
+            resolved = self._resolve_imported_symbol(
+                component_name, import_map[base_name], file_path, language,
+            )
+            if resolved:
+                return resolved
+
+        return component_name
 
     def _extract_solidity_constructs(
         self,
@@ -1924,6 +2035,14 @@ class CodeParser:
                     if inner.type in func_types or inner.type in class_types:
                         target = inner
                         break
+            elif (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "export_statement"
+            ):
+                for inner in child.children:
+                    if inner.type in func_types or inner.type in class_types:
+                        target = inner
+                        break
 
             target_type = target.type
 
@@ -1945,12 +2064,34 @@ class CodeParser:
                                       "class" if target_type in class_types else "function")
                 if name:
                     defined_names.add(name)
+                    continue
+
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "export_statement"
+            ):
+                self._collect_js_exported_local_names(child, defined_names)
 
             # Collect import mappings: imported_name → module_path
             if node_type in import_types:
                 self._collect_import_names(child, language, source, import_map)
 
         return import_map, defined_names
+
+    def _collect_js_exported_local_names(
+        self, node, defined_names: set[str],
+    ) -> None:
+        """Collect locally exported JS/TS names from export statements."""
+        for child in node.children:
+            if child.type in ("lexical_declaration", "variable_declaration"):
+                for sub in child.children:
+                    if sub.type == "variable_declarator":
+                        for part in sub.children:
+                            if part.type == "identifier":
+                                defined_names.add(
+                                    part.text.decode("utf-8", errors="replace"),
+                                )
+                                break
 
     def _collect_import_names(
         self, node, language: str, source: bytes, import_map: dict[str, str],
@@ -2000,6 +2141,11 @@ class CodeParser:
             if child.type == "identifier":
                 # Default import
                 import_map[child.text.decode("utf-8", errors="replace")] = module
+            elif child.type == "namespace_import":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        import_map[sub.text.decode("utf-8", errors="replace")] = module
+                        break
             elif child.type == "named_imports":
                 for spec in child.children:
                     if spec.type == "import_specifier":
@@ -2101,12 +2247,134 @@ class CodeParser:
         if call_name in defined_names:
             return self._qualify(call_name, file_path, None)
         if call_name in import_map:
-            resolved = self._resolve_module_to_file(
-                import_map[call_name], file_path, language,
+            resolved = self._resolve_imported_symbol(
+                call_name, import_map[call_name], file_path, language,
             )
             if resolved:
-                return self._qualify(call_name, resolved, None)
+                return resolved
         return call_name
+
+    def _resolve_imported_symbol(
+        self,
+        symbol_name: str,
+        module: str,
+        file_path: str,
+        language: str,
+    ) -> Optional[str]:
+        """Resolve an imported symbol to its defining qualified name when possible."""
+        resolved = self._resolve_module_to_file(module, file_path, language)
+        if not resolved:
+            return None
+
+        export_target = self._resolve_exported_symbol(resolved, symbol_name)
+        if export_target:
+            return export_target
+        return self._qualify(symbol_name, resolved, None)
+
+    def _resolve_exported_symbol(
+        self,
+        module_file: str,
+        symbol_name: str,
+        seen: Optional[set[tuple[str, str]]] = None,
+    ) -> Optional[str]:
+        """Resolve a JS/TS symbol through common re-export/barrel patterns."""
+        cache_key = f"{module_file}::{symbol_name}"
+        if cache_key in self._export_symbol_cache:
+            return self._export_symbol_cache[cache_key]
+
+        key = (module_file, symbol_name)
+        if seen is None:
+            seen = set()
+        if key in seen:
+            return None
+        seen.add(key)
+
+        path = Path(module_file)
+        language = self.detect_language(path)
+        if language not in ("javascript", "typescript", "tsx", "vue"):
+            return None
+
+        try:
+            source = path.read_bytes()
+        except (OSError, PermissionError):
+            return None
+
+        parser = self._get_parser(language)
+        if not parser:
+            return None
+
+        tree = parser.parse(source)
+
+        # Direct local definition/export in the module file.
+        import_map, defined_names = self._collect_file_scope(
+            tree.root_node, language, source,
+        )
+        if symbol_name in defined_names:
+            result = self._qualify(symbol_name, module_file, None)
+            self._export_symbol_cache[cache_key] = result
+            return result
+
+        for child in tree.root_node.children:
+            if child.type != "export_statement":
+                continue
+
+            export_clause = None
+            target_module = None
+            has_star_export = False
+
+            for sub in child.children:
+                if sub.type == "export_clause":
+                    export_clause = sub
+                elif sub.type == "string":
+                    target_module = sub.text.decode("utf-8", errors="replace").strip("'\"")
+                elif sub.type == "*":
+                    has_star_export = True
+
+            # Re-exported names: export { Foo as Bar } from './x'
+            if export_clause is not None:
+                for spec in export_clause.children:
+                    if spec.type != "export_specifier":
+                        continue
+                    names = [
+                        part.text.decode("utf-8", errors="replace")
+                        for part in spec.children
+                        if part.type in ("identifier", "property_identifier")
+                    ]
+                    if not names:
+                        continue
+                    exported_name = names[-1]
+                    original_name = names[0]
+                    if exported_name != symbol_name:
+                        continue
+                    if target_module:
+                        resolved_module = self._resolve_module_to_file(
+                            target_module, module_file, language,
+                        )
+                        if resolved_module:
+                            result = self._resolve_exported_symbol(
+                                resolved_module, original_name, seen,
+                            ) or self._qualify(original_name, resolved_module, None)
+                            self._export_symbol_cache[cache_key] = result
+                            return result
+                    result = self._qualify(original_name, module_file, None)
+                    self._export_symbol_cache[cache_key] = result
+                    return result
+
+            # Star re-export: export * from './x'
+            if has_star_export and target_module:
+                resolved_module = self._resolve_module_to_file(
+                    target_module, module_file, language,
+                )
+                if resolved_module:
+                    result = self._resolve_exported_symbol(
+                        resolved_module, symbol_name, seen,
+                    )
+                    if result:
+                        self._export_symbol_cache[cache_key] = result
+                        return result
+
+        self._export_symbol_cache[cache_key] = None
+        return None
 
     def _qualify(self, name: str, file_path: str, enclosing_class: Optional[str]) -> str:
         """Create a qualified name: file_path::ClassName.name or file_path::name."""
@@ -2131,11 +2399,11 @@ class CodeParser:
                 for child in node.children:
                     if child.type in ("receive", "fallback"):
                         return child.text.decode("utf-8", errors="replace")
-        # Lua: function_declaration names may be dot_index_expression or
+        # Lua/Luau: function_declaration names may be dot_index_expression or
         # method_index_expression (e.g. function Animal.new() / Animal:speak()).
         # Return only the method name; the table name is used as parent_name
         # in _extract_lua_constructs.
-        if language == "lua" and node.type == "function_declaration":
+        if language in ("lua", "luau") and node.type == "function_declaration":
             for child in node.children:
                 if child.type in ("dot_index_expression", "method_index_expression"):
                     # Last identifier child is the method name
@@ -2158,6 +2426,13 @@ class CodeParser:
                     result = self._get_name(child, language, kind)
                     if result:
                         return result
+        # Go methods: tree-sitter-go uses field_identifier for the name
+        # (e.g. func (s *T) MethodName(...) { }). Must run before the generic
+        # loop, which would match the result type's type_identifier (e.g. int64).
+        if language == "go" and node.type == "method_declaration":
+            for child in node.children:
+                if child.type == "field_identifier":
+                    return child.text.decode("utf-8", errors="replace")                        
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
@@ -2432,16 +2707,17 @@ class CodeParser:
             return None  # method child not found
 
         # Simple call: func_name(args)
-        if first.type == "identifier":
+        # Kotlin uses "simple_identifier" instead of "identifier".
+        if first.type in ("identifier", "simple_identifier"):
             return first.text.decode("utf-8", errors="replace")
 
         # Perl: function_call_expression / ambiguous_function_call_expression
         if first.type == "function":
             return first.text.decode("utf-8", errors="replace")
 
-        # Lua: dot_index_expression (obj.method) and method_index_expression
+        # Lua/Luau: dot_index_expression (obj.method) and method_index_expression
         # (obj:method) — extract the rightmost identifier as the call name.
-        if language == "lua" and first.type in (
+        if language in ("lua", "luau") and first.type in (
             "dot_index_expression", "method_index_expression",
         ):
             for child in reversed(first.children):
@@ -2450,18 +2726,25 @@ class CodeParser:
             return None
 
         # Method call: obj.method(args)
+        # Kotlin uses "navigation_expression" for member access (obj.method).
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
+            "navigation_expression",
         )
         if first.type in member_types:
             # Get the rightmost identifier (the method name)
+            # Kotlin navigation_expression uses navigation_suffix > simple_identifier.
             for child in reversed(first.children):
                 if child.type in (
                     "identifier", "property_identifier", "field_identifier",
-                    "field_name",
+                    "field_name", "simple_identifier",
                 ):
                     return child.text.decode("utf-8", errors="replace")
+                if child.type == "navigation_suffix":
+                    for sub in child.children:
+                        if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 
         # Scoped call (e.g., Rust path::func())
@@ -2473,6 +2756,55 @@ class CodeParser:
             return first.text.decode("utf-8", errors="replace")
 
         return None
+
+    def _get_jsx_component_reference(self, node) -> Optional[tuple[Optional[str], str]]:
+        """Extract ``(base_name, component_name)`` for a JSX element.
+
+        ``base_name`` is set for member-style elements such as
+        ``<UI.MarkdownMsg />`` and ``None`` for plain component tags such as
+        ``<MarkdownMsg />``.
+        """
+        for child in node.children:
+            if child.type == "identifier":
+                name = child.text.decode("utf-8", errors="replace")
+                if self._looks_like_component_name(name):
+                    return (None, name)
+                return None
+            if child.type == "member_expression":
+                base_name = self._get_member_expression_root_name(child)
+                component_name = None
+                for sub in reversed(child.children):
+                    if sub.type in ("identifier", "property_identifier"):
+                        component_name = sub.text.decode("utf-8", errors="replace")
+                        break
+                if component_name and self._looks_like_component_name(component_name):
+                    return (base_name, component_name)
+                for sub in reversed(child.children):
+                    if sub.type in ("identifier", "property_identifier"):
+                        name = sub.text.decode("utf-8", errors="replace")
+                        if self._looks_like_component_name(name):
+                            return (None, name)
+                        return None
+                text = child.text.decode("utf-8", errors="replace")
+                tail = text.split(".")[-1]
+                if self._looks_like_component_name(tail):
+                    return (None, tail)
+                return None
+        return None
+
+    def _get_member_expression_root_name(self, node) -> Optional[str]:
+        """Return the leftmost identifier for a nested member expression."""
+        for child in node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type == "member_expression":
+                return self._get_member_expression_root_name(child)
+        return None
+
+    @staticmethod
+    def _looks_like_component_name(name: str) -> bool:
+        """Return True for JSX names that look like user components."""
+        return bool(name) and name[0].isupper()
 
     # Modifier suffixes used in JS/TS test runners
     _TEST_MODIFIER_SUFFIXES = frozenset({

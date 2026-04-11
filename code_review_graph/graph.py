@@ -126,7 +126,8 @@ class GraphStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
-            str(self.db_path), timeout=30, check_same_thread=False
+            str(self.db_path), timeout=30, check_same_thread=False,
+            isolation_level=None,  # Disable implicit transactions (#135)
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -236,6 +237,16 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
+        # Defense-in-depth: flush any pending transaction before BEGIN
+        # IMMEDIATE.  The root cause (implicit transactions from legacy
+        # isolation_level="") is fixed by setting isolation_level=None in
+        # __init__, but external code accessing _conn directly (e.g.
+        # _compute_summaries, flows.py, communities.py) could still leave
+        # a transaction open.
+        # See: https://github.com/tirth8205/code-review-graph/issues/135
+        if self._conn.in_transaction:
+            logger.warning("Flushing unexpected open transaction before BEGIN IMMEDIATE")
+            self._conn.commit()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
@@ -261,6 +272,9 @@ class GraphStore:
 
     def commit(self) -> None:
         self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
 
     # --- Read operations ---
 

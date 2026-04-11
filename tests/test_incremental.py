@@ -10,6 +10,7 @@ from code_review_graph.incremental import (
     _parse_single_file,
     _should_ignore,
     _single_hop_dependents,
+    ensure_repo_gitignore_excludes_crg,
     find_dependents,
     find_project_root,
     find_repo_root,
