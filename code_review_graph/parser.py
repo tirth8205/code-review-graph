@@ -924,6 +924,14 @@ class CodeParser:
             ):
                 continue
 
+            # --- JS/TS CommonJS require() -> IMPORTS_FROM edges ---
+            if language in ("javascript", "typescript", "tsx"):
+                self._extract_js_require_constructs(
+                    child, node_type, source, language, file_path,
+                    nodes, edges, enclosing_class, enclosing_func,
+                    import_map, defined_names, _depth,
+                )
+
             # --- JS/TS variable-assigned functions (const foo = () => {}) ---
             if (
                 language in ("javascript", "typescript", "tsx")
@@ -1333,6 +1341,236 @@ class CodeParser:
                         raw = arg.text.decode("utf-8", errors="replace")
                         return raw.strip("'\"")
         return None
+
+    # ------------------------------------------------------------------
+    # JS/TS: CommonJS require() detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _js_get_require_target(call_node) -> Optional[str]:
+        """Extract the module path from a JS/TS require() or dynamic import().
+
+        Handles these patterns:
+          require('./module')                          -> './module'
+          require(path.join(__dirname, 'mod'))          -> './mod'
+          require(path.resolve(__dirname, 'mod.js'))    -> './mod.js'
+          require(`./commands/${name}`)                 -> './commands'
+          await import('./module')                      -> './module'
+          await import(`./utils/${name}`)               -> './utils'
+
+        Returns the module path string, or None if this is not a
+        recognisable require/import call.
+        """
+        if not call_node.children:
+            return None
+
+        first = call_node.children[0]
+        is_require = (first.type == "identifier" and first.text == b"require")
+        is_import = (first.type == "import" or first.text == b"import")
+
+        if not is_require and not is_import:
+            return None
+
+        # Find the arguments node
+        args_node = None
+        for child in call_node.children:
+            if child.type == "arguments":
+                args_node = child
+                break
+        if not args_node:
+            return None
+
+        # Walk argument children (skip parentheses)
+        for arg in args_node.children:
+            # --- Static string literal: require('./module') ---
+            if arg.type == "string":
+                for sub in arg.children:
+                    if sub.type == "string_fragment":
+                        return sub.text.decode("utf-8", errors="replace")
+                # Fallback: strip quotes
+                raw = arg.text.decode("utf-8", errors="replace")
+                return raw.strip("'\"")
+
+            # --- Template literal: require(`./commands/${name}`) ---
+            if arg.type == "template_string":
+                # Extract leading static fragment before first interpolation
+                static_parts = []
+                for sub in arg.children:
+                    if sub.type == "string_fragment":
+                        # tree-sitter calls template literal fragments
+                        # "string_fragment" inside template_string
+                        static_parts.append(
+                            sub.text.decode("utf-8", errors="replace"),
+                        )
+                        break
+                    elif sub.type == "template_substitution":
+                        break
+                if static_parts and static_parts[0]:
+                    prefix = static_parts[0].rstrip("/")
+                    return prefix if prefix else None
+
+            # --- path.join/path.resolve: require(path.join(dir, 'mod')) ---
+            if arg.type == "call_expression":
+                callee = arg.children[0] if arg.children else None
+                if (
+                    callee
+                    and callee.type == "member_expression"
+                    and callee.text
+                ):
+                    callee_text = callee.text.decode("utf-8", errors="replace")
+                    if callee_text in ("path.join", "path.resolve"):
+                        # Extract the last string argument as the module hint
+                        inner_args = None
+                        for sub in arg.children:
+                            if sub.type == "arguments":
+                                inner_args = sub
+                                break
+                        if inner_args:
+                            last_string = None
+                            for sub in inner_args.children:
+                                if sub.type == "string":
+                                    raw = sub.text.decode(
+                                        "utf-8", errors="replace",
+                                    )
+                                    last_string = raw.strip("'\"")
+                            if last_string:
+                                # Return as relative path for resolution
+                                if not last_string.startswith("."):
+                                    last_string = "./" + last_string
+                                return last_string
+
+        return None
+
+    def _extract_js_require_constructs(
+        self,
+        child,
+        node_type: str,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle JS/TS CommonJS require() patterns as IMPORTS_FROM edges.
+
+        Returns True if the child was fully handled and should be skipped
+        by the main loop.
+
+        Handles:
+        - variable_declaration/lexical_declaration with require():
+          ``const X = require('./module')``  -> IMPORTS_FROM edge
+          ``const { A, B } = require('./module')`` -> IMPORTS_FROM edge
+        - Top-level call_expression that is require():
+          ``require('./module')`` -> IMPORTS_FROM edge
+        - expression_statement wrapping require():
+          ``require('./side-effect-module')``  -> IMPORTS_FROM edge
+        - call_expression with dynamic import():
+          ``await import('./module')`` -> IMPORTS_FROM edge
+        """
+        # --- variable/lexical declaration with require() ---
+        if node_type in ("lexical_declaration", "variable_declaration"):
+            found_require = False
+            for declarator in child.children:
+                if declarator.type != "variable_declarator":
+                    continue
+                # Find the value: look for call_expression child
+                for sub in declarator.children:
+                    if sub.type == "call_expression":
+                        req_target = self._js_get_require_target(sub)
+                        if req_target is not None and req_target != "":
+                            resolved = self._resolve_module_to_file(
+                                req_target, file_path, language,
+                            )
+                            edges.append(EdgeInfo(
+                                kind="IMPORTS_FROM",
+                                source=file_path,
+                                target=resolved if resolved else req_target,
+                                file_path=file_path,
+                                line=child.start_point[0] + 1,
+                            ))
+                            found_require = True
+                            break
+            if found_require:
+                # Still let _extract_js_var_functions run if there are also
+                # function assignments in the same declaration — but we've
+                # already captured the require edge.
+                return False
+            return False
+
+        # --- expression_statement wrapping a require() call ---
+        # Covers: require('./side-effect'), module.exports = { X: require() }
+        if node_type == "expression_statement":
+            self._js_collect_require_edges(
+                child, file_path, language, edges,
+            )
+            # Always return False — let generic recursion continue
+            return False
+
+        return False
+
+    def _js_collect_require_edges(
+        self, node, file_path: str, language: str,
+        edges: list[EdgeInfo],
+        depth: int = 0, max_depth: int = 50,
+    ) -> None:
+        """Recursively find require()/import() calls in a subtree and add
+        IMPORTS_FROM edges for each.
+
+        This catches patterns like:
+          require('./side-effect')
+          module.exports = { A: require('./a'), B: require('./b') }
+          await import('./module')
+        """
+        if depth >= max_depth:
+            return
+        if not node.children:
+            return
+        for child in node.children:
+            if child.type == "call_expression":
+                req_target = self._js_get_require_target(child)
+                if req_target is not None and req_target != "":
+                    resolved = self._resolve_module_to_file(
+                        req_target, file_path, language,
+                    )
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=resolved if resolved else req_target,
+                        file_path=file_path,
+                        line=child.start_point[0] + 1,
+                    ))
+                    # Don't recurse into this call_expression's children
+                    continue
+            if child.type == "await_expression":
+                for await_child in child.children:
+                    if await_child.type == "call_expression":
+                        req_target = self._js_get_require_target(await_child)
+                        if req_target is not None and req_target != "":
+                            resolved = self._resolve_module_to_file(
+                                req_target, file_path, language,
+                            )
+                            edges.append(EdgeInfo(
+                                kind="IMPORTS_FROM",
+                                source=file_path,
+                                target=(
+                                    resolved if resolved else req_target
+                                ),
+                                file_path=file_path,
+                                line=child.start_point[0] + 1,
+                            ))
+                continue
+            # Recurse into assignment_expression, object, pair, etc.
+            self._js_collect_require_edges(
+                child, file_path, language, edges,
+                depth=depth + 1, max_depth=max_depth,
+            )
+
+        return
 
     # ------------------------------------------------------------------
     # JS/TS: variable-assigned functions  (const foo = () => {})
@@ -2313,6 +2551,15 @@ class CodeParser:
             if node_type in import_types:
                 self._collect_import_names(child, language, source, import_map)
 
+            # JS/TS: CommonJS require() into import_map
+            # const X = require('./module') -> {X: './module'}
+            # const { A, B } = require('./module') -> {A: './module', B: ...}
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type in ("lexical_declaration", "variable_declaration")
+            ):
+                self._collect_js_require_names(child, import_map)
+
         return import_map, defined_names
 
     def _collect_js_exported_local_names(
@@ -2329,6 +2576,59 @@ class CodeParser:
                                     part.text.decode("utf-8", errors="replace"),
                                 )
                                 break
+
+    def _collect_js_require_names(
+        self, decl_node, import_map: dict[str, str],
+    ) -> None:
+        """Extract imported names from CommonJS require() declarations.
+
+        Handles:
+          const X = require('./module')          -> {X: './module'}
+          const { A, B } = require('./module')   -> {A: './module', B: ...}
+          var X = require('./module')             -> {X: './module'}
+        """
+        for declarator in decl_node.children:
+            if declarator.type != "variable_declarator":
+                continue
+
+            # Collect the variable name(s) and the initialiser
+            names: list[str] = []
+            call_node = None
+            for sub in declarator.children:
+                if sub.type == "identifier":
+                    names.append(sub.text.decode("utf-8", errors="replace"))
+                elif sub.type == "object_pattern":
+                    # Destructured: const { A, B } = require(...)
+                    for pat_child in sub.children:
+                        if pat_child.type == "shorthand_property_identifier_pattern":
+                            names.append(
+                                pat_child.text.decode("utf-8", errors="replace"),
+                            )
+                        elif pat_child.type == "pair_pattern":
+                            # { A: localA } — last identifier is the local name
+                            ids = [
+                                c for c in pat_child.children
+                                if c.type == "identifier"
+                            ]
+                            if ids:
+                                names.append(
+                                    ids[-1].text.decode(
+                                        "utf-8", errors="replace",
+                                    ),
+                                )
+                elif sub.type == "call_expression":
+                    call_node = sub
+
+            if not call_node:
+                continue
+
+            req_target = self._js_get_require_target(call_node)
+            if not req_target:
+                continue
+
+            for name in names:
+                import_map[name] = req_target
+
 
     def _collect_import_names(
         self, node, language: str, source: bytes, import_map: dict[str, str],
