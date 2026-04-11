@@ -382,3 +382,82 @@ class TestPendingRefactorsThreadSafe:
             assert len(_pending_refactors) >= 10
             # Clean up
             _pending_refactors.clear()
+
+
+class TestFindDeadCodeWithReferences:
+    """Tests for REFERENCES-aware dead code detection."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        self._seed()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed(self):
+        """Seed with functions that have REFERENCES edges (map dispatch pattern)."""
+        # File
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/repo/handlers.ts", file_path="/repo/handlers.ts",
+            line_start=1, line_end=100, language="typescript",
+        ))
+        # A function referenced in a map (should NOT be dead)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="handleCreate", file_path="/repo/handlers.ts",
+            line_start=10, line_end=20, language="typescript",
+        ))
+        # A function with CALLS edge (should NOT be dead)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="calledFunc", file_path="/repo/handlers.ts",
+            line_start=30, line_end=40, language="typescript",
+        ))
+        # A truly dead function (no edges at all)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="deadFunc", file_path="/repo/handlers.ts",
+            line_start=50, line_end=60, language="typescript",
+        ))
+        # Caller
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="dispatch", file_path="/repo/handlers.ts",
+            line_start=70, line_end=80, language="typescript",
+        ))
+        # REFERENCES edge: dispatch -> handleCreate (map dispatch pattern)
+        self.store.upsert_edge(EdgeInfo(
+            kind="REFERENCES", source="/repo/handlers.ts::dispatch",
+            target="/repo/handlers.ts::handleCreate",
+            file_path="/repo/handlers.ts", line=75,
+        ))
+        # CALLS edge: dispatch -> calledFunc
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/handlers.ts::dispatch",
+            target="/repo/handlers.ts::calledFunc",
+            file_path="/repo/handlers.ts", line=76,
+        ))
+        self.store.commit()
+
+    def test_referenced_function_not_dead(self):
+        """Functions with REFERENCES edges should NOT be flagged as dead code."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "handleCreate" not in dead_names
+
+    def test_called_function_not_dead(self):
+        """Functions with CALLS edges remain excluded (existing behavior)."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "calledFunc" not in dead_names
+
+    def test_truly_dead_function_still_reported(self):
+        """Functions with no edges at all should still be flagged as dead code."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "deadFunc" in dead_names
+
+    def test_only_references_edge_sufficient(self):
+        """A function with ONLY a REFERENCES edge (no CALLS/IMPORTS) is not dead."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        # handleCreate has only a REFERENCES edge, no CALLS targeting it
+        assert "handleCreate" not in dead_names

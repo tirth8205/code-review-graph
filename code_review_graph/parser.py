@@ -57,7 +57,9 @@ class NodeInfo:
 
 @dataclass
 class EdgeInfo:
-    kind: str  # CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON
+    # CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS,
+    # TESTED_BY, DEPENDS_ON, REFERENCES
+    kind: str
     source: str  # qualified name or path
     target: str  # qualified name or path
     file_path: str
@@ -851,7 +853,7 @@ class CodeParser:
 
         resolved: list[EdgeInfo] = []
         for edge in edges:
-            if edge.kind == "CALLS" and "::" not in edge.target:
+            if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
                 if edge.target in symbols:
                     edge = EdgeInfo(
                         kind=edge.kind,
@@ -996,6 +998,13 @@ class CodeParser:
                     enclosing_class, enclosing_func,
                     import_map, defined_names,
                 )
+
+            # --- Value references (function-as-value in maps, arrays, args) ---
+            self._extract_value_references(
+                child, node_type, source, language, file_path, edges,
+                enclosing_class, enclosing_func,
+                import_map, defined_names,
+            )
 
             # --- Solidity-specific constructs ---
             if language == "solidity" and self._extract_solidity_constructs(
@@ -2080,6 +2089,234 @@ class CodeParser:
 
         return component_name
 
+    # ------------------------------------------------------------------
+    # Value-reference extraction (function-as-value patterns)
+    # ------------------------------------------------------------------
+
+    # AST node types that represent object literal key-value pairs.
+    _PAIR_TYPES = frozenset({"pair"})
+
+    # AST node types for array/list containers.
+    _ARRAY_TYPES = frozenset({"array", "list"})
+
+    # Names that are almost certainly not function references (constants,
+    # common primitives).  All-uppercase identifiers and very short names
+    # are excluded by a length/casing heuristic in the method itself.
+    _VALUE_REF_SKIP_NAMES = frozenset({
+        "true", "false", "null", "undefined", "None", "True", "False",
+        "self", "this", "cls", "super",
+    })
+
+    def _extract_value_references(
+        self,
+        child,
+        node_type: str,
+        source: bytes,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+    ) -> None:
+        """Emit ``REFERENCES`` edges for function-as-value patterns.
+
+        Detects identifiers in value positions that likely refer to
+        functions — object literal values, map property assignments,
+        array elements, and callback arguments.  This reduces false
+        positives in dead-code detection for dispatch-map patterns
+        like ``Record<string, Handler>``.
+
+        Only emits edges when the identifier matches a locally defined
+        name or an imported symbol, avoiding noise from arbitrary
+        variable references.
+        """
+        imap = import_map or {}
+        dnames = defined_names or set()
+
+        # Use enclosing function as source, or the file path for module-scope code.
+        if enclosing_func:
+            caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        else:
+            caller = file_path
+
+        # --- JS/TS/Python: object literal pair values  { key: fnRef } ---
+        if node_type in self._PAIR_TYPES:
+            self._ref_from_pair(child, source, language, file_path, caller, edges, imap, dnames)
+            return
+
+        # --- JS/TS: shorthand property identifiers  { fnRef } ---
+        if (
+            node_type == "shorthand_property_identifier"
+            and language in ("javascript", "typescript", "tsx")
+        ):
+            name = child.text.decode("utf-8", errors="replace")
+            self._emit_reference_if_known(
+                name, language, file_path, caller, edges, imap, dnames,
+                line=child.start_point[0] + 1,
+            )
+            return
+
+        # --- JS/TS/Python: assignment with member/subscript LHS ---
+        if node_type in ("assignment_expression", "augmented_assignment", "assignment"):
+            self._ref_from_assignment(
+                child, source, language, file_path, caller, edges, imap, dnames,
+            )
+            return
+
+        # --- JS/TS/Python: array / list elements ---
+        if node_type in self._ARRAY_TYPES:
+            self._ref_from_array(child, source, language, file_path, caller, edges, imap, dnames)
+            return
+
+        # --- Callback arguments (identifier args inside call_expression) ---
+        if node_type == "arguments":
+            self._ref_from_arguments(
+                child, source, language, file_path, caller, edges, imap, dnames,
+            )
+
+    def _emit_reference_if_known(
+        self,
+        name: str,
+        language: str,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+        line: int = 0,
+    ) -> None:
+        """Emit a ``REFERENCES`` edge if *name* is a known function/import."""
+        if not name or name in self._VALUE_REF_SKIP_NAMES:
+            return
+        # Skip all-uppercase names (likely constants) and single-char names.
+        if name.isupper() or len(name) <= 1:
+            return
+        # Must be a known local definition or import to be worth tracking.
+        if name not in defined_names and name not in import_map:
+            return
+
+        target = self._resolve_call_target(
+            name, file_path, language, import_map, defined_names,
+        )
+        edges.append(EdgeInfo(
+            kind="REFERENCES",
+            source=caller,
+            target=target,
+            file_path=file_path,
+            line=line,
+        ))
+
+    def _ref_from_pair(
+        self,
+        pair_node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        """Extract a REFERENCES edge from an object/dict literal pair value."""
+        # pair children: key, ":", value
+        children = pair_node.children
+        # Find the value — it's the last meaningful child.
+        value_node = None
+        for ch in reversed(children):
+            if ch.type not in (":", ",", "comment"):
+                value_node = ch
+                break
+        if value_node is None:
+            return
+        if value_node.type == "identifier":
+            name = value_node.text.decode("utf-8", errors="replace")
+            self._emit_reference_if_known(
+                name, language, file_path, caller, edges,
+                import_map, defined_names,
+                line=value_node.start_point[0] + 1,
+            )
+
+    def _ref_from_assignment(
+        self,
+        assign_node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        """Extract REFERENCES from ``obj.key = fnRef`` or ``obj['key'] = fnRef``."""
+        children = assign_node.children
+        if len(children) < 3:
+            return
+        lhs = children[0]
+        # LHS must be a member_expression or subscript_expression (map assignment).
+        if lhs.type not in (
+            "member_expression", "subscript_expression",
+            "attribute", "subscript",
+        ):
+            return
+        # RHS is the last non-punctuation child.
+        rhs = None
+        for ch in reversed(children):
+            if ch.type not in ("=", ":", ",", "comment", "type_annotation"):
+                rhs = ch
+                break
+        if rhs is None or rhs.type != "identifier":
+            return
+        name = rhs.text.decode("utf-8", errors="replace")
+        self._emit_reference_if_known(
+            name, language, file_path, caller, edges,
+            import_map, defined_names,
+            line=rhs.start_point[0] + 1,
+        )
+
+    def _ref_from_array(
+        self,
+        array_node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        """Extract REFERENCES from array/list elements that are identifiers."""
+        for ch in array_node.children:
+            if ch.type == "identifier":
+                name = ch.text.decode("utf-8", errors="replace")
+                self._emit_reference_if_known(
+                    name, language, file_path, caller, edges,
+                    import_map, defined_names,
+                    line=ch.start_point[0] + 1,
+                )
+
+    def _ref_from_arguments(
+        self,
+        args_node,
+        source: bytes,
+        language: str,
+        file_path: str,
+        caller: str,
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> None:
+        """Extract REFERENCES from identifier arguments (callbacks)."""
+        for ch in args_node.children:
+            if ch.type == "identifier":
+                name = ch.text.decode("utf-8", errors="replace")
+                self._emit_reference_if_known(
+                    name, language, file_path, caller, edges,
+                    import_map, defined_names,
+                    line=ch.start_point[0] + 1,
+                )
+
     def _extract_solidity_constructs(
         self,
         child,
@@ -2732,7 +2969,7 @@ class CodeParser:
         if language == "go" and node.type == "method_declaration":
             for child in node.children:
                 if child.type == "field_identifier":
-                    return child.text.decode("utf-8", errors="replace")                        
+                    return child.text.decode("utf-8", errors="replace")
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (

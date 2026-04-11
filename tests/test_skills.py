@@ -2,10 +2,14 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10 backport
+    import tomli as tomllib
 
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
@@ -13,6 +17,7 @@ from code_review_graph.skills import (
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
+    inject_platform_instructions,
     install_git_hook,
     install_hooks,
     install_platform_configs,
@@ -69,9 +74,7 @@ class TestGenerateSkills:
         skills_dir = generate_skills(tmp_path)
         for path in skills_dir.iterdir():
             content = path.read_text()
-            assert "detail_level" in content, (
-                f"{path.name} missing detail_level reference"
-            )
+            assert "detail_level" in content, f"{path.name} missing detail_level reference"
 
     def test_idempotent(self, tmp_path):
         """Running twice should not fail and files should still be valid."""
@@ -222,24 +225,61 @@ class TestInjectClaudeMd:
         assert second_content.count(_CLAUDE_MD_SECTION_MARKER) == 1
 
 
+class TestInjectPlatformInstructionsFiltering:
+    def test_all_writes_every_file(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="all")
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+
+    def test_default_is_all(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path)
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+
+    def test_claude_writes_nothing(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="claude")
+        assert updated == []
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+
+    def test_cursor_writes_only_cursor_files(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="cursor")
+        assert set(updated) == {"AGENTS.md", ".cursorrules"}
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+
+    def test_windsurf_writes_only_windsurfrules(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="windsurf")
+        assert updated == [".windsurfrules"]
+
+    def test_antigravity_writes_agents_and_gemini(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="antigravity")
+        assert set(updated) == {"AGENTS.md", "GEMINI.md"}
+
+    def test_opencode_writes_only_agents(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="opencode")
+        assert updated == ["AGENTS.md"]
+
+
 class TestInstallPlatformConfigs:
     def test_install_codex_config(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="codex")
         assert "Codex" in configured
         data = tomllib.loads(codex_config.read_text())
         entry = data["mcp_servers"]["code-review-graph"]
         assert entry["type"] == "stdio"
-        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == [
-            "serve"
-        ]
+        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == ["serve"]
 
     def test_install_codex_preserves_existing_toml(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -248,13 +288,16 @@ class TestInstallPlatformConfigs:
             'model = "gpt-5.4"\n\n[mcp_servers.other]\ncommand = "other"\n',
             encoding="utf-8",
         )
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="codex")
         data = tomllib.loads(codex_config.read_text())
         assert data["model"] == "gpt-5.4"
@@ -268,9 +311,9 @@ class TestInstallPlatformConfigs:
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         codex_config.write_text(
-            '\n'.join(
+            "\n".join(
                 [
-                    '[mcp_servers.code-review-graph]',
+                    "[mcp_servers.code-review-graph]",
                     'command = "uvx"',
                     'args = ["code-review-graph", "serve"]',
                     'type = "stdio"',
@@ -279,20 +322,26 @@ class TestInstallPlatformConfigs:
             ),
             encoding="utf-8",
         )
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="codex")
         assert codex_config.read_text().count("[mcp_servers.code-review-graph]") == 1
 
     def test_install_cursor_config(self, tmp_path):
-        with patch.dict(PLATFORMS, {
-            "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
-        }):
+        with patch.dict(
+            PLATFORMS,
+            {
+                "cursor": {**PLATFORMS["cursor"], "detect": lambda: True},
+            },
+        ):
             configured = install_platform_configs(tmp_path, target="cursor")
         assert "Cursor" in configured
         config_path = tmp_path / ".cursor" / "mcp.json"
@@ -305,32 +354,39 @@ class TestInstallPlatformConfigs:
         windsurf_dir = tmp_path / ".codeium" / "windsurf"
         windsurf_dir.mkdir(parents=True)
         config_path = windsurf_dir / "mcp_config.json"
-        with patch.dict(PLATFORMS, {
-            "windsurf": {
-                **PLATFORMS["windsurf"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "windsurf": {
+                    **PLATFORMS["windsurf"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="windsurf")
         assert "Windsurf" in configured
         data = json.loads(config_path.read_text())
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
         import shutil
+
         expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
         assert entry["command"] == expected_cmd
 
     def test_install_zed_config(self, tmp_path):
         zed_settings = tmp_path / "zed" / "settings.json"
         zed_settings.parent.mkdir(parents=True)
-        with patch.dict(PLATFORMS, {
-            "zed": {
-                **PLATFORMS["zed"],
-                "config_path": lambda root: zed_settings,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "zed": {
+                    **PLATFORMS["zed"],
+                    "config_path": lambda root: zed_settings,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="zed")
         assert "Zed" in configured
         data = json.loads(zed_settings.read_text())
@@ -341,13 +397,16 @@ class TestInstallPlatformConfigs:
         continue_dir = tmp_path / ".continue"
         continue_dir.mkdir()
         config_path = continue_dir / "config.json"
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="continue")
         assert "Continue" in configured
         data = json.loads(config_path.read_text())
@@ -367,20 +426,23 @@ class TestInstallPlatformConfigs:
     def test_install_all_detected(self, tmp_path):
         """Installing 'all' configures auto-detected platforms."""
         codex_config = tmp_path / ".codex" / "config.toml"
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
+                "claude": {**PLATFORMS["claude"], "detect": lambda: True},
+                "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
+                "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
+                "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
+                "zed": {**PLATFORMS["zed"], "detect": lambda: False},
+                "continue": {**PLATFORMS["continue"], "detect": lambda: False},
+                "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
             },
-            "claude": {**PLATFORMS["claude"], "detect": lambda: True},
-            "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
-            "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
-            "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
-            "zed": {**PLATFORMS["zed"], "detect": lambda: False},
-            "continue": {**PLATFORMS["continue"], "detect": lambda: False},
-            "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="all")
         assert "Codex" in configured
         assert "Claude Code" in configured
@@ -400,9 +462,7 @@ class TestInstallPlatformConfigs:
         assert "code-review-graph" in data["mcpServers"]
 
     def test_dry_run_no_write(self, tmp_path):
-        configured = install_platform_configs(
-            tmp_path, target="claude", dry_run=True
-        )
+        configured = install_platform_configs(tmp_path, target="claude", dry_run=True)
         assert "Claude Code" in configured
         assert not (tmp_path / ".mcp.json").exists()
 
@@ -415,18 +475,19 @@ class TestInstallPlatformConfigs:
         config_path = tmp_path / ".continue" / "config.json"
         config_path.parent.mkdir(parents=True)
         existing = {
-            "mcpServers": [
-                {"name": "code-review-graph", "command": "uvx", "args": ["serve"]}
-            ]
+            "mcpServers": [{"name": "code-review-graph", "command": "uvx", "args": ["serve"]}]
         }
         config_path.write_text(json.dumps(existing))
-        with patch.dict(PLATFORMS, {
-            "continue": {
-                **PLATFORMS["continue"],
-                "config_path": lambda root: config_path,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="continue")
         data = json.loads(config_path.read_text())
         assert len(data["mcpServers"]) == 1

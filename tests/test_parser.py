@@ -762,3 +762,116 @@ class TestCodeParser:
         test_names = {n.name for n in test_nodes}
         assert "test_something" in test_names
         assert "helper" not in test_names
+
+
+class TestValueReferences:
+    """Tests for REFERENCES edge extraction from function-as-value patterns."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_ts_object_literal_function_values(self):
+        """Object literal values that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # handleCreate, handleUpdate, handleDelete are values in the handlers object
+        assert "handleCreate" in ref_targets_bare
+        assert "handleUpdate" in ref_targets_bare
+        assert "handleDelete" in ref_targets_bare
+
+    def test_ts_shorthand_property_references(self):
+        """Shorthand properties like { validateInput } emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        assert "validateInput" in ref_targets_bare
+        assert "processData" in ref_targets_bare
+
+    def test_ts_array_function_elements(self):
+        """Array elements that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # pipeline = [validateInput, processData, formatOutput]
+        assert "formatOutput" in ref_targets_bare
+
+    def test_ts_callback_argument_reference(self):
+        """Function identifiers passed as arguments emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # register(handleCreate) in dispatch function
+        assert "handleCreate" in ref_targets_bare
+
+    def test_ts_property_assignment_reference(self):
+        """Property assignment RHS identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # dynamicHandlers['format'] = formatOutput
+        assert "formatOutput" in ref_targets_bare
+
+    def test_python_dict_function_values(self):
+        """Python dict values that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        assert "handle_create" in ref_targets_bare
+        assert "handle_update" in ref_targets_bare
+        assert "handle_delete" in ref_targets_bare
+
+    def test_python_list_function_elements(self):
+        """Python list elements that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # pipeline = [validate_input, process_data, format_output]
+        assert "validate_input" in ref_targets_bare
+        assert "process_data" in ref_targets_bare
+        assert "format_output" in ref_targets_bare
+
+    def test_references_have_correct_source(self):
+        """REFERENCES edges should have the enclosing function as source."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        # The register(handleCreate) call is inside 'dispatch'
+        dispatch_refs = [
+            e for e in refs
+            if "dispatch" in e.source and "handleCreate" in e.target
+        ]
+        assert len(dispatch_refs) >= 1
+
+    def test_no_references_for_unknown_identifiers(self):
+        """Identifiers not in defined_names or import_map should NOT emit REFERENCES."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/test/example.ts"),
+            b"function outer() {\n"
+            b"  const map = { key: unknownFunc };\n"
+            b"}\n",
+        )
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets = {e.target for e in refs}
+        assert "unknownFunc" not in ref_targets
+
+    def test_no_references_for_constants(self):
+        """All-uppercase identifiers should NOT emit REFERENCES (likely constants)."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/test/example.ts"),
+            b"const MAX_SIZE = 100;\n"
+            b"function outer() {\n"
+            b"  const arr = [MAX_SIZE];\n"
+            b"}\n",
+        )
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets = {e.target for e in refs}
+        assert "MAX_SIZE" not in ref_targets
+
+    def test_resolve_references_targets(self):
+        """REFERENCES edges should have resolved (qualified) targets for local funcs."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        file_path = str(FIXTURES / "sample_map_dispatch.ts")
+        # At least some targets should be fully qualified
+        qualified_refs = [e for e in refs if "::" in e.target]
+        assert len(qualified_refs) > 0

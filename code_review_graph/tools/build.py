@@ -286,6 +286,7 @@ def build_or_update_graph(
     repo_root: str | None = None,
     base: str = "HEAD~1",
     postprocess: str = "full",
+    recurse_submodules: bool | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -298,6 +299,10 @@ def build_or_update_graph(
             ``"full"`` (default) — signatures, FTS, flows, communities.
             ``"minimal"`` — signatures + FTS only (fast, keeps search working).
             ``"none"`` — skip all post-processing (raw parse only).
+        recurse_submodules: If True, include files from git submodules
+            via ``git ls-files --recurse-submodules``. When None
+            (default), falls back to the CRG_RECURSE_SUBMODULES
+            environment variable. Default: disabled.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
@@ -305,7 +310,7 @@ def build_or_update_graph(
     store, root = _get_store(repo_root)
     try:
         if full_rebuild:
-            result = full_build(root, store)
+            result = full_build(root, store, recurse_submodules)
             build_result = {
                 "status": "ok",
                 "build_type": "full",
