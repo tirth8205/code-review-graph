@@ -36,12 +36,15 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 def _get_version() -> str:
     """Get the installed package version."""
     try:
         return pkg_version("code-review-graph")
-    except PackageNotFoundError:
+    except PackageNotFoundError as exc:
+        logger.debug("Package metadata unavailable, falling back to 'dev': %s", exc)
         return "dev"
 
 

@@ -771,7 +771,7 @@ class GraphStore:
             }
         except sqlite3.OperationalError as exc:
             # community_id column may not exist yet on pre-v6 schemas
-            logger.debug("get_all_community_ids: schema not yet migrated (%s)", exc)
+            logger.debug("Community IDs unavailable (schema not yet migrated): %s", exc)
             return {}
 
     def get_node_ids_by_files(
@@ -848,7 +848,7 @@ class GraphStore:
             ).fetchall()
         except sqlite3.OperationalError as exc:
             # communities table doesn't exist yet on pre-v4 schemas
-            logger.debug("get_communities_raw: table missing (%s)", exc)
+            logger.debug("Communities list unavailable (table missing): %s", exc)
             return []
 
     def get_community_member_qns(
