@@ -1087,6 +1087,39 @@ class TestBashParsing:
         assert self.parser.detect_language(Path("build.sh")) == "bash"
         assert self.parser.detect_language(Path("build.bash")) == "bash"
         assert self.parser.detect_language(Path("run.zsh")) == "bash"
+        # Regression for #235 — Korn shell (.ksh) should parse as bash.
+        assert self.parser.detect_language(Path("legacy.ksh")) == "bash"
+
+    def test_ksh_extension_parses_as_bash(self, tmp_path):
+        """Regression for #235: a real .ksh file is parsed through the bash
+        grammar end-to-end and produces the same structural nodes/edges
+        as an equivalent .sh file."""
+        fixture_source = (FIXTURES / "sample.sh").read_text(encoding="utf-8")
+        ksh_copy = tmp_path / "legacy.ksh"
+        ksh_copy.write_text(fixture_source, encoding="utf-8")
+
+        ksh_nodes, ksh_edges = self.parser.parse_file(ksh_copy)
+
+        # Language tagging: every node must be "bash".
+        assert ksh_nodes, "parser produced zero nodes for .ksh file"
+        for n in ksh_nodes:
+            assert n.language == "bash"
+
+        # Same function set as the .sh fixture.
+        ksh_funcs = {n.name for n in ksh_nodes if n.kind == "Function"}
+        sh_funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert ksh_funcs == sh_funcs, (
+            f".ksh and .sh produced different function sets: "
+            f"sh-only={sh_funcs - ksh_funcs}, ksh-only={ksh_funcs - sh_funcs}"
+        )
+
+        # Same structural-edge totals by kind.
+        def by_kind(edges):
+            counts: dict[str, int] = {}
+            for e in edges:
+                counts[e.kind] = counts.get(e.kind, 0) + 1
+            return counts
+        assert by_kind(ksh_edges) == by_kind(self.edges)
 
     def test_nodes_have_bash_language(self):
         for n in self.nodes:

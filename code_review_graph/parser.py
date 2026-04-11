@@ -108,6 +108,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
+    ".ksh": "bash",  # Korn shell — close enough to bash for tree-sitter-bash (#235)
     ".ex": "elixir",
     ".exs": "elixir",
     ".ipynb": "notebook",
