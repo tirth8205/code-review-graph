@@ -179,6 +179,69 @@ class TestIgnorePatterns:
         assert _should_ignore(".cache/webpack/index.pack", patterns)
 
 
+class TestDataDir:
+    """Tests for get_data_dir / CRG_DATA_DIR / CRG_REPO_ROOT (#155)."""
+
+    def test_default_uses_repo_subdir(self, tmp_path, monkeypatch):
+        """Without CRG_DATA_DIR, graphs live at <repo>/.code-review-graph."""
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        from code_review_graph.incremental import get_data_dir
+        result = get_data_dir(tmp_path)
+        assert result == tmp_path / ".code-review-graph"
+        assert result.is_dir()
+        # Auto-generated gitignore must exist
+        assert (result / ".gitignore").is_file()
+        content = (result / ".gitignore").read_text(encoding="utf-8")
+        assert content.strip().endswith("*")
+
+    def test_env_override_replaces_repo_subdir(self, tmp_path, monkeypatch):
+        """CRG_DATA_DIR replaces the default <repo>/.code-review-graph."""
+        external = tmp_path / "external-graphs"
+        repo = tmp_path / "project"
+        repo.mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        from code_review_graph.incremental import get_data_dir
+        result = get_data_dir(repo)
+        assert result == external.resolve()
+        assert result.is_dir()
+        # The repo itself should NOT have a .code-review-graph dir now
+        assert not (repo / ".code-review-graph").exists()
+
+    def test_get_db_path_uses_data_dir(self, tmp_path, monkeypatch):
+        """get_db_path should honor CRG_DATA_DIR too."""
+        external = tmp_path / "external"
+        repo = tmp_path / "project"
+        repo.mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        from code_review_graph.incremental import get_db_path
+        db_path = get_db_path(repo)
+        assert db_path == external.resolve() / "graph.db"
+        assert db_path.parent.is_dir()
+
+    def test_find_project_root_env_override(self, tmp_path, monkeypatch):
+        """CRG_REPO_ROOT should override normal git-root resolution."""
+        from pathlib import Path as PathType
+        external_repo = tmp_path / "elsewhere"
+        external_repo.mkdir()
+        monkeypatch.setenv("CRG_REPO_ROOT", str(external_repo))
+        from code_review_graph.incremental import find_project_root
+        result = find_project_root(PathType.cwd())
+        assert result == external_repo.resolve()
+
+    def test_find_project_root_env_override_missing_dir_falls_through(
+        self, tmp_path, monkeypatch,
+    ):
+        """CRG_REPO_ROOT pointing at a non-existent path falls back to
+        the usual resolution rather than crashing."""
+        monkeypatch.setenv(
+            "CRG_REPO_ROOT", str(tmp_path / "does-not-exist-123"),
+        )
+        from code_review_graph.incremental import find_project_root
+        result = find_project_root(tmp_path)
+        # Should NOT equal the bogus env value
+        assert result != tmp_path / "does-not-exist-123"
+
+
 class TestIsBinary:
     def test_text_file_is_not_binary(self, tmp_path):
         f = tmp_path / "text.py"
