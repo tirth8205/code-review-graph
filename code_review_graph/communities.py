@@ -215,11 +215,15 @@ def _compute_cohesion(
 def _detect_leiden(
     nodes: list[GraphNode], edges: list[GraphEdge], min_size: int
 ) -> list[dict[str, Any]]:
-    """Detect communities using Leiden algorithm via igraph."""
+    """Detect communities using Leiden algorithm via igraph.
+
+    Caps Leiden at ``n_iterations=2`` (sufficient for code dependency graphs)
+    and skips the recursive sub-community splitting pass that caused
+    exponential blow-up on large repos (>100k nodes).
+    """
     if ig is None:
         return []
 
-    # Build mapping from qualified_name to index
     qn_to_idx: dict[str, int] = {}
     idx_to_node: dict[int, GraphNode] = {}
     for i, node in enumerate(nodes):
@@ -229,7 +233,8 @@ def _detect_leiden(
     if not qn_to_idx:
         return []
 
-    # Build igraph graph (undirected, weighted)
+    logger.info("Building igraph with %d nodes...", len(qn_to_idx))
+
     g = ig.Graph(n=len(qn_to_idx), directed=False)
     edge_list: list[tuple[int, int]] = []
     weights: list[float] = []
@@ -246,20 +251,27 @@ def _detect_leiden(
                 weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
 
     if not edge_list:
-        # No edges — fall back to file grouping
         return _detect_file_based(nodes, edges, min_size)
 
     g.add_edges(edge_list)
     g.es["weight"] = weights
 
-    # Run Leiden
+    logger.info(
+        "Running Leiden on %d nodes, %d edges...",
+        g.vcount(), g.ecount(),
+    )
+
     partition = g.community_leiden(
         objective_function="modularity",
         weights="weight",
+        n_iterations=2,
     )
 
-    # Build communities from partition. Collect member sets first so we
-    # can batch-compute all cohesions in a single O(edges) pass below.
+    logger.info(
+        "Leiden complete, found %d partitions. Computing cohesion...",
+        len(partition),
+    )
+
     pending: list[tuple[list[GraphNode], set[str]]] = []
     for cluster_ids in partition:
         if len(cluster_ids) < min_size:
@@ -289,99 +301,8 @@ def _detect_leiden(
             "member_qns": member_qns,
         })
 
-    # Second pass: split large communities (>50 nodes)
-    final: list[dict[str, Any]] = []
-    for comm in communities:
-        if comm["size"] > 50:
-            sub_nodes = [n for n in nodes if n.qualified_name in comm["member_qns"]]
-            sub_edges = [
-                e for e in edges
-                if e.source_qualified in comm["member_qns"]
-                and e.target_qualified in comm["member_qns"]
-            ]
-            subs = _detect_leiden_sub(sub_nodes, sub_edges, min_size, parent_name=comm["name"])
-            if len(subs) >= 2:
-                final.extend(subs)
-            else:
-                final.append(comm)
-        else:
-            final.append(comm)
-
-    return final
-
-
-def _detect_leiden_sub(
-    nodes: list[GraphNode],
-    edges: list[GraphEdge],
-    min_size: int,
-    parent_name: str,
-) -> list[dict[str, Any]]:
-    """Second-pass Leiden on a large community for sub-communities."""
-    if ig is None:
-        return []
-
-    qn_to_idx: dict[str, int] = {}
-    idx_to_node: dict[int, GraphNode] = {}
-    for i, node in enumerate(nodes):
-        qn_to_idx[node.qualified_name] = i
-        idx_to_node[i] = node
-
-    g = ig.Graph(n=len(qn_to_idx), directed=False)
-    edge_list: list[tuple[int, int]] = []
-    weights: list[float] = []
-    seen_edges: set[tuple[int, int]] = set()
-
-    for e in edges:
-        src_idx = qn_to_idx.get(e.source_qualified)
-        tgt_idx = qn_to_idx.get(e.target_qualified)
-        if src_idx is not None and tgt_idx is not None and src_idx != tgt_idx:
-            pair = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
-            if pair not in seen_edges:
-                seen_edges.add(pair)
-                edge_list.append(pair)
-                weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
-
-    if not edge_list:
-        return []
-
-    g.add_edges(edge_list)
-    g.es["weight"] = weights
-
-    partition = g.community_leiden(
-        objective_function="modularity",
-        weights="weight",
-    )
-
-    pending: list[tuple[list[GraphNode], set[str]]] = []
-    for cluster_ids in partition:
-        if len(cluster_ids) < min_size:
-            continue
-        members = [idx_to_node[i] for i in cluster_ids if i in idx_to_node]
-        if len(members) < min_size:
-            continue
-        member_qns = {m.qualified_name for m in members}
-        pending.append((members, member_qns))
-
-    cohesions = _compute_cohesion_batch([p[1] for p in pending], edges)
-
-    subs: list[dict[str, Any]] = []
-    for (members, member_qns), cohesion in zip(pending, cohesions):
-        lang_counts = Counter(m.language for m in members if m.language)
-        dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
-        name = _generate_community_name(members)
-
-        subs.append({
-            "name": f"{parent_name}/{name}",
-            "level": 1,
-            "size": len(members),
-            "cohesion": round(cohesion, 4),
-            "dominant_language": dominant_lang,
-            "description": f"Sub-community of {len(members)} nodes within {parent_name}",
-            "members": [m.qualified_name for m in members],
-            "member_qns": member_qns,
-        })
-
-    return subs
+    logger.info("Community detection complete: %d communities", len(communities))
+    return communities
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +376,8 @@ def detect_communities(
     all_edges = store.get_all_edges()
     all_files = store.get_all_files()
 
+    logger.info("Loading nodes from %d files...", len(all_files))
+
     nodes: list[GraphNode] = []
     for fp in all_files:
         nodes.extend(store.get_nodes_by_file(fp))
@@ -473,6 +396,11 @@ def detect_communities(
         if n.qualified_name not in seen_qns:
             seen_qns.add(n.qualified_name)
             unique_nodes.append(n)
+
+    logger.info(
+        "Loaded %d unique nodes, %d edges",
+        len(unique_nodes), len(all_edges),
+    )
 
     if IGRAPH_AVAILABLE:
         logger.info("Detecting communities with Leiden algorithm (igraph)")
@@ -561,7 +489,8 @@ def store_communities(
         count = 0
         for comm in communities:
             cursor = conn.execute(
-                """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
+                """INSERT INTO communities
+                       (name, level, cohesion, size, dominant_language, description)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     comm["name"],
@@ -574,12 +503,13 @@ def store_communities(
             )
             community_id = cursor.lastrowid
 
-            # Update community_id on member nodes
+            # Batch update community_id on member nodes
             member_qns = comm.get("members", [])
-            for qn in member_qns:
+            if member_qns:
+                placeholders = ",".join("?" * len(member_qns))
                 conn.execute(
-                    "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
-                    (community_id, qn),
+                    f"UPDATE nodes SET community_id = ? WHERE qualified_name IN ({placeholders})",  # nosec B608
+                    [community_id] + member_qns,
                 )
             count += 1
 
