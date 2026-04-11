@@ -35,9 +35,48 @@ class TestFindRepoRoot:
         assert find_repo_root(sub) == tmp_path
 
     def test_returns_none_without_git(self, tmp_path):
+        """No .git between ``sub`` and ``tmp_path`` -> None.
+
+        Bounded with ``stop_at=tmp_path`` so the walk does not climb into
+        ancestors outside the test sandbox.  On Windows in particular,
+        ``tmp_path`` lives under ``C:/Users/<user>/AppData/Local/Temp/...``
+        and if the user has ``git init`` anywhere under their home (dotfiles,
+        chezmoi, etc.) the unbounded walk would find that ancestor .git and
+        the test would fail for reasons unrelated to the product.  See #241.
+        """
         sub = tmp_path / "no_git"
         sub.mkdir()
-        assert find_repo_root(sub) is None
+        assert find_repo_root(sub, stop_at=tmp_path) is None
+
+    def test_stop_at_prevents_escape_to_outer_git(self, tmp_path):
+        """Positive regression test for #241: ``stop_at`` must halt the
+        walk even when an ancestor *does* contain ``.git``.
+
+        Without ``stop_at`` the walk correctly finds the outer .git; with
+        ``stop_at=inner`` the walk is bounded and returns None.
+        """
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        # Unbounded walk finds the ancestor .git (existing behavior).
+        assert find_repo_root(inner) == outer
+
+        # Bounded walk stops at ``inner`` and never climbs to ``outer``.
+        assert find_repo_root(inner, stop_at=inner) is None
+
+    def test_stop_at_finds_git_at_boundary(self, tmp_path):
+        """stop_at does not suppress a .git that lives *at* the boundary."""
+        boundary = tmp_path / "boundary"
+        boundary.mkdir()
+        (boundary / ".git").mkdir()
+        inner = boundary / "inner"
+        inner.mkdir()
+
+        # The walk examines ``boundary`` and finds the .git before stopping.
+        assert find_repo_root(inner, stop_at=boundary) == boundary
 
 
 class TestFindProjectRoot:
@@ -45,10 +84,34 @@ class TestFindProjectRoot:
         (tmp_path / ".git").mkdir()
         assert find_project_root(tmp_path) == tmp_path
 
-    def test_falls_back_to_start(self, tmp_path):
+    def test_falls_back_to_start(self, tmp_path, monkeypatch):
+        """With no .git and no env override, find_project_root returns ``sub``.
+
+        Bounded with ``stop_at=tmp_path`` to prevent the ancestor walk from
+        escaping the test sandbox (see #241), and ``CRG_REPO_ROOT`` is
+        cleared so a developer env var cannot shadow the test expectation.
+        """
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
         sub = tmp_path / "no_git"
         sub.mkdir()
-        assert find_project_root(sub) == sub
+        assert find_project_root(sub, stop_at=tmp_path) == sub
+
+    def test_stop_at_forwarded_to_find_repo_root(self, tmp_path, monkeypatch):
+        """Positive regression test for #241: find_project_root must forward
+        stop_at to find_repo_root, not silently drop it."""
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        # Without stop_at, find_project_root climbs to outer (existing behavior).
+        assert find_project_root(inner) == outer
+
+        # With stop_at=inner, the walk is bounded and find_project_root falls
+        # back to its third resolution rule (the start path itself).
+        assert find_project_root(inner, stop_at=inner) == inner
 
 
 class TestGetDbPath:
