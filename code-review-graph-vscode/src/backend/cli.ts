@@ -53,22 +53,14 @@ export class CliWrapper {
     /**
      * Build (or fully rebuild) the graph database for a workspace.
      */
-    async buildGraph(
-        workspaceRoot: string,
-        options?: { fullRebuild?: boolean },
-    ): Promise<CliResult> {
-        const args = ['build'];
-        if (options?.fullRebuild) {
-            args.push('--full');
-        }
-
+    async buildGraph(workspaceRoot: string): Promise<CliResult> {
         return vscode.window.withProgress(
             {
                 location: vscode.ProgressLocation.Notification,
                 title: 'Code Review Graph: Building graph\u2026',
                 cancellable: false,
             },
-            () => this.exec(args, workspaceRoot),
+            () => this.exec(['build'], workspaceRoot),
         );
     }
 

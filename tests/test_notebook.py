@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from code_review_graph.parser import _SQL_TABLE_RE, CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -300,13 +298,11 @@ class TestRKernelNotebook:
         file_node = [n for n in self.nodes if n.kind == "File"][0]
         assert file_node.language == "r"
 
-    @pytest.mark.xfail(reason="Requires R parser mappings from PR #43")
     def test_r_kernel_detects_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "clean_data" in names
 
-    @pytest.mark.xfail(reason="Requires R parser mappings from PR #43")
     def test_r_kernel_detects_imports(self):
         imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
         targets = {e.target for e in imports}

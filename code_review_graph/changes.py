@@ -154,15 +154,19 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
     Scoring factors:
       - Flow participation: 0.05 per flow membership, capped at 0.25
       - Community crossing: 0.05 per caller from a different community, capped at 0.15
-      - Test coverage: 0.30 if no TESTED_BY edges, 0.05 if tested
+      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges)
       - Security sensitivity: 0.20 if name matches security keywords
       - Caller count: callers / 20, capped at 0.10
     """
     score = 0.0
 
-    # --- Flow participation (cap 0.25) ---
-    flow_count = store.count_flow_memberships(node.id)
-    score += min(flow_count * 0.05, 0.25)
+    # --- Flow participation (cap 0.25), weighted by criticality ---
+    flow_criticalities = store.get_flow_criticalities_for_node(node.id)
+    if flow_criticalities:
+        score += min(sum(flow_criticalities), 0.25)
+    else:
+        flow_count = store.count_flow_memberships(node.id)
+        score += min(flow_count * 0.05, 0.25)
 
     # --- Community crossing (cap 0.15) ---
     callers = store.get_edges_by_target(node.qualified_name)
@@ -179,10 +183,10 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
                 cross_community += 1
     score += min(cross_community * 0.05, 0.15)
 
-    # --- Test coverage ---
-    tested_edges = store.get_edges_by_target(node.qualified_name)
-    has_test = any(e.kind == "TESTED_BY" for e in tested_edges)
-    score += 0.05 if has_test else 0.30
+    # --- Test coverage (direct + transitive) ---
+    transitive_tests = store.get_transitive_tests(node.qualified_name)
+    test_count = len(transitive_tests)
+    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()

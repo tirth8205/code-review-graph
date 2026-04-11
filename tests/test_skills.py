@@ -109,6 +109,18 @@ class TestGenerateHooksConfig:
         assert "status" in inner["command"]
         assert 0 < inner["timeout"] <= 600
 
+    def test_has_pre_tool_use(self):
+        config = generate_hooks_config()
+        assert "PreToolUse" in config["hooks"]
+        entries = config["hooks"]["PreToolUse"]
+        assert len(entries) >= 1
+        assert entries[0]["matcher"] == "Bash"
+        inner = entries[0]["hooks"][0]
+        assert inner["type"] == "command"
+        assert inner["if"] == "Bash(git commit*)"
+        assert "detect-changes" in inner["command"]
+        assert 0 < inner["timeout"] <= 600
+
     def test_no_pre_commit(self):
         config = generate_hooks_config()
         assert "PreCommit" not in config["hooks"]
@@ -119,6 +131,12 @@ class TestGenerateHooksConfig:
             for entry in entries:
                 assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
                 assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
+
+    def test_has_permissions_allow(self):
+        config = generate_hooks_config()
+        assert "permissions" in config
+        assert "allow" in config["permissions"]
+        assert "mcp__code-review-graph__*" in config["permissions"]["allow"]
 
 
 class TestInstallGitHook:
@@ -176,10 +194,38 @@ class TestInstallHooks:
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
         assert "PreCommit" not in data["hooks"]
+        assert "PreToolUse" in data["hooks"]
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
+
+    def test_merges_permissions_with_existing(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        existing = {
+            "permissions": {
+                "allow": ["Bash(npm run *)"],
+            },
+        }
+        (settings_dir / "settings.json").write_text(json.dumps(existing))
+
+        install_hooks(tmp_path)
+
+        data = json.loads((settings_dir / "settings.json").read_text())
+        allow = data["permissions"]["allow"]
+        assert "Bash(npm run *)" in allow
+        assert "mcp__code-review-graph__*" in allow
+
+    def test_no_duplicate_permissions(self, tmp_path):
+        install_hooks(tmp_path)
+        install_hooks(tmp_path)
+
+        data = json.loads(
+            (tmp_path / ".claude" / "settings.json").read_text()
+        )
+        allow = data["permissions"]["allow"]
+        assert allow.count("mcp__code-review-graph__*") == 1
 
 
 class TestInjectClaudeMd:

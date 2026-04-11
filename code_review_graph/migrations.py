@@ -203,6 +203,20 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
                 "(community_summaries, flow_snapshots, risk_index)")
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """v7: Reserved (upstream PR #127). No-op for forward compatibility."""
+    logger.info("Migration v7: reserved (no-op)")
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """v8: Add composite index on edges for upsert_edge performance."""
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_edges_composite
+        ON edges(kind, source_qualified, target_qualified, file_path, line)
+    """)
+    logger.info("Migration v8: created composite edge index")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -213,6 +227,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_v4,
     5: _migrate_v5,
     6: _migrate_v6,
+    7: _migrate_v7,
+    8: _migrate_v8,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

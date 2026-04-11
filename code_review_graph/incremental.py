@@ -62,6 +62,8 @@ DEFAULT_IGNORE_PATTERNS = [
     "*.min.css",
     "*.map",
     "*.lock",
+    "*.bundle.js",
+    "cdk.out/**",
     "package-lock.json",
     "yarn.lock",
     "*.db",
@@ -486,6 +488,16 @@ def _parse_single_file(
         return (rel_path, [], [], str(e), "")
 
 
+def _run_jedi_enrichment(store: GraphStore, repo_root: Path) -> dict:
+    """Run optional Jedi enrichment for Python method calls."""
+    try:
+        from .jedi_resolver import enrich_jedi_calls
+        return enrich_jedi_calls(store, repo_root)
+    except Exception as e:
+        logger.warning("Jedi enrichment failed: %s", e)
+        return {"error": str(e)}
+
+
 def full_build(
     repo_root: Path,
     store: GraphStore,
@@ -520,6 +532,7 @@ def full_build(
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 
+    t0 = time.perf_counter()
     if use_serial or file_count < 8:
         # Serial fallback (for debugging or tiny repos)
         for i, rel_path in enumerate(files, 1):
@@ -539,8 +552,10 @@ def full_build(
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
-        # Parallel parsing — store calls remain serial (SQLite single-writer)
+        # Parallel parsing -- batch store to reduce transaction overhead
+        batch_size = 50
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
+        batch: list[tuple[str, list, list, str]] = []
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=_MAX_PARSE_WORKERS,
         ) as executor:
@@ -552,13 +567,28 @@ def full_build(
                     errors.append({"file": rel_path, "error": error})
                     continue
                 full_path = repo_root / rel_path
-                store.store_file_nodes_edges(
-                    str(full_path), nodes, edges, fhash,
-                )
+                batch.append((str(full_path), nodes, edges, fhash))
                 total_nodes += len(nodes)
                 total_edges += len(edges)
+                if len(batch) >= batch_size:
+                    store.store_file_batch(batch)
+                    batch = []
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
+        if batch:
+            store.store_file_batch(batch)
+    t_parse = time.perf_counter()
+    logger.info("Phase: parsing %d files took %.2fs", file_count, t_parse - t0)
+
+    # Post-parse Jedi enrichment for Python method calls
+    jedi_stats = _run_jedi_enrichment(store, repo_root)
+    t_jedi = time.perf_counter()
+    logger.info("Phase: Jedi enrichment took %.2fs", t_jedi - t_parse)
+
+    # Post-build: resolve bare-name CALLS targets across all files
+    bare_resolved = store.resolve_bare_call_targets()
+    t_bare = time.perf_counter()
+    logger.info("Phase: bare-name resolution took %.2fs", t_bare - t_jedi)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
@@ -574,6 +604,13 @@ def full_build(
         "total_nodes": total_nodes,
         "total_edges": total_edges,
         "errors": errors,
+        "jedi": jedi_stats,
+        "bare_resolved": bare_resolved,
+        "timing": {
+            "parse_s": round(t_parse - t0, 2),
+            "jedi_s": round(t_jedi - t_parse, 2),
+            "bare_resolve_s": round(t_bare - t_jedi, 2),
+        },
     }
 
 
@@ -650,6 +687,7 @@ def incremental_update(
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 
+    t0 = time.perf_counter()
     if use_serial or len(to_parse) < 8:
         for rel_path in to_parse:
             abs_path = repo_root / rel_path
@@ -666,7 +704,9 @@ def incremental_update(
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
     else:
+        batch_size = 50
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
+        batch: list[tuple[str, list, list, str]] = []
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=_MAX_PARSE_WORKERS,
         ) as executor:
@@ -677,11 +717,26 @@ def incremental_update(
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
                     continue
-                store.store_file_nodes_edges(
-                    str(repo_root / rel_path), nodes, edges, fhash,
-                )
+                batch.append((str(repo_root / rel_path), nodes, edges, fhash))
                 total_nodes += len(nodes)
                 total_edges += len(edges)
+                if len(batch) >= batch_size:
+                    store.store_file_batch(batch)
+                    batch = []
+        if batch:
+            store.store_file_batch(batch)
+    t_parse = time.perf_counter()
+    logger.info("Phase: parsing %d files took %.2fs", len(to_parse), t_parse - t0)
+
+    # Post-parse Jedi enrichment for Python method calls
+    jedi_stats = _run_jedi_enrichment(store, repo_root)
+    t_jedi = time.perf_counter()
+    logger.info("Phase: Jedi enrichment took %.2fs", t_jedi - t_parse)
+
+    # Post-build: resolve bare-name CALLS targets across all files
+    bare_resolved = store.resolve_bare_call_targets()
+    t_bare = time.perf_counter()
+    logger.info("Phase: bare-name resolution took %.2fs", t_bare - t_jedi)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
@@ -699,6 +754,13 @@ def incremental_update(
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "errors": errors,
+        "jedi": jedi_stats,
+        "bare_resolved": bare_resolved,
+        "timing": {
+            "parse_s": round(t_parse - t0, 2),
+            "jedi_s": round(t_jedi - t_parse, 2),
+            "bare_resolve_s": round(t_bare - t_jedi, 2),
+        },
     }
 
 

@@ -10,11 +10,11 @@
 ┌──────────────────────────────────────────────────────────────┐
 │                        Claude Code                           │
 │                                                              │
-│  Skills (SKILL.md)          Hooks (hooks.json)               │
-│  ├── build-graph            └── PostToolUse (Write|Edit|Bash) │
-│  ├── review-delta                → incremental update         │
-│  └── review-pr                                               │
-│          │                        │                          │
+│  Skills (SKILL.md)          Hooks (settings.json)            │
+│  ├── build-graph            ├── PostToolUse (Write|Edit|Bash) │
+│  ├── review-delta           │    → incremental update         │
+│  └── review-pr              └── PreToolUse (git commit)       │
+│          │                       → detect-changes             │
 │          ▼                        ▼                          │
 │  ┌────────────────────────────────────────────┐              │
 │  │            MCP Server (stdio)              │              │

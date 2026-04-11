@@ -1,6 +1,25 @@
 # Features
 
-## v2.2.1 (Current)
+## Unreleased (Current)
+- **Parser refactoring**: 16 per-language handler modules in `code_review_graph/lang/` — strategy pattern replaces monolithic conditionals.
+- **Jedi-based call resolution**: `jedi_resolver.py` resolves Python method calls at build time with pre-scan filtering (36s to 3s).
+- **PreToolUse search enrichment**: `enrich.py` + `code-review-graph enrich` injects graph context (callers, flows, community, tests) into agent search results.
+- **Typed variable call enrichment**: Constructor-based type inference and instance method call tracking (Python, JS/TS, Kotlin/Java).
+- **Star/namespace import resolution**: `from module import *`, `import * as X`, and CommonJS `require()`.
+- **Angular template parsing**: Extract call targets from component templates.
+- **JSX handler tracking**: Function/class references as event handler props.
+- **Framework decorator recognition**: `@app.route`, `@router.get`, `@cli.command` etc. recognized as entry points.
+- **Thread-safe parser caches**: Double-check locking on `_type_sets`, `_get_parser`, `_resolve_module_to_file`, `_get_exported_names`.
+- **Community detection 21x speedup**: Bulk node loading + adjacency-indexed cohesion (48.6s to 2.3s on 41k nodes).
+- **Batch file storage**: 50-file transaction batching for faster builds.
+- **Weighted flow risk scoring**: Risk weighted by flow criticality instead of flat counts.
+- **Transitive TESTED_BY**: `tests_for` follows transitive test relationships.
+- **DB schema v8**: Composite edge index for upsert performance.
+- **`--quiet`/`--json` CLI flags**: Machine-readable output.
+- **Dead code FP reduction**: Decorators, CDK methods, abstract overrides, e2e test exclusion.
+- **829+ tests** across 26 test files (up from 615).
+
+## v2.2.1
 - **24 MCP tools** (up from 22): Added `get_minimal_context` and `run_postprocess`.
 - **Parallel parsing**: `ProcessPoolExecutor` for 3-5x faster builds on large repos.
 - **Lazy post-processing**: `postprocess="full"|"minimal"|"none"` to skip expensive steps.

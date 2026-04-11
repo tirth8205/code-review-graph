@@ -165,6 +165,50 @@ class TestCommunities:
         assert isinstance(overview["cross_community_edges"], list)
         assert isinstance(overview["warnings"], list)
 
+    def test_architecture_overview_excludes_tested_by_coupling(self):
+        """TESTED_BY edges do not count toward coupling warnings."""
+        self._seed_two_clusters()
+        communities = detect_communities(self.store, min_size=2)
+        store_communities(self.store, communities)
+
+        # Add many TESTED_BY cross-community edges (well above the threshold of 10)
+        for i in range(20):
+            self.store.upsert_edge(EdgeInfo(
+                kind="TESTED_BY", source=f"auth.py::login",
+                target=f"db.py::query", file_path="auth.py", line=i + 100,
+            ))
+        self.store.commit()
+
+        overview = get_architecture_overview(self.store)
+        # Warnings should not include any that are purely from TESTED_BY edges
+        for w in overview["warnings"]:
+            assert "TESTED_BY" not in w
+
+    def test_architecture_overview_excludes_test_community_warnings(self):
+        """Warnings involving test-dominated communities are filtered out."""
+        self._seed_two_clusters()
+        communities = detect_communities(self.store, min_size=2)
+        store_communities(self.store, communities)
+
+        # Manually insert a test-named community with high cross-coupling
+        conn = self.store._conn
+        cursor = conn.execute(
+            "INSERT INTO communities (name, level, cohesion, size, dominant_language, description)"
+            " VALUES (?, 0, 0.5, 10, 'typescript', 'Test community')",
+            ("handler-it:should",),
+        )
+        test_comm_id = cursor.lastrowid
+        # Assign some nodes to this community (reuse existing node)
+        conn.execute(
+            "UPDATE nodes SET community_id = ? WHERE name = 'login'",
+            (test_comm_id,),
+        )
+        conn.commit()
+
+        overview = get_architecture_overview(self.store)
+        for w in overview["warnings"]:
+            assert "it:should" not in w, f"Test community should be filtered: {w}"
+
     def test_fallback_file_communities(self):
         """File-based fallback produces communities grouped by file."""
         self._seed_two_clusters()
@@ -351,8 +395,8 @@ class TestCommunities:
 
         assert len(result) == 2
         by_desc = {c["description"]: c for c in result}
-        auth = by_desc["File-based community: auth.py"]
-        db = by_desc["File-based community: db.py"]
+        auth = by_desc["Directory-based community: auth"]
+        db = by_desc["Directory-based community: db"]
 
         # Member sets — catches wrong member_qns being passed to batch helper
         assert set(auth["members"]) == {
@@ -477,6 +521,54 @@ class TestCommunities:
     def test_igraph_available_is_bool(self):
         """IGRAPH_AVAILABLE is a boolean."""
         assert isinstance(IGRAPH_AVAILABLE, bool)
+
+    def test_leiden_fallback_to_file_based(self):
+        """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
+        # Seed nodes with only CONTAINS edges (no CALLS/IMPORTS -- sparse graph)
+        self.store.upsert_node(
+            NodeInfo(
+                kind="File", name="a.py", file_path="a.py",
+                line_start=1, line_end=100, language="python",
+            ), file_hash="a1"
+        )
+        self.store.upsert_node(
+            NodeInfo(
+                kind="Function", name="f1", file_path="a.py",
+                line_start=1, line_end=10, language="python",
+                parent_name=None,
+            ), file_hash="a1"
+        )
+        self.store.upsert_node(
+            NodeInfo(
+                kind="Function", name="f2", file_path="a.py",
+                line_start=11, line_end=20, language="python",
+                parent_name=None,
+            ), file_hash="a1"
+        )
+        self.store.upsert_node(
+            NodeInfo(
+                kind="Function", name="f3", file_path="a.py",
+                line_start=21, line_end=30, language="python",
+                parent_name=None,
+            ), file_hash="a1"
+        )
+        self.store.upsert_edge(
+            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f1",
+                     file_path="a.py", line=1)
+        )
+        self.store.upsert_edge(
+            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f2",
+                     file_path="a.py", line=11)
+        )
+        self.store.upsert_edge(
+            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f3",
+                     file_path="a.py", line=21)
+        )
+        # With high min_size, Leiden may produce tiny clusters that get dropped.
+        # The fallback to file-based should still produce results.
+        result = detect_communities(self.store, min_size=2)
+        assert isinstance(result, list)
+        assert len(result) >= 1
 
     def test_incremental_detect_no_affected_communities(self):
         """incremental_detect_communities returns 0 when no communities are affected."""

@@ -230,6 +230,7 @@ code-review-graph watch            # Auto-update on file changes
 code-review-graph visualize        # Generate interactive HTML graph
 code-review-graph wiki             # Generate markdown wiki from communities
 code-review-graph detect-changes   # Risk-scored change impact analysis
+code-review-graph enrich           # Enrich search results with graph context
 code-review-graph register <path>  # Register repo in multi-repo registry
 code-review-graph unregister <id>  # Remove repo from registry
 code-review-graph repos            # List registered repositories
@@ -296,6 +297,7 @@ Optional dependency groups:
 pip install code-review-graph[embeddings]          # Local vector embeddings (sentence-transformers)
 pip install code-review-graph[google-embeddings]   # Google Gemini embeddings
 pip install code-review-graph[communities]         # Community detection (igraph)
+pip install code-review-graph[enrichment]          # Jedi-based Python call resolution
 pip install code-review-graph[eval]                # Evaluation benchmarks (matplotlib)
 pip install code-review-graph[wiki]                # Wiki generation with LLM summaries (ollama)
 pip install code-review-graph[all]                 # All optional dependencies
@@ -319,7 +321,7 @@ pytest
 <summary><strong>Adding a new language</strong></summary>
 <br>
 
-Edit `code_review_graph/parser.py` and add your extension to `EXTENSION_TO_LANGUAGE` along with node type mappings in `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES`, and `_CALL_TYPES`. Include a test fixture and open a PR.
+Edit the appropriate language handler in `code_review_graph/lang/` (e.g., `_python.py`, `_kotlin.py`) or create a new one following `_base.py`. Add your extension to `EXTENSION_TO_LANGUAGE` in `parser.py`, include a test fixture, and open a PR.
 
 </details>
 

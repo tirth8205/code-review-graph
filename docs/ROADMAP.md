@@ -2,6 +2,27 @@
 
 ## Shipped
 
+### Unreleased
+- Parser refactored into 16 per-language handler modules (`code_review_graph/lang/`)
+- Jedi-based Python call resolution at build time (36s to 3s)
+- PreToolUse search enrichment (`code-review-graph enrich`)
+- Typed variable call enrichment (Python, JS/TS, Kotlin/Java)
+- Star/namespace import resolution, Angular templates, JSX handlers
+- Thread-safe parser caches (double-check locking)
+- Community detection 21x speedup (48.6s to 2.3s via adjacency index)
+- Dead code FP reduction (decorators, CDK, abstract overrides, e2e exclusion)
+- Weighted flow risk scoring, transitive TESTED_BY
+- DB schema v8 (composite edge index)
+- `--quiet`/`--json` CLI flags, batch file storage
+- 829+ tests across 26 test files
+
+### v2.2.0
+- PreToolUse search enrichment (`code-review-graph enrich`)
+- Multi-word FTS5 AND search, deduplicated query results, ambiguous auto-resolution
+- Test function deprioritization in search
+- Composite edge index (v6 migration)
+- 589 tests across 23 test files
+
 ### v2.0.0
 - 22 MCP tools (up from 9) and 5 MCP prompts
 - 18 languages (added Dart, R, Perl)
@@ -13,7 +34,7 @@
 - Wiki generation from community structure
 - Multi-repo registry with cross-repo search
 - FTS5 full-text search with porter stemming
-- Database migrations (v1-v5)
+- Database migrations (v1-v6)
 - Evaluation framework with matplotlib visualization
 - TypeScript tsconfig path alias resolution
 - MiniMax embedding provider (embo-01)

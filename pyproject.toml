@@ -67,6 +67,7 @@ wiki = [
 all = [
     "code-review-graph[embeddings]",
     "code-review-graph[communities]",
+    "code-review-graph[enrichment]",
     "code-review-graph[eval]",
     "code-review-graph[wiki]",
 ]
@@ -76,6 +77,9 @@ dev = [
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
     "tomli>=2.0; python_version < '3.11'",
+]
+enrichment = [
+    "jedi>=0.19.2",
 ]
 
 [tool.hatch.build.targets.wheel]

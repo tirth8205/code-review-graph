@@ -212,7 +212,7 @@ export class SqliteReader {
         if (row) {
           const version = parseInt(row.value, 10);
           // Must match LATEST_VERSION in code_review_graph/migrations.py
-          const SUPPORTED_SCHEMA_VERSION = 6;
+          const SUPPORTED_SCHEMA_VERSION = 8;
           if (!isNaN(version) && version > SUPPORTED_SCHEMA_VERSION) {
             return `Database was created with a newer version (schema v${version}). Update the extension.`;
           }

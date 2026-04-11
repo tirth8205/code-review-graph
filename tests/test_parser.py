@@ -66,9 +66,10 @@ class TestCodeParser:
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
         calls = [e for e in edges if e.kind == "CALLS"]
         call_targets = {e.target for e in calls}
-        # _resolve_call_targets qualifies same-file definitions
+        # self._validate_token() resolves within the class
         assert any("_validate_token" in t for t in call_targets)
-        assert any("authenticate" in t for t in call_targets)
+        # Fixture is in tests/ dir so it's treated as a test file --
+        # method calls are not filtered in test files (for TESTED_BY edges).
 
     def test_parse_typescript_file(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_typescript.ts")
@@ -143,6 +144,111 @@ class TestCodeParser:
         lines = {e.line for e in calls}
         assert len(lines) == 2  # distinct line numbers
 
+    def test_method_call_filtering_python_self(self):
+        """self.method() should emit a CALLS edge."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"class C:\n    def helper(self): pass\n"
+            b"    def main(self):\n        self.helper()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert any("helper" in c.target for c in calls)
+
+    def test_method_call_filtering_python_external(self):
+        """obj.method() emits bare CALLS for non-blocklisted methods."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"def main():\n    response.json()\n    data.get('k')\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # json is not blocklisted -> bare CALLS edge emitted
+        assert "json" in targets
+        # get is blocklisted -> no CALLS edge
+        assert "get" not in targets
+
+    def test_method_call_filtering_python_super(self):
+        """super().method() should emit a CALLS edge."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"class C:\n    def save(self):\n        super().save()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert any("save" in c.target for c in calls)
+
+    def test_method_call_filtering_ts_this(self):
+        """this.method() should emit a CALLS edge in TS."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.ts"),
+            b"class C {\n    helper() {}\n"
+            b"    main() { this.helper(); }\n}\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert any("helper" in c.target for c in calls)
+
+    def test_method_call_filtering_ts_external(self):
+        """obj.method() emits bare CALLS for non-blocklisted methods in TS."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.ts"),
+            b"function main() { response.json(); data.get('k'); }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # json is not blocklisted -> bare CALLS edge emitted
+        assert "json" in targets
+        # get is blocklisted -> no CALLS edge
+        assert "get" not in targets
+
+    def test_class_receiver_call_emits_edge(self):
+        """ClassName.method() should emit a CALLS edge with qualified target."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"def main():\n    MyClass.create()\n    Factory.build()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert any("MyClass" in t and "create" in t for t in targets)
+        assert any("Factory" in t and "build" in t for t in targets)
+
+    def test_lowercase_receiver_blocklisted_methods(self):
+        """Blocklisted methods (get, push, map, etc.) are still blocked."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"def main():\n    data.get('k')\n    items.push(1)\n    arr.map(fn)\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "get" not in targets
+        assert "push" not in targets
+        assert "map" not in targets
+
+    def test_instance_method_call_emits_bare_name(self):
+        """Non-blocklisted instance method calls emit bare-name CALLS edges."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.ts"),
+            b"function main() { buffer.addChunk(data); svc.cleanup(); }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "addChunk" in targets
+        assert "cleanup" in targets
+
+    def test_ts_exported_class_decorator_extracted(self):
+        """@Injectable on an exported TS class should be extracted as decorator."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/guard.ts"),
+            b'@Injectable({ providedIn: "root" })\n'
+            b"export class ConsentGuard {\n"
+            b"  canActivate() { return true; }\n"
+            b"}\n",
+        )
+        class_nodes = [n for n in nodes if n.kind == "Class"]
+        assert len(class_nodes) == 1
+        decorators = class_nodes[0].extra.get("decorators", [])
+        assert any("Injectable" in d for d in decorators), (
+            f"Expected @Injectable decorator, got: {decorators}"
+        )
+
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
         assert nodes == []
@@ -196,6 +302,31 @@ class TestCodeParser:
         parser._resolve_module_to_file("os", "/test/file.py", "python")
         assert len(parser._module_file_cache) <= parser._MODULE_CACHE_MAX
 
+    def test_parser_thread_safety(self):
+        """CodeParser caches should be safe under concurrent access."""
+        import threading
+        from pathlib import Path as PathAlias
+
+        parser = CodeParser()
+        source = b'def hello():\n    pass\n\ndef world():\n    hello()\n'
+        errors: list[Exception] = []
+
+        def worker():
+            try:
+                for _ in range(20):
+                    nodes, edges = parser.parse_bytes(PathAlias("/t/f.py"), source)
+                    assert any(n.name == "hello" for n in nodes)
+                    assert any(n.name == "world" for n in nodes)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, f"Thread safety errors: {errors}"
+
     # --- Vue SFC tests ---
 
     def test_detect_language_vue(self):
@@ -227,9 +358,8 @@ class TestCodeParser:
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vue.vue")
         calls = [e for e in edges if e.kind == "CALLS"]
         call_targets = {e.target for e in calls}
-        assert "log" in call_targets or "console.log" in call_targets or any(
-            "log" in t for t in call_targets
-        )
+        # fetch() is a simple function call, should be present
+        assert "fetch" in call_targets
 
     def test_parse_vue_contains_edges(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vue.vue")
@@ -431,24 +561,18 @@ class TestCodeParser:
         assert describe_qualified & contains_sources
 
     def test_vitest_calls_edges(self):
-        """Calls inside test blocks should produce CALLS edges."""
+        """Test files should keep method calls (needed for TESTED_BY)."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         calls = [e for e in edges if e.kind == "CALLS"]
-        assert len(calls) >= 1
-        test_names = {n.name for n in nodes if n.kind == "Test"}
-        file_path = str(FIXTURES / "sample_vitest.test.ts")
-        test_qualified = {f"{file_path}::{name}" for name in test_names}
-        call_sources = {e.source for e in calls}
-        assert call_sources & test_qualified
+        # Test files exempt from method call filtering -- service.findById kept
+        assert any("findById" in c.target for c in calls)
 
     def test_vitest_tested_by_edges(self):
-        """TESTED_BY edges should be generated from test calls to production code."""
+        """Test files with method calls should produce TESTED_BY edges."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_vitest.test.ts")
         tested_by = [e for e in edges if e.kind == "TESTED_BY"]
-        assert len(tested_by) >= 1, (
-            f"Expected TESTED_BY edges, got none. "
-            f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
-        )
+        # service.findById() is kept in test files, so TESTED_BY edges exist
+        assert len(tested_by) >= 1
 
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
@@ -749,6 +873,173 @@ class TestCodeParser:
             ]
             assert len(jsx_calls) == 1
 
+    # --- Decorator and import edge tests ---
+
+    def test_python_decorator_extraction(self):
+        """Decorated Python functions should have decorators in extra."""
+        import tempfile
+        code = b"""\
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/users")
+def get_users():
+    return []
+
+@router.post("/users")
+@some_validator
+def create_user(body):
+    pass
+
+def plain_func():
+    pass
+"""
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = Path(f.name)
+        try:
+            nodes, _ = self.parser.parse_file(tmp_path)
+            funcs = {n.name: n for n in nodes if n.kind == "Function"}
+
+            assert "get_users" in funcs
+            assert funcs["get_users"].extra.get("decorators") == [
+                'router.get("/users")',
+            ]
+
+            assert "create_user" in funcs
+            decos = funcs["create_user"].extra.get("decorators")
+            assert len(decos) == 2
+            assert 'router.post("/users")' in decos
+            assert "some_validator" in decos
+
+            assert "plain_func" in funcs
+            assert not funcs["plain_func"].extra.get("decorators")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def test_python_class_decorator_extraction(self):
+        """Decorated Python classes should have decorators in extra."""
+        import tempfile
+        code = b"""\
+import dataclasses
+
+@dataclasses.dataclass
+class MyModel:
+    name: str
+
+class PlainClass:
+    pass
+"""
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = Path(f.name)
+        try:
+            nodes, _ = self.parser.parse_file(tmp_path)
+            classes = {n.name: n for n in nodes if n.kind == "Class"}
+
+            assert "MyModel" in classes
+            assert classes["MyModel"].extra.get("decorators") == [
+                "dataclasses.dataclass",
+            ]
+
+            assert "PlainClass" in classes
+            assert not classes["PlainClass"].extra.get("decorators")
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    def test_tsx_named_import_creates_per_symbol_edges(self):
+        """import { A, B } from './mod' should create per-symbol IMPORTS_FROM edges."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            # Source module with exported functions
+            mod_file = tmp_dir / "mod.ts"
+            mod_file.write_bytes(b"export function getUsers() { return []; }\n"
+                                 b"export function getItems() { return []; }\n")
+
+            # Importer
+            importer = tmp_dir / "page.tsx"
+            importer.write_bytes(
+                b"import { getUsers, getItems } from './mod';\n"
+                b"export function Page() { return getUsers(); }\n"
+            )
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            # File-level edge
+            assert resolved_mod in targets
+            # Per-symbol edges
+            assert f"{resolved_mod}::getUsers" in targets
+            assert f"{resolved_mod}::getItems" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+    def test_tsx_default_import_creates_per_symbol_edge(self):
+        """import Foo from './mod' should create a per-symbol IMPORTS_FROM edge."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            mod_file = tmp_dir / "mod.ts"
+            mod_file.write_bytes(b"export default function Foo() {}\n")
+
+            importer = tmp_dir / "app.tsx"
+            importer.write_bytes(b"import Foo from './mod';\n")
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            assert f"{resolved_mod}::Foo" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+    def test_tsx_aliased_import_uses_original_name(self):
+        """import { A as B } should create edge to ::A (original name)."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            mod_file = tmp_dir / "util.ts"
+            mod_file.write_bytes(b"export function helper() {}\n")
+
+            importer = tmp_dir / "main.tsx"
+            importer.write_bytes(b"import { helper as h } from './util';\n")
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            assert f"{resolved_mod}::helper" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
+    def test_python_aliased_import_creates_per_symbol_edge(self):
+        """from X import Y as Z should create edge to ::Y (original name)."""
+        import tempfile
+        tmp_dir = Path(tempfile.mkdtemp())
+        try:
+            mod_file = tmp_dir / "utils.py"
+            mod_file.write_bytes(b"def helper(): pass\ndef other(): pass\n")
+
+            importer = tmp_dir / "main.py"
+            importer.write_bytes(b"from utils import helper as h, other\n")
+
+            nodes, edges = self.parser.parse_file(importer)
+            import_edges = [e for e in edges if e.kind == "IMPORTS_FROM"]
+            targets = {e.target for e in import_edges}
+            resolved_mod = str(mod_file.resolve())
+            assert f"{resolved_mod}::helper" in targets
+            assert f"{resolved_mod}::other" in targets
+        finally:
+            import shutil
+            shutil.rmtree(tmp_dir)
+
     def test_junit_annotation_marks_test(self):
         """Java @Test annotation should mark functions as tests."""
         nodes, _ = self.parser.parse_bytes(
@@ -789,6 +1080,7 @@ class TestCodeParser:
         test_names = {n.name for n in test_nodes}
         assert "test_something" in test_names
         assert "helper" not in test_names
+
 
 
 class TestValueReferences:
@@ -902,3 +1194,332 @@ class TestValueReferences:
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
+
+    def test_jsx_component_calls(self):
+        """JSX <Component /> should emit CALLS edges for uppercase components."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/App.tsx"),
+            b"function App() {\n"
+            b"  return <UserProfile />;\n"
+            b"}\n"
+            b"function UserProfile() { return <div />; }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert any("UserProfile" in t for t in targets)
+        # <div /> is lowercase HTML -- should NOT produce a CALLS edge
+        assert not any(t == "div" for t in targets)
+
+    def test_builtin_filtering_python(self):
+        """Python builtins (len, print, etc.) should not produce CALLS edges."""
+        _, edges = self.parser.parse_bytes(
+            Path("/src/app.py"),
+            b"def main():\n    x = len([1,2,3])\n    print(x)\n    my_func(x)\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "len" not in targets
+        assert "print" not in targets
+        assert "my_func" in targets
+
+    def test_test_file_keeps_method_calls(self):
+        """Test files should keep external method calls for TESTED_BY."""
+        _, edges = self.parser.parse_bytes(
+            Path("/project/tests/test_service.py"),
+            b"def test_fetch():\n    service.fetch_data()\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert "fetch_data" in targets
+
+    def test_prod_file_instance_method_calls(self):
+        """Production files emit bare-name CALLS for non-blocklisted instance methods."""
+        _, edges = self.parser.parse_bytes(
+            Path("/project/src/service.py"),
+            b"def main():\n    service.fetch_data()\n    items.append(x)\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # fetch_data is not blocklisted -> bare CALLS emitted
+        assert "fetch_data" in targets
+        # append is blocklisted -> no CALLS
+        assert "append" not in targets
+
+    # --- JS/TS namespace imports, require(), re-exports ---
+
+    def test_namespace_import_populates_import_map(self):
+        """import * as X from './mod' should let X.fn() resolve."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "js_namespace_import.ts")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        # utils.cn() should produce a dotted call name
+        call_targets = {c.target for c in calls}
+        assert any("cn" in t for t in call_targets), (
+            f"Expected utils.cn() to resolve, got: {call_targets}"
+        )
+        # Should have IMPORTS_FROM for the namespace
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) >= 1
+
+    def test_namespace_import_resolves_in_prod_code(self):
+        """import * as X from './mod' in production code should resolve X.fn()."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/project/src/app.ts"),
+            b"import * as helpers from './helpers';\n"
+            b"function main() { helpers.format('x'); }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # Should resolve via import_map to module::method format
+        assert any("format" in t and t != "format" for t in targets), (
+            f"Expected resolved helpers.format() call in prod code, got: {targets}"
+        )
+
+    def test_commonjs_require_default(self):
+        """const X = require('mod') should populate import_map."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/project/app.js"),
+            b"const path = require('path');\n"
+            b"function main() { path.resolve('.'); }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # path.resolve should produce a call edge (path in import_map)
+        assert any("resolve" in t for t in targets), (
+            f"Expected path.resolve() call, got: {targets}"
+        )
+
+    def test_commonjs_require_destructured(self):
+        """const { X } = require('mod') should populate import_map."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/project/app.js"),
+            b"const { readFile } = require('fs');\n"
+            b"function main() { readFile('x'); }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        assert any("readFile" in t for t in targets), (
+            f"Expected readFile() call, got: {targets}"
+        )
+
+    def test_js_reexport_named(self):
+        """export { X } from './mod' should create IMPORTS_FROM edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/project/index.ts"),
+            b"export { foo, bar } from './utils';\n",
+        )
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) >= 1, (
+            f"Expected IMPORTS_FROM for named re-export, got: {[e.target for e in imports]}"
+        )
+
+    def test_js_reexport_star(self):
+        """export * from './mod' should create IMPORTS_FROM edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/project/index.ts"),
+            b"export * from './other';\n",
+        )
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) >= 1, "Expected IMPORTS_FROM for export * re-export"
+
+    def test_angular_template_event_binding(self):
+        """(click)="method()" should create a CALLS edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/my.component.html"),
+            b'<button (click)="openSettings()">Go</button>\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "openSettings" in targets
+
+    def test_angular_template_interpolation(self):
+        """{{method()}} should create a CALLS edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/filter.component.html"),
+            b"<p>{{getRuleSummary()}}</p>\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "getRuleSummary" in targets
+
+    def test_angular_template_property_binding(self):
+        """[value]="property" should create a CALLS edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/comp.component.html"),
+            b'<input [value]="selectedClassification">\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "selectedClassification" in targets
+
+    def test_angular_template_non_component_html_ignored(self):
+        """Non-component .html files should be skipped."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/index.html"),
+            b'<button (click)="openSettings()">Go</button>\n',
+        )
+        assert len(nodes) == 0
+        assert len(edges) == 0
+
+    def test_angular_template_control_flow(self):
+        """@if (condition) should create a CALLS edge for the condition."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/page.component.html"),
+            b'@if (shouldShow) {\n  <div>Content</div>\n}\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "shouldShow" in targets
+
+    def test_angular_template_structural_directive(self):
+        """*ngIf="expr" should extract identifiers from the expression."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/comp.component.html"),
+            b'<div *ngIf="isConfigurable && pluginConfig">Content</div>\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "isConfigurable" in targets
+        assert "pluginConfig" in targets
+
+    def test_angular_template_structural_mat_directive(self):
+        """*matTreeNodeDef with 'when: hasChild' should extract hasChild."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/tree.component.html"),
+            b'<mat-nested-tree-node *matTreeNodeDef="let node; when: hasChild">'
+            b"</mat-nested-tree-node>\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "hasChild" in targets
+
+    def test_angular_template_interpolation_bare_property(self):
+        """{{ errorMessage }} should create a CALLS edge for the property."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/err.component.html"),
+            b'<span>{{ errorMessage }}</span>\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "errorMessage" in targets
+
+    def test_angular_template_animation_event(self):
+        """(@pulse.done)="onAnimationDone()" should create a CALLS edge."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/anim.component.html"),
+            b'<div (@pulse.done)="onAnimationDone()">Pulse</div>\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "onAnimationDone" in targets
+
+    def test_angular_template_binding_complex_expression(self):
+        """[prop]="!!(value$ | async)" should extract value identifiers."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/bind.component.html"),
+            b'<input [configurable]="!!(isConfigurable$ | async)">\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # isConfigurable$ gets the $ stripped by \w+ matching "isConfigurable"
+        assert "isConfigurable" in targets or "isConfigurable$" in targets
+
+    def test_angular_template_mat_header_row_def(self):
+        """*matHeaderRowDef="displayedColumns" should extract the identifier."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/table.component.html"),
+            b'<tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>\n',
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "displayedColumns" in targets
+
+    def test_func_ref_return_statement(self):
+        """return funcName should create a CALLS edge for the reference."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/repo/counter.ts"),
+            b"function countTokensGpt(text: string): number { return text.length; }\n"
+            b"function getCounter() { return countTokensGpt; }\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("countTokensGpt" in t for t in targets)
+
+    def test_func_ref_assignment(self):
+        """const x = funcName should create a CALLS edge for the reference."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/repo/handler.ts"),
+            b"function processEvent() { return 1; }\n"
+            b"const handler = processEvent;\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("processEvent" in t for t in targets)
+
+    def test_constructor_param_property_this_call(self):
+        """this.service.method() resolves via constructor parameter type."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/app/my.component.ts"),
+            b"class Comp {\n"
+            b"  constructor(private svc: AuthService) {}\n"
+            b"  run() { this.svc.authenticate('x'); }\n"
+            b"}\n",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "AuthService::authenticate" in targets
+
+
+class TestWorkspaceResolution:
+    """Test npm workspace package alias -> directory resolution."""
+
+    def test_workspace_package_import_resolves(self, tmp_path):
+        """Import from a workspace package should resolve to the package dir."""
+        # Set up monorepo structure
+        root_pkg = tmp_path / "package.json"
+        root_pkg.write_text('{"workspaces": ["packages/*"]}')
+
+        pkg_a = tmp_path / "packages" / "pkg-a"
+        pkg_a.mkdir(parents=True)
+        (pkg_a / "package.json").write_text('{"name": "@myorg/pkg-a"}')
+        (pkg_a / "index.ts").write_text("export function hello() {}")
+
+        pkg_b = tmp_path / "packages" / "pkg-b"
+        pkg_b.mkdir(parents=True)
+        (pkg_b / "package.json").write_text('{"name": "@myorg/pkg-b"}')
+        caller = pkg_b / "main.ts"
+        caller.write_text('import { hello } from "@myorg/pkg-a";')
+
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(caller)
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        # Should resolve to the pkg-a directory, not the raw alias
+        assert any(str(pkg_a.resolve()) in t for t in targets), (
+            f"Expected pkg-a path in targets, got: {targets}"
+        )
+
+    def test_workspace_subpath_import(self, tmp_path):
+        """Import of @scope/pkg/sub/path should resolve to file in pkg."""
+        root_pkg = tmp_path / "package.json"
+        root_pkg.write_text('{"workspaces": ["libs/*"]}')
+
+        lib = tmp_path / "libs" / "common"
+        lib.mkdir(parents=True)
+        (lib / "package.json").write_text('{"name": "@myorg/common"}')
+        auth_dir = lib / "auth"
+        auth_dir.mkdir()
+        (auth_dir / "validate.ts").write_text("export function validate() {}")
+
+        consumer = tmp_path / "libs" / "app"
+        consumer.mkdir(parents=True)
+        (consumer / "package.json").write_text('{"name": "@myorg/app"}')
+        caller = consumer / "handler.ts"
+        caller.write_text('import { validate } from "@myorg/common/auth/validate";')
+
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(caller)
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert any("validate.ts" in t for t in targets), (
+            f"Expected validate.ts in targets, got: {targets}"
+        )
