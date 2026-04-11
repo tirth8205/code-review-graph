@@ -72,6 +72,7 @@ dev = [
     "pytest-asyncio>=0.23,<1",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.hatch.build.targets.wheel]

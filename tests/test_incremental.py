@@ -215,6 +215,62 @@ class TestGitOperations:
         result = get_all_tracked_files(tmp_path)
         assert result == ["a.py", "b.py", "c.go"]
 
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_recurse_submodules_param(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\nsub/b.py\n",
+        )
+        result = get_all_tracked_files(tmp_path, recurse_submodules=True)
+        assert result == ["a.py", "sub/b.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_no_recurse_by_default(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\n",
+        )
+        result = get_all_tracked_files(tmp_path)
+        assert result == ["a.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" not in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    @patch("code_review_graph.incremental._RECURSE_SUBMODULES", True)
+    def test_get_all_tracked_files_env_var_fallback(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\nsub/c.py\n",
+        )
+        # None -> falls back to env var (_RECURSE_SUBMODULES=True)
+        result = get_all_tracked_files(tmp_path, recurse_submodules=None)
+        assert result == ["a.py", "sub/c.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    @patch("code_review_graph.incremental._RECURSE_SUBMODULES", True)
+    def test_get_all_tracked_files_param_overrides_env(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\n",
+        )
+        # Explicit False overrides env var
+        result = get_all_tracked_files(tmp_path, recurse_submodules=False)
+        assert result == ["a.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" not in cmd
+
 
 class TestFullBuild:
     def test_full_build_parses_files(self, tmp_path):
