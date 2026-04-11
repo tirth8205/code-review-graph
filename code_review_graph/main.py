@@ -64,6 +64,7 @@ def build_or_update_graph_tool(
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     postprocess: str = "full",
+    recurse_submodules: Optional[bool] = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -77,10 +78,12 @@ def build_or_update_graph_tool(
         base: Git ref to diff against for incremental updates. Default: HEAD~1.
         postprocess: Post-processing level: "full" (default), "minimal" (signatures+FTS only),
                      or "none" (skip all post-processing). Use "minimal" for faster builds.
+        recurse_submodules: If True, include files from git submodules.
+            When None (default), falls back to CRG_RECURSE_SUBMODULES env var.
     """
     return build_or_update_graph(
         full_rebuild=full_rebuild, repo_root=repo_root, base=base,
-        postprocess=postprocess,
+        postprocess=postprocess, recurse_submodules=recurse_submodules,
     )
 
 
