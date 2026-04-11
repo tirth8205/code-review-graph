@@ -238,7 +238,7 @@ def run_migrations(conn: sqlite3.Connection) -> None:
             MIGRATIONS[version](conn)
             _set_schema_version(conn, version)
             conn.commit()
-        except Exception:
+        except sqlite3.Error:
             conn.rollback()
             logger.error("Migration v%d failed, rolling back", version, exc_info=True)
             raise

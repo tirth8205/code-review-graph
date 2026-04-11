@@ -2,10 +2,14 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10 backport
+    import tomli as tomllib
 
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
@@ -14,6 +18,7 @@ from code_review_graph.skills import (
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
+    inject_platform_instructions,
     install_git_hook,
     install_hooks,
     install_opencode_plugin,
@@ -222,24 +227,61 @@ class TestInjectClaudeMd:
         assert second_content.count(_CLAUDE_MD_SECTION_MARKER) == 1
 
 
+class TestInjectPlatformInstructionsFiltering:
+    def test_all_writes_every_file(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="all")
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+
+    def test_default_is_all(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path)
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+
+    def test_claude_writes_nothing(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="claude")
+        assert updated == []
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+
+    def test_cursor_writes_only_cursor_files(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="cursor")
+        assert set(updated) == {"AGENTS.md", ".cursorrules"}
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+
+    def test_windsurf_writes_only_windsurfrules(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="windsurf")
+        assert updated == [".windsurfrules"]
+
+    def test_antigravity_writes_agents_and_gemini(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="antigravity")
+        assert set(updated) == {"AGENTS.md", "GEMINI.md"}
+
+    def test_opencode_writes_only_agents(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="opencode")
+        assert updated == ["AGENTS.md"]
+
+
 class TestInstallPlatformConfigs:
     def test_install_codex_config(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="codex")
         assert "Codex" in configured
         data = tomllib.loads(codex_config.read_text())
         entry = data["mcp_servers"]["code-review-graph"]
         assert entry["type"] == "stdio"
-        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == [
-            "serve"
-        ]
+        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == ["serve"]
 
     def test_install_codex_preserves_existing_toml(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -248,13 +290,16 @@ class TestInstallPlatformConfigs:
             'model = "gpt-5.4"\n\n[mcp_servers.other]\ncommand = "other"\n',
             encoding="utf-8",
         )
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="codex")
         data = tomllib.loads(codex_config.read_text())
         assert data["model"] == "gpt-5.4"
@@ -268,9 +313,9 @@ class TestInstallPlatformConfigs:
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
         codex_config.write_text(
-            '\n'.join(
+            "\n".join(
                 [
-                    '[mcp_servers.code-review-graph]',
+                    "[mcp_servers.code-review-graph]",
                     'command = "uvx"',
                     'args = ["code-review-graph", "serve"]',
                     'type = "stdio"',
@@ -279,13 +324,16 @@ class TestInstallPlatformConfigs:
             ),
             encoding="utf-8",
         )
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
             },
-        }):
+        ):
             install_platform_configs(tmp_path, target="codex")
         assert codex_config.read_text().count("[mcp_servers.code-review-graph]") == 1
 
@@ -377,23 +425,69 @@ class TestInstallPlatformConfigs:
         assert entry["type"] == "stdio"
         assert entry["env"] == []
 
+    def test_install_qwen_config(self, tmp_path):
+        """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
+        qwen_config = tmp_path / ".qwen" / "settings.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "qwen": {
+                    **PLATFORMS["qwen"],
+                    "config_path": lambda root: qwen_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="qwen")
+        assert "Qwen Code" in configured
+        data = json.loads(qwen_config.read_text())
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert entry["args"][-1] == "serve"
+
+    def test_install_qwen_preserves_existing_servers(self, tmp_path):
+        """Adding qwen should merge with, not clobber, existing mcpServers."""
+        qwen_config = tmp_path / ".qwen" / "settings.json"
+        qwen_config.parent.mkdir(parents=True)
+        qwen_config.write_text(
+            json.dumps({"mcpServers": {"other-server": {"command": "other"}}}),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "qwen": {
+                    **PLATFORMS["qwen"],
+                    "config_path": lambda root: qwen_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="qwen")
+        data = json.loads(qwen_config.read_text())
+        assert "other-server" in data["mcpServers"]
+        assert "code-review-graph" in data["mcpServers"]
+
     def test_install_all_detected(self, tmp_path):
         """Installing 'all' configures auto-detected platforms."""
         codex_config = tmp_path / ".codex" / "config.toml"
-        with patch.dict(PLATFORMS, {
-            "codex": {
-                **PLATFORMS["codex"],
-                "config_path": lambda root: codex_config,
-                "detect": lambda: True,
+        with patch.dict(
+            PLATFORMS,
+            {
+                "codex": {
+                    **PLATFORMS["codex"],
+                    "config_path": lambda root: codex_config,
+                    "detect": lambda: True,
+                },
+                "claude": {**PLATFORMS["claude"], "detect": lambda: True},
+                "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
+                "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
+                "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
+                "zed": {**PLATFORMS["zed"], "detect": lambda: False},
+                "continue": {**PLATFORMS["continue"], "detect": lambda: False},
+                "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
             },
-            "claude": {**PLATFORMS["claude"], "detect": lambda: True},
-            "opencode": {**PLATFORMS["opencode"], "detect": lambda: True},
-            "cursor": {**PLATFORMS["cursor"], "detect": lambda: False},
-            "windsurf": {**PLATFORMS["windsurf"], "detect": lambda: False},
-            "zed": {**PLATFORMS["zed"], "detect": lambda: False},
-            "continue": {**PLATFORMS["continue"], "detect": lambda: False},
-            "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
-        }):
+        ):
             configured = install_platform_configs(tmp_path, target="all")
         assert "Codex" in configured
         assert "Claude Code" in configured

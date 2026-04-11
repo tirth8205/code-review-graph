@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "2.2.2"
+version = "2.3.1"
 description = "Persistent incremental knowledge graph for token-efficient, context-aware code reviews with Claude Code"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -26,7 +26,10 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.0.0,<2",
-    "fastmcp>=0.1.0,<2",
+    # fastmcp 2.14+ fixes CVE-2025-62800/62801/66416 and drops the
+    # transitive fakeredis dep that was broken by a rename upstream.
+    # See: #139, #195
+    "fastmcp>=2.14.0,<3",
     "tree-sitter>=0.23.0,<1",
     "tree-sitter-language-pack>=0.3.0,<1",
     "networkx>=3.2,<4",
@@ -72,6 +75,7 @@ dev = [
     "pytest-asyncio>=0.23,<1",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.hatch.build.targets.wheel]

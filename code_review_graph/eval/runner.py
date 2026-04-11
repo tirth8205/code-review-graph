@@ -51,6 +51,7 @@ def load_config(name: str) -> dict:
 
 def load_all_configs() -> list[dict]:
     """Load all benchmark configs from the configs directory."""
+    _require_yaml()
     configs = []
     for p in sorted(CONFIGS_DIR.glob("*.yaml")):
         with open(p) as f:

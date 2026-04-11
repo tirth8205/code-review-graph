@@ -192,7 +192,7 @@ class ConnectionPool:
                 evict_key, evict_conn = self._pool.popitem(last=False)
                 try:
                     evict_conn.close()
-                except Exception:
+                except sqlite3.Error:
                     logger.debug("Failed to close evicted connection: %s", evict_key)
                 logger.debug("Evicted connection: %s", evict_key)
 
@@ -212,7 +212,7 @@ class ConnectionPool:
             for key, conn in self._pool.items():
                 try:
                     conn.close()
-                except Exception:
+                except sqlite3.Error:
                     logger.debug("Failed to close connection: %s", key)
             self._pool.clear()
 

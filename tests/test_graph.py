@@ -1,5 +1,7 @@
 """Tests for the graph storage and query engine."""
 
+import logging
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -223,6 +225,35 @@ class TestGraphStore:
         self.store.set_metadata("test_key", "test_value")
         assert self.store.get_metadata("test_key") == "test_value"
         assert self.store.get_metadata("nonexistent") is None
+
+    def test_get_all_community_ids_logs_when_column_missing(self, caplog):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE nodes (qualified_name TEXT PRIMARY KEY)"
+        )
+        store = GraphStore.__new__(GraphStore)
+        store._conn = conn
+
+        with caplog.at_level(logging.DEBUG, logger="code_review_graph.graph"):
+            result = store.get_all_community_ids()
+
+        assert result == {}
+        assert "Community IDs unavailable" in caplog.text
+        conn.close()
+
+    def test_get_communities_list_logs_when_table_missing(self, caplog):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        store = GraphStore.__new__(GraphStore)
+        store._conn = conn
+
+        with caplog.at_level(logging.DEBUG, logger="code_review_graph.graph"):
+            result = store.get_communities_list()
+
+        assert result == []
+        assert "Communities list unavailable" in caplog.text
+        conn.close()
 
 
 class TestImpactRadiusSql:

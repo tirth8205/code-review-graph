@@ -93,6 +93,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": False,
     },
+    "qwen": {
+        "name": "Qwen Code",
+        "config_path": lambda root: Path.home() / ".qwen" / "settings.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".qwen").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
 }
 
 
@@ -444,14 +452,14 @@ def install_git_hook(repo_root: Path) -> Path | None:
     existing one — preserving any hooks already there. Returns None when no
     ``.git`` directory is found.
     """
-    _SCRIPT = """\
+    script = """\
 #!/bin/sh
 # Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
 if command -v code-review-graph >/dev/null 2>&1; then
     code-review-graph detect-changes --brief || true
 fi
 """
-    _MARKER = "code-review-graph detect-changes"
+    marker = "code-review-graph detect-changes"
 
     git_dir = repo_root / ".git"
     if not git_dir.is_dir():
@@ -463,11 +471,11 @@ fi
 
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8")
-        if _MARKER in existing:
+        if marker in existing:
             return hook_path
-        hook_path.write_text(existing.rstrip("\n") + "\n" + _SCRIPT, encoding="utf-8")
+        hook_path.write_text(existing.rstrip("\n") + "\n" + script, encoding="utf-8")
     else:
-        hook_path.write_text(_SCRIPT, encoding="utf-8")
+        hook_path.write_text(script, encoding="utf-8")
 
     hook_path.chmod(0o755)
     logger.info("Wrote git pre-commit hook: %s", hook_path)
@@ -576,29 +584,37 @@ def inject_claude_md(repo_root: Path) -> None:
     )
 
 
-# Cross-platform instruction files so every AI coding tool uses the graph.
-_PLATFORM_INSTRUCTION_FILES = {
-    "AGENTS.md": "AGENTS.md",  # Cursor, OpenCode, Antigravity
-    "GEMINI.md": "GEMINI.md",  # Antigravity / Gemini CLI
-    ".cursorrules": ".cursorrules",  # Cursor (legacy, widely used)
-    ".windsurfrules": ".windsurfrules",  # Windsurf
+# Cross-platform instruction files and which platforms own each one.
+# Used to filter writes when the user passes --platform <X>: only files
+# whose owner set includes the target (or "all") are written.
+_PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
+    "AGENTS.md": ("cursor", "opencode", "antigravity"),
+    "GEMINI.md": ("antigravity",),
+    ".cursorrules": ("cursor",),
+    ".windsurfrules": ("windsurf",),
 }
 
 
-def inject_platform_instructions(repo_root: Path) -> list[str]:
-    """Inject 'use graph first' instructions into all platform rule files.
+def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[str]:
+    """Inject 'use graph first' instructions into platform rule files.
 
-    Generates AGENTS.md, GEMINI.md, .cursorrules, and .windsurfrules
-    with instructions to prefer code-review-graph MCP tools over
-    manual file scanning.
+    Writes AGENTS.md, GEMINI.md, .cursorrules, and/or .windsurfrules
+    depending on ``target``:
 
-    Returns list of files that were created or updated.
+    - ``"all"`` (default): writes every file — matches pre-filter behavior.
+    - ``"claude"``: writes nothing (CLAUDE.md is handled by ``inject_claude_md``).
+    - any other platform key (``cursor``, ``windsurf``, ``antigravity``,
+      ``opencode``): writes only the files associated with that platform.
+
+    Returns list of filenames that were created or updated.
     """
     updated: list[str] = []
-    for label, filename in _PLATFORM_INSTRUCTION_FILES.items():
+    for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
+        if target != "all" and target not in owners:
+            continue
         path = repo_root / filename
         if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
-            updated.append(label)
+            updated.append(filename)
     return updated
 
 

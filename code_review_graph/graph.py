@@ -1,7 +1,7 @@
 """SQLite-backed knowledge graph storage and query engine.
 
 Stores code structure as nodes (File, Class, Function, Type, Test) and
-edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON).
+edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
 Supports impact-radius queries and subgraph extraction.
 """
 
@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE TABLE IF NOT EXISTS edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,           -- CALLS, IMPORTS_FROM, INHERITS, etc.
+    kind TEXT NOT NULL,           -- CALLS, IMPORTS_FROM, INHERITS, REFERENCES, etc.
     source_qualified TEXT NOT NULL,
     target_qualified TEXT NOT NULL,
     file_path TEXT NOT NULL,
@@ -769,7 +769,9 @@ class GraphStore:
                 r["qualified_name"]: r["community_id"]
                 for r in rows
             }
-        except Exception:
+        except sqlite3.OperationalError as exc:
+            # community_id column may not exist yet on pre-v6 schemas
+            logger.debug("Community IDs unavailable (schema not yet migrated): %s", exc)
             return {}
 
     def get_node_ids_by_files(
@@ -844,7 +846,9 @@ class GraphStore:
             return self._conn.execute(
                 "SELECT id, name FROM communities"
             ).fetchall()
-        except Exception:
+        except sqlite3.OperationalError as exc:
+            # communities table doesn't exist yet on pre-v4 schemas
+            logger.debug("Communities list unavailable (table missing): %s", exc)
             return []
 
     def get_community_member_qns(

@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
@@ -42,7 +43,8 @@ def _get_version() -> str:
     """Get the installed package version."""
     try:
         return pkg_version("code-review-graph")
-    except Exception:
+    except PackageNotFoundError as exc:
+        logger.debug("Package metadata unavailable, falling back to 'dev': %s", exc)
         return "dev"
 
 
@@ -96,6 +98,61 @@ def _print_banner() -> None:
 """)
 
 
+def _instruction_files_to_modify(
+    repo_root: Path, target: str,
+) -> list[str]:
+    """Return the list of instruction files that ``install`` would write
+    or modify, given the current state of the repo and the selected
+    platform target. Used for the dry-run / confirm preview (#173).
+    """
+    from .skills import _CLAUDE_MD_SECTION_MARKER, _PLATFORM_INSTRUCTION_FILES
+
+    targets: list[str] = []
+
+    if target in ("claude", "all"):
+        claude_md = repo_root / "CLAUDE.md"
+        if claude_md.exists():
+            content = claude_md.read_text(encoding="utf-8")
+            if _CLAUDE_MD_SECTION_MARKER not in content:
+                targets.append("CLAUDE.md (append)")
+        else:
+            targets.append("CLAUDE.md (new)")
+
+    for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
+        if target != "all" and target not in owners:
+            continue
+        path = repo_root / filename
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            if _CLAUDE_MD_SECTION_MARKER not in content:
+                targets.append(f"{filename} (append)")
+        else:
+            targets.append(f"{filename} (new)")
+
+    return targets
+
+
+def _confirm_yes_no(prompt: str, default_yes: bool = True) -> bool:
+    """Prompt the user [Y/n] and return True for yes.
+
+    Non-interactive environments (no TTY on stdin, e.g. an MCP wrapper
+    piping the CLI) return ``default_yes`` without blocking — the
+    stdio transport cannot safely read from stdin without corrupting
+    the JSON-RPC stream. See: #173, #174
+    """
+    if not sys.stdin.isatty():
+        return default_yes
+    suffix = "[Y/n]" if default_yes else "[y/N]"
+    try:
+        answer = input(f"{prompt} {suffix} ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    if not answer:
+        return default_yes
+    return answer in ("y", "yes")
+
+
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
     from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
@@ -109,6 +166,8 @@ def _handle_init(args: argparse.Namespace) -> None:
     target = getattr(args, "platform", "all") or "all"
     if target == "claude-code":
         target = "claude"
+    auto_yes = getattr(args, "yes", False)
+    skip_instructions = getattr(args, "no_instructions", False)
 
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
@@ -118,9 +177,17 @@ def _handle_init(args: argparse.Namespace) -> None:
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
+    # Preview the instruction files that would be touched (#173).
+    instr_targets = _instruction_files_to_modify(repo_root, target)
+    if instr_targets:
+        print()
+        print("Graph instructions will be injected into:")
+        for t in instr_targets:
+            print(f"  {t}")
+
     if dry_run:
-        print("[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
-        print("\n[dry-run] No files were modified.")
+        print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
+        print("[dry-run] No files were modified.")
         return
 
     gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
@@ -132,7 +199,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         print(".gitignore already contains .code-review-graph/.")
 
     # Skills and hooks are installed by default so Claude actually uses the
-    # graph tools proactively.  Use --no-skills / --no-hooks to opt out.
+    # graph tools proactively.  Use --no-skills / --no-hooks / --no-instructions
+    # to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
@@ -150,12 +218,28 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_skills:
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
-        inject_claude_md(repo_root)
-        updated = inject_platform_instructions(repo_root)
-        if updated:
-            print(f"Injected graph instructions into: {', '.join(updated)}")
 
-    if not skip_hooks:
+    # Confirm before writing instruction files (#173). --yes skips the
+    # prompt; --no-instructions skips the whole block.
+    if not skip_instructions and instr_targets:
+        if auto_yes or _confirm_yes_no(
+            "Inject graph instructions into the files above?",
+            default_yes=True,
+        ):
+            if target in ("claude", "all"):
+                inject_claude_md(repo_root)
+            inject_platform_instructions(repo_root, target=target)
+            # Use the precomputed instr_targets list for the confirmation
+            # message; we don't need the fresh return value from
+            # inject_platform_instructions here.
+            names = [t.split(" ")[0] for t in instr_targets]
+            print(f"Injected graph instructions into: {', '.join(names)}")
+        else:
+            print("Skipped instruction injection (user declined).")
+    elif skip_instructions:
+        print("Skipped instruction injection (--no-instructions).")
+
+    if not skip_hooks and target in ("claude", "all"):
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
         git_hook = install_git_hook(repo_root)
@@ -203,6 +287,14 @@ def main() -> None:
         action="store_true",
         help="Skip installing Claude Code hooks",
     )
+    install_cmd.add_argument(
+        "--no-instructions", action="store_true",
+        help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
+    )
+    install_cmd.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Auto-confirm instruction injection without an interactive prompt",
+    )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     install_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
@@ -221,6 +313,7 @@ def main() -> None:
             "continue",
             "opencode",
             "antigravity",
+            "qwen",
             "all",
         ],
         default="all",
@@ -244,6 +337,14 @@ def main() -> None:
         action="store_true",
         help="Skip installing Claude Code hooks",
     )
+    init_cmd.add_argument(
+        "--no-instructions", action="store_true",
+        help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
+    )
+    init_cmd.add_argument(
+        "-y", "--yes", action="store_true",
+        help="Auto-confirm instruction injection without an interactive prompt",
+    )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--all", action="store_true", dest="install_all", help=argparse.SUPPRESS)
@@ -259,6 +360,7 @@ def main() -> None:
             "continue",
             "opencode",
             "antigravity",
+            "qwen",
             "all",
         ],
         default="all",
@@ -587,9 +689,9 @@ def main() -> None:
             watch(repo_root, store)
 
         elif args.command == "visualize":
+            from .incremental import get_data_dir
             from .visualization import generate_html
-
-            html_path = repo_root / ".code-review-graph" / "graph.html"
+            html_path = get_data_dir(repo_root) / "graph.html"
             vis_mode = getattr(args, "mode", "auto") or "auto"
             generate_html(store, html_path, mode=vis_mode)
             print(f"Visualization ({vis_mode}): {html_path}")
@@ -614,9 +716,9 @@ def main() -> None:
                 print("Open in browser to explore your codebase graph.")
 
         elif args.command == "wiki":
+            from .incremental import get_data_dir
             from .wiki import generate_wiki
-
-            wiki_dir = repo_root / ".code-review-graph" / "wiki"
+            wiki_dir = get_data_dir(repo_root) / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(

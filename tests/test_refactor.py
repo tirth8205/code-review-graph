@@ -351,6 +351,98 @@ class TestApplyRefactor:
             (tmp_dir / ".git").rmdir()
             tmp_dir.rmdir()
 
+    def test_apply_refactor_dry_run_returns_diff_without_writing(self):
+        """dry_run=True returns a unified diff without touching disk and
+        keeps the refactor_id valid for a follow-up write (#176)."""
+        tmp_dir = Path(tempfile.mkdtemp())
+        (tmp_dir / ".git").mkdir()
+        target_file = tmp_dir / "example.py"
+        original = "def old_func():\n    pass\n"
+        target_file.write_text(original, encoding="utf-8")
+        try:
+            rid = "dryrun1"
+            with _refactor_lock:
+                _pending_refactors[rid] = {
+                    "refactor_id": rid,
+                    "type": "rename",
+                    "old_name": "old_func",
+                    "new_name": "new_func",
+                    "edits": [{
+                        "file": str(target_file),
+                        "line": 1,
+                        "old": "old_func",
+                        "new": "new_func",
+                        "confidence": "high",
+                    }],
+                    "stats": {"high": 1, "medium": 0, "low": 0},
+                    "created_at": time.time(),
+                }
+
+            # Step 1: dry_run — no writes, returns diff
+            result = apply_refactor(rid, tmp_dir, dry_run=True)
+            assert result["status"] == "ok"
+            assert result["dry_run"] is True
+            assert result["edits_applied"] == 1
+            assert len(result["would_modify"]) == 1
+            assert result["files_modified"] == []  # nothing written yet
+            assert str(target_file) in result["would_modify"]
+            # Diff should mention both the old and new name
+            diff = result["diffs"][str(target_file)]
+            assert "-def old_func():" in diff
+            assert "+def new_func():" in diff
+            # File on disk must be unchanged
+            assert target_file.read_text(encoding="utf-8") == original
+
+            # Step 2: refactor_id should still be valid — dry_run doesn't consume it
+            with _refactor_lock:
+                assert rid in _pending_refactors
+
+            # Step 3: real apply — uses same refactor_id
+            real_result = apply_refactor(rid, tmp_dir, dry_run=False)
+            assert real_result["status"] == "ok"
+            assert real_result.get("dry_run") is None  # not set on the real path
+            assert real_result["edits_applied"] == 1
+            assert len(real_result["files_modified"]) == 1
+            # File content changed
+            new_content = target_file.read_text(encoding="utf-8")
+            assert "new_func" in new_content
+            assert "old_func" not in new_content
+
+            # refactor_id consumed after real apply
+            with _refactor_lock:
+                assert rid not in _pending_refactors
+        finally:
+            target_file.unlink(missing_ok=True)
+            (tmp_dir / ".git").rmdir()
+            tmp_dir.rmdir()
+
+    def test_apply_refactor_dry_run_no_edits(self):
+        """dry_run with an empty edit list returns an empty diff dict."""
+        tmp_dir = Path(tempfile.mkdtemp())
+        (tmp_dir / ".git").mkdir()
+        try:
+            rid = "dryrun-empty"
+            with _refactor_lock:
+                _pending_refactors[rid] = {
+                    "refactor_id": rid,
+                    "type": "rename",
+                    "old_name": "x",
+                    "new_name": "y",
+                    "edits": [],
+                    "stats": {"high": 0, "medium": 0, "low": 0},
+                    "created_at": time.time(),
+                }
+            result = apply_refactor(rid, tmp_dir, dry_run=True)
+            assert result["status"] == "ok"
+            assert result["dry_run"] is True
+            assert result["would_modify"] == []
+            assert result["diffs"] == {}
+        finally:
+            with _refactor_lock:
+                _pending_refactors.pop("dryrun-empty", None)
+            (tmp_dir / ".git").rmdir()
+            tmp_dir.rmdir()
+
 
 class TestPendingRefactorsThreadSafe:
     """Tests for thread-safety of the pending refactors storage."""
@@ -382,3 +474,82 @@ class TestPendingRefactorsThreadSafe:
             assert len(_pending_refactors) >= 10
             # Clean up
             _pending_refactors.clear()
+
+
+class TestFindDeadCodeWithReferences:
+    """Tests for REFERENCES-aware dead code detection."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        self._seed()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed(self):
+        """Seed with functions that have REFERENCES edges (map dispatch pattern)."""
+        # File
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/repo/handlers.ts", file_path="/repo/handlers.ts",
+            line_start=1, line_end=100, language="typescript",
+        ))
+        # A function referenced in a map (should NOT be dead)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="handleCreate", file_path="/repo/handlers.ts",
+            line_start=10, line_end=20, language="typescript",
+        ))
+        # A function with CALLS edge (should NOT be dead)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="calledFunc", file_path="/repo/handlers.ts",
+            line_start=30, line_end=40, language="typescript",
+        ))
+        # A truly dead function (no edges at all)
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="deadFunc", file_path="/repo/handlers.ts",
+            line_start=50, line_end=60, language="typescript",
+        ))
+        # Caller
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="dispatch", file_path="/repo/handlers.ts",
+            line_start=70, line_end=80, language="typescript",
+        ))
+        # REFERENCES edge: dispatch -> handleCreate (map dispatch pattern)
+        self.store.upsert_edge(EdgeInfo(
+            kind="REFERENCES", source="/repo/handlers.ts::dispatch",
+            target="/repo/handlers.ts::handleCreate",
+            file_path="/repo/handlers.ts", line=75,
+        ))
+        # CALLS edge: dispatch -> calledFunc
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/handlers.ts::dispatch",
+            target="/repo/handlers.ts::calledFunc",
+            file_path="/repo/handlers.ts", line=76,
+        ))
+        self.store.commit()
+
+    def test_referenced_function_not_dead(self):
+        """Functions with REFERENCES edges should NOT be flagged as dead code."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "handleCreate" not in dead_names
+
+    def test_called_function_not_dead(self):
+        """Functions with CALLS edges remain excluded (existing behavior)."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "calledFunc" not in dead_names
+
+    def test_truly_dead_function_still_reported(self):
+        """Functions with no edges at all should still be flagged as dead code."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "deadFunc" in dead_names
+
+    def test_only_references_edge_sufficient(self):
+        """A function with ONLY a REFERENCES edge (no CALLS/IMPORTS) is not dead."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        # handleCreate has only a REFERENCES edge, no CALLS targeting it
+        assert "handleCreate" not in dead_names

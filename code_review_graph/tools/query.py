@@ -291,6 +291,16 @@ def query_graph(
                     if child:
                         results.append(node_to_dict(child))
                     edges_out.append(edge_to_dict(e))
+            # Fallback: INHERITS/IMPLEMENTS edges store unqualified base names
+            # (e.g. "Animal") while qn is fully qualified
+            # (e.g. "sample.dart::Animal"). Search by plain name too. See: #87
+            if not results and node:
+                for kind in ("INHERITS", "IMPLEMENTS"):
+                    for e in store.search_edges_by_target_name(node.name, kind=kind):
+                        child = store.get_node(e.source_qualified)
+                        if child:
+                            results.append(node_to_dict(child))
+                        edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
             abs_path = str(root / target)

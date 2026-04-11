@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from pathlib import Path
@@ -142,14 +143,16 @@ def export_graph_data(store: GraphStore) -> dict:
     try:
         from code_review_graph.flows import get_flows
         flows = get_flows(store, limit=100)
-    except Exception:
+    except (ImportError, sqlite3.OperationalError) as exc:
+        logger.debug("flows unavailable for export: %s", exc)
         flows = []
 
     # Include communities (graceful fallback if table doesn't exist)
     try:
         from code_review_graph.communities import get_communities
         communities = get_communities(store)
-    except Exception:
+    except (ImportError, sqlite3.OperationalError) as exc:
+        logger.debug("communities unavailable for export: %s", exc)
         communities = []
 
     return {
@@ -412,7 +415,7 @@ def generate_html(
 # ---------------------------------------------------------------------------
 
 # Template lives in this file for zero-dependency packaging (no external files
-# to locate at runtime).  The ``# noqa: E501`` on the module is set via
+# to locate at runtime). The E501 suppression for this module is configured via
 # pyproject.toml per-file-ignores for this reason.
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>
@@ -863,7 +866,12 @@ simulation.on("tick", function() {
     .attr("x", function(d) { return d.x + (KIND_RADIUS[d.kind] || 6) + 5; })
     .attr("y", function(d) { return d.y; });
 });
-nodes.forEach(function(n) { if (n.kind === "File") collapsedFiles.add(n.qualified_name); });
+// Only auto-collapse File nodes on very large graphs, otherwise all edges
+// become invisible because they connect to Functions/Classes that are now
+// hidden beneath collapsed Files. See: #132
+if (N > 2000) {
+  nodes.forEach(function(n) { if (n.kind === "File") collapsedFiles.add(n.qualified_name); });
+}
 updateNodes();
 function fitGraph() {
   var b = gRoot.node().getBBox();

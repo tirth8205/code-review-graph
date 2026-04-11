@@ -178,10 +178,19 @@ def find_dead_code(
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Find functions/classes with no callers, no test refs, and no importers.
+    """Find functions/classes with no callers, no test refs, no importers, and no references.
 
     Entry points (functions matching framework decorators or conventional name
     patterns like ``main``, ``test_*``, ``handle_*``) are excluded.
+
+    .. note::
+
+        **Caveats — dynamic dispatch patterns.**  Static analysis cannot track
+        all runtime-determined call patterns.  Functions registered via fully
+        dynamic keys (``map[computedKey()] = fn``), ``Reflect.apply``, or
+        runtime ``require()`` may still appear as dead code.  Treat results as
+        hints, especially for TypeScript projects that use map-based dispatch,
+        plugin registries, or dynamic requires.
 
     Args:
         store: The GraphStore instance.
@@ -189,7 +198,8 @@ def find_dead_code(
         file_pattern: Optional file-path substring filter.
 
     Returns:
-        List of dead-code dicts with name, qualified_name, kind, file, line.
+        List of dead-code dicts with name, qualified_name, kind, file, line,
+        and a top-level ``caveats`` note.
     """
     # Query candidate nodes.
     candidates = store.get_nodes_by_kind(
@@ -209,13 +219,15 @@ def find_dead_code(
         if _is_entry_point(node):
             continue
 
-        # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM).
+        # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM),
+        # and value references (REFERENCES — function-as-value in maps, arrays, etc.).
         incoming = store.get_edges_by_target(node.qualified_name)
         has_callers = any(e.kind == "CALLS" for e in incoming)
         has_test_refs = any(e.kind == "TESTED_BY" for e in incoming)
         has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
+        has_references = any(e.kind == "REFERENCES" for e in incoming)
 
-        if not has_callers and not has_test_refs and not has_importers:
+        if not has_callers and not has_test_refs and not has_importers and not has_references:
             dead.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": _sanitize_name(node.qualified_name),
@@ -326,6 +338,7 @@ def suggest_refactorings(store: GraphStore) -> list[dict[str, Any]]:
 def apply_refactor(
     refactor_id: str,
     repo_root: Path,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Apply a previously previewed refactoring to source files.
 
@@ -336,9 +349,20 @@ def apply_refactor(
     Args:
         refactor_id: ID from a prior ``rename_preview`` call.
         repo_root: Validated repository root path.
+        dry_run: If True, compute the would-be changes and return a
+            unified-diff representation per affected file, but do NOT
+            write anything to disk. The ``refactor_id`` is preserved so
+            the same preview can be committed afterwards via a second
+            call without ``dry_run``. See: #176
 
     Returns:
-        Status dict with applied count and modified files.
+        Status dict with applied count and modified files. When
+        ``dry_run=True`` the dict additionally contains:
+
+        - ``dry_run``: ``True``
+        - ``would_modify``: list of file paths that would be changed
+        - ``diffs``: map of file path → unified diff string showing the
+          proposed change
     """
     repo_root = repo_root.resolve()
 
@@ -360,6 +384,12 @@ def apply_refactor(
 
     edits = preview.get("edits", [])
     if not edits:
+        if dry_run:
+            return {
+                "status": "ok", "dry_run": True, "applied": 0,
+                "files_modified": [], "edits_applied": 0,
+                "would_modify": [], "diffs": {},
+            }
         return {"status": "ok", "applied": 0, "files_modified": [], "edits_applied": 0}
 
     # --- Path traversal validation ---
@@ -377,49 +407,95 @@ def apply_refactor(
                 "error": f"Edit path '{edit['file']}' is outside repo root.",
             }
 
-    # --- Apply edits ---
-    files_modified: set[str] = set()
-    edits_applied = 0
-
+    # --- Compute new content for every edit (shared by dry-run and write paths) ---
+    # Group edits by file so multiple edits to the same file apply
+    # sequentially against the updated content rather than stomping each
+    # other. Dry-run and write modes then share this computation.
+    from collections import defaultdict
+    edits_by_file: dict[str, list[dict]] = defaultdict(list)
     for edit in edits:
-        file_path = Path(edit["file"])
-        old_text = edit["old"]
-        new_text = edit["new"]
+        edits_by_file[edit["file"]].append(edit)
 
+    planned: dict[str, tuple[str, str, int]] = {}  # file -> (old_content, new_content, edit_count)
+    for file_str, file_edits in edits_by_file.items():
+        file_path = Path(file_str)
         if not file_path.is_file():
             logger.warning("apply_refactor: file not found: %s", file_path)
             continue
-
         try:
-            content = file_path.read_text(encoding="utf-8")
+            original = file_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("apply_refactor: could not read %s: %s", file_path, exc)
             continue
 
-        if old_text not in content:
-            logger.warning(
-                "apply_refactor: old text %r not found in %s", old_text, file_path,
-            )
-            continue
-
-        # Line-targeted replacement to avoid corrupting unrelated occurrences.
-        target_line = edit.get("line")
-        if target_line is not None:
-            lines = content.splitlines(keepends=True)
-            idx = target_line - 1  # 0-indexed
-            if 0 <= idx < len(lines) and old_text in lines[idx]:
-                lines[idx] = lines[idx].replace(old_text, new_text, 1)
-                new_content = "".join(lines)
+        content = original
+        file_edits_applied = 0
+        for edit in file_edits:
+            old_text = edit["old"]
+            new_text = edit["new"]
+            if old_text not in content:
+                logger.warning(
+                    "apply_refactor: old text %r not found in %s",
+                    old_text, file_path,
+                )
+                continue
+            target_line = edit.get("line")
+            if target_line is not None:
+                lines = content.splitlines(keepends=True)
+                idx = target_line - 1
+                if 0 <= idx < len(lines) and old_text in lines[idx]:
+                    lines[idx] = lines[idx].replace(old_text, new_text, 1)
+                    content = "".join(lines)
+                else:
+                    content = content.replace(old_text, new_text, 1)
             else:
-                # Fall back to first-occurrence replacement if line doesn't match.
-                new_content = content.replace(old_text, new_text, 1)
-        else:
-            new_content = content.replace(old_text, new_text, 1)
+                content = content.replace(old_text, new_text, 1)
+            file_edits_applied += 1
+
+        if file_edits_applied > 0:
+            planned[file_str] = (original, content, file_edits_applied)
+
+    # --- Dry-run path: return diffs, no writes ---
+    if dry_run:
+        import difflib
+        diffs: dict[str, str] = {}
+        for file_str, (original, new_content, _count) in planned.items():
+            diff_lines = list(difflib.unified_diff(
+                original.splitlines(keepends=True),
+                new_content.splitlines(keepends=True),
+                fromfile=f"a/{file_str}",
+                tofile=f"b/{file_str}",
+                n=3,
+            ))
+            diffs[file_str] = "".join(diff_lines)
+        total_edits = sum(count for _o, _n, count in planned.values())
+        result = {
+            "status": "ok",
+            "dry_run": True,
+            "applied": 0,
+            "edits_applied": total_edits,
+            "would_modify": sorted(planned.keys()),
+            "files_modified": [],
+            "diffs": diffs,
+        }
+        logger.info(
+            "apply_refactor: dry-run %s — %d edits would be applied to %d files",
+            refactor_id, total_edits, len(planned),
+        )
+        # Do NOT pop the pending refactor — let the user commit via a
+        # second call with dry_run=False.
+        return result
+
+    # --- Real-write path: write the pre-computed new content ---
+    files_modified: set[str] = set()
+    edits_applied = 0
+    for file_str, (_original, new_content, count) in planned.items():
+        file_path = Path(file_str)
         try:
             file_path.write_text(new_content, encoding="utf-8")
-            edits_applied += 1
+            edits_applied += count
             files_modified.add(str(file_path))
-            logger.info("apply_refactor: applied edit to %s", file_path)
+            logger.info("apply_refactor: applied %d edit(s) to %s", count, file_path)
         except OSError as exc:
             logger.error("apply_refactor: could not write %s: %s", file_path, exc)
 

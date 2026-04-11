@@ -145,6 +145,102 @@ class TestIgnorePatterns:
         assert _should_ignore(".git/HEAD", patterns)
         assert not _should_ignore("src/main.py", patterns)
 
+    def test_should_ignore_nested_dependency_dirs(self):
+        """Nested node_modules / vendor / .gradle should be ignored (#91)."""
+        patterns = [
+            "node_modules/**", "vendor/**", ".gradle/**", ".venv/**",
+        ]
+        # Monorepo: nested node_modules
+        assert _should_ignore("packages/app/node_modules/react/index.js", patterns)
+        assert _should_ignore("apps/web/node_modules/lodash/index.js", patterns)
+        # PHP/Laravel: vendor at any depth
+        assert _should_ignore("backend/vendor/autoload.php", patterns)
+        # Gradle at any depth
+        assert _should_ignore("android/app/.gradle/cache/metadata.bin", patterns)
+        # Negative: similarly-named dirs that aren't a match
+        assert not _should_ignore("src/node_modules_helper/foo.py", patterns)
+        assert not _should_ignore("src/venv_tools/bar.py", patterns)
+
+    def test_should_ignore_framework_defaults(self):
+        """Default patterns should cover Laravel, Gradle, Flutter, and caches."""
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        # Laravel/PHP
+        assert _should_ignore("vendor/autoload.php", patterns)
+        assert _should_ignore("bootstrap/cache/packages.php", patterns)
+        # Gradle/Java
+        assert _should_ignore(".gradle/caches/jars.bin", patterns)
+        assert _should_ignore("build/libs/app.jar", patterns)
+        # Flutter/Dart
+        assert _should_ignore(".dart_tool/package_config.json", patterns)
+        # Coverage/cache
+        assert _should_ignore("coverage/lcov.info", patterns)
+        assert _should_ignore(".cache/webpack/index.pack", patterns)
+
+
+class TestDataDir:
+    """Tests for get_data_dir / CRG_DATA_DIR / CRG_REPO_ROOT (#155)."""
+
+    def test_default_uses_repo_subdir(self, tmp_path, monkeypatch):
+        """Without CRG_DATA_DIR, graphs live at <repo>/.code-review-graph."""
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        from code_review_graph.incremental import get_data_dir
+        result = get_data_dir(tmp_path)
+        assert result == tmp_path / ".code-review-graph"
+        assert result.is_dir()
+        # Auto-generated gitignore must exist
+        assert (result / ".gitignore").is_file()
+        content = (result / ".gitignore").read_text(encoding="utf-8")
+        assert content.strip().endswith("*")
+
+    def test_env_override_replaces_repo_subdir(self, tmp_path, monkeypatch):
+        """CRG_DATA_DIR replaces the default <repo>/.code-review-graph."""
+        external = tmp_path / "external-graphs"
+        repo = tmp_path / "project"
+        repo.mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        from code_review_graph.incremental import get_data_dir
+        result = get_data_dir(repo)
+        assert result == external.resolve()
+        assert result.is_dir()
+        # The repo itself should NOT have a .code-review-graph dir now
+        assert not (repo / ".code-review-graph").exists()
+
+    def test_get_db_path_uses_data_dir(self, tmp_path, monkeypatch):
+        """get_db_path should honor CRG_DATA_DIR too."""
+        external = tmp_path / "external"
+        repo = tmp_path / "project"
+        repo.mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(external))
+        from code_review_graph.incremental import get_db_path
+        db_path = get_db_path(repo)
+        assert db_path == external.resolve() / "graph.db"
+        assert db_path.parent.is_dir()
+
+    def test_find_project_root_env_override(self, tmp_path, monkeypatch):
+        """CRG_REPO_ROOT should override normal git-root resolution."""
+        from pathlib import Path as PathType
+        external_repo = tmp_path / "elsewhere"
+        external_repo.mkdir()
+        monkeypatch.setenv("CRG_REPO_ROOT", str(external_repo))
+        from code_review_graph.incremental import find_project_root
+        result = find_project_root(PathType.cwd())
+        assert result == external_repo.resolve()
+
+    def test_find_project_root_env_override_missing_dir_falls_through(
+        self, tmp_path, monkeypatch,
+    ):
+        """CRG_REPO_ROOT pointing at a non-existent path falls back to
+        the usual resolution rather than crashing."""
+        monkeypatch.setenv(
+            "CRG_REPO_ROOT", str(tmp_path / "does-not-exist-123"),
+        )
+        from code_review_graph.incremental import find_project_root
+        result = find_project_root(tmp_path)
+        # Should NOT equal the bogus env value
+        assert result != tmp_path / "does-not-exist-123"
+
 
 class TestIsBinary:
     def test_text_file_is_not_binary(self, tmp_path):
@@ -214,6 +310,62 @@ class TestGitOperations:
         )
         result = get_all_tracked_files(tmp_path)
         assert result == ["a.py", "b.py", "c.go"]
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_recurse_submodules_param(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\nsub/b.py\n",
+        )
+        result = get_all_tracked_files(tmp_path, recurse_submodules=True)
+        assert result == ["a.py", "sub/b.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_no_recurse_by_default(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\n",
+        )
+        result = get_all_tracked_files(tmp_path)
+        assert result == ["a.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" not in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    @patch("code_review_graph.incremental._RECURSE_SUBMODULES", True)
+    def test_get_all_tracked_files_env_var_fallback(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\nsub/c.py\n",
+        )
+        # None -> falls back to env var (_RECURSE_SUBMODULES=True)
+        result = get_all_tracked_files(tmp_path, recurse_submodules=None)
+        assert result == ["a.py", "sub/c.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" in cmd
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    @patch("code_review_graph.incremental._RECURSE_SUBMODULES", True)
+    def test_get_all_tracked_files_param_overrides_env(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="a.py\n",
+        )
+        # Explicit False overrides env var
+        result = get_all_tracked_files(tmp_path, recurse_submodules=False)
+        assert result == ["a.py"]
+        cmd = mock_run.call_args[0][0]
+        assert "--recurse-submodules" not in cmd
 
 
 class TestFullBuild:
