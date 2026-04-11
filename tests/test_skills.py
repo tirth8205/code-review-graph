@@ -2,10 +2,14 @@
 
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import tomllib
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover - Python 3.10 backport
+    import tomli as tomllib
 
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
