@@ -21,6 +21,143 @@ class TestCodeParser:
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
 
+    # --- Shebang detection for extension-less Unix scripts (#237) ---
+
+    def _write_shebang_file(self, tmp_path: Path, name: str, content: str) -> Path:
+        """Helper: write an extension-less file with ``content`` and return its path."""
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_detect_shebang_bin_bash(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "deploy", "#!/bin/bash\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_bin_sh_routed_to_bash(self, tmp_path):
+        """/bin/sh scripts are parsed through the bash grammar."""
+        p = self._write_shebang_file(
+            tmp_path, "install-hook", "#!/bin/sh\necho hello\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_env_bash(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "runner", "#!/usr/bin/env bash\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_env_python3(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "myapp",
+            "#!/usr/bin/env python3\ndef main():\n    pass\n",
+        )
+        assert self.parser.detect_language(p) == "python"
+
+    def test_detect_shebang_direct_python(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "tool", "#!/usr/bin/python3\nprint('hi')\n",
+        )
+        assert self.parser.detect_language(p) == "python"
+
+    def test_detect_shebang_node(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "cli", "#!/usr/bin/env node\nconsole.log(1);\n",
+        )
+        assert self.parser.detect_language(p) == "javascript"
+
+    def test_detect_shebang_env_dash_s_flag(self, tmp_path):
+        """``#!/usr/bin/env -S node --flag`` (Linux -S) resolves to the interpreter."""
+        p = self._write_shebang_file(
+            tmp_path, "esm-tool",
+            "#!/usr/bin/env -S node --experimental-vm-modules\n"
+            "console.log('esm');\n",
+        )
+        assert self.parser.detect_language(p) == "javascript"
+
+    def test_detect_shebang_ruby(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "rake-task", "#!/usr/bin/env ruby\nputs 1\n",
+        )
+        assert self.parser.detect_language(p) == "ruby"
+
+    def test_detect_shebang_perl(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "cgi-script", "#!/usr/bin/env perl\nprint 1;\n",
+        )
+        assert self.parser.detect_language(p) == "perl"
+
+    def test_detect_shebang_with_trailing_flags(self, tmp_path):
+        """``#!/bin/bash -e`` still maps to bash (flags ignored)."""
+        p = self._write_shebang_file(
+            tmp_path, "strict", "#!/bin/bash -e\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_missing_returns_none(self, tmp_path):
+        """Extension-less text files without a shebang return None, not bash."""
+        p = self._write_shebang_file(
+            tmp_path, "README", "# just a readme, no shebang\nsome content\n",
+        )
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_empty_file_returns_none(self, tmp_path):
+        p = tmp_path / "EMPTY"
+        p.write_bytes(b"")
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_binary_content_returns_none(self, tmp_path):
+        """A garbage-byte first line that happens not to start with ``#!``
+        must not raise and must return None."""
+        p = tmp_path / "binary-blob"
+        p.write_bytes(b"\x00\x01\x02\x03 garbage bytes not a shebang\n")
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_unknown_interpreter_returns_none(self, tmp_path):
+        """A valid shebang to an interpreter we don't route is treated as
+        'unknown language' — same as an unmapped extension."""
+        p = self._write_shebang_file(
+            tmp_path, "ocaml-script", "#!/usr/bin/env ocaml\nlet x = 1\n",
+        )
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_does_not_override_extension(self, tmp_path):
+        """A file with a known extension must still use extension-based
+        detection, even if its first line is a misleading shebang."""
+        p = tmp_path / "script.py"
+        p.write_text("#!/bin/bash\nprint('hi')\n", encoding="utf-8")
+        # .py wins over the bash shebang — non-intuitive-looking content
+        # in a .py file must not fool the detector.
+        assert self.parser.detect_language(p) == "python"
+
+    def test_parse_shebang_script_produces_function_nodes(self, tmp_path):
+        """End-to-end regression: an extension-less bash script is not only
+        detected but also fully parsed into structural nodes via parse_file.
+        """
+        script = (
+            "#!/usr/bin/env bash\n"
+            "greet() {\n"
+            '    echo "hi $1"\n'
+            "}\n"
+            "main() {\n"
+            "    greet world\n"
+            "}\n"
+            "main\n"
+        )
+        p = self._write_shebang_file(tmp_path, "deploy", script)
+
+        nodes, edges = self.parser.parse_file(p)
+
+        # We at least got the File node plus both functions.
+        assert len(nodes) >= 3
+        funcs = [n for n in nodes if n.kind == "Function"]
+        func_names = {f.name for f in funcs}
+        assert "greet" in func_names
+        assert "main" in func_names
+        for n in nodes:
+            assert n.language == "bash"
+
     def test_parse_python_file(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
 
