@@ -561,7 +561,8 @@ def store_communities(
         count = 0
         for comm in communities:
             cursor = conn.execute(
-                """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
+                """INSERT INTO communities
+                       (name, level, cohesion, size, dominant_language, description)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (
                     comm["name"],
