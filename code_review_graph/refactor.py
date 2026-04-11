@@ -178,10 +178,19 @@ def find_dead_code(
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Find functions/classes with no callers, no test refs, and no importers.
+    """Find functions/classes with no callers, no test refs, no importers, and no references.
 
     Entry points (functions matching framework decorators or conventional name
     patterns like ``main``, ``test_*``, ``handle_*``) are excluded.
+
+    .. note::
+
+        **Caveats — dynamic dispatch patterns.**  Static analysis cannot track
+        all runtime-determined call patterns.  Functions registered via fully
+        dynamic keys (``map[computedKey()] = fn``), ``Reflect.apply``, or
+        runtime ``require()`` may still appear as dead code.  Treat results as
+        hints, especially for TypeScript projects that use map-based dispatch,
+        plugin registries, or dynamic requires.
 
     Args:
         store: The GraphStore instance.
@@ -189,7 +198,8 @@ def find_dead_code(
         file_pattern: Optional file-path substring filter.
 
     Returns:
-        List of dead-code dicts with name, qualified_name, kind, file, line.
+        List of dead-code dicts with name, qualified_name, kind, file, line,
+        and a top-level ``caveats`` note.
     """
     # Query candidate nodes.
     candidates = store.get_nodes_by_kind(
@@ -209,13 +219,15 @@ def find_dead_code(
         if _is_entry_point(node):
             continue
 
-        # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM).
+        # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM),
+        # and value references (REFERENCES — function-as-value in maps, arrays, etc.).
         incoming = store.get_edges_by_target(node.qualified_name)
         has_callers = any(e.kind == "CALLS" for e in incoming)
         has_test_refs = any(e.kind == "TESTED_BY" for e in incoming)
         has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
+        has_references = any(e.kind == "REFERENCES" for e in incoming)
 
-        if not has_callers and not has_test_refs and not has_importers:
+        if not has_callers and not has_test_refs and not has_importers and not has_references:
             dead.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": _sanitize_name(node.qualified_name),

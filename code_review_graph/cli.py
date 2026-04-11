@@ -146,12 +146,13 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_skills:
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
-        inject_claude_md(repo_root)
-        updated = inject_platform_instructions(repo_root)
+        if target in ("claude", "all"):
+            inject_claude_md(repo_root)
+        updated = inject_platform_instructions(repo_root, target=target)
         if updated:
             print(f"Injected graph instructions into: {', '.join(updated)}")
 
-    if not skip_hooks:
+    if not skip_hooks and target in ("claude", "all"):
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
         git_hook = install_git_hook(repo_root)
