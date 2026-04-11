@@ -149,24 +149,62 @@ def _to_slug(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _compute_cohesion_batch(
+    community_member_qns: list[set[str]],
+    all_edges: list[GraphEdge],
+) -> list[float]:
+    """Compute cohesion for multiple communities in a single O(edges) pass.
+
+    Builds a ``qualified_name -> community_index`` reverse map (each node
+    appears in at most one community since all callers produce partitions),
+    then walks every edge exactly once, bucketing it into internal/external
+    counters per community.
+
+    Total work: O(edges + sum(|members|)) instead of
+    O(edges * communities) for naive per-community cohesion.
+
+    Returns a list of cohesion scores aligned with ``community_member_qns``.
+    """
+    qn_to_idx: dict[str, int] = {}
+    for idx, members in enumerate(community_member_qns):
+        for qn in members:
+            qn_to_idx[qn] = idx
+
+    n = len(community_member_qns)
+    internal = [0] * n
+    external = [0] * n
+
+    for e in all_edges:
+        sc = qn_to_idx.get(e.source_qualified)
+        tc = qn_to_idx.get(e.target_qualified)
+        if sc is None and tc is None:
+            continue
+        if sc == tc:
+            # Safe: sc is not None here (sc == tc and not both None).
+            assert sc is not None
+            internal[sc] += 1
+        else:
+            if sc is not None:
+                external[sc] += 1
+            if tc is not None:
+                external[tc] += 1
+
+    results: list[float] = []
+    for i in range(n):
+        total = internal[i] + external[i]
+        results.append(internal[i] / total if total > 0 else 0.0)
+    return results
+
+
 def _compute_cohesion(
     member_qns: set[str], all_edges: list[GraphEdge]
 ) -> float:
-    """Compute cohesion: internal_edges / (internal_edges + external_edges)."""
-    internal = 0
-    external = 0
-    for e in all_edges:
-        src_in = e.source_qualified in member_qns
-        tgt_in = e.target_qualified in member_qns
-        if src_in or tgt_in:
-            if src_in and tgt_in:
-                internal += 1
-            else:
-                external += 1
-    total = internal + external
-    if total == 0:
-        return 0.0
-    return internal / total
+    """Compute cohesion: internal_edges / (internal_edges + external_edges).
+
+    For multiple communities, prefer :func:`_compute_cohesion_batch`, which
+    runs in O(edges) total instead of O(edges) per community.
+    """
+    return _compute_cohesion_batch([member_qns], all_edges)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -220,8 +258,9 @@ def _detect_leiden(
         weights="weight",
     )
 
-    # Build communities from partition
-    communities: list[dict[str, Any]] = []
+    # Build communities from partition. Collect member sets first so we
+    # can batch-compute all cohesions in a single O(edges) pass below.
+    pending: list[tuple[list[GraphNode], set[str]]] = []
     for cluster_ids in partition:
         if len(cluster_ids) < min_size:
             continue
@@ -229,7 +268,12 @@ def _detect_leiden(
         if len(members) < min_size:
             continue
         member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
+        pending.append((members, member_qns))
+
+    cohesions = _compute_cohesion_batch([p[1] for p in pending], edges)
+
+    communities: list[dict[str, Any]] = []
+    for (members, member_qns), cohesion in zip(pending, cohesions):
         lang_counts = Counter(m.language for m in members if m.language)
         dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
         name = _generate_community_name(members)
@@ -308,15 +352,20 @@ def _detect_leiden_sub(
         weights="weight",
     )
 
-    subs: list[dict[str, Any]] = []
-    for idx, cluster_ids in enumerate(partition):
+    pending: list[tuple[list[GraphNode], set[str]]] = []
+    for cluster_ids in partition:
         if len(cluster_ids) < min_size:
             continue
         members = [idx_to_node[i] for i in cluster_ids if i in idx_to_node]
         if len(members) < min_size:
             continue
         member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
+        pending.append((members, member_qns))
+
+    cohesions = _compute_cohesion_batch([p[1] for p in pending], edges)
+
+    subs: list[dict[str, Any]] = []
+    for (members, member_qns), cohesion in zip(pending, cohesions):
         lang_counts = Counter(m.language for m in members if m.language)
         dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
         name = _generate_community_name(members)
@@ -348,12 +397,21 @@ def _detect_file_based(
     for n in nodes:
         by_file[n.file_path].append(n)
 
-    communities: list[dict[str, Any]] = []
+    # Pre-filter to communities meeting min_size and collect their member
+    # sets so we can batch-compute all cohesions in a single O(edges) pass.
+    # Without this, per-community cohesion is O(edges * files), which makes
+    # community detection effectively hang on large repos.
+    pending: list[tuple[str, list[GraphNode], set[str]]] = []
     for file_path, members in by_file.items():
         if len(members) < min_size:
             continue
         member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
+        pending.append((file_path, members, member_qns))
+
+    cohesions = _compute_cohesion_batch([p[2] for p in pending], edges)
+
+    communities: list[dict[str, Any]] = []
+    for (file_path, members, member_qns), cohesion in zip(pending, cohesions):
         lang_counts = Counter(m.language for m in members if m.language)
         dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
         name = _generate_community_name(members)
@@ -493,36 +551,42 @@ def store_communities(
     # that are tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear existing data
-    conn.execute("DELETE FROM communities")
-    conn.execute("UPDATE nodes SET community_id = NULL")
+    # Wrap in explicit transaction so the DELETE + INSERT + UPDATE
+    # sequence is atomic — no partial community data on crash.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM communities")
+        conn.execute("UPDATE nodes SET community_id = NULL")
 
-    count = 0
-    for comm in communities:
-        cursor = conn.execute(
-            """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                comm["name"],
-                comm.get("level", 0),
-                comm.get("cohesion", 0.0),
-                comm["size"],
-                comm.get("dominant_language", ""),
-                comm.get("description", ""),
-            ),
-        )
-        community_id = cursor.lastrowid
-
-        # Update community_id on member nodes
-        member_qns = comm.get("members", [])
-        for qn in member_qns:
-            conn.execute(
-                "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
-                (community_id, qn),
+        count = 0
+        for comm in communities:
+            cursor = conn.execute(
+                """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    comm["name"],
+                    comm.get("level", 0),
+                    comm.get("cohesion", 0.0),
+                    comm["size"],
+                    comm.get("dominant_language", ""),
+                    comm.get("description", ""),
+                ),
             )
-        count += 1
+            community_id = cursor.lastrowid
 
-    conn.commit()
+            # Update community_id on member nodes
+            member_qns = comm.get("members", [])
+            for qn in member_qns:
+                conn.execute(
+                    "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
+                    (community_id, qn),
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 

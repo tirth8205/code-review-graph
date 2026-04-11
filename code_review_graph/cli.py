@@ -96,7 +96,7 @@ def _print_banner() -> None:
 
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
-    from .incremental import find_repo_root
+    from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
     from .skills import install_platform_configs
 
     repo_root = Path(args.repo) if args.repo else find_repo_root()
@@ -117,8 +117,17 @@ def _handle_init(args: argparse.Namespace) -> None:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
     if dry_run:
+        print("[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
         print("\n[dry-run] No files were modified.")
         return
+
+    gitignore_state = ensure_repo_gitignore_excludes_crg(repo_root)
+    if gitignore_state == "created":
+        print("Created .gitignore and added .code-review-graph/.")
+    elif gitignore_state == "updated":
+        print("Updated .gitignore with .code-review-graph/.")
+    else:
+        print(".gitignore already contains .code-review-graph/.")
 
     # Skills and hooks are installed by default so Claude actually uses the
     # graph tools proactively.  Use --no-skills / --no-hooks to opt out.
@@ -130,6 +139,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_git_hook,
         install_hooks,
     )
 
@@ -144,6 +154,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks:
         install_hooks(repo_root)
         print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
+        git_hook = install_git_hook(repo_root)
+        if git_hook:
+            print(f"Installed git pre-commit hook in {git_hook}")
 
     print()
     print("Next steps:")

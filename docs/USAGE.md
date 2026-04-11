@@ -15,6 +15,7 @@ code-review-graph build      # parse your codebase
 To target a specific platform instead of auto-detecting all:
 
 ```bash
+code-review-graph install --platform codex
 code-review-graph install --platform cursor
 code-review-graph install --platform codex
 code-review-graph install --platform claude-code
@@ -24,6 +25,7 @@ code-review-graph install --platform claude-code
 
 | Platform | Config file |
 |----------|-------------|
+| **Codex** | `~/.codex/config.toml` |
 | **Claude Code** | `.mcp.json` |
 | **Cursor** | `.cursor/mcp.json` |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
@@ -137,3 +139,5 @@ generated/**
 vendor/**
 *.generated.ts
 ```
+
+In git repos, indexing is based on tracked files (`git ls-files`), so gitignored files are skipped automatically. Use `.code-review-graphignore` to exclude tracked files or when git isn't available.

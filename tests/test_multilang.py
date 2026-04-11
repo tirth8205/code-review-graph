@@ -249,6 +249,14 @@ class TestKotlinParsing:
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
 
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # Simple call: println(...)
+        assert "println" in targets
+        # Method call: repo.save(user)
+        assert any("save" in t for t in targets)
+
 
 class TestSwiftParsing:
     def setup_method(self):
@@ -807,3 +815,116 @@ class TestLuaParsing:
         sources = {e.source.split("::")[-1] for e in calls}
         assert "Dog.fetch" in sources  # Dog:fetch calls self:speak and print
         assert "Animal.speak" in sources  # Animal:speak calls log:info
+
+
+class TestLuauParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.luau")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("init.luau")) == "luau"
+        assert self.parser.detect_language(Path("module.luau")) == "luau"
+
+    def test_finds_type_aliases(self):
+        types = [n for n in self.nodes if n.kind == "Class"]
+        names = {t.name for t in types}
+        assert "Vector3" in names
+        assert "Callback" in names
+
+    def test_finds_top_level_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        assert "greet" in names
+        assert "add" in names
+        assert "process_animals" in names
+
+    def test_finds_variable_assigned_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        assert "transform" in names
+
+    def test_finds_dot_syntax_methods(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Animal"
+        ]
+        names = {f.name for f in funcs}
+        assert "new" in names
+
+    def test_finds_colon_syntax_methods(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Animal"
+        ]
+        names = {f.name for f in funcs}
+        assert "speak" in names
+        assert "rename" in names
+
+    def test_finds_inherited_table_methods(self):
+        dog_funcs = [
+            n for n in self.nodes
+            if n.kind in ("Function", "Test") and n.parent_name == "Dog"
+        ]
+        names = {f.name for f in dog_funcs}
+        assert "new" in names
+        assert "fetch" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "lib.utils" in targets
+        assert "logging" in targets
+        assert len(imports) >= 2
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "print" in targets
+        assert "setmetatable" in targets
+        assert "assert" in targets
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split("::")[-1] for e in contains}
+        assert "greet" in targets
+        assert "add" in targets
+        assert "Animal.new" in targets
+        assert "Animal.speak" in targets
+        assert "Dog.fetch" in targets
+
+    def test_method_parent_names(self):
+        funcs = {
+            (n.name, n.parent_name) for n in self.nodes
+            if n.kind == "Function" and n.parent_name is not None
+        }
+        assert ("new", "Animal") in funcs
+        assert ("speak", "Animal") in funcs
+        assert ("rename", "Animal") in funcs
+        assert ("new", "Dog") in funcs
+        assert ("fetch", "Dog") in funcs
+
+    def test_detects_test_functions(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        names = {t.name for t in tests}
+        assert "test_greet" in names
+        assert "test_animal_speak" in names
+        assert "test_dog_fetch" in names
+        assert len(tests) == 3
+
+    def test_nodes_have_luau_language(self):
+        for node in self.nodes:
+            assert node.language == "luau"
+
+    def test_calls_inside_methods(self):
+        """Verify that calls inside methods have correct source qualified names."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        sources = {e.source.split("::")[-1] for e in calls}
+        assert "Dog.fetch" in sources
+        assert "Animal.speak" in sources
