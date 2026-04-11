@@ -412,7 +412,7 @@ def generate_html(
 # ---------------------------------------------------------------------------
 
 # Template lives in this file for zero-dependency packaging (no external files
-# to locate at runtime).  The ``# noqa: E501`` on the module is set via
+# to locate at runtime). The E501 suppression for this module is configured via
 # pyproject.toml per-file-ignores for this reason.
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>

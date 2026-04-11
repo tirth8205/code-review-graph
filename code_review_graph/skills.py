@@ -446,14 +446,14 @@ def install_git_hook(repo_root: Path) -> Path | None:
     existing one — preserving any hooks already there. Returns None when no
     ``.git`` directory is found.
     """
-    _SCRIPT = """\
+    script = """\
 #!/bin/sh
 # Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
 if command -v code-review-graph >/dev/null 2>&1; then
     code-review-graph detect-changes --brief || true
 fi
 """
-    _MARKER = "code-review-graph detect-changes"
+    marker = "code-review-graph detect-changes"
 
     git_dir = repo_root / ".git"
     if not git_dir.is_dir():
@@ -465,11 +465,11 @@ fi
 
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8")
-        if _MARKER in existing:
+        if marker in existing:
             return hook_path
-        hook_path.write_text(existing.rstrip("\n") + "\n" + _SCRIPT, encoding="utf-8")
+        hook_path.write_text(existing.rstrip("\n") + "\n" + script, encoding="utf-8")
     else:
-        hook_path.write_text(_SCRIPT, encoding="utf-8")
+        hook_path.write_text(script, encoding="utf-8")
 
     hook_path.chmod(0o755)
     logger.info("Wrote git pre-commit hook: %s", hook_path)
