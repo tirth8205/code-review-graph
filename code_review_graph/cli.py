@@ -32,6 +32,7 @@ import argparse
 import json
 import logging
 import os
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _get_version() -> str:
     """Get the installed package version."""
     try:
         return pkg_version("code-review-graph")
-    except Exception:
+    except PackageNotFoundError:
         return "dev"
 
 

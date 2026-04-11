@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -18,7 +19,8 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
         try:
             from code_review_graph.search import hybrid_search
             search_results = hybrid_search(store, query, limit=20)
-        except Exception:
+        except (ImportError, sqlite3.OperationalError) as exc:
+            logger.debug("hybrid_search unavailable, using fallback: %s", exc)
             # Fallback to basic search
             search_results = [
                 {"qualified_name": n.qualified_name}
