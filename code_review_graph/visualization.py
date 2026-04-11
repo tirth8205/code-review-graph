@@ -412,7 +412,7 @@ def generate_html(
 # ---------------------------------------------------------------------------
 
 # Template lives in this file for zero-dependency packaging (no external files
-# to locate at runtime).  The ``# noqa: E501`` on the module is set via
+# to locate at runtime). Line-length exceptions are configured in
 # pyproject.toml per-file-ignores for this reason.
 
 _HTML_TEMPLATE = r"""<!DOCTYPE html>
