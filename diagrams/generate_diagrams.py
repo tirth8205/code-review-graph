@@ -4,7 +4,10 @@
 All statistics match repo benchmarks exactly. No invented features or numbers.
 """
 
-import json, random, os, math
+import json
+import math
+import os
+import random
 
 random.seed(2024)
 OUT = os.path.dirname(os.path.abspath(__file__))

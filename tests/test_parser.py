@@ -1,5 +1,6 @@
 """Tests for the Tree-sitter parser module."""
 
+import tempfile
 from pathlib import Path
 
 from code_review_graph.parser import CodeParser
@@ -440,6 +441,286 @@ class TestCodeParser:
             )
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    # --- JSX component CALLS tests ---
+
+    def test_tsx_jsx_component_invocation_creates_call_edge(self):
+        source = (
+            b"import MarkdownMsg from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <section><MarkdownMsg text={value} /></section>;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_intrinsic_dom_elements_do_not_create_call_edges(self):
+        source = (
+            b"export function BookWorkspace() {\n"
+            b"  return <section><div /><span /></section>;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert calls == []
+
+    def test_tsx_member_component_invocation_creates_unqualified_call_edge(self):
+        source = (
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == "MarkdownMsg"
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_namespace_import_component_invocation_resolves_to_module_file(self):
+        source = (
+            b"import * as UI from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_nested_member_component_invocation_resolves_namespace_root(self):
+        source = (
+            b"import * as UI from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.Messages.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { MarkdownMsg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <MarkdownMsg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_aliased_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export { MarkdownMsg as Msg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { Msg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <Msg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_star_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export * from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { MarkdownMsg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <MarkdownMsg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_grimoire_style_jsx_fixture_tracks_all_component_call_sites(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            components = root / "components"
+            components.mkdir()
+            (components / "MarkdownMsg.jsx").write_text(
+                "export function MarkdownMsg({ text }) { return <div>{text}</div>; }\n",
+                encoding="utf-8",
+            )
+            (components / "index.js").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.jsx"
+            consumer.write_text(
+                "import { MarkdownMsg } from './components';\n\n"
+                "export function BookDashboard() {\n"
+                "  return (\n"
+                "    <>\n"
+                "      <MarkdownMsg text='a' />\n"
+                "      <MarkdownMsg text='b' />\n"
+                "      <MarkdownMsg text='c' />\n"
+                "    </>\n"
+                "  );\n"
+                "}\n\n"
+                "export function AIPanel() {\n"
+                "  return (\n"
+                "    <>\n"
+                "      <MarkdownMsg text='d' />\n"
+                "      <MarkdownMsg text='e' />\n"
+                "    </>\n"
+                "  );\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(consumer)
+
+            expected_target = (
+                f"{str((components / 'MarkdownMsg.jsx').resolve())}::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in edges
+                if e.kind == "CALLS" and e.target == expected_target
+            ]
+            by_source = {}
+            for edge in jsx_calls:
+                by_source[edge.source] = by_source.get(edge.source, 0) + 1
+            assert by_source == {
+                f"{consumer}::BookDashboard": 3,
+                f"{consumer}::AIPanel": 2,
+            }
+
+    def test_nested_barrel_chain_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            messages = root / "components" / "messages"
+            messages.mkdir(parents=True)
+            (messages / "MarkdownMsg.jsx").write_text(
+                "export function MarkdownMsg({ text }) { return <div>{text}</div>; }\n",
+                encoding="utf-8",
+            )
+            (messages / "index.js").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.js").write_text(
+                "export { MarkdownMsg as Msg } from './messages';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.jsx"
+            consumer.write_text(
+                "import { Msg } from './components';\n\n"
+                "export function BookDashboard() {\n"
+                "  return <Msg text='a' />;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(consumer)
+
+            expected_target = (
+                f"{str((messages / 'MarkdownMsg.jsx').resolve())}::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in edges
+                if e.kind == "CALLS"
+                and e.source == f"{consumer}::BookDashboard"
+                and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
 
     def test_junit_annotation_marks_test(self):
         """Java @Test annotation should mark functions as tests."""
