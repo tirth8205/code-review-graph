@@ -376,12 +376,189 @@ class TestPHPParsing:
     def test_finds_classes(self):
         classes = [n for n in self.nodes if n.kind == "Class"]
         names = {c.name for c in classes}
-        assert "User" in names or "InMemoryRepo" in names
+        assert "User" in names
+        assert "InMemoryRepo" in names
+        assert "UserController" in names
 
     def test_finds_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
-        assert len(names) > 0
+        assert "createUser" in names
+
+    def test_finds_traits(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Timestampable" in names
+
+    def test_finds_enums(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Status" in names
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # member_call_expression: $repo->save(...)
+        assert any("save" in t for t in targets), f"No 'save' call in {targets}"
+
+    def test_finds_static_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # scoped_call_expression uses dot notation: User.find
+        assert any("User.find" in t for t in targets), (
+            f"No static call to 'User.find' in {targets}"
+        )
+
+    def test_finds_new_expression(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("InMemoryRepo" in t for t in targets), (
+            f"No 'new InMemoryRepo()' call in {targets}"
+        )
+
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind in ("INHERITS", "IMPLEMENTS")]
+        targets = {e.target for e in inherits}
+        sources = {e.source for e in inherits}
+        # InMemoryRepo implements Repository
+        assert any("Repository" in t for t in targets), (
+            f"No INHERITS/IMPLEMENTS to Repository in {inherits}"
+        )
+        # UserController extends Controller
+        assert any("Controller" in t for t in targets), (
+            f"No INHERITS to Controller in {inherits}"
+        )
+
+    def test_finds_imports(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert any("Exception" in t for t in targets), (
+            f"No import of Exception in {targets}"
+        )
+        # Should not be raw "use Exception;" text
+        assert not any(t.startswith("use ") for t in targets), (
+            f"Import target is raw text: {targets}"
+        )
+
+    def test_finds_grouped_imports(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert any("Loggable" in t for t in targets), (
+            f"No grouped import of Loggable in {targets}"
+        )
+        assert any("Cacheable" in t for t in targets), (
+            f"No grouped import of Cacheable in {targets}"
+        )
+
+    def test_finds_alias_import(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert any("UserService" in t for t in targets), (
+            f"No alias import of UserService in {targets}"
+        )
+
+    def test_blade_detected_as_blade(self):  # Phase 2
+        assert self.parser.detect_language(Path("home.blade.php")) == "blade"
+
+    def test_regular_php_not_affected_by_blade(self):
+        assert self.parser.detect_language(Path("index.php")) == "php"
+
+
+class TestLaravelParsing:
+    """Phase 3: Laravel-specific semantic tests."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample_laravel.php"
+        )
+
+    def test_route_creates_calls_to_controller(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any(
+            "UserController.index" in t for t in targets
+        ), f"No Route->Controller CALLS edge in {targets}"
+
+    def test_eloquent_relation_creates_references(self):
+        refs = [e for e in self.edges if e.kind == "REFERENCES"]
+        targets = {e.target for e in refs}
+        assert any(
+            "Post" in t for t in targets
+        ), f"No Eloquent REFERENCES to Post in {targets}"
+
+    def test_belongs_to_creates_references(self):
+        refs = [e for e in self.edges if e.kind == "REFERENCES"]
+        targets = {e.target for e in refs}
+        assert any(
+            "User" in t for t in targets
+        ), f"No belongsTo REFERENCES to User in {targets}"
+
+    def test_belongs_to_many_creates_references(self):
+        refs = [e for e in self.edges if e.kind == "REFERENCES"]
+        targets = {e.target for e in refs}
+        assert any(
+            "Tag" in t for t in targets
+        ), f"No belongsToMany REFERENCES to Tag in {targets}"
+
+    def test_route_also_has_generic_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any(
+            "Route.get" in t for t in targets
+        ), f"No generic Route.get CALLS edge in {targets}"
+
+
+class TestBladeParsing:
+    """Phase 4: Blade template tests."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample.blade.php"
+        )
+
+    def test_blade_creates_file_node(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "blade"
+
+    def test_blade_extends_creates_import(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert "layouts.app" in targets, (
+            f"No @extends import in {targets}"
+        )
+
+    def test_blade_include_creates_import(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert "partials.header" in targets, (
+            f"No @include import in {targets}"
+        )
+        assert "partials.footer" in targets, (
+            f"No @include footer import in {targets}"
+        )
+
+    def test_blade_component_creates_import(self):
+        imp_edges = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imp_edges}
+        assert "components.alert" in targets, (
+            f"No @component import in {targets}"
+        )
+
+    def test_blade_livewire_creates_references(self):
+        refs = [e for e in self.edges if e.kind == "REFERENCES"]
+        targets = {e.target for e in refs}
+        assert "components.counter" in targets, (
+            f"No @livewire REFERENCES in {targets}"
+        )
+
+    def test_regular_php_not_affected(self):
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(FIXTURES / "sample.php")
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert any(c.name == "User" for c in classes)
 
     def test_finds_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]

@@ -148,7 +148,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "perl": ["package_statement", "class_statement", "role_statement"],
     "kotlin": ["class_declaration", "object_declaration"],
     "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
-    "php": ["class_declaration", "interface_declaration"],
+    "php": [
+        "class_declaration", "interface_declaration",
+        "trait_declaration", "enum_declaration",
+    ],
     "scala": [
         "class_definition", "trait_definition", "object_definition", "enum_definition",
     ],
@@ -283,7 +286,13 @@ _CALL_TYPES: dict[str, list[str]] = {
     ],
     "kotlin": ["call_expression"],
     "swift": ["call_expression"],
-    "php": ["function_call_expression", "member_call_expression"],
+    "php": [
+        "function_call_expression",
+        "member_call_expression",
+        "scoped_call_expression",
+        "nullsafe_member_call_expression",
+        "object_creation_expression",
+    ],
     "scala": ["call_expression", "instance_expression", "generic_function"],
     "solidity": ["call_expression"],
     "lua": ["function_call"],
@@ -628,6 +637,8 @@ class CodeParser:
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
+        # Per-parse cache of PHP composer.json PSR-4 mappings
+        self._php_composer_cache: dict[str, Optional[dict[str, str]]] = {}
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
         if language not in self._parsers:
@@ -640,7 +651,93 @@ class CodeParser:
         return self._parsers[language]
 
     def detect_language(self, path: Path) -> Optional[str]:
-        return EXTENSION_TO_LANGUAGE.get(path.suffix.lower())
+        """Map a file path to its language name.
+
+        Compound extensions (.blade.php) are checked first.  Then
+        extension-based lookup.  For extension-less files (typical for
+        Unix scripts like ``bin/myapp`` or ``.git/hooks/pre-commit``)
+        we fall back to reading the first line for a shebang.  Files that
+        already have a known extension are never re-read — shebang probing
+        only runs when the extension lookup returns ``None`` **and** the path
+        has no suffix at all.  See issues #237 and PHP/Laravel support.
+        """
+        # Blade templates use compound extension (.blade.php); Path.suffix
+        # only returns the last part (.php), so check the full name first.
+        if path.name.endswith(".blade.php"):
+            return "blade"
+        suffix = path.suffix.lower()
+        lang = EXTENSION_TO_LANGUAGE.get(suffix)
+        if lang is not None:
+            return lang
+        # Only probe shebang for files without any extension — "README", "LICENSE",
+        # and other extension-less text files also fall here, but the probe is a
+        # cheap 256-byte read that returns None when no shebang is found.
+        if suffix == "":
+            return self._detect_language_from_shebang(path)
+        return None
+
+    @staticmethod
+    def _detect_language_from_shebang(path: Path) -> Optional[str]:
+        """Inspect the first line of ``path`` for a shebang interpreter.
+
+        Returns the mapped language name or ``None`` if the file has no
+        shebang, is unreadable, or names an interpreter we don't map.
+
+        Accepted shapes::
+
+            #!/bin/bash
+            #!/usr/bin/env python3
+            #!/usr/bin/env -S node --experimental-vm-modules
+            #!/usr/bin/bash -e
+
+        Only the basename of the interpreter is consulted.  Trailing flags
+        after the interpreter are ignored.  Windows-style ``\r\n`` line
+        endings are handled.  Binary files read as garbage bytes simply
+        fail the ``#!`` prefix check and return ``None``.
+        """
+        try:
+            with path.open("rb") as fh:
+                head = fh.read(_SHEBANG_PROBE_BYTES)
+        except (OSError, PermissionError):
+            return None
+        if not head.startswith(b"#!"):
+            return None
+
+        # Take just the first line, stripped of leading "#!" and any
+        # surrounding whitespace.  Split on NUL to defend against accidental
+        # binary content following a ``#!`` prefix.
+        first_line = head.split(b"\n", 1)[0].split(b"\0", 1)[0]
+        try:
+            line = first_line[2:].decode("utf-8", errors="strict").strip()
+        except UnicodeDecodeError:
+            return None
+        if not line:
+            return None
+
+        tokens = line.split()
+        if not tokens:
+            return None
+
+        first = tokens[0]
+        # `/usr/bin/env` indirection: the interpreter is the next token.
+        # `/usr/bin/env -S node --flag` is also valid — skip any leading
+        # ``-`` options after env.
+        if first.endswith("/env") or first == "env":
+            interpreter_token: Optional[str] = None
+            for tok in tokens[1:]:
+                if tok.startswith("-"):
+                    # ``-S`` takes no argument in most envs; skip and continue.
+                    continue
+                interpreter_token = tok
+                break
+            if interpreter_token is None:
+                return None
+            interpreter = interpreter_token.rsplit("/", 1)[-1]
+        else:
+            # Direct form: ``#!/bin/bash`` or ``#!/usr/local/bin/python3``.
+            interpreter = first.rsplit("/", 1)[-1]
+
+        return SHEBANG_INTERPRETER_TO_LANGUAGE.get(interpreter)
 
     def parse_file(self, path: Path) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse a single file and return extracted nodes and edges."""
@@ -659,6 +756,10 @@ class CodeParser:
         language = self.detect_language(path)
         if not language:
             return [], []
+
+        # Blade templates: regex-based extraction (no tree-sitter grammar)
+        if language == "blade":
+            return self._parse_blade(path, source)
 
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
@@ -734,6 +835,51 @@ class CodeParser:
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
+
+        return nodes, edges
+
+    # Blade directive patterns for extracting template references.
+    _BLADE_DIRECTIVE_RE = re.compile(
+        r"""@(extends|include|component|livewire)\s*\(\s*['"]([^'"]+)['"]\s*\)""",
+    )
+
+    def _parse_blade(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a Blade template using regex (no tree-sitter grammar).
+
+        Extracts ``@extends``, ``@include``, ``@component``, and
+        ``@livewire`` directives as IMPORTS_FROM / REFERENCES edges.
+        """
+        file_path = str(path)
+        text = source.decode("utf-8", errors="replace")
+
+        nodes: list[NodeInfo] = [
+            NodeInfo(
+                kind="File",
+                name=path.name,
+                file_path=file_path,
+                line_start=1,
+                line_end=text.count("\n") + 1,
+                language="blade",
+            ),
+        ]
+        edges: list[EdgeInfo] = []
+
+        for match in self._BLADE_DIRECTIVE_RE.finditer(text):
+            directive = match.group(1)
+            target_dotpath = match.group(2)
+            line = text[:match.start()].count("\n") + 1
+
+            # @livewire produces REFERENCES; others produce IMPORTS_FROM
+            kind = "REFERENCES" if directive == "livewire" else "IMPORTS_FROM"
+            edges.append(EdgeInfo(
+                kind=kind,
+                source=file_path,
+                target=target_dotpath,
+                file_path=file_path,
+                line=line,
+            ))
 
         return nodes, edges
 
@@ -1855,6 +2001,20 @@ class CodeParser:
                     child, language, source, file_path, edges,
                 )
                 continue
+
+            # --- PHP Laravel-specific constructs ---
+            # Route definitions and Eloquent relationships need semantic
+            # edges beyond the generic CALLS edge.  When matched, produces
+            # both the standard CALLS edge and extra semantic edges, then
+            # returns True so the generic path is skipped.
+            if language == "php" and node_type in (
+                "scoped_call_expression", "member_call_expression",
+            ):
+                if self._extract_php_constructs(
+                    child, source, file_path, edges,
+                    enclosing_class, enclosing_func,
+                ):
+                    continue
 
             # --- Calls ---
             if node_type in call_types:
@@ -3331,6 +3491,237 @@ class CodeParser:
                     line=ch.start_point[0] + 1,
                 )
 
+    # ------------------------------------------------------------------
+    # PHP / Laravel semantic constructs
+    # ------------------------------------------------------------------
+
+    _ELOQUENT_RELATIONS = frozenset({
+        "hasMany", "hasOne", "belongsTo", "belongsToMany",
+        "morphTo", "morphMany", "morphOne", "morphToMany",
+        "morphedByMany", "hasManyThrough", "hasOneThrough",
+    })
+
+    _ROUTE_VERBS = frozenset({
+        "get", "post", "put", "patch", "delete", "options",
+        "any", "match", "resource", "apiResource",
+    })
+
+    @staticmethod
+    def _php_class_from_class_access(node) -> Optional[str]:
+        """Extract the class name from a ``class_constant_access_expression``.
+
+        Handles both short names (``Post::class`` → ``Post``) and fully
+        qualified names (``\\App\\Models\\Post::class`` → ``Post``).
+        The literal ``class`` keyword child is skipped.
+        """
+        for child in node.children:
+            if child.type == "qualified_name":
+                # FQCN: extract last segment
+                text = child.text.decode("utf-8", errors="replace")
+                return text.rsplit("\\", 1)[-1]
+            if child.type == "name":
+                text = child.text.decode("utf-8", errors="replace")
+                if text != "class":
+                    return text
+        return None
+
+    def _extract_php_constructs(
+        self,
+        node,
+        source: bytes,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> bool:
+        """Handle Laravel-specific PHP patterns.
+
+        Returns True if the node was fully handled (caller should
+        ``continue``); False to let the generic CALLS path proceed.
+
+        Patterns handled:
+        - Route::get('/path', [Controller::class, 'method']) — produces
+          CALLS edge to Controller.method
+        - $this->hasMany(Post::class) — produces REFERENCES edge to Post
+        """
+        # --- Route definitions ---
+        # scoped_call_expression: Route::get('/path', [...])
+        if node.type == "scoped_call_expression":
+            names = [c for c in node.children if c.type == "name"]
+            if len(names) >= 2:
+                scope = names[0].text.decode("utf-8", errors="replace")
+                method = names[1].text.decode("utf-8", errors="replace")
+                if scope == "Route" and method in self._ROUTE_VERBS:
+                    self._extract_laravel_route(
+                        node, source, file_path, edges,
+                        enclosing_class, enclosing_func,
+                        scope, method,
+                    )
+                    return True
+            return False
+
+        # --- Eloquent relationships ---
+        # member_call_expression: $this->hasMany(Post::class)
+        if node.type == "member_call_expression":
+            for child in reversed(node.children):
+                if child.type == "name":
+                    method_name = child.text.decode(
+                        "utf-8", errors="replace"
+                    )
+                    if method_name in self._ELOQUENT_RELATIONS:
+                        self._extract_eloquent_relation(
+                            node, source, file_path, edges,
+                            enclosing_class, enclosing_func,
+                            method_name,
+                        )
+                        return True
+                    break
+            return False
+
+        return False
+
+    def _extract_laravel_route(
+        self,
+        node,
+        source: bytes,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        scope: str,
+        method: str,
+    ) -> None:
+        """Extract CALLS edge from Route::verb to controller method."""
+        caller = self._qualify(
+            enclosing_func or enclosing_class, file_path,
+            enclosing_class if enclosing_func else None,
+        ) if (enclosing_func or enclosing_class) else file_path
+
+        # Emit generic CALLS edge to Route::verb
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=f"{scope}.{method}",
+            file_path=file_path,
+            line=node.start_point[0] + 1,
+        ))
+
+        # Try to extract [Controller::class, 'method'] from arguments
+        for child in node.children:
+            if child.type == "arguments":
+                self._extract_route_controller_target(
+                    child, file_path, edges, caller,
+                    node.start_point[0] + 1,
+                )
+                break
+
+    def _extract_route_controller_target(
+        self,
+        args_node,
+        file_path: str,
+        edges: list[EdgeInfo],
+        caller: str,
+        line: int,
+    ) -> None:
+        """Parse [Controller::class, 'method'] array in route arguments."""
+        for child in args_node.children:
+            if child.type == "argument":
+                for sub in child.children:
+                    if sub.type == "array_creation_expression":
+                        self._parse_route_array(
+                            sub, file_path, edges, caller, line,
+                        )
+
+    def _parse_route_array(
+        self, array_node, file_path, edges, caller, line,
+    ) -> None:
+        """Extract controller::class + 'method' from array literal."""
+        class_name = None
+        method_name = None
+        for child in array_node.children:
+            if child.type == "array_element_initializer":
+                for sub in child.children:
+                    if sub.type == "class_constant_access_expression":
+                        class_name = (
+                            self._php_class_from_class_access(sub)
+                            or class_name
+                        )
+                    if sub.type in ("string", "encapsed_string"):
+                        txt = sub.text.decode(
+                            "utf-8", errors="replace"
+                        ).strip("'\"")
+                        if txt:
+                            method_name = txt
+            # Also handle direct children (no array_element_initializer)
+            if child.type == "class_constant_access_expression":
+                class_name = (
+                    self._php_class_from_class_access(child)
+                    or class_name
+                )
+            if child.type in ("string", "encapsed_string"):
+                txt = child.text.decode(
+                    "utf-8", errors="replace"
+                ).strip("'\"")
+                if txt:
+                    method_name = txt
+
+        if class_name and method_name:
+            target = f"{class_name}.{method_name}"
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=caller,
+                target=target,
+                file_path=file_path,
+                line=line,
+            ))
+
+    def _extract_eloquent_relation(
+        self,
+        node,
+        source: bytes,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        method_name: str,
+    ) -> None:
+        """Extract REFERENCES edge from Eloquent relationship call."""
+        caller = self._qualify(
+            enclosing_func or enclosing_class, file_path,
+            enclosing_class if enclosing_func else None,
+        ) if (enclosing_func or enclosing_class) else file_path
+
+        # Emit generic CALLS edge for the relationship method
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=method_name,
+            file_path=file_path,
+            line=node.start_point[0] + 1,
+        ))
+
+        # Extract the target model from ::class argument
+        for child in node.children:
+            if child.type == "arguments":
+                for arg in child.children:
+                    if arg.type == "argument":
+                        for sub in arg.children:
+                            if sub.type == (
+                                "class_constant_access_expression"
+                            ):
+                                model = self._php_class_from_class_access(
+                                    sub,
+                                )
+                                if model:
+                                    edges.append(EdgeInfo(
+                                        kind="REFERENCES",
+                                        source=caller,
+                                        target=model,
+                                        file_path=file_path,
+                                        line=node.start_point[0] + 1,
+                                    ))
+                                    return
+
     def _extract_solidity_constructs(
         self,
         child,
@@ -3753,6 +4144,60 @@ class CodeParser:
             # ``dart:core`` / ``dart:async`` etc. are SDK libraries we do
             # not track; fall through to return None.
 
+        elif language == "java":
+            # ``import com.example.pkg.ClassName;`` — convert dot-notation
+            # to a relative path and walk up from the caller's directory to
+            # find the source root.  Wildcards (``import pkg.*``) and static
+            # member imports (``import static pkg.Class.member``) that don't
+            # resolve as-is are retried after dropping the last segment
+            # (the member name).
+            if module.endswith(".*"):
+                return None  # wildcard import — can't resolve to one file
+            rel_path = module.replace(".", "/") + ".java"
+            current = caller_dir
+            while True:
+                target = current / rel_path
+                if target.is_file():
+                    return str(target.resolve())
+                if current == current.parent:
+                    break
+                current = current.parent
+            # Static import: ``pkg.Class.member`` — strip member, try again
+            dot = module.rfind(".")
+            if dot > 0:
+                class_module = module[:dot]
+                rel_path2 = class_module.replace(".", "/") + ".java"
+                current = caller_dir
+                while True:
+                    target = current / rel_path2
+                    if target.is_file():
+                        return str(target.resolve())
+                    if current == current.parent:
+                        break
+                    current = current.parent
+
+        elif language == "php":
+            # PSR-4: resolve namespace to file via composer.json autoload.
+            # e.g. ``App\Models\User`` -> ``app/Models/User.php``
+            psr4 = self._find_php_composer_psr4(caller_dir)
+            if psr4:
+                for prefix, base_dir in psr4.items():
+                    ns_prefix = prefix.rstrip("\\")
+                    if module == ns_prefix or module.startswith(
+                        ns_prefix + "\\"
+                    ):
+                        relative = module[len(ns_prefix):].lstrip("\\")
+                        rel_path = relative.replace("\\", "/") + ".php"
+                        target = Path(base_dir) / rel_path
+                        try:
+                            if target.is_file():
+                                return str(target.resolve())
+                        except (OSError, ValueError) as exc:
+                            logger.debug(
+                                "PSR-4 resolve failed for %s -> %s: %s",
+                                module, target, exc,
+                            )
+
         return None
 
     def _find_dart_pubspec_root(
@@ -3784,6 +4229,56 @@ class CodeParser:
                 break
             current = current.parent
         self._dart_pubspec_cache[cache_key] = None
+        return None
+
+    def _find_php_composer_psr4(
+        self, start: Path,
+    ) -> Optional[dict[str, str]]:
+        """Walk up from *start* to find ``composer.json`` and parse its
+        ``autoload.psr-4`` (and ``autoload-dev.psr-4``) mappings.
+
+        Returns a dict mapping namespace prefix to absolute directory path,
+        or None if no composer.json is found.  Results are cached per
+        directory so repeated lookups are cheap.
+        """
+        cache_key = str(start)
+        if cache_key in self._php_composer_cache:
+            return self._php_composer_cache[cache_key]
+
+        current = start
+        for _ in range(20):
+            composer = current / "composer.json"
+            if composer.is_file():
+                try:
+                    data = json.loads(
+                        composer.read_text(encoding="utf-8", errors="replace")
+                    )
+                except (OSError, json.JSONDecodeError) as exc:
+                    logger.warning(
+                        "Failed to parse %s: %s", composer, exc,
+                    )
+                    self._php_composer_cache[cache_key] = None
+                    return None
+
+                mappings: dict[str, str] = {}
+                for section in ("autoload", "autoload-dev"):
+                    psr4 = data.get(section, {}).get("psr-4", {})
+                    for prefix, rel_dir in psr4.items():
+                        if isinstance(rel_dir, list):
+                            rel_dir = rel_dir[0] if rel_dir else ""
+                        if not isinstance(rel_dir, str):
+                            continue
+                        abs_dir = str((current / rel_dir).resolve())
+                        mappings[prefix] = abs_dir
+
+                self._php_composer_cache[cache_key] = mappings or None
+                return mappings or None
+
+            if current.parent == current:
+                break
+            current = current.parent
+
+        self._php_composer_cache[cache_key] = None
         return None
 
     def _resolve_call_target(
@@ -4182,6 +4677,69 @@ class CodeParser:
                                         ident.text.decode("utf-8", errors="replace")
                                     )
                                     break
+        elif language == "julia":
+            # Julia: struct Foo <: Bar / abstract type Foo <: Bar end
+            # AST: type_head > binary_expression with operator "<:" and
+            # identifier children; the identifier AFTER the operator is the
+            # supertype.
+            if node.type in ("struct_definition", "abstract_definition"):
+                for child in node.children:
+                    if child.type != "type_head":
+                        continue
+                    for sub in child.children:
+                        if sub.type != "binary_expression":
+                            continue
+                        has_subtype_op = False
+                        for op_child in sub.children:
+                            if (
+                                op_child.type == "operator"
+                                and op_child.text == b"<:"
+                            ):
+                                has_subtype_op = True
+                                break
+                        if not has_subtype_op:
+                            continue
+                        idents = [
+                            c for c in sub.children if c.type == "identifier"
+                        ]
+                        # First identifier is the type being defined; the
+                        # second (if present) is the supertype.
+                        if len(idents) >= 2:
+                            bases.append(
+                                idents[1].text.decode("utf-8", errors="replace"),
+                            )
+                        elif len(idents) == 1:
+                            # Could be `Parametric{T} <: Super` where the
+                            # first side is parametrized_type_expression.
+                            bases.append(
+                                idents[0].text.decode("utf-8", errors="replace"),
+                            )
+        elif language == "php":
+            # class Foo extends Bar implements Baz, Qux { ... }
+            # AST: base_clause contains [extends, name], class_interface_clause
+            # contains [implements, name, ...].  tree-sitter-php uses `name`
+            # (not `type_identifier`) for class/interface references.
+            for child in node.children:
+                if child.type == "base_clause":
+                    for sub in child.children:
+                        if sub.type == "name":
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
+                        elif sub.type == "qualified_name":
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
+                elif child.type == "class_interface_clause":
+                    for sub in child.children:
+                        if sub.type == "name":
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
+                        elif sub.type == "qualified_name":
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
         return bases
 
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:
@@ -4295,6 +4853,122 @@ class CodeParser:
             val = _find_string_literal(node)
             if val:
                 imports.append(val)
+        elif language == "julia":
+            # using/import statements. Children can be:
+            # - identifier (simple: `using Foo`)
+            # - import_path (dotted: `using Foo.Bar`)
+            # - selected_import (`using Foo: bar, baz` — first child is the
+            #   module as identifier/import_path, remaining identifiers after
+            #   the ':' are imported names to record as ``Module.name``)
+            def _import_path_text(n) -> str:
+                parts: list[str] = []
+                for sub in n.children:
+                    if sub.type == "identifier":
+                        parts.append(sub.text.decode("utf-8", errors="replace"))
+                return ".".join(parts)
+
+            for child in node.children:
+                if child.type == "identifier":
+                    imports.append(
+                        child.text.decode("utf-8", errors="replace"),
+                    )
+                elif child.type == "import_path":
+                    path = _import_path_text(child)
+                    if path:
+                        imports.append(path)
+                elif child.type == "selected_import":
+                    module_name: Optional[str] = None
+                    seen_colon = False
+                    for sub in child.children:
+                        if sub.type == ":":
+                            seen_colon = True
+                            continue
+                        if not seen_colon:
+                            if sub.type == "identifier":
+                                module_name = sub.text.decode(
+                                    "utf-8", errors="replace",
+                                )
+                            elif sub.type == "import_path":
+                                path = _import_path_text(sub)
+                                if path:
+                                    module_name = path
+                        else:
+                            if sub.type == "identifier" and module_name:
+                                imported = sub.text.decode(
+                                    "utf-8", errors="replace",
+                                )
+                                imports.append(f"{module_name}.{imported}")
+        elif language == "gdscript":
+            # ``extends Node`` → type > identifier("Node")
+            # ``extends "res://path.gd"`` → string literal
+            # ``extends SomeClass.Nested`` → type node (keep full text)
+            for child in node.children:
+                if child.type == "type":
+                    txt = child.text.decode("utf-8", errors="replace").strip()
+                    if txt:
+                        imports.append(txt)
+                elif child.type == "string":
+                    val = child.text.decode("utf-8", errors="replace").strip("'\"")
+                    if val:
+                        imports.append(val)
+                elif child.type == "identifier":
+                    # Fallback: some grammar variants expose the parent type as
+                    # a bare identifier next to the ``extends`` keyword.
+                    txt = child.text.decode("utf-8", errors="replace")
+                    if txt and txt != "extends":
+                        imports.append(txt)
+        elif language == "php":
+            # PHP namespace use declarations have three forms:
+            # 1. Simple: use App\Models\User;
+            #    AST: namespace_use_declaration > namespace_use_clause >
+            #         qualified_name
+            # 2. Grouped: use App\Models\{User, Post};
+            #    AST: namespace_use_declaration > namespace_name +
+            #         namespace_use_group > { namespace_use_clause* }
+            # 3. Alias: use App\Models\User as BaseUser;
+            #    AST: same as simple but with alias clause
+            prefix = ""
+            group_found = False
+            for child in node.children:
+                if child.type == "namespace_name":
+                    prefix = child.text.decode(
+                        "utf-8", errors="replace"
+                    ).rstrip("\\")
+                elif child.type == "namespace_use_group":
+                    group_found = True
+                    for sub in child.children:
+                        if sub.type == "namespace_use_clause":
+                            name = sub.children[0] if sub.children else None
+                            if name is not None and name.type in (
+                                "qualified_name", "name",
+                            ):
+                                val = name.text.decode(
+                                    "utf-8", errors="replace"
+                                )
+                                if prefix:
+                                    imports.append(f"{prefix}\\{val}")
+                                else:
+                                    imports.append(val)
+                elif child.type == "namespace_use_clause":
+                    qn = None
+                    for sub in child.children:
+                        if sub.type == "qualified_name":
+                            qn = sub.text.decode(
+                                "utf-8", errors="replace"
+                            )
+                            break
+                        if sub.type == "name":
+                            qn = sub.text.decode(
+                                "utf-8", errors="replace"
+                            )
+                            break
+                    if qn:
+                        imports.append(qn)
+            if not imports and not group_found:
+                # Last-resort fallback: strip `use` keyword and semicolons
+                cleaned = text.removeprefix("use").strip().rstrip(";").strip()
+                if cleaned:
+                    imports.append(cleaned)
         else:
             # Fallback: just record the text
             imports.append(text)
@@ -4352,6 +5026,43 @@ class CodeParser:
                 if child.type == "method":
                     return child.text.decode("utf-8", errors="replace")
             return None  # method child not found
+
+        # PHP-specific call handling: tree-sitter-php uses `name` as the
+        # node type for identifiers (not `identifier`), and each call
+        # expression type has a distinct child layout.
+        if language == "php":
+            if node.type == "scoped_call_expression":
+                # Class::method(args) — children: [name, ::, name, arguments]
+                # Use dot notation (Class.method) to match the graph's
+                # qualified name format (file.php::Class.method).
+                names = [c for c in node.children if c.type == "name"]
+                if len(names) >= 2:
+                    cls = names[0].text.decode("utf-8", errors="replace")
+                    method = names[1].text.decode("utf-8", errors="replace")
+                    return f"{cls}.{method}"
+                if names:
+                    return names[0].text.decode("utf-8", errors="replace")
+                return None
+            if node.type == "object_creation_expression":
+                # new ClassName(args) — children: [new, name, arguments]
+                for child in node.children:
+                    if child.type == "name":
+                        return child.text.decode("utf-8", errors="replace")
+                    if child.type == "qualified_name":
+                        return child.text.decode("utf-8", errors="replace")
+                return None
+            if node.type == "member_call_expression":
+                # $obj->method(args) — children: [variable_name, ->, name, arguments]
+                for child in reversed(node.children):
+                    if child.type == "name":
+                        return child.text.decode("utf-8", errors="replace")
+                return None
+            # function_call_expression: func(args) — children: [name, arguments]
+            if first.type == "name":
+                return first.text.decode("utf-8", errors="replace")
+            if first.type == "qualified_name":
+                return first.text.decode("utf-8", errors="replace")
+            return None
 
         # Simple call: func_name(args)
         # Kotlin uses "simple_identifier" instead of "identifier".
