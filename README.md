@@ -180,7 +180,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 
 - **Small single-file changes:** Graph context can exceed naive file reads for trivial edits (see express results above). The overhead is the structural metadata that enables multi-file analysis.
 - **Search quality (MRR 0.35):** Keyword search finds the right result in the top-4 for most queries, but ranking needs improvement. Express queries return 0 hits due to module-pattern naming.
-- **Flow detection (33% recall):** Only reliably detects entry points in Python repos (fastapi, httpx) where framework patterns are recognized. JavaScript and Go flow detection needs work.
+- **Flow detection (33% recall):** Reliably detects entry points in Python repos (fastapi, httpx) and PHP/Laravel (controllers, commands, middleware, migrations). JavaScript and Go flow detection needs work.
 - **Precision vs recall trade-off:** Impact analysis is deliberately conservative. It flags files that *might* be affected, which means some false positives in large dependency graphs.
 
 </details>
@@ -208,6 +208,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **Token benchmarking** | Measure naive full-corpus tokens vs graph query tokens with per-question ratios |
 | **Memory loop** | Persist Q&A results as markdown for re-ingestion, so the graph grows from queries |
 | **Community auto-split** | Oversized communities (>25% of graph) are recursively split via Leiden |
+| **Framework-aware parsing** | Laravel Route→Controller mapping, Eloquent relationship edges, Blade template references, PSR-4 namespace resolution. Python decorator detection for Flask/FastAPI/Django/Celery. |
 | **Execution flows** | Trace call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
 | **Architecture overview** | Auto-generated architecture map with coupling warnings |
