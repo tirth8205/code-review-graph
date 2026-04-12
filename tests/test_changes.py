@@ -294,6 +294,42 @@ class TestChanges:
         # helper should have flow participation bonus.
         assert helper_score >= isolated_score
 
+    def test_risk_score_weighted_by_flow_criticality(self):
+        """Nodes in high-criticality flows score higher than low-criticality."""
+        # Build two separate flows with different criticality
+        self._add_func("hi_entry", path="hi.py", line_start=1, line_end=5)
+        self._add_func("hi_func", path="hi.py", line_start=10, line_end=20)
+        self._add_call("hi.py::hi_entry", "hi.py::hi_func")
+
+        self._add_func("lo_entry", path="lo.py", line_start=1, line_end=5)
+        self._add_func("lo_func", path="lo.py", line_start=10, line_end=20)
+        self._add_call("lo.py::lo_entry", "lo.py::lo_func")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        # Manually set different criticality values
+        self.store._conn.execute(
+            "UPDATE flows SET criticality = 0.9 "
+            "WHERE name = 'hi_entry'"
+        )
+        self.store._conn.execute(
+            "UPDATE flows SET criticality = 0.1 "
+            "WHERE name = 'lo_entry'"
+        )
+        self.store.commit()
+
+        hi = self.store.get_node("hi.py::hi_func")
+        lo = self.store.get_node("lo.py::lo_func")
+        assert hi and lo
+
+        hi_score = compute_risk_score(self.store, hi)
+        lo_score = compute_risk_score(self.store, lo)
+        assert hi_score > lo_score, (
+            f"High-criticality flow node ({hi_score}) should score "
+            f"higher than low-criticality ({lo_score})"
+        )
+
     # ---------------------------------------------------------------
     # analyze_changes
     # ---------------------------------------------------------------
