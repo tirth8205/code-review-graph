@@ -172,7 +172,10 @@ def _should_ignore(path: str, patterns: list[str]) -> bool:
             prefix = p[:-3]
             # Support multi-segment prefixes like "bootstrap/cache"
             prefix_parts = prefix.split("/")
-            if len(parts) >= len(prefix_parts) and tuple(parts[: len(prefix_parts)]) == tuple(prefix_parts):
+            if (
+                len(parts) >= len(prefix_parts)
+                and parts[: len(prefix_parts)] == tuple(prefix_parts)
+            ):
                 return True
         # Plain glob (e.g. *.pyc, *.min.js)
         elif fnmatch.fnmatch(path, p):
