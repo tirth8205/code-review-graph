@@ -12,6 +12,15 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "code-review-graph build >/dev/null 2>&1 &"
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit|Bash",
         "hooks": [
           {
