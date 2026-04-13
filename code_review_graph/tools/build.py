@@ -72,6 +72,7 @@ def _run_postprocess(
     use_incremental = not full_rebuild and bool(changed_files)
 
     try:
+        logger.info("Detecting execution flows...")
         if use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
@@ -131,43 +132,72 @@ def _compute_summaries(store: Any) -> None:
     Each summary block (community_summaries, flow_snapshots, risk_index)
     is wrapped in an explicit transaction so the DELETE + INSERT sequence
     is atomic.  If a table doesn't exist yet the block is silently skipped.
+
+    Performance: uses bulk aggregate queries instead of per-row lookups
+    to avoid O(N) individual queries on large graphs. See: #189
     """
     import json as _json
+    from collections import defaultdict
 
     conn = store._conn
 
     # -- community_summaries --
     try:
+        logger.info("Computing community summaries...")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM community_summaries")
         rows = conn.execute(
             "SELECT id, name, size, dominant_language FROM communities"
         ).fetchall()
+
+        # Bulk: top 5 symbols per community by edge count.
+        # Uses a single query with window function instead of one query
+        # per community (avoids ~35K individual JOIN queries on large repos).
+        top_syms_by_community: dict[int, list[str]] = defaultdict(list)
+        try:
+            ranked = conn.execute(
+                "SELECT community_id, name FROM ("
+                "  SELECT n.community_id, n.name,"
+                "    ROW_NUMBER() OVER ("
+                "      PARTITION BY n.community_id "
+                "      ORDER BY ("
+                "        (SELECT COUNT(*) FROM edges e1"
+                "         WHERE e1.source_qualified = n.qualified_name)"
+                "        + (SELECT COUNT(*) FROM edges e2"
+                "           WHERE e2.target_qualified = n.qualified_name)"
+                "      ) DESC"
+                "    ) AS rn"
+                "  FROM nodes n WHERE n.kind != 'File' AND n.community_id IS NOT NULL"
+                ") WHERE rn <= 5"
+            ).fetchall()
+            for cid_val, sym_name in ranked:
+                top_syms_by_community[cid_val].append(sym_name)
+        except sqlite3.OperationalError:
+            # Fallback: window functions not available (very old SQLite)
+            pass
+
+        # Bulk: file paths per community for purpose detection
+        purpose_by_community: dict[int, str] = {}
+        path_rows = conn.execute(
+            "SELECT community_id, file_path FROM nodes "
+            "WHERE community_id IS NOT NULL "
+            "GROUP BY community_id, file_path"
+        ).fetchall()
+        paths_by_cid: dict[int, list[str]] = defaultdict(list)
+        for cid_val, fpath in path_rows:
+            paths_by_cid[cid_val].append(fpath)
+        from os.path import commonprefix
+        for cid_val, paths in paths_by_cid.items():
+            prefix = commonprefix(paths[:20])
+            if "/" in prefix:
+                purpose_by_community[cid_val] = (
+                    prefix.rsplit("/", 1)[0].split("/")[-1]
+                )
+
         for r in rows:
             cid, cname, csize, clang = r[0], r[1], r[2], r[3]
-            # Top 5 symbols by in+out edge count
-            top_symbols = conn.execute(
-                "SELECT n.name FROM nodes n "
-                "LEFT JOIN edges e1 ON e1.source_qualified = n.qualified_name "
-                "LEFT JOIN edges e2 ON e2.target_qualified = n.qualified_name "
-                "WHERE n.community_id = ? AND n.kind != 'File' "
-                "GROUP BY n.id ORDER BY COUNT(e1.id) + COUNT(e2.id) DESC "
-                "LIMIT 5",
-                (cid,),
-            ).fetchall()
-            key_syms = _json.dumps([s[0] for s in top_symbols])
-            # Auto-generate purpose from common file path prefix
-            file_rows = conn.execute(
-                "SELECT DISTINCT file_path FROM nodes WHERE community_id = ? LIMIT 20",
-                (cid,),
-            ).fetchall()
-            paths = [fr[0] for fr in file_rows]
-            purpose = ""
-            if paths:
-                from os.path import commonprefix
-                prefix = commonprefix(paths)
-                if "/" in prefix:
-                    purpose = prefix.rsplit("/", 1)[0].split("/")[-1] if "/" in prefix else ""
+            key_syms = _json.dumps(top_syms_by_community.get(cid, []))
+            purpose = purpose_by_community.get(cid, "")
             conn.execute(
                 "INSERT OR REPLACE INTO community_summaries "
                 "(community_id, name, purpose, key_symbols, size, dominant_language) "
@@ -175,49 +205,44 @@ def _compute_summaries(store: Any) -> None:
                 (cid, cname, purpose, key_syms, csize, clang or ""),
             )
         conn.commit()
+        logger.info("Community summaries complete: %d communities", len(rows))
     except sqlite3.OperationalError:
         conn.rollback()  # Table may not exist yet
 
     # -- flow_snapshots --
     try:
+        logger.info("Computing flow snapshots...")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM flow_snapshots")
         rows = conn.execute(
             "SELECT id, name, entry_point_id, criticality, node_count, "
             "file_count, path_json FROM flows"
         ).fetchall()
+
+        # Bulk: load all node id→name and id→qualified_name mappings
+        node_names: dict[int, str] = {}
+        node_qnames: dict[int, str] = {}
+        for nr in conn.execute("SELECT id, name, qualified_name FROM nodes").fetchall():
+            node_names[nr[0]] = nr[1]
+            node_qnames[nr[0]] = nr[2]
+
         for r in rows:
-            fid = r[0]
-            fname = r[1]
-            ep_id = r[2]
-            crit = r[3]
-            ncount = r[4]
-            fcount = r[5]
-            # Get entry point name
-            ep_row = conn.execute(
-                "SELECT qualified_name FROM nodes WHERE id = ?", (ep_id,),
-            ).fetchone()
-            ep_name = ep_row[0] if ep_row else str(ep_id)
-            # Compress path to entry + top 3 intermediate + exit
+            fid, fname, ep_id = r[0], r[1], r[2]
+            crit, ncount, fcount = r[3], r[4], r[5]
+            ep_name = node_qnames.get(ep_id, str(ep_id))
             path_ids = _json.loads(r[6]) if r[6] else []
             critical_path = []
             if path_ids:
                 critical_path.append(ep_name)
                 if len(path_ids) > 2:
-                    # Pick up to 3 intermediate nodes
                     for nid in path_ids[1:4]:
-                        nr = conn.execute(
-                            "SELECT name FROM nodes WHERE id = ?", (nid,),
-                        ).fetchone()
-                        if nr:
-                            critical_path.append(nr[0])
+                        n = node_names.get(nid)
+                        if n:
+                            critical_path.append(n)
                 if len(path_ids) > 1:
-                    last = conn.execute(
-                        "SELECT name FROM nodes WHERE id = ?",
-                        (path_ids[-1],),
-                    ).fetchone()
-                    if last and last[0] not in critical_path:
-                        critical_path.append(last[0])
+                    last = node_names.get(path_ids[-1])
+                    if last and last not in critical_path:
+                        critical_path.append(last)
             conn.execute(
                 "INSERT OR REPLACE INTO flow_snapshots "
                 "(flow_id, name, entry_point, critical_path, criticality, "
@@ -226,39 +251,52 @@ def _compute_summaries(store: Any) -> None:
                  crit, ncount, fcount),
             )
         conn.commit()
+        logger.info("Flow snapshots complete: %d flows", len(rows))
     except sqlite3.OperationalError:
         conn.rollback()
 
     # -- risk_index --
+    # Uses two bulk aggregate queries (caller counts + test coverage)
+    # instead of 2×N individual COUNT(*) queries per node. On a 333K-node
+    # graph this reduces ~666K queries to 2. See: #189
     try:
+        logger.info("Computing risk index...")
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM risk_index")
-        # Per-node risk: caller_count, test coverage, security keywords
+
         nodes = conn.execute(
             "SELECT id, qualified_name, name FROM nodes "
             "WHERE kind IN ('Function', 'Class', 'Test')"
         ).fetchall()
+
+        # Bulk: caller counts per qualified_name
+        caller_counts: dict[str, int] = {}
+        for row in conn.execute(
+            "SELECT target_qualified, COUNT(*) FROM edges "
+            "WHERE kind = 'CALLS' GROUP BY target_qualified"
+        ).fetchall():
+            caller_counts[row[0]] = row[1]
+
+        # Bulk: tested nodes (any TESTED_BY edge)
+        tested_set: set[str] = set()
+        for row in conn.execute(
+            "SELECT DISTINCT source_qualified FROM edges "
+            "WHERE kind = 'TESTED_BY'"
+        ).fetchall():
+            tested_set.add(row[0])
+
         security_kw = {
             "auth", "login", "password", "token", "session", "crypt",
             "secret", "credential", "permission", "sql", "execute",
         }
-        for n in nodes:
+
+        node_count = len(nodes)
+        for i, n in enumerate(nodes):
             nid, qn, name = n[0], n[1], n[2]
-            # Count callers
-            caller_count = conn.execute(
-                "SELECT COUNT(*) FROM edges WHERE target_qualified = ? "
-                "AND kind = 'CALLS'", (qn,),
-            ).fetchone()[0]
-            # Test coverage
-            tested = conn.execute(
-                "SELECT COUNT(*) FROM edges WHERE source_qualified = ? "
-                "AND kind = 'TESTED_BY'", (qn,),
-            ).fetchone()[0]
-            coverage = "tested" if tested > 0 else "untested"
-            # Security relevance
+            caller_count = caller_counts.get(qn, 0)
+            coverage = "tested" if qn in tested_set else "untested"
             name_lower = name.lower()
             sec_relevant = 1 if any(kw in name_lower for kw in security_kw) else 0
-            # Compute risk score
             risk = 0.0
             if caller_count > 10:
                 risk += 0.3
@@ -276,7 +314,10 @@ def _compute_summaries(store: Any) -> None:
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
                 (nid, qn, risk, caller_count, coverage, sec_relevant),
             )
+            if (i + 1) % 50000 == 0:
+                logger.info("Risk index progress: %d/%d nodes", i + 1, node_count)
         conn.commit()
+        logger.info("Risk index complete: %d nodes scored", node_count)
     except sqlite3.OperationalError:
         conn.rollback()
 
