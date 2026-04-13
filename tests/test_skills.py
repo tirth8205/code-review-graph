@@ -176,6 +176,7 @@ class TestInstallHooks:
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
         assert "PreCommit" not in data["hooks"]
+        assert "OtherHook" in data["hooks"]  # pre-existing hooks must not be clobbered
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)

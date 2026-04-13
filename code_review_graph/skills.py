@@ -502,7 +502,7 @@ def install_hooks(repo_root: Path) -> None:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
     hooks_config = generate_hooks_config()
-    existing.update(hooks_config)
+    existing.setdefault("hooks", {}).update(hooks_config["hooks"])
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)

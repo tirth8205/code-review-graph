@@ -2,10 +2,12 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh"
+            "command": "code-review-graph status",
+            "timeout": 10
           }
         ]
       }
@@ -16,7 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "code-review-graph update 2>/dev/null || true"
+            "command": "code-review-graph update --skip-flows",
+            "timeout": 30
           }
         ]
       }
