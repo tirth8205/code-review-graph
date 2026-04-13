@@ -3186,7 +3186,7 @@ class CodeParser:
         for child in node.children:
             if child.type in (
                 "identifier", "name", "type_identifier", "property_identifier",
-                "simple_identifier", "constant",
+                "simple_identifier", "constant", "field_identifier",
             ):
                 return child.text.decode("utf-8", errors="replace")
         # For Go type declarations, look for type_spec
