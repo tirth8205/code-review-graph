@@ -34,6 +34,7 @@ def _run_postprocess(
         return warnings
 
     # -- Signatures + FTS (fast, always run unless "none") --
+    t0 = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
         for row in rows:
@@ -54,6 +55,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
+    t_sig = time.perf_counter()
+    logger.info("Postprocess: signatures took %.2fs", t_sig - t0)
 
     try:
         from code_review_graph.search import rebuild_fts_index
@@ -64,6 +67,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("FTS index rebuild failed: %s", e)
         warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
+    t_fts = time.perf_counter()
+    logger.info("Postprocess: FTS rebuild took %.2fs", t_fts - t_sig)
 
     if postprocess == "minimal":
         return warnings
@@ -86,6 +91,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Flow detection failed: %s", e)
         warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
+    t_flows = time.perf_counter()
+    logger.info("Postprocess: flows took %.2fs", t_flows - t_fts)
 
     try:
         if use_incremental:
@@ -108,6 +115,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+    t_comm = time.perf_counter()
+    logger.info("Postprocess: communities took %.2fs", t_comm - t_flows)
 
     # -- Compute pre-computed summary tables --
     try:
@@ -116,6 +125,16 @@ def _run_postprocess(
     except (sqlite3.OperationalError, Exception) as e:
         logger.warning("Summary computation failed: %s", e)
         warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
+    t_sum = time.perf_counter()
+    logger.info("Postprocess: summaries took %.2fs", t_sum - t_comm)
+
+    build_result["postprocess_timing"] = {
+        "signatures_s": round(t_sig - t0, 2),
+        "fts_s": round(t_fts - t_sig, 2),
+        "flows_s": round(t_flows - t_fts, 2),
+        "communities_s": round(t_comm - t_flows, 2),
+        "summaries_s": round(t_sum - t_comm, 2),
+    }
 
     store.set_metadata(
         "last_postprocessed_at", time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -221,8 +240,9 @@ def _compute_summaries(store: Any) -> None:
                 (cid, cname, purpose, key_syms, csize, clang or ""),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()  # Table may not exist yet
+        logger.info("Skipping community_summaries (table may not exist): %s", e)
 
     # -- flow_snapshots --
     try:
@@ -289,8 +309,9 @@ def _compute_summaries(store: Any) -> None:
                  crit, ncount, fcount),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()
+        logger.info("Skipping flow_snapshots (table may not exist): %s", e)
 
     # -- risk_index --
     try:
@@ -351,8 +372,9 @@ def _compute_summaries(store: Any) -> None:
                 (nid, qn, risk, caller_count, coverage, sec_relevant),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()
+        logger.info("Skipping risk_index (table may not exist): %s", e)
 
 
 def build_or_update_graph(

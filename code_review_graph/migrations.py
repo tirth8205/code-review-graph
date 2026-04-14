@@ -204,16 +204,8 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v7(conn: sqlite3.Connection) -> None:
-    """v7: Add compound edge indexes for summary and risk queries."""
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_edges_target_kind "
-        "ON edges(target_qualified, kind)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_edges_source_kind "
-        "ON edges(source_qualified, kind)"
-    )
-    logger.info("Migration v7: added compound edge indexes")
+    """v7: Reserved (upstream PR #127). No-op for forward compatibility."""
+    logger.info("Migration v7: reserved (no-op)")
 
 
 def _migrate_v8(conn: sqlite3.Connection) -> None:

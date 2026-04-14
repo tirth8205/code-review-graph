@@ -198,14 +198,20 @@ def query_graph(
                 node = candidates[0]
                 target = node.qualified_name
             elif len(candidates) > 1:
-                return {
-                    "status": "ambiguous",
-                    "summary": (
-                        f"Multiple matches for '{target}'. "
-                        "Please use a qualified name."
-                    ),
-                    "candidates": [node_to_dict(c) for c in candidates],
-                }
+                # Prefer non-test nodes when exactly one production candidate
+                non_test = [c for c in candidates if not c.is_test]
+                if len(non_test) == 1:
+                    node = non_test[0]
+                    target = node.qualified_name
+                else:
+                    return {
+                        "status": "ambiguous",
+                        "summary": (
+                            f"Multiple matches for '{target}'. "
+                            "Please use a qualified name."
+                        ),
+                        "candidates": [node_to_dict(c) for c in candidates],
+                    }
 
         if not node and pattern != "file_summary":
             return {
@@ -216,10 +222,12 @@ def query_graph(
         qn = node.qualified_name if node else target
 
         if pattern == "callers_of":
+            seen_qn: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind == "CALLS":
                     caller = store.get_node(e.source_qualified)
-                    if caller:
+                    if caller and caller.qualified_name not in seen_qn:
+                        seen_qn.add(caller.qualified_name)
                         results.append(node_to_dict(caller))
                     edges_out.append(edge_to_dict(e))
             # Fallback: CALLS edges store unqualified target names
@@ -228,15 +236,18 @@ def query_graph(
             if not results and node:
                 for e in store.search_edges_by_target_name(node.name):
                     caller = store.get_node(e.source_qualified)
-                    if caller:
+                    if caller and caller.qualified_name not in seen_qn:
+                        seen_qn.add(caller.qualified_name)
                         results.append(node_to_dict(caller))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
+            seen_callee: set[str] = set()
             for e in store.get_edges_by_source(qn):
                 if e.kind == "CALLS":
                     callee = store.get_node(e.target_qualified)
-                    if callee:
+                    if callee and callee.qualified_name not in seen_callee:
+                        seen_callee.add(callee.qualified_name)
                         results.append(node_to_dict(callee))
                     edges_out.append(edge_to_dict(e))
 
@@ -270,25 +281,27 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
-            for e in store.get_edges_by_target(qn):
-                if e.kind == "TESTED_BY":
-                    test = store.get_node(e.source_qualified)
-                    if test:
-                        results.append(node_to_dict(test))
+            # Use transitive lookup: direct TESTED_BY + 1-hop CALLS->TESTED_BY
+            transitive = store.get_transitive_tests(qn)
+            seen = {r["qualified_name"] for r in transitive}
+            for r in transitive:
+                results.append(r)
             # Also search by naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)
             test_nodes += store.search_nodes(f"Test{name}", limit=10)
-            seen = {r.get("qualified_name") for r in results}
             for t in test_nodes:
                 if t.qualified_name not in seen and t.is_test:
                     results.append(node_to_dict(t))
+                    seen.add(t.qualified_name)
 
         elif pattern == "inheritors_of":
+            seen_inheritor: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind in ("INHERITS", "IMPLEMENTS"):
                     child = store.get_node(e.source_qualified)
-                    if child:
+                    if child and child.qualified_name not in seen_inheritor:
+                        seen_inheritor.add(child.qualified_name)
                         results.append(node_to_dict(child))
                     edges_out.append(edge_to_dict(e))
             # Fallback: INHERITS/IMPLEMENTS edges store unqualified base names

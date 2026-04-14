@@ -422,9 +422,18 @@ def generate_hooks_config() -> dict[str, Any]:
 
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
-    Claude Code event — pre-commit checks are handled by ``install_git_hook``.
+    Claude Code event -- pre-commit checks are handled by ``install_git_hook``.
+
+    Returns a settings dict with permissions (auto-allow MCP tools) and
+    hooks (PostToolUse, SessionStart, PreToolUse) for automatic graph
+    updates and search enrichment.
     """
     return {
+        "permissions": {
+            "allow": [
+                "mcp__code-review-graph__*",
+            ],
+        },
         "hooks": {
             "PostToolUse": [
                 {
@@ -446,6 +455,29 @@ def generate_hooks_config() -> dict[str, Any]:
                             "type": "command",
                             "command": "code-review-graph status",
                             "timeout": 10,
+                        },
+                    ],
+                },
+            ],
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "if": "Bash(git commit*)",
+                            "command": "code-review-graph detect-changes --brief",
+                            "timeout": 10,
+                        },
+                    ],
+                },
+                {
+                    "matcher": "Grep|Glob|Bash|Read",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "code-review-graph enrich",
+                            "timeout": 5,
                         },
                     ],
                 },
@@ -493,10 +525,10 @@ fi
 
 
 def install_hooks(repo_root: Path) -> None:
-    """Write hooks config to .claude/settings.json.
+    """Write hooks and permissions config to .claude/settings.json.
 
-    Merges with existing settings if present, preserving non-hook
-    configuration.
+    Merges with existing settings, preserving user's own permission
+    rules and non-hook configuration.
 
     Args:
         repo_root: Repository root directory.
@@ -512,11 +544,21 @@ def install_hooks(repo_root: Path) -> None:
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
-    hooks_config = generate_hooks_config()
-    existing.update(hooks_config)
+    config = generate_hooks_config()
+
+    # Deep-merge permissions.allow (don't clobber user's existing rules)
+    if "permissions" in config:
+        existing_perms = existing.setdefault("permissions", {})
+        existing_allow = existing_perms.setdefault("allow", [])
+        for rule in config["permissions"]["allow"]:
+            if rule not in existing_allow:
+                existing_allow.append(rule)
+        del config["permissions"]
+
+    existing.update(config)
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
-    logger.info("Wrote hooks config: %s", settings_path)
+    logger.info("Wrote settings config: %s", settings_path)
 
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
@@ -524,41 +566,44 @@ _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
 _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 ## MCP Tools: code-review-graph
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
-the codebase.** The graph is faster, cheaper (fewer tokens), and gives
-you structural context (callers, dependents, test coverage) that file
-scanning cannot.
+This project has a structural knowledge graph that auto-updates on file changes.
+Routine Grep/Glob/Read results are automatically enriched with callers, callees,
+flows, and test coverage (via hooks -- no action needed).
 
-### When to use graph tools FIRST
-
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
-
-Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
-
-### Key Tools
+Use these tools for **deep analysis** that enrichment doesn't cover:
 
 | Tool | Use when |
 |------|----------|
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
+| `detect_changes` | Reviewing code changes -- risk-scored analysis |
+| `get_review_context` | Token-efficient source snippets for review |
 | `get_impact_radius` | Understanding blast radius of a change |
 | `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `get_architecture_overview` | High-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+"""
+
+_PLATFORM_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
+
+_PLATFORM_SECTION = f"""{_PLATFORM_SECTION_MARKER}
+## MCP Tools: code-review-graph
+
+This project has a structural knowledge graph. Prefer these MCP tools over
+Grep/Glob/Read for code exploration -- they give you structural context
+(callers, dependents, test coverage) that file scanning cannot.
+
+| Tool | Use when |
+|------|----------|
 | `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `detect_changes` | Reviewing code changes -- risk-scored analysis |
+| `get_review_context` | Token-efficient source snippets for review |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `get_architecture_overview` | High-level codebase structure |
 | `refactor_tool` | Planning renames, finding dead code |
 
-### Workflow
-
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+The graph auto-updates. Use `detect_changes` for code review,
+`get_affected_flows` for impact, `query_graph` pattern="tests_for" for coverage.
 """
 
 
@@ -611,7 +656,8 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     """Inject 'use graph first' instructions into platform rule files.
 
     Writes AGENTS.md, GEMINI.md, .cursorrules, and/or .windsurfrules
-    depending on ``target``:
+    depending on ``target``.  Uses stronger instructions since these
+    platforms lack PreToolUse hooks for passive enrichment.
 
     - ``"all"`` (default): writes every file — matches pre-filter behavior.
     - ``"claude"``: writes nothing (CLAUDE.md is handled by ``inject_claude_md``).
@@ -625,6 +671,6 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
         if target != "all" and target not in owners:
             continue
         path = repo_root / filename
-        if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
+        if _inject_instructions(path, _PLATFORM_SECTION_MARKER, _PLATFORM_SECTION):
             updated.append(filename)
     return updated

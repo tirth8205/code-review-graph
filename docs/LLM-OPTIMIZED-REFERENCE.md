@@ -27,7 +27,7 @@ Never include full files unless explicitly asked.
 MCP tools (24): get_minimal_context_tool, build_or_update_graph_tool, run_postprocess_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool, find_large_functions_tool, list_flows_tool, get_flow_tool, get_affected_flows_tool, list_communities_tool, get_community_tool, get_architecture_overview_tool, detect_changes_tool, refactor_tool, apply_refactor_tool, generate_wiki_tool, get_wiki_page_tool, list_repos_tool, cross_repo_search_tool
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check
 Skills: build-graph, review-delta, review-pr
-CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|postprocess|register|unregister|repos|eval]
+CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|enrich|postprocess|register|unregister|repos|eval]
 Token efficiency: All tools support detail_level="minimal" for compact output. Always call get_minimal_context_tool first.
 </section>
 

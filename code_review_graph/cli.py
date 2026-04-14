@@ -11,6 +11,7 @@ Usage:
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
+    code-review-graph enrich
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -250,6 +251,67 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
+def _run_post_processing(store, quiet: bool = False) -> None:
+    """Run signatures, FTS, flows, and communities after build/update."""
+    import sqlite3
+
+    # Signatures
+    try:
+        nodes = store._conn.execute(
+            "SELECT id, name, kind, params, return_type FROM nodes "
+            "WHERE kind IN ('Function','Test','Class')"
+        ).fetchall()
+        for row in nodes:
+            node_id, name, kind, params, ret = row
+            if kind in ("Function", "Test"):
+                sig = f"{name}({params or ''})"
+                if ret:
+                    sig += f" -> {ret}"
+            elif kind == "Class":
+                sig = f"class {name}"
+            else:
+                sig = name
+            store.update_node_signature(node_id, sig[:512])
+        store.commit()
+    except (sqlite3.OperationalError, TypeError, KeyError) as e:
+        if not quiet:
+            print(f"Warning: signature computation failed: {e}")
+
+    # FTS index
+    try:
+        from .search import rebuild_fts_index
+        fts_count = rebuild_fts_index(store)
+        if not quiet:
+            print(f"FTS indexed: {fts_count} nodes")
+    except (sqlite3.OperationalError, ImportError) as e:
+        if not quiet:
+            print(f"Warning: FTS index rebuild failed: {e}")
+
+    # Flows
+    try:
+        from .flows import store_flows as _store_flows
+        from .flows import trace_flows as _trace_flows
+        flows = _trace_flows(store)
+        count = _store_flows(store, flows)
+        if not quiet:
+            print(f"Flows detected: {count}")
+    except (sqlite3.OperationalError, ImportError) as e:
+        if not quiet:
+            print(f"Warning: flow detection failed: {e}")
+
+    # Communities
+    try:
+        from .communities import detect_communities as _detect_communities
+        from .communities import store_communities as _store_communities
+        comms = _detect_communities(store)
+        count = _store_communities(store, comms)
+        if not quiet:
+            print(f"Communities detected: {count}")
+    except (sqlite3.OperationalError, ImportError) as e:
+        if not quiet:
+            print(f"Warning: community detection failed: {e}")
+
+
 def main() -> None:
     """Main CLI entry point."""
     ap = argparse.ArgumentParser(
@@ -342,6 +404,7 @@ def main() -> None:
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    build_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     build_cmd.add_argument(
         "--skip-flows", action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
@@ -355,6 +418,7 @@ def main() -> None:
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
     update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    update_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     update_cmd.add_argument(
         "--skip-flows", action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
@@ -381,6 +445,11 @@ def main() -> None:
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    status_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    status_cmd.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output as JSON",
+    )
 
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
@@ -448,6 +517,13 @@ def main() -> None:
     )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
+    # embed
+    embed_cmd = sub.add_parser("embed", help="Compute vector embeddings for graph nodes")
+    embed_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
+    # enrich (PreToolUse hook -- reads hook JSON from stdin)
+    sub.add_parser("enrich", help="Enrich search results with graph context (hook)")
+
     # serve
     serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -465,6 +541,28 @@ def main() -> None:
     if args.command == "serve":
         from .main import main as serve_main
         serve_main(repo_root=args.repo)
+        return
+
+    if args.command == "embed":
+        from .incremental import find_repo_root
+        repo_root = Path(args.repo) if args.repo else find_repo_root()
+        if not repo_root:
+            repo_root = Path.cwd()
+        db_path = repo_root / ".code-review-graph" / "graph.db"
+        if not db_path.exists():
+            print("No graph database found. Run 'code-review-graph build' first.")
+            return
+        from .embeddings import EmbeddingStore, embed_all_nodes
+        from .graph import GraphStore
+        store = GraphStore(str(db_path))
+        emb_store = EmbeddingStore(str(db_path))
+        count = embed_all_nodes(store, emb_store)
+        print(f"Embedded {count} nodes.")
+        return
+
+    if args.command == "enrich":
+        from .enrich import run_hook
+        run_hook()
         return
 
     if args.command == "eval":
@@ -606,13 +704,14 @@ def main() -> None:
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Full build: {parsed} files, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
-            if result.get("errors"):
-                print(f"Errors: {len(result['errors'])}")
+            if not getattr(args, "quiet", False):
+                print(
+                    f"Full build: {parsed} files, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+                if result.get("errors"):
+                    print(f"Errors: {len(result['errors'])}")
 
         elif args.command == "update":
             pp = "none" if getattr(args, "skip_postprocess", False) else (
@@ -626,34 +725,52 @@ def main() -> None:
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Incremental: {updated} files updated, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
+            if not getattr(args, "quiet", False):
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
 
         elif args.command == "status":
+            import json as json_mod
             stats = store.get_stats()
-            print(f"Nodes: {stats.total_nodes}")
-            print(f"Edges: {stats.total_edges}")
-            print(f"Files: {stats.files_count}")
-            print(f"Languages: {', '.join(stats.languages)}")
-            print(f"Last updated: {stats.last_updated or 'never'}")
-            # Show branch info and warn if stale
             stored_branch = store.get_metadata("git_branch")
             stored_sha = store.get_metadata("git_head_sha")
-            if stored_branch:
-                print(f"Built on branch: {stored_branch}")
-            if stored_sha:
-                print(f"Built at commit: {stored_sha[:12]}")
             from .incremental import _git_branch_info
             current_branch, current_sha = _git_branch_info(repo_root)
+            stale_warning = None
             if stored_branch and current_branch and stored_branch != current_branch:
-                print(
-                    f"WARNING: Graph was built on '{stored_branch}' "
+                stale_warning = (
+                    f"Graph was built on '{stored_branch}' "
                     f"but you are now on '{current_branch}'. "
                     f"Run 'code-review-graph build' to rebuild."
                 )
+
+            if getattr(args, "json_output", False):
+                data = {
+                    "nodes": stats.total_nodes,
+                    "edges": stats.total_edges,
+                    "files": stats.files_count,
+                    "languages": list(stats.languages),
+                    "last_updated": stats.last_updated,
+                    "branch": stored_branch,
+                    "commit": stored_sha[:12] if stored_sha else None,
+                    "stale": stale_warning,
+                }
+                print(json_mod.dumps(data))
+            elif not args.quiet:
+                print(f"Nodes: {stats.total_nodes}")
+                print(f"Edges: {stats.total_edges}")
+                print(f"Files: {stats.files_count}")
+                print(f"Languages: {', '.join(stats.languages)}")
+                print(f"Last updated: {stats.last_updated or 'never'}")
+                if stored_branch:
+                    print(f"Built on branch: {stored_branch}")
+                if stored_sha:
+                    print(f"Built at commit: {stored_sha[:12]}")
+                if stale_warning:
+                    print(f"WARNING: {stale_warning}")
 
         elif args.command == "watch":
             watch(repo_root, store)

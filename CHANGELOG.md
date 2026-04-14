@@ -2,46 +2,6 @@
 
 ## [Unreleased]
 
-## [2.3.2] - 2026-04-14
-
-Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP tools, 4 new languages, multi-format export, and graph analysis suite.
-
-### Added
-
-- **Hub node detection** (`get_hub_nodes_tool`): find the most-connected nodes in the codebase (architectural hotspots) by in+out degree, excluding File nodes.
-- **Bridge node detection** (`get_bridge_nodes_tool`): find architectural chokepoints via betweenness centrality with sampling approximation for graphs >5000 nodes.
-- **Knowledge gap analysis** (`get_knowledge_gaps_tool`): identify structural weaknesses — isolated nodes, thin communities (<3 members), untested hotspots, and single-file communities.
-- **Surprise scoring** (`get_surprising_connections_tool`): composite scoring for unexpected architectural coupling (cross-community, cross-language, peripheral-to-hub, cross-test-boundary).
-- **Suggested questions** (`get_suggested_questions_tool`): auto-generate prioritized review questions from graph analysis (bridge nodes, untested hubs, surprising connections, thin communities).
-- **BFS/DFS traversal** (`traverse_graph_tool`): free-form graph exploration from any node with configurable depth (1-6) and token budget.
-- **Edge confidence scoring**: three-tier system (EXTRACTED/INFERRED/AMBIGUOUS) with float confidence scores on all edges. Schema migration v9.
-- **Export formats**: GraphML (Gephi/yEd/Cytoscape), Neo4j Cypher statements, Obsidian vault (wikilinks + YAML frontmatter + community pages), SVG static graph. CLI: `visualize --format graphml|cypher|obsidian|svg`.
-- **Graph diff**: snapshot/compare graph state over time — new/removed nodes, edges, community membership changes.
-- **Token reduction benchmark**: measure naive full-corpus tokens vs graph query tokens with per-question reduction ratios.
-- **Memory/feedback loop**: persist Q&A results as markdown for re-ingestion via `save_result` / `list_memories` / `clear_memories`.
-- **Oversized community auto-splitting**: communities exceeding 25% of graph are recursively split via Leiden algorithm.
-- **4 new languages**: Zig, PowerShell, Julia, Svelte SFC (23 total).
-- **Visualization enhancements**: node size scaled by degree, community legend with toggle visibility, improved interactivity.
-- **README translations**: Simplified Chinese, Japanese, Korean, Hindi.
-
-### Merged community PRs
-
-- **#127** (xtfer): SQLite compound edge indexes for query performance.
-- **#184** (realkotob): batch `_compute_summaries` — fixes build hangs on large repos.
-- **#202** (lngyeen): Swift extension detection, inheritance edges, type kind metadata.
-- **#249** (gzenz): community detection resolution scaling (21x speedup), expanded framework patterns, framework-aware dead code detection (56 new tests).
-- **#253** (cwoolum): automatic graph build for new worktrees in Claude Code.
-- **#267** (jindalarpit): Kiro platform support with 9 tests.
-
-### Changed
-
-- MCP tool count: 22 → 28.
-- Schema version: 8 → 9 (edge confidence columns).
-- Community detection uses resolution scaling for large graphs.
-- Risk scoring uses weighted flow criticality and graduated test coverage.
-- Dead code detection is framework-aware (ORM models, Pydantic, CDK constructs filtered).
-- Flow entry points expanded with 30+ framework decorator patterns.
-
 ## [2.3.1] - 2026-04-11
 
 Hotfix for the Windows long-running-MCP-tool hang that v2.2.4 only partially fixed.
@@ -150,14 +110,50 @@ Hotfix on top of 2.2.3 for two bugs surfaced by a full first-time-user smoke tes
 
 ### Added
 - **Codex platform install support** (PR #177): `code-review-graph install --platform codex` appends a `mcp_servers.code-review-graph` section to `~/.codex/config.toml` without overwriting existing Codex settings.
-- **Luau language support** (PR #165, closes #153): Roblox Luau (`.luau`) parsing — functions, classes, local functions, requires, tests.
+- **Luau language support** (PR #165, closes #153): Roblox Luau (`.luau`) parsing -- functions, classes, local functions, requires, tests.
 - **REFERENCES edge type** (PR #217): New edge kind for symbol references that aren't direct calls (map/dispatch lookups, string-keyed handlers), including Python and TypeScript patterns.
 - **`recurse_submodules` build option** (PR #215): Build/update can now optionally recurse into git submodules.
 - **`.gitignore` default for `.code-review-graph/`** (PR #185): Fresh installs automatically add the SQLite DB directory to `.gitignore` so the database isn't accidentally committed.
 - **Clearer gitignore docs** (PR #171, closes #157): Documentation now spells out that `code-review-graph` already respects `.gitignore` via `git ls-files`.
+- **Parser refactoring**: Extracted 16 per-language handler modules into `code_review_graph/lang/` package using a strategy pattern, replacing monolithic conditionals in `parser.py`
+- **Jedi-based call resolution**: New `jedi_resolver.py` module resolves Python method calls at build time via Jedi static analysis, with pre-scan filtering by project function names (36s to 3s on large repos)
+- **PreToolUse search enrichment**: New `enrich.py` module and `code-review-graph enrich` CLI command inject graph context (callers, callees, flows, community, tests) into agent search results passively
+- **Typed variable call enrichment**: Track constructor-based type inference and instance method calls for Python, JS/TS, and Kotlin/Java
+- **Star import resolution**: Resolve `from module import *` by scanning target module's exported names
+- **Namespace imports**: Track `import * as X from 'module'` and CommonJS `require()` patterns
+- **Angular template parsing**: Extract call targets from Angular component templates
+- **JSX handler tracking**: Detect function/class references passed as JSX event handler props
+- **Framework decorator recognition**: Identify entry points decorated with `@app.route`, `@router.get`, `@cli.command`, etc., reducing dead code false positives
+- **Module-level import tracking**: Track module-qualified call resolution (`module.function()`)
+- **Thread safety**: Double-check locking on parser caches (`_type_sets`, `_get_parser`, `_resolve_module_to_file`, `_get_exported_names`)
+- **Batch file storage**: `store_file_batch()` groups file insertions into 50-file transactions for faster builds
+- **Bulk node loading**: `get_all_nodes()` replaces per-file SQL queries for community detection
+- **Adjacency-indexed cohesion**: Community cohesion computed in O(community-edges) instead of O(all-edges), yielding 21x speedup (48.6s to 2.3s on 41k-node repos)
+- **Phase timing instrumentation**: `time.perf_counter()` timing at INFO level for all build phases
+- **Batch risk_index**: 2 GROUP BY queries replace per-node COUNT loops in risk scoring
+- **Weighted flow risk scoring**: Risk scores weighted by flow criticality instead of flat edge counts
+- **Transitive TESTED_BY lookup**: `tests_for` and risk scoring follow transitive test relationships
+- **DB schema v8**: Composite edge index for upsert performance (v7 reserved by upstream PR #127)
+- **`--quiet` and `--json` CLI flags**: Machine-readable output for `build`, `update`, `status`
+- **829+ tests** across 26 test files (up from 615), including `test_pain_points.py` (1,587 lines TDD suite), `test_hardened.py` (467 lines), `test_enrich.py` (237 lines)
+- **14 new test fixtures**: Kotlin, Java, TypeScript, JSX, Python resolution scenarios
 
 ### Changed
-- Community detection is now bounded — large repos complete in reasonable time instead of hanging indefinitely.
+- Community detection is now bounded -- large repos complete in reasonable time instead of hanging indefinitely.
+- New `[enrichment]` optional dependency group for Jedi-based Python call resolution
+- Leiden community detection scales resolution parameter with graph size
+- Adaptive directory-based fallback for community detection when Leiden produces poor clusters
+- Search query deduplication and test function deprioritization
+
+### Fixed
+- **Dead code false positives**: Decorators, CDK construct methods, abstract overrides, and overriding methods with called parents no longer flagged as dead
+- **E2e test exclusion**: Playwright/Cypress e2e test directories excluded from dead code detection
+- **Unique-name plausible caller optimization**: Faster dead code analysis via pre-filtered candidate sets
+- **Store cache liveness check**: Cached SQLite connections verified as alive before reuse
+
+### Performance
+- **Community detection**: 48.6s to 2.3s (21x) on Gadgetbridge (41k nodes, 280k edges)
+- **Jedi enrichment**: 36s to 3s (12x) via pre-scan filtering by project function names
 
 ## [2.2.2] - 2026-04-08
 
