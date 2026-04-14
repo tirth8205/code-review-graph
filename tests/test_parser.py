@@ -902,3 +902,102 @@ class TestValueReferences:
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
+
+
+class TestShebangLanguageDetection:
+    """Shebang-based detection for extension-less scripts (closes #237)."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _write(self, tmp_dir: str, name: str, content: bytes) -> Path:
+        path = Path(tmp_dir) / name
+        path.write_bytes(content)
+        return path
+
+    def test_direct_shebang_bash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "deploy", b"#!/bin/bash\necho hi\n")
+            assert self.parser.detect_language(p) == "bash"
+
+    def test_env_form_shebang_python(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "bin_myapp", b"#!/usr/bin/env python3\nprint('x')\n")
+            assert self.parser.detect_language(p) == "python"
+
+    def test_env_form_shebang_node(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "bootstrap", b"#!/usr/bin/env node\nconsole.log(1);\n")
+            assert self.parser.detect_language(p) == "javascript"
+
+    def test_shebang_with_trailing_flags(self):
+        """`#!/bin/bash -euo pipefail` should still resolve to bash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "installer", b"#!/bin/bash -euo pipefail\necho ok\n")
+            assert self.parser.detect_language(p) == "bash"
+
+    def test_mapped_interpreters_route_correctly(self):
+        cases = [
+            (b"#!/bin/sh\n", "bash"),
+            (b"#!/bin/zsh\n", "bash"),
+            (b"#!/bin/ksh\n", "bash"),
+            (b"#!/bin/dash\n", "bash"),
+            (b"#!/usr/bin/env ash\n", "bash"),
+            (b"#!/usr/bin/env python\n", "python"),
+            (b"#!/usr/bin/env python2\n", "python"),
+            (b"#!/usr/bin/env pypy3\n", "python"),
+            (b"#!/usr/bin/env nodejs\n", "javascript"),
+            (b"#!/usr/bin/env ruby\n", "ruby"),
+            (b"#!/usr/bin/perl\n", "perl"),
+            (b"#!/usr/bin/env lua\n", "lua"),
+            (b"#!/usr/bin/env Rscript\n", "r"),
+            (b"#!/usr/bin/env php\n", "php"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, (content, expected) in enumerate(cases):
+                p = self._write(tmp, f"script_{i}", content)
+                assert self.parser.detect_language(p) == expected, (
+                    f"{content!r} -> expected {expected}"
+                )
+
+    def test_missing_shebang_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "plain", b"just some text\nno shebang here\n")
+            assert self.parser.detect_language(p) is None
+
+    def test_unknown_interpreter_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "mystery", b"#!/usr/bin/env fortran\n")
+            assert self.parser.detect_language(p) is None
+
+    def test_binary_content_returns_none(self):
+        """Binary files that happen to start with 0x23 0x21 must not crash."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "bin", b"#!\xff\xfe\x00\x01\x02binary-payload")
+            assert self.parser.detect_language(p) is None
+
+    def test_empty_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "empty", b"")
+            assert self.parser.detect_language(p) is None
+
+    def test_missing_file_returns_none(self):
+        """Non-existent paths must not raise."""
+        assert self.parser.detect_language(Path("/does/not/exist/script")) is None
+
+    def test_extension_wins_over_shebang(self):
+        """.py with a bash shebang stays Python — shebang is a fallback only."""
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, "weird.py", b"#!/bin/bash\nprint('x')\n")
+            assert self.parser.detect_language(p) == "python"
+
+    def test_parse_file_on_shebang_only_script(self):
+        """End-to-end: an extension-less bash script should produce function nodes
+        via the existing bash parser (#237)."""
+        nodes, _edges = self.parser.parse_file(FIXTURES / "shebang_bash_script")
+        assert nodes, "expected at least one node from shebang_bash_script"
+        for n in nodes:
+            assert n.language == "bash"
+        func_names = {n.name for n in nodes if n.kind == "Function"}
+        assert "log_info" in func_names
+        assert "deploy" in func_names

@@ -1,0 +1,13 @@
+#!/bin/bash
+# Extension-less script — routed to bash via shebang detection (#237).
+
+log_info() {
+    echo "[info] $1"
+}
+
+deploy() {
+    log_info "starting"
+    log_info "done"
+}
+
+deploy

@@ -113,6 +113,29 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".ipynb": "notebook",
 }
 
+# Shebang interpreter basename -> registered language. Used as a fallback for
+# extension-less scripts (see _detect_language_from_shebang, closes #237).
+_SHEBANG_INTERPRETER_TO_LANGUAGE: dict[str, str] = {
+    "bash": "bash",
+    "sh": "bash",
+    "zsh": "bash",
+    "ksh": "bash",
+    "dash": "bash",
+    "ash": "bash",
+    "python": "python",
+    "python2": "python",
+    "python3": "python",
+    "pypy": "python",
+    "pypy3": "python",
+    "node": "javascript",
+    "nodejs": "javascript",
+    "ruby": "ruby",
+    "perl": "perl",
+    "lua": "lua",
+    "Rscript": "r",
+    "php": "php",
+}
+
 # Tree-sitter node type mappings per language
 # Maps (language) -> dict of semantic role -> list of TS node types
 _CLASS_TYPES: dict[str, list[str]] = {
@@ -359,7 +382,44 @@ class CodeParser:
         return self._parsers[language]
 
     def detect_language(self, path: Path) -> Optional[str]:
-        return EXTENSION_TO_LANGUAGE.get(path.suffix.lower())
+        lang = EXTENSION_TO_LANGUAGE.get(path.suffix.lower())
+        if lang is not None:
+            return lang
+        if path.suffix == "":
+            return self._detect_language_from_shebang(path)
+        return None
+
+    def _detect_language_from_shebang(self, path: Path) -> Optional[str]:
+        """Map the shebang interpreter of an extension-less script to a
+        registered language. Reads at most 256 bytes. Returns None for
+        missing, unreadable, binary, or unknown shebangs (closes #237).
+        """
+        try:
+            with path.open("rb") as f:
+                head = f.read(256)
+        except (OSError, PermissionError):
+            return None
+        if not head.startswith(b"#!"):
+            return None
+        newline = head.find(b"\n")
+        raw = head[2:newline] if newline != -1 else head[2:]
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            return None
+        parts = line.split()
+        if not parts:
+            return None
+        first = parts[0]
+        first_name = first.rsplit("/", 1)[-1]
+        if first_name == "env":
+            # "#!/usr/bin/env python3" — interpreter is the next token.
+            interpreter = parts[1] if len(parts) >= 2 else None
+        else:
+            interpreter = first_name
+        if not interpreter:
+            return None
+        return _SHEBANG_INTERPRETER_TO_LANGUAGE.get(interpreter)
 
     def parse_file(self, path: Path) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse a single file and return extracted nodes and edges."""
