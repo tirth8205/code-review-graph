@@ -1038,6 +1038,7 @@ class TestBashParsing:
         assert self.parser.detect_language(Path("build.sh")) == "bash"
         assert self.parser.detect_language(Path("build.bash")) == "bash"
         assert self.parser.detect_language(Path("run.zsh")) == "bash"
+        assert self.parser.detect_language(Path("deploy.ksh")) == "bash"
 
     def test_nodes_have_bash_language(self):
         for n in self.nodes:
@@ -1091,6 +1092,20 @@ class TestBashParsing:
         assert any(t.endswith("::log_info") for t in call_targets)
         assert any(t.endswith("::ensure_dir") for t in call_targets)
         assert any(t.endswith("::cleanup") for t in call_targets)
+
+    def test_ksh_extension_parses_as_bash(self):
+        """.ksh files should parse through the bash grammar and produce the
+        same node/edge shapes as .sh (follow-up to #197)."""
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(FIXTURES / "sample.ksh")
+        assert nodes, "expected at least one node from sample.ksh"
+        for n in nodes:
+            assert n.language == "bash"
+        funcs = {n.name for n in nodes if n.kind == "Function"}
+        assert "backup_logs" in funcs
+        assert "rotate" in funcs
+        calls = {e.target for e in edges if e.kind == "CALLS"}
+        assert any(t.endswith("::backup_logs") for t in calls)
 
 
 class TestElixirParsing:

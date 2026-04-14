@@ -108,6 +108,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
+    ".ksh": "bash",
     ".ex": "elixir",
     ".exs": "elixir",
     ".ipynb": "notebook",
