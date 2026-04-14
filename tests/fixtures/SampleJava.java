@@ -57,3 +57,10 @@ class UserService {
         return repo.findById(id);
     }
 }
+
+class CachedRepo extends InMemoryRepo {
+    @Override
+    public void save(User user) {
+        super.save(user);
+    }
+}
