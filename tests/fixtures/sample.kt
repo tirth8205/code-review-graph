@@ -25,3 +25,12 @@ fun createUser(repo: UserRepository, name: String, email: String): User {
     repo.save(user)
     return user
 }
+
+object UserFactory {
+    fun create(name: String): User = User(1, name, "$name@example.com")
+}
+
+fun main() {
+    val user = UserFactory.create("Alice")
+    println(user)
+}
