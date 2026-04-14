@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - Python 3.10 backport
@@ -21,6 +23,15 @@ from code_review_graph.skills import (
     install_git_hook,
     install_hooks,
     install_platform_configs,
+)
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None  # type: ignore[assignment]
+
+_needs_tomllib = pytest.mark.skipif(
+    tomllib is None, reason="tomllib requires Python 3.11+",
 )
 
 
@@ -228,11 +239,11 @@ class TestInjectClaudeMd:
 class TestInjectPlatformInstructionsFiltering:
     def test_all_writes_every_file(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="all")
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".kiro/steering/code-review-graph.md"}
 
     def test_default_is_all(self, tmp_path):
         updated = inject_platform_instructions(tmp_path)
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules"}
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".kiro/steering/code-review-graph.md"}
 
     def test_claude_writes_nothing(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="claude")
@@ -262,6 +273,7 @@ class TestInjectPlatformInstructionsFiltering:
 
 
 class TestInstallPlatformConfigs:
+    @_needs_tomllib
     def test_install_codex_config(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
         with patch.dict(
@@ -281,6 +293,7 @@ class TestInstallPlatformConfigs:
         assert entry["type"] == "stdio"
         assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == ["serve"]
 
+    @_needs_tomllib
     def test_install_codex_preserves_existing_toml(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
         codex_config.parent.mkdir(parents=True)
@@ -766,3 +779,95 @@ def test_copilot_platforms_in_cli() -> None:
     """Verify copilot platforms are in CLI choices."""
     from code_review_graph.cli import main
     assert callable(main)
+    
+class TestKiroPlatform:
+    """Tests for Kiro platform support."""
+
+    def test_kiro_platform_entry_exists(self):
+        """PLATFORMS dict has a 'kiro' key with correct metadata."""
+        assert "kiro" in PLATFORMS
+        kiro = PLATFORMS["kiro"]
+        assert kiro["name"] == "Kiro"
+        assert kiro["key"] == "mcpServers"
+        assert kiro["format"] == "object"
+        assert kiro["needs_type"] is True
+
+    def test_install_kiro_config(self, tmp_path):
+        """install_platform_configs creates .kiro/settings/mcp.json."""
+        configured = install_platform_configs(tmp_path, target="kiro")
+        assert "Kiro" in configured
+        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        assert config_path.exists()
+        data = json.loads(config_path.read_text())
+        assert "code-review-graph" in data["mcpServers"]
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+
+    def test_install_kiro_preserves_existing_servers(self, tmp_path):
+        """Existing mcpServers entries are preserved when adding code-review-graph."""
+        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"mcpServers": {"other-server": {"command": "other"}}}),
+            encoding="utf-8",
+        )
+        install_platform_configs(tmp_path, target="kiro")
+        data = json.loads(config_path.read_text())
+        assert "other-server" in data["mcpServers"]
+        assert "code-review-graph" in data["mcpServers"]
+
+    def test_install_kiro_no_duplicate(self, tmp_path):
+        """Second install skips when code-review-graph already exists."""
+        install_platform_configs(tmp_path, target="kiro")
+        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        first_content = config_path.read_text()
+        install_platform_configs(tmp_path, target="kiro")
+        second_content = config_path.read_text()
+        assert first_content == second_content
+        data = json.loads(second_content)
+        assert list(data["mcpServers"].keys()).count("code-review-graph") == 1
+
+    def test_kiro_steering_file_written(self, tmp_path):
+        """inject_platform_instructions creates .kiro/steering/code-review-graph.md."""
+        updated = inject_platform_instructions(tmp_path, target="kiro")
+        assert ".kiro/steering/code-review-graph.md" in updated
+        steering = tmp_path / ".kiro" / "steering" / "code-review-graph.md"
+        assert steering.exists()
+        content = steering.read_text()
+        assert _CLAUDE_MD_SECTION_MARKER in content
+
+    def test_kiro_steering_idempotent(self, tmp_path):
+        """Running inject twice produces identical content."""
+        inject_platform_instructions(tmp_path, target="kiro")
+        first = (tmp_path / ".kiro" / "steering" / "code-review-graph.md").read_text()
+        inject_platform_instructions(tmp_path, target="kiro")
+        second = (tmp_path / ".kiro" / "steering" / "code-review-graph.md").read_text()
+        assert first == second
+
+    def test_kiro_included_in_all_when_detected(self, tmp_path):
+        """install_platform_configs with target='all' includes Kiro when .kiro exists."""
+        (tmp_path / ".kiro").mkdir()
+        # Mock Path.home() to a dir without .kiro so only workspace detection fires
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+            configured = install_platform_configs(tmp_path, target="all")
+        assert "Kiro" in configured
+
+    def test_kiro_workspace_detection(self, tmp_path):
+        """Kiro detected when repo_root/.kiro exists even if ~/.kiro does not."""
+        (tmp_path / ".kiro").mkdir()
+        fake_home = tmp_path / "fakehome"
+        fake_home.mkdir()
+        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+            configured = install_platform_configs(tmp_path, target="all")
+        assert "Kiro" in configured
+        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        assert config_path.exists()
+
+    def test_kiro_dry_run(self, tmp_path):
+        """dry_run=True does not create any files."""
+        configured = install_platform_configs(tmp_path, target="kiro", dry_run=True)
+        assert "Kiro" in configured
+        config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
+        assert not config_path.exists()

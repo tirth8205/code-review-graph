@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-04-14
+
+Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP tools, 4 new languages, multi-format export, and graph analysis suite.
+
+### Added
+
+- **Hub node detection** (`get_hub_nodes_tool`): find the most-connected nodes in the codebase (architectural hotspots) by in+out degree, excluding File nodes.
+- **Bridge node detection** (`get_bridge_nodes_tool`): find architectural chokepoints via betweenness centrality with sampling approximation for graphs >5000 nodes.
+- **Knowledge gap analysis** (`get_knowledge_gaps_tool`): identify structural weaknesses — isolated nodes, thin communities (<3 members), untested hotspots, and single-file communities.
+- **Surprise scoring** (`get_surprising_connections_tool`): composite scoring for unexpected architectural coupling (cross-community, cross-language, peripheral-to-hub, cross-test-boundary).
+- **Suggested questions** (`get_suggested_questions_tool`): auto-generate prioritized review questions from graph analysis (bridge nodes, untested hubs, surprising connections, thin communities).
+- **BFS/DFS traversal** (`traverse_graph_tool`): free-form graph exploration from any node with configurable depth (1-6) and token budget.
+- **Edge confidence scoring**: three-tier system (EXTRACTED/INFERRED/AMBIGUOUS) with float confidence scores on all edges. Schema migration v9.
+- **Export formats**: GraphML (Gephi/yEd/Cytoscape), Neo4j Cypher statements, Obsidian vault (wikilinks + YAML frontmatter + community pages), SVG static graph. CLI: `visualize --format graphml|cypher|obsidian|svg`.
+- **Graph diff**: snapshot/compare graph state over time — new/removed nodes, edges, community membership changes.
+- **Token reduction benchmark**: measure naive full-corpus tokens vs graph query tokens with per-question reduction ratios.
+- **Memory/feedback loop**: persist Q&A results as markdown for re-ingestion via `save_result` / `list_memories` / `clear_memories`.
+- **Oversized community auto-splitting**: communities exceeding 25% of graph are recursively split via Leiden algorithm.
+- **4 new languages**: Zig, PowerShell, Julia, Svelte SFC (23 total).
+- **Visualization enhancements**: node size scaled by degree, community legend with toggle visibility, improved interactivity.
+- **README translations**: Simplified Chinese, Japanese, Korean, Hindi.
+
+### Merged community PRs
+
+- **#127** (xtfer): SQLite compound edge indexes for query performance.
+- **#184** (realkotob): batch `_compute_summaries` — fixes build hangs on large repos.
+- **#202** (lngyeen): Swift extension detection, inheritance edges, type kind metadata.
+- **#249** (gzenz): community detection resolution scaling (21x speedup), expanded framework patterns, framework-aware dead code detection (56 new tests).
+- **#253** (cwoolum): automatic graph build for new worktrees in Claude Code.
+- **#267** (jindalarpit): Kiro platform support with 9 tests.
+
+### Changed
+
+- MCP tool count: 22 → 28.
+- Schema version: 8 → 9 (edge confidence columns).
+- Community detection uses resolution scaling for large graphs.
+- Risk scoring uses weighted flow criticality and graduated test coverage.
+- Dead code detection is framework-aware (ORM models, Pydantic, CDK constructs filtered).
+- Flow entry points expanded with 30+ framework decorator patterns.
+
 ## [2.3.1] - 2026-04-11
 
 Hotfix for the Windows long-running-MCP-tool hang that v2.2.4 only partially fixed.

@@ -29,12 +29,17 @@ from .tools import (
     generate_wiki_func,
     get_affected_flows_func,
     get_architecture_overview_func,
+    get_bridge_nodes_func,
     get_community_func,
     get_docs_section,
     get_flow,
+    get_hub_nodes_func,
     get_impact_radius,
+    get_knowledge_gaps_func,
     get_minimal_context,
     get_review_context,
+    get_suggested_questions_func,
+    get_surprising_connections_func,
     get_wiki_page_func,
     list_communities_func,
     list_flows,
@@ -44,6 +49,7 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
+    traverse_graph_func,
 )
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
@@ -671,6 +677,131 @@ def get_wiki_page_tool(
     """
     return get_wiki_page_func(
         community_name=community_name, repo_root=_resolve_repo_root(repo_root),
+    )
+
+
+@mcp.tool()
+def get_hub_nodes_tool(
+    top_n: int = 10,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Find the most connected nodes in the codebase (architectural hotspots).
+
+    Hub nodes have the highest total degree (in + out edges). Changes to
+    them have disproportionate blast radius. Excludes File nodes.
+
+    Args:
+        top_n: Number of top hubs to return. Default: 10.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return get_hub_nodes_func(
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+    )
+
+
+@mcp.tool()
+def get_bridge_nodes_tool(
+    top_n: int = 10,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Find architectural chokepoints via betweenness centrality.
+
+    Bridge nodes sit on shortest paths between many node pairs.
+    If they break, multiple code regions lose connectivity.
+    Uses sampling approximation for graphs > 5000 nodes.
+
+    Args:
+        top_n: Number of top bridges to return. Default: 10.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return get_bridge_nodes_func(
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+    )
+
+
+@mcp.tool()
+def get_knowledge_gaps_tool(
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Identify structural weaknesses in the codebase graph.
+
+    Finds isolated nodes (disconnected), thin communities (< 3 members),
+    untested hotspots (high-degree nodes without test coverage), and
+    single-file communities.
+
+    Args:
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return get_knowledge_gaps_func(
+        repo_root=_resolve_repo_root(repo_root),
+    )
+
+
+@mcp.tool()
+def get_surprising_connections_tool(
+    top_n: int = 15,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Find unexpected architectural coupling via composite surprise scoring.
+
+    Scores edges by: cross-community (+0.3), cross-language (+0.2),
+    peripheral-to-hub (+0.2), cross-test-boundary (+0.15), and
+    unusual edge kinds (+0.15).
+
+    Args:
+        top_n: Number of top surprises to return. Default: 15.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return get_surprising_connections_func(
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+    )
+
+
+@mcp.tool()
+def get_suggested_questions_tool(
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Auto-generate review questions from graph analysis.
+
+    Produces prioritized questions about: bridge nodes needing tests,
+    untested hub nodes, surprising cross-community coupling, thin
+    communities, and untested hotspots.
+
+    Args:
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return get_suggested_questions_func(
+        repo_root=_resolve_repo_root(repo_root),
+    )
+
+
+@mcp.tool()
+def traverse_graph_tool(
+    query: str,
+    mode: str = "bfs",
+    depth: int = 3,
+    token_budget: int = 2000,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """BFS/DFS traversal from best-matching node with token budget.
+
+    Free-form graph exploration: finds the node best matching your
+    query, then traverses outward via BFS or DFS up to the given
+    depth, collecting connected nodes within the token budget.
+
+    Args:
+        query: Search string to find the starting node.
+        mode: Traversal mode: "bfs" (breadth-first) or "dfs"
+            (depth-first). Default: bfs.
+        depth: Max traversal depth (1-6). Default: 3.
+        token_budget: Approximate token limit for results.
+            Default: 2000.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return traverse_graph_func(
+        query=query, mode=mode, depth=depth,
+        token_budget=token_budget,
+        repo_root=_resolve_repo_root(repo_root) or "",
     )
 
 

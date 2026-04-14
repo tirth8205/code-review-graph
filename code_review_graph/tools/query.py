@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..embeddings import EmbeddingStore
-from ..graph import edge_to_dict, node_to_dict
+from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
 from ..search import hybrid_search
@@ -559,6 +559,110 @@ def find_large_functions(
             "total_found": len(results),
             "min_lines": min_lines,
             "results": results,
+        }
+    finally:
+        store.close()
+
+
+# -------------------------------------------------------------------
+# traverse_graph: free-form BFS / DFS traversal
+# -------------------------------------------------------------------
+
+
+def traverse_graph_func(
+    query: str,
+    mode: str = "bfs",
+    depth: int = 3,
+    token_budget: int = 2000,
+    repo_root: str | None = None,
+) -> dict[str, Any]:
+    """BFS/DFS traversal from best-matching node.
+
+    Args:
+        query: Search string to find the starting node.
+        mode: "bfs" (breadth-first) or "dfs" (depth-first).
+        depth: Max traversal depth (1-6). Default: 3.
+        token_budget: Approximate token limit for results.
+        repo_root: Repository root path.
+    """
+    store, root = _get_store(repo_root)
+    try:
+        results = hybrid_search(store, query, limit=1)
+        if not results:
+            return {
+                "error": f"No node matching '{query}'",
+                "nodes": [],
+            }
+
+        start_qn = results[0]["qualified_name"]
+        depth = max(1, min(depth, 6))
+
+        # BFS / DFS traversal
+        visited: dict[str, int] = {}  # qn -> depth
+        queue: list[tuple[str, int]] = [
+            (start_qn, 0),
+        ]
+        traversal: list[dict] = []
+        approx_tokens = 0
+
+        while queue:
+            if mode == "bfs":
+                current_qn, cur_depth = queue.pop(0)
+            else:
+                current_qn, cur_depth = queue.pop()
+
+            if current_qn in visited:
+                continue
+            if cur_depth > depth:
+                continue
+
+            visited[current_qn] = cur_depth
+            node = store.get_node(current_qn)
+            if not node:
+                continue
+
+            entry = {
+                "name": _sanitize_name(node.name),
+                "qualified_name": node.qualified_name,
+                "kind": node.kind,
+                "file": node.file_path,
+                "depth": cur_depth,
+            }
+            approx_tokens += len(str(entry)) // 4
+            if approx_tokens > token_budget:
+                break
+
+            traversal.append(entry)
+
+            # Get neighbours
+            out_edges = store.get_edges_by_source(
+                current_qn
+            )
+            in_edges = store.get_edges_by_target(
+                current_qn
+            )
+            for e in out_edges:
+                tgt = e.target_qualified
+                if tgt not in visited:
+                    queue.append((tgt, cur_depth + 1))
+            for e in in_edges:
+                src = e.source_qualified
+                if src not in visited:
+                    queue.append((src, cur_depth + 1))
+
+        return {
+            "start_node": start_qn,
+            "mode": mode,
+            "max_depth": depth,
+            "nodes_visited": len(traversal),
+            "traversal": traversal,
+            "truncated": approx_tokens > token_budget,
+            "next_tool_suggestions": [
+                "query_graph callers_of"
+                " -- focused relationship query",
+                "get_impact_radius"
+                " -- blast radius analysis",
+            ],
         }
     finally:
         store.close()

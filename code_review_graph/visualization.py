@@ -559,6 +559,35 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   .filter-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; user-select: none; }
   .filter-item input { accent-color: #58a6ff; cursor: pointer; }
+  #community-legend {
+    position: absolute; bottom: 50px; right: 16px;
+    background: rgba(22,27,34,0.95);
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 14px 18px; font-size: 12px;
+    backdrop-filter: blur(12px); z-index: 10;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    max-height: 300px; overflow-y: auto;
+    display: none;
+  }
+  #community-legend.visible { display: block; }
+  #community-legend h3 {
+    font-size: 11px; font-weight: 700;
+    margin-bottom: 8px; color: #8b949e;
+    text-transform: uppercase; letter-spacing: 1px;
+  }
+  .cl-item {
+    display: flex; align-items: center;
+    gap: 8px; padding: 3px 0;
+    cursor: pointer; user-select: none;
+  }
+  .cl-item input {
+    accent-color: #58a6ff; cursor: pointer;
+  }
+  .cl-swatch {
+    width: 10px; height: 10px;
+    border-radius: 50%; flex-shrink: 0;
+  }
   marker { overflow: visible; }
 </style>
 </head>
@@ -598,6 +627,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="search-results"></div>
 <div id="detail-panel"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content"></div></div>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
+<div id="community-legend" aria-label="Community legend"></div>
 <div id="tooltip"></div>
 <svg role="img" aria-label="Interactive code knowledge graph visualization. Use search to find nodes, click files to expand."></svg>
 <script>
@@ -650,8 +680,28 @@ function allDescendants(qn) {
 }
 var nodeToCommunity = new Map();
 communities.forEach(function(c) {
-  (c.members || []).forEach(function(qn) { nodeToCommunity.set(qn, c.id); });
+  (c.members || []).forEach(function(qn) {
+    nodeToCommunity.set(qn, c.id);
+  });
 });
+// Compute node degree (connection count) for size scaling
+var nodeDegree = new Map();
+edges.forEach(function(e) {
+  var s = e._source, t = e._target;
+  nodeDegree.set(s, (nodeDegree.get(s) || 0) + 1);
+  nodeDegree.set(t, (nodeDegree.get(t) || 0) + 1);
+});
+var maxDegree = 1;
+nodeDegree.forEach(function(v) {
+  if (v > maxDegree) maxDegree = v;
+});
+function degreeRadius(d) {
+  var base = KIND_RADIUS[d.kind] || 6;
+  var deg = nodeDegree.get(d.qualified_name) || 0;
+  // Scale: base + up to 2x base proportional to degree
+  var scale = 1 + (deg / maxDegree);
+  return Math.round(base * scale);
+}
 var nodeIdToQn = new Map();
 nodes.forEach(function(n) { nodeIdToQn.set(n.id, n.qualified_name); });
 var flowSelect = document.getElementById("flow-select");
@@ -719,7 +769,7 @@ var simulation = d3.forceSimulation(nodes)
     .distance(function(d) { return d.kind === "CONTAINS" ? 35 : (isLarge ? 80 : 120); })
     .strength(function(d) { return d.kind === "CONTAINS" ? 1.5 : 0.15; }))
   .force("charge", d3.forceManyBody().strength(function(d) { return d.kind === "File" ? (isLarge ? -200 : -400) : (isLarge ? -60 : -120); }).theta(0.85).distanceMax(600))
-  .force("collide", d3.forceCollide().radius(function(d) { return (KIND_RADIUS[d.kind] || 6) + 4; }))
+  .force("collide", d3.forceCollide().radius(function(d) { return degreeRadius(d) + 4; }))
   .force("center", d3.forceCenter(W / 2, H / 2))
   .force("x", d3.forceX(W / 2).strength(0.03))
   .force("y", d3.forceY(H / 2).strength(0.03))
@@ -771,12 +821,12 @@ function updateNodes() {
   var enter = nodeSel.enter().append("g").attr("class","node-g");
   enter.filter(function(d) { return d.kind === "File"; }).append("circle")
     .attr("class","glow-ring")
-    .attr("r", function(d) { return KIND_RADIUS[d.kind] + 5; })
+    .attr("r", function(d) { return degreeRadius(d) + 5; })
     .attr("fill","none")
     .attr("stroke", function(d) { return nodeColor(d); })
     .attr("stroke-width", 1.5).attr("opacity", 0.3).attr("filter","url(#glow)");
   enter.append("circle").attr("class","node-circle")
-    .attr("r", function(d) { return KIND_RADIUS[d.kind] || 6; })
+    .attr("r", function(d) { return degreeRadius(d); })
     .attr("fill", function(d) { return nodeColor(d); })
     .attr("stroke", function(d) { return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
     .attr("stroke-width", function(d) { return d.kind === "File" ? 2 : 1; })
@@ -863,7 +913,7 @@ simulation.on("tick", function() {
     .attr("x2", function(d) { return d.target.x; }).attr("y2", function(d) { return d.target.y; });
   nodeGroup.selectAll("g.node-g").attr("transform", function(d) { return "translate(" + d.x + "," + d.y + ")"; });
   if (labelSel) labelSel
-    .attr("x", function(d) { return d.x + (KIND_RADIUS[d.kind] || 6) + 5; })
+    .attr("x", function(d) { return d.x + degreeRadius(d) + 5; })
     .attr("y", function(d) { return d.y; });
 });
 // Only auto-collapse File nodes on very large graphs, otherwise all edges
@@ -916,11 +966,79 @@ document.querySelectorAll("#filter-panel input[data-kind]").forEach(function(el)
 document.getElementById("btn-community").addEventListener("click", function() {
   communityColoringOn = !communityColoringOn;
   this.classList.toggle("active");
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300)
+  nodeGroup.selectAll("g.node-g").select(".node-circle")
+    .transition().duration(300)
     .attr("fill", function(d) { return nodeColor(d); });
-  nodeGroup.selectAll("g.node-g").select(".glow-ring").transition().duration(300)
+  nodeGroup.selectAll("g.node-g").select(".glow-ring")
+    .transition().duration(300)
     .attr("stroke", function(d) { return nodeColor(d); });
+  // Toggle community legend visibility with coloring
+  var cl = document.getElementById("community-legend");
+  if (communityColoringOn) cl.classList.add("visible");
+  else cl.classList.remove("visible");
 });
+// Build community legend with toggle checkboxes
+var hiddenCommunities = new Set();
+(function buildCommunityLegend() {
+  var cl = document.getElementById("community-legend");
+  if (!communities.length) return;
+  var h = '<h3>Communities</h3>';
+  communities.slice(0, 30).forEach(function(c) {
+    var col = communityColorScale(c.id);
+    var nm = escH(c.name || ("Community " + c.id));
+    h += '<label class="cl-item">'
+      + '<input type="checkbox" data-cid="'
+      + c.id + '" checked>'
+      + '<span class="cl-swatch" style="background:'
+      + col + '"></span> ' + nm + '</label>';
+  });
+  cl.textContent = "";
+  cl.insertAdjacentHTML("beforeend", h);
+  cl.querySelectorAll("input[data-cid]").forEach(
+    function(el) {
+      el.addEventListener("change", function() {
+        var cid = parseInt(this.dataset.cid);
+        if (this.checked) hiddenCommunities.delete(cid);
+        else hiddenCommunities.add(cid);
+        applyCommunityFilter();
+      });
+    }
+  );
+})();
+function applyCommunityFilter() {
+  if (!communityColoringOn || !hiddenCommunities.size) {
+    nodeGroup.selectAll("g.node-g")
+      .attr("display", function(d) {
+        return d._hidden ? "none" : null;
+      });
+    updateLinks();
+    return;
+  }
+  nodeGroup.selectAll("g.node-g")
+    .attr("display", function(d) {
+      if (d._hidden) return "none";
+      var cid = d.community_id;
+      if (cid == null) {
+        cid = nodeToCommunity.get(d.qualified_name);
+      }
+      if (cid != null && hiddenCommunities.has(cid)) {
+        return "none";
+      }
+      return null;
+    });
+  if (labelSel) labelSel
+    .attr("display", function(d) {
+      var cid = d.community_id;
+      if (cid == null) {
+        cid = nodeToCommunity.get(d.qualified_name);
+      }
+      if (cid != null && hiddenCommunities.has(cid)) {
+        return "none";
+      }
+      return null;
+    });
+  updateLinks();
+}
 var activeFlowQns = null;
 flowSelect.addEventListener("change", function() {
   var idx = this.value;

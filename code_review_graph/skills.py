@@ -182,6 +182,11 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": lambda root: Path.home() / ".config" / "github-copilot" / "mcp_servers.json",
         "key": "servers",
         "detect": _copilot_cli_detected,
+    "kiro": {
+        "name": "Kiro",
+        "config_path": lambda root: root / ".kiro" / "settings" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".kiro").exists(),
         "format": "object",
         "needs_type": True,
     },
@@ -268,6 +273,9 @@ def install_platform_configs(
     """
     if target == "all":
         platforms_to_install = {k: v for k, v in PLATFORMS.items() if v["detect"]()}
+        # Workspace-level Kiro detection
+        if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
+            platforms_to_install["kiro"] = PLATFORMS["kiro"]
     else:
         if target not in PLATFORMS:
             logger.error("Unknown platform: %s", target)
@@ -658,6 +666,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
 
     separator = "\n" if existing and not existing.endswith("\n") else ""
     extra_newline = "\n" if existing else ""
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(existing + separator + extra_newline + section, encoding="utf-8")
     logger.info("Appended MCP tools section to %s", file_path)
     return True
@@ -680,6 +689,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "GEMINI.md": ("antigravity",),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
+    ".kiro/steering/code-review-graph.md": ("kiro",),
 }
 
 

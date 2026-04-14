@@ -595,6 +595,7 @@ def d8():
         ("Continue",     "~/.continue/config.json",              YLW, YLW_BG),
         ("OpenCode",     ".opencode.json",                       RED, RED_BG),
         ("Antigravity",  "~/.gemini/antigravity/mcp_config.json",GRY, GRY_BG),
+        ("Kiro",         ".kiro/settings/mcp.json",              BLU, BLU_BG),
     ]
 
     # Central "install" node

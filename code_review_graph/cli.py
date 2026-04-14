@@ -295,7 +295,7 @@ def main() -> None:
         "--platform",
         choices=[
             "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "qwen",
+            "continue", "opencode", "antigravity", "qwen", "kiro",
             "copilot", "copilot-cli", "all",
         ],
         default="all",
@@ -334,7 +334,7 @@ def main() -> None:
         "--platform",
         choices=[
             "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "qwen",
+            "continue", "opencode", "antigravity", "qwen", "kiro",
             "copilot", "copilot-cli", "all",
         ],
         default="all",
@@ -396,6 +396,12 @@ def main() -> None:
     vis_cmd.add_argument(
         "--serve", action="store_true",
         help="Start a local HTTP server to view the visualization (localhost:8765)",
+    )
+    vis_cmd.add_argument(
+        "--format",
+        choices=["html", "graphml", "cypher", "obsidian", "svg"],
+        default="html",
+        help="Export format (default: html)",
     )
 
     # wiki
@@ -656,30 +662,58 @@ def main() -> None:
 
         elif args.command == "visualize":
             from .incremental import get_data_dir
-            from .visualization import generate_html
-            html_path = get_data_dir(repo_root) / "graph.html"
-            vis_mode = getattr(args, "mode", "auto") or "auto"
-            generate_html(store, html_path, mode=vis_mode)
-            print(f"Visualization ({vis_mode}): {html_path}")
-            if getattr(args, "serve", False):
-                import functools
-                import http.server
+            data_dir = get_data_dir(repo_root)
+            fmt = getattr(args, "format", "html") or "html"
 
-                serve_dir = html_path.parent
-                port = 8765
-                handler = functools.partial(
-                    http.server.SimpleHTTPRequestHandler,
-                    directory=str(serve_dir),
-                )
-                print(f"Serving at http://localhost:{port}/graph.html")
-                print("Press Ctrl+C to stop.")
-                with http.server.HTTPServer(("localhost", port), handler) as httpd:
-                    try:
-                        httpd.serve_forever()
-                    except KeyboardInterrupt:
-                        print("\nServer stopped.")
+            if fmt == "graphml":
+                from .exports import export_graphml
+                out = data_dir / "graph.graphml"
+                export_graphml(store, out)
+                print(f"GraphML exported: {out}")
+            elif fmt == "cypher":
+                from .exports import export_neo4j_cypher
+                out = data_dir / "graph.cypher"
+                export_neo4j_cypher(store, out)
+                print(f"Neo4j Cypher exported: {out}")
+            elif fmt == "obsidian":
+                from .exports import export_obsidian_vault
+                out = data_dir / "obsidian"
+                export_obsidian_vault(store, out)
+                print(f"Obsidian vault exported: {out}")
+            elif fmt == "svg":
+                from .exports import export_svg
+                out = data_dir / "graph.svg"
+                export_svg(store, out)
+                print(f"SVG exported: {out}")
             else:
-                print("Open in browser to explore your codebase graph.")
+                from .visualization import generate_html
+                html_path = data_dir / "graph.html"
+                vis_mode = getattr(args, "mode", "auto") or "auto"
+                generate_html(store, html_path, mode=vis_mode)
+                print(f"Visualization ({vis_mode}): {html_path}")
+                if getattr(args, "serve", False):
+                    import functools
+                    import http.server
+                    serve_dir = html_path.parent
+                    port = 8765
+                    handler = functools.partial(
+                        http.server.SimpleHTTPRequestHandler,
+                        directory=str(serve_dir),
+                    )
+                    print(
+                        f"Serving at http://localhost:{port}"
+                        f"/graph.html"
+                    )
+                    print("Press Ctrl+C to stop.")
+                    with http.server.HTTPServer(
+                        ("localhost", port), handler
+                    ) as httpd:
+                        try:
+                            httpd.serve_forever()
+                        except KeyboardInterrupt:
+                            print("\nServer stopped.")
+                else:
+                    print("Open in browser to explore.")
 
         elif args.command == "wiki":
             from .incremental import get_data_dir

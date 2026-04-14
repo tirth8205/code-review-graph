@@ -5,14 +5,23 @@
 </p>
 
 <p align="center">
-  <a href="https://code-review-graph.com"><img src="https://img.shields.io/badge/website-code--review--graph.com-blue?style=flat-square" alt="Website"></a>
-  <a href="https://discord.gg/3p58KXqGFN"><img src="https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="README.md">English</a> |
+  <a href="README.zh-CN.md">简体中文</a> |
+  <a href="README.ja-JP.md">日本語</a> |
+  <a href="README.ko-KR.md">한국어</a> |
+  <a href="README.hi-IN.md">हिन्दी</a>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/code-review-graph/"><img src="https://img.shields.io/pypi/v/code-review-graph?style=flat-square&color=blue" alt="PyPI"></a>
+  <a href="https://pepy.tech/project/code-review-graph"><img src="https://img.shields.io/pepy/dt/code-review-graph?style=flat-square" alt="Downloads"></a>
   <a href="https://github.com/tirth8205/code-review-graph/stargazers"><img src="https://img.shields.io/github/stars/tirth8205/code-review-graph?style=flat-square" alt="Stars"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence"></a>
   <a href="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml"><img src="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square" alt="Python 3.10+"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square" alt="MCP"></a>
-  <a href="#"><img src="https://img.shields.io/badge/version-2.1.0-purple.svg?style=flat-square" alt="v2.1.0"></a>
+  <a href="https://code-review-graph.com"><img src="https://img.shields.io/badge/website-code--review--graph.com-blue?style=flat-square" alt="Website"></a>
+  <a href="https://discord.gg/3p58KXqGFN"><img src="https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <br>
@@ -36,7 +45,7 @@ code-review-graph build            # parse your codebase
 One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and GitHub Copilot" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Kiro and GitHub Copilot" width="85%" />
 </p>
 
 To target a specific platform:
@@ -47,6 +56,7 @@ code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
 code-review-graph install --platform copilot      # GitHub Copilot in VS Code
 code-review-graph install --platform copilot-cli  # GitHub Copilot CLI
+code-review-graph install --platform kiro         # configure only Kiro
 ```
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
@@ -97,13 +107,13 @@ Large monorepos are where token waste is most painful. The graph cuts through th
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js monorepo: 27,732 files funnelled through code-review-graph down to ~15 files — 49x fewer tokens" width="80%" />
 </p>
 
-### 19 languages + Jupyter notebooks
+### 23 languages + Jupyter notebooks
 
 <p align="center">
   <img src="diagrams/diagram9_language_coverage.png" alt="19 languages organized by category: Web, Backend, Systems, Mobile, Scripting, plus Jupyter/Databricks notebook support" width="90%" />
 </p>
 
-Full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection in every language. Plus Jupyter/Databricks notebook parsing (`.ipynb`) with multi-language cell support (Python, R, SQL), and Perl XS files (`.xs`).
+Full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection in every language. Includes Zig, PowerShell, Julia, and Svelte SFC support. Plus Jupyter/Databricks notebook parsing (`.ipynb`) with multi-language cell support (Python, R, SQL), and Perl XS files (`.xs`).
 
 ---
 
@@ -185,22 +195,33 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only changed files. Subsequent updates complete in under 2 seconds. |
-| **19 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Jupyter/Databricks (.ipynb) |
+| **23 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, or MiniMax |
-| **Interactive visualisation** | D3.js force-directed graph with edge-type toggles and search |
-| **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
-| **Watch mode** | Continuous graph updates as you work |
-| **Execution flows** | Trace call chains from entry points, sorted by criticality |
-| **Community detection** | Cluster related code via Leiden algorithm or file grouping |
+| **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
+| **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
+| **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
+| **Knowledge gap analysis** | Identify isolated nodes, untested hotspots, thin communities, and structural weaknesses |
+| **Suggested questions** | Auto-generated review questions from graph analysis (bridges, hubs, surprises) |
+| **Edge confidence** | Three-tier confidence scoring (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
+| **Graph traversal** | Free-form BFS/DFS exploration from any node with configurable depth and token budget |
+| **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault with wikilinks, SVG static graph |
+| **Graph diff** | Compare graph snapshots over time: new/removed nodes, edges, community changes |
+| **Token benchmarking** | Measure naive full-corpus tokens vs graph query tokens with per-question ratios |
+| **Memory loop** | Persist Q&A results as markdown for re-ingestion, so the graph grows from queries |
+| **Community auto-split** | Oversized communities (>25% of graph) are recursively split via Leiden |
+| **Execution flows** | Trace call chains from entry points, sorted by weighted criticality |
+| **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
 | **Architecture overview** | Auto-generated architecture map with coupling warnings |
 | **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows, and test gaps |
-| **Refactoring tools** | Rename preview, dead code detection, community-driven suggestions |
+| **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
 | **Wiki generation** | Auto-generate markdown wiki from community structure |
 | **Multi-repo registry** | Register multiple repos, search across all of them |
 | **MCP prompts** | 5 workflow templates: review, architecture, debug, onboard, pre-merge |
 | **Full-text search** | FTS5-powered hybrid search combining keyword and vector similarity |
+| **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
+| **Watch mode** | Continuous graph updates as you work |
 
 ---
 
@@ -230,6 +251,10 @@ code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Auto-update on file changes
 code-review-graph visualize        # Generate interactive HTML graph
+code-review-graph visualize --format graphml   # Export as GraphML
+code-review-graph visualize --format svg       # Export as SVG
+code-review-graph visualize --format obsidian  # Export as Obsidian vault
+code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Generate markdown wiki from communities
 code-review-graph detect-changes   # Risk-scored change impact analysis
 code-review-graph register <path>  # Register repo in multi-repo registry
@@ -242,7 +267,7 @@ code-review-graph serve            # Start MCP server
 </details>
 
 <details>
-<summary><strong>22 MCP tools</strong></summary>
+<summary><strong>28 MCP tools</strong></summary>
 <br>
 
 Your AI assistant uses these automatically once the graph is built.
@@ -250,9 +275,11 @@ Your AI assistant uses these automatically once the graph is built.
 | Tool | Description |
 |------|-------------|
 | `build_or_update_graph_tool` | Build or incrementally update the graph |
+| `get_minimal_context_tool` | Ultra-compact context (~100 tokens) — call this first |
 | `get_impact_radius_tool` | Blast radius of changed files |
 | `get_review_context_tool` | Token-optimised review context with structural summary |
 | `query_graph_tool` | Callers, callees, tests, imports, inheritance queries |
+| `traverse_graph_tool` | BFS/DFS traversal from any node with token budget |
 | `semantic_search_nodes_tool` | Search code entities by name or meaning |
 | `embed_graph_tool` | Compute vector embeddings for semantic search |
 | `list_graph_stats_tool` | Graph size and health |
@@ -265,6 +292,11 @@ Your AI assistant uses these automatically once the graph is built.
 | `get_community_tool` | Get details of a single community |
 | `get_architecture_overview_tool` | Architecture overview from community structure |
 | `detect_changes_tool` | Risk-scored change impact analysis for code review |
+| `get_hub_nodes_tool` | Find most-connected nodes (architectural hotspots) |
+| `get_bridge_nodes_tool` | Find chokepoints via betweenness centrality |
+| `get_knowledge_gaps_tool` | Identify structural weaknesses and untested hotspots |
+| `get_surprising_connections_tool` | Detect unexpected cross-community coupling |
+| `get_suggested_questions_tool` | Auto-generated review questions from analysis |
 | `refactor_tool` | Rename preview, dead code detection, suggestions |
 | `apply_refactor_tool` | Apply a previously previewed refactoring |
 | `generate_wiki_tool` | Generate markdown wiki from communities |
@@ -333,5 +365,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and GitHub Copilot</sub>
+<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Kiro and GitHub Copilot</sub>
 </p>

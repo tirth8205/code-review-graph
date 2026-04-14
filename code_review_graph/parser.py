@@ -111,6 +111,12 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".ex": "elixir",
     ".exs": "elixir",
     ".ipynb": "notebook",
+    ".zig": "zig",
+    ".ps1": "powershell",
+    ".psm1": "powershell",
+    ".psd1": "powershell",
+    ".svelte": "svelte",
+    ".jl": "julia",
 }
 
 # Tree-sitter node type mappings per language
@@ -155,6 +161,9 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # identifier is literally "defmodule". Dispatched via
     # _extract_elixir_constructs to avoid matching every ``call`` here.
     "elixir": [],
+    "zig": ["container_declaration"],
+    "powershell": ["class_statement"],
+    "julia": ["struct_definition", "abstract_definition"],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -199,6 +208,12 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # Elixir: def/defp/defmacro are all ``call`` nodes whose first
     # identifier matches. Dispatched via _extract_elixir_constructs.
     "elixir": [],
+    "zig": ["fn_proto", "fn_decl"],
+    "powershell": ["function_statement"],
+    "julia": [
+        "function_definition",
+        "short_function_definition",
+    ],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -233,6 +248,12 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     # Elixir: alias/import/require/use are all ``call`` nodes —
     # handled in _extract_elixir_constructs.
     "elixir": [],
+    # Zig: @import("...") is a builtin_call_expr — handled
+    # generically via call types below.
+    "zig": [],
+    "powershell": [],
+    # Julia: import/using are import_statement nodes.
+    "julia": ["import_statement", "using_statement"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -268,6 +289,9 @@ _CALL_TYPES: dict[str, list[str]] = {
     # _extract_elixir_constructs which filters out def/defmodule/alias/etc.
     # before treating what's left as a real call.
     "elixir": [],
+    "zig": ["call_expression", "builtin_call_expr"],
+    "powershell": ["command_expression"],
+    "julia": ["call_expression"],
 }
 
 # Patterns that indicate a test function
@@ -382,6 +406,10 @@ class CodeParser:
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
             return self._parse_vue(path, source)
+
+        # Svelte SFCs: same approach as Vue — extract <script> blocks
+        if language == "svelte":
+            return self._parse_svelte(path, source)
 
         # Jupyter notebooks: extract code cells and parse as Python
         if language == "notebook":
@@ -549,6 +577,136 @@ class CodeParser:
                     test_qnames.add(qn)
             for edge in list(all_edges):
                 if edge.kind == "CALLS" and edge.source in test_qnames:
+                    all_edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+
+        return all_nodes, all_edges
+
+    def _parse_svelte(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a Svelte SFC by extracting <script> blocks.
+
+        Uses the same approach as Vue: parse the outer HTML structure,
+        locate ``<script>`` blocks, detect ``lang="ts"`` for TypeScript,
+        and delegate each block to the appropriate JS/TS parser.
+        """
+        # Svelte uses HTML-like structure; reuse the vue grammar which
+        # also handles generic HTML with <script> elements.
+        svelte_parser = self._get_parser("svelte")
+        # Fall back to the vue grammar if a dedicated svelte grammar
+        # is not available in the installed tree-sitter language pack.
+        if not svelte_parser:
+            svelte_parser = self._get_parser("vue")
+        if not svelte_parser:
+            return [], []
+
+        tree = svelte_parser.parse(source)
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+
+        all_nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="svelte",
+            is_test=test_file,
+        )]
+        all_edges: list[EdgeInfo] = []
+
+        # Walk root children looking for script_element blocks
+        for child in tree.root_node.children:
+            if child.type != "script_element":
+                continue
+
+            script_lang = "javascript"
+            start_tag = None
+            raw_text_node = None
+            for sub in child.children:
+                if sub.type == "start_tag":
+                    start_tag = sub
+                elif sub.type == "raw_text":
+                    raw_text_node = sub
+
+            if start_tag:
+                for attr in start_tag.children:
+                    if attr.type == "attribute":
+                        attr_name = None
+                        attr_value = None
+                        for a in attr.children:
+                            if a.type == "attribute_name":
+                                attr_name = a.text.decode(
+                                    "utf-8", errors="replace",
+                                )
+                            elif a.type == "quoted_attribute_value":
+                                for v in a.children:
+                                    if v.type == "attribute_value":
+                                        attr_value = v.text.decode(
+                                            "utf-8",
+                                            errors="replace",
+                                        )
+                        if (
+                            attr_name == "lang"
+                            and attr_value
+                            in ("ts", "typescript")
+                        ):
+                            script_lang = "typescript"
+
+            if not raw_text_node:
+                continue
+
+            script_source = raw_text_node.text
+            line_offset = raw_text_node.start_point[0]
+
+            script_parser = self._get_parser(script_lang)
+            if not script_parser:
+                continue
+
+            script_tree = script_parser.parse(script_source)
+            import_map, defined_names = self._collect_file_scope(
+                script_tree.root_node, script_lang, script_source,
+            )
+
+            nodes: list[NodeInfo] = []
+            edges: list[EdgeInfo] = []
+            self._extract_from_tree(
+                script_tree.root_node, script_source,
+                script_lang, file_path_str, nodes, edges,
+                import_map=import_map,
+                defined_names=defined_names,
+            )
+
+            for node in nodes:
+                node.line_start += line_offset
+                node.line_end += line_offset
+                node.language = "svelte"
+            for edge in edges:
+                edge.line += line_offset
+
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+
+        # Generate TESTED_BY edges
+        if test_file:
+            test_qnames = set()
+            for n in all_nodes:
+                if n.is_test:
+                    qn = self._qualify(
+                        n.name, n.file_path, n.parent_name,
+                    )
+                    test_qnames.add(qn)
+            for edge in list(all_edges):
+                if (
+                    edge.kind == "CALLS"
+                    and edge.source in test_qnames
+                ):
                     all_edges.append(EdgeInfo(
                         kind="TESTED_BY",
                         source=edge.target,
@@ -1938,6 +2096,22 @@ class CodeParser:
         if not name:
             return False
 
+        # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
+        # and store it in extra["swift_kind"] for richer downstream analysis.
+        # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
+        # protocol uses its own protocol_declaration node type.
+        extra: dict = {}
+        if language == "swift":
+            if child.type == "class_declaration":
+                _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
+                for kw_child in child.children:
+                    kw_text = kw_child.text.decode("utf-8", errors="replace")
+                    if kw_text in _swift_keywords:
+                        extra["swift_kind"] = kw_text
+                        break
+            elif child.type == "protocol_declaration":
+                extra["swift_kind"] = "protocol"
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -1946,6 +2120,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            extra=extra,
         )
         nodes.append(node)
 
@@ -3182,6 +3357,14 @@ class CodeParser:
             for child in node.children:
                 if child.type == "field_identifier":
                     return child.text.decode("utf-8", errors="replace")
+        # Swift extensions: name is inside user_type > type_identifier
+        # (e.g. `extension MyClass: Protocol { ... }`)
+        if language == "swift" and node.type == "class_declaration":
+            for child in node.children:
+                if child.type == "user_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
@@ -3341,6 +3524,19 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type == "type_identifier":
                             bases.append(sub.text.decode("utf-8", errors="replace"))
+        elif language == "swift":
+            # Swift: class Foo: Bar, Baz { ... } / extension Foo: Protocol { ... }
+            # AST: inheritance_specifier > user_type > type_identifier
+            for child in node.children:
+                if child.type == "inheritance_specifier":
+                    for sub in child.children:
+                        if sub.type == "user_type":
+                            for ident in sub.children:
+                                if ident.type == "type_identifier":
+                                    bases.append(
+                                        ident.text.decode("utf-8", errors="replace")
+                                    )
+                                    break
         return bases
 
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:

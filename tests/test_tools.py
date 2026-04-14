@@ -3,6 +3,8 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
@@ -760,6 +762,305 @@ class TestBuildPostprocess:
         # Full postprocess should have flows and communities
         assert "flows_detected" in result
         assert "communities_detected" in result
+
+
+class TestComputeSummaries:
+    """Tests for _compute_summaries: pins the contents of the three
+    summary tables so that the batch-aggregate refactor can't silently
+    change behavior.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        self._seed_graph()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed_graph(self):
+        """Seed a small graph with two communities, some CALLS/TESTED_BY
+        edges, and a node name that triggers the security keyword check.
+
+        Shape (auth.py community, community_id=1):
+            login  ->  check_token   (CALLS, internal)
+            logout ->  check_token   (CALLS, internal)
+            test_login -> login      (TESTED_BY)
+            test_login -> logout     (TESTED_BY)
+            (login is called from db.py::query to force cross-community
+             edges into caller_counts)
+
+        Shape (db.py community, community_id=2):
+            query   -> connect       (CALLS, internal)
+            close   -> connect       (CALLS, internal)
+            (query also calls login across the community boundary)
+        """
+        # Auth cluster files / nodes
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="auth.py", file_path="auth.py",
+            line_start=1, line_end=100, language="python",
+        ))
+        for fn in ("login", "logout", "check_token"):
+            self.store.upsert_node(NodeInfo(
+                kind="Function", name=fn, file_path="auth.py",
+                line_start=1, line_end=10, language="python",
+            ))
+        self.store.upsert_node(NodeInfo(
+            kind="Test", name="test_login", file_path="tests/test_auth.py",
+            line_start=1, line_end=5, language="python",
+        ))
+
+        # DB cluster files / nodes
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="db.py", file_path="db.py",
+            line_start=1, line_end=100, language="python",
+        ))
+        for fn in ("connect", "query", "close"):
+            self.store.upsert_node(NodeInfo(
+                kind="Function", name=fn, file_path="db.py",
+                line_start=1, line_end=10, language="python",
+            ))
+
+        # Internal edges
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="auth.py::login",
+            target="auth.py::check_token", file_path="auth.py", line=5,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="auth.py::logout",
+            target="auth.py::check_token", file_path="auth.py", line=10,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="db.py::query",
+            target="db.py::connect", file_path="db.py", line=5,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="db.py::close",
+            target="db.py::connect", file_path="db.py", line=10,
+        ))
+
+        # Cross-community CALLS — boosts login's caller_count.
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="db.py::query",
+            target="auth.py::login", file_path="db.py", line=3,
+        ))
+
+        # TESTED_BY edges from the Test node back to auth functions.
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY", source="auth.py::login",
+            target="tests/test_auth.py::test_login",
+            file_path="tests/test_auth.py", line=1,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY", source="auth.py::logout",
+            target="tests/test_auth.py::test_login",
+            file_path="tests/test_auth.py", line=1,
+        ))
+
+        self.store.commit()
+
+        # Create the two communities and stamp community_id on nodes.
+        conn = self.store._conn
+        conn.execute(
+            "INSERT INTO communities (name, level, cohesion, size, "
+            "dominant_language, description) "
+            "VALUES (?, 0, 1.0, 3, 'python', 'auth community')",
+            ("auth-cluster",),
+        )
+        conn.execute(
+            "INSERT INTO communities (name, level, cohesion, size, "
+            "dominant_language, description) "
+            "VALUES (?, 0, 1.0, 3, 'python', 'db community')",
+            ("db-cluster",),
+        )
+        # Assign community_id by looking up the auto-assigned ids.
+        auth_cid = conn.execute(
+            "SELECT id FROM communities WHERE name='auth-cluster'"
+        ).fetchone()[0]
+        db_cid = conn.execute(
+            "SELECT id FROM communities WHERE name='db-cluster'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE nodes SET community_id = ? WHERE file_path = 'auth.py'",
+            (auth_cid,),
+        )
+        conn.execute(
+            "UPDATE nodes SET community_id = ? WHERE file_path = 'db.py'",
+            (db_cid,),
+        )
+        conn.commit()
+        self._auth_cid = auth_cid
+        self._db_cid = db_cid
+
+    def test_risk_index_populated_with_correct_values(self):
+        """risk_index rows must match per-node caller counts, test
+        coverage, security flag, and risk scores derived from the
+        seeded graph."""
+        from code_review_graph.tools.build import _compute_summaries
+
+        _compute_summaries(self.store)
+
+        rows = self.store._conn.execute(
+            "SELECT qualified_name, caller_count, test_coverage, "
+            "security_relevant, risk_score FROM risk_index"
+        ).fetchall()
+        by_qn = {r[0]: r for r in rows}
+
+        # login: called once (by db.py::query), tested, security-keyword
+        # -> caller_count=1, coverage=tested, sec_relevant=1
+        # risk: caller_count<=3 (0) + tested (0) + sec (0.4) = 0.4
+        login = by_qn["auth.py::login"]
+        assert login[1] == 1  # caller_count
+        assert login[2] == "tested"  # test_coverage
+        assert login[3] == 1  # security_relevant
+        assert login[4] == pytest.approx(0.4)
+
+        # logout: not called by anyone, tested, security-keyword is false
+        #   ("logout" does not match any keyword)
+        # risk: untested(0)/tested(0) + sec(0) = 0 + 0 = 0
+        # Actually: coverage=tested (TESTED_BY edge exists), sec=0, caller=0
+        # risk = 0
+        logout = by_qn["auth.py::logout"]
+        assert logout[1] == 0
+        assert logout[2] == "tested"
+        assert logout[3] == 0
+        assert logout[4] == pytest.approx(0.0)
+
+        # check_token: called twice (login, logout), untested,
+        # "token" matches security keyword
+        # risk: caller<=3(0) + untested(0.3) + sec(0.4) = 0.7
+        ct = by_qn["auth.py::check_token"]
+        assert ct[1] == 2
+        assert ct[2] == "untested"
+        assert ct[3] == 1
+        assert ct[4] == pytest.approx(0.7)
+
+        # connect: called twice, untested, not security
+        # risk: 0 + 0.3 + 0 = 0.3
+        connect = by_qn["db.py::connect"]
+        assert connect[1] == 2
+        assert connect[2] == "untested"
+        assert connect[3] == 0
+        assert connect[4] == pytest.approx(0.3)
+
+        # query: not called, untested, not security
+        # risk: 0 + 0.3 + 0 = 0.3
+        query = by_qn["db.py::query"]
+        assert query[1] == 0
+        assert query[2] == "untested"
+        assert query[3] == 0
+        assert query[4] == pytest.approx(0.3)
+
+        # test_login (kind=Test): not called, untested, not security
+        # Test nodes are included in risk_index via the kind filter.
+        assert "tests/test_auth.py::test_login" in by_qn
+
+    def test_community_summaries_populated_with_correct_values(self):
+        """community_summaries rows must match per-community key
+        symbols, size, and dominant language."""
+        import json as _json
+
+        from code_review_graph.tools.build import _compute_summaries
+
+        _compute_summaries(self.store)
+
+        rows = self.store._conn.execute(
+            "SELECT community_id, name, key_symbols, size, "
+            "dominant_language FROM community_summaries"
+        ).fetchall()
+        assert len(rows) == 2
+        by_name = {r[1]: r for r in rows}
+
+        auth_row = by_name["auth-cluster"]
+        assert auth_row[0] == self._auth_cid
+        assert auth_row[3] == 3  # size
+        assert auth_row[4] == "python"
+
+        # Top symbols in auth cluster by in+out edge count:
+        #   login: 1 out (CALLS check_token) + 1 out (TESTED_BY test_login)
+        #          + 1 in (CALLS from db.query) = 3
+        #   logout: 1 out (CALLS) + 1 out (TESTED_BY) = 2
+        #   check_token: 2 in (CALLS from login, logout) = 2
+        auth_syms = _json.loads(auth_row[2])
+        assert auth_syms[0] == "login"
+        assert set(auth_syms[:3]) == {"login", "logout", "check_token"}
+
+        db_row = by_name["db-cluster"]
+        assert db_row[0] == self._db_cid
+        assert db_row[3] == 3
+        assert db_row[4] == "python"
+
+        # Top symbols in db cluster:
+        #   connect: 2 in (CALLS from query, close) = 2
+        #   query: 2 out (CALLS to connect, login) = 2
+        #   close: 1 out (CALLS to connect) = 1
+        db_syms = _json.loads(db_row[2])
+        assert set(db_syms[:2]) == {"connect", "query"}
+        assert db_syms[-1] == "close" or "close" in db_syms
+
+    def test_compute_summaries_does_not_scale_per_node(self):
+        """Regression guard: SELECT-with-single-row-WHERE-filter queries
+        (the per-row pattern that caused the Godot hang) must stay
+        bounded regardless of how many nodes the fixture has.
+
+        Uses ``sqlite3.Connection.set_trace_callback`` to count DML
+        statements that look like per-row lookups. Note that
+        ``set_trace_callback`` hands back the *expanded* SQL string
+        with parameters substituted as literals, so we match against
+        the expanded form (``= 'foo'`` or ``= 123``) rather than the
+        ``?`` placeholder.
+
+        The batched refactor issues aggregate GROUP BY queries once
+        up front, so this count stays at zero; the pre-refactor code
+        grew linearly with the number of Function/Class/Test nodes
+        and communities.
+        """
+        import re
+
+        from code_review_graph.tools.build import _compute_summaries
+
+        conn = self.store._conn
+        per_row_selects: list[str] = []
+
+        # Match SELECTs whose WHERE filter is a single equality against
+        # a qualified_name literal or an integer id literal — the shape
+        # of all three per-row patterns we refactored away:
+        #   WHERE target_qualified = 'some.qn'   (risk_index caller_count)
+        #   WHERE source_qualified = 'some.qn'   (risk_index test coverage)
+        #   WHERE community_id = 5               (community_summaries)
+        #   FROM nodes WHERE id = 42             (flow_snapshots node name)
+        per_row_re = re.compile(
+            r"\bwhere\s+(?:n\.)?"
+            r"(target_qualified|source_qualified|community_id|id)\s*=\s*"
+            r"(?:'[^']*'|\d+)",
+            re.IGNORECASE,
+        )
+
+        def trace(sql: str) -> None:
+            normalized = sql.strip().lower()
+            if not normalized.startswith("select"):
+                return
+            if per_row_re.search(normalized):
+                per_row_selects.append(sql)
+
+        conn.set_trace_callback(trace)
+        try:
+            _compute_summaries(self.store)
+        finally:
+            conn.set_trace_callback(None)
+
+        # The batched refactor should emit zero per-row lookups.
+        # Pre-refactor, on this 6-Function/1-Test fixture with 2
+        # communities, we would have seen at least
+        # (7 risk nodes × 2 COUNT queries) + (2 comms × 2 setup
+        # queries) ≈ 18. A failure here prints the offending SQL so
+        # the regression is easy to spot.
+        assert not per_row_selects, (
+            f"_compute_summaries issued {len(per_row_selects)} per-row "
+            "SELECTs — the batch-aggregate refactor has regressed:\n"
+            + "\n".join(f"  - {s}" for s in per_row_selects[:5])
+        )
 
 
 class TestGetMinimalContext:
