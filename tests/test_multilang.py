@@ -151,6 +151,81 @@ class TestJavaParsing:
         assert len(calls) >= 3
 
 
+class TestJavaImportResolution:
+    """Test that Java imports are resolved to absolute file paths."""
+
+    def test_resolves_project_import(self, tmp_path):
+        """Import of a project class resolves to its .java file."""
+        # Create a mini Java project with two packages
+        auth = tmp_path / "src/main/java/com/example/auth"
+        auth.mkdir(parents=True)
+        (auth / "User.java").write_text(
+            "package com.example.auth;\npublic class User {}\n"
+        )
+        svc = tmp_path / "src/main/java/com/example/service"
+        svc.mkdir(parents=True)
+        (svc / "App.java").write_text(
+            "package com.example.service;\n"
+            "import com.example.auth.User;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((auth / "User.java").resolve())
+
+    def test_jdk_import_stays_unresolved(self):
+        """JDK imports have no local file and remain as raw strings."""
+        parser = CodeParser()
+        _, edges = parser.parse_file(FIXTURES / "SampleJava.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        # All imports in SampleJava.java are java.util.* (JDK)
+        for e in imports:
+            assert not e.target.endswith(".java"), (
+                f"JDK import should not resolve to a file: {e.target!r}"
+            )
+
+    def test_static_import_resolves_to_class(self, tmp_path):
+        """Static import of a member resolves to the enclosing class file."""
+        pkg = tmp_path / "src/main/java/com/example/util"
+        pkg.mkdir(parents=True)
+        (pkg / "Helper.java").write_text(
+            "package com.example.util;\n"
+            "public class Helper { public static int MAX = 1; }\n"
+        )
+        app_dir = tmp_path / "src/main/java/com/example/app"
+        app_dir.mkdir(parents=True)
+        (app_dir / "App.java").write_text(
+            "package com.example.app;\n"
+            "import static com.example.util.Helper.MAX;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(app_dir / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((pkg / "Helper.java").resolve())
+
+    def test_wildcard_import_stays_unresolved(self, tmp_path):
+        """Wildcard imports cannot resolve to a single file."""
+        app_dir = tmp_path / "src/main/java/com/example"
+        app_dir.mkdir(parents=True)
+        (app_dir / "App.java").write_text(
+            "package com.example;\n"
+            "import java.util.*;\n"
+            "public class App {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(app_dir / "App.java")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == "java.util.*"
+
+
 class TestCParsing:
     def setup_method(self):
         self.parser = CodeParser()
