@@ -137,6 +137,22 @@ class TestJavaParsing:
         assert "save" in names
         assert "getUser" in names
 
+    def test_method_names_not_return_types(self):
+        """Method names must be the actual name, not the return type.
+
+        tree-sitter-java puts type_identifier (return type) before
+        identifier (method name).  Without the Java-specific branch in
+        _get_name the generic loop picks up the return type instead.
+        """
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        # getName()/getEmail() return String — must not be indexed as "String"
+        assert "getName" in names
+        assert "getEmail" in names
+        assert "getId" in names
+        # createUser() returns User — must not be indexed as "User" (the class)
+        assert "createUser" in names
+
     def test_finds_imports(self):
         imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) >= 2
