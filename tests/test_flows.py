@@ -558,3 +558,31 @@ class TestFlows:
         assert count == 0
         # Original flows unchanged.
         assert len(get_flows(self.store)) == initial_count
+
+    def test_incremental_trace_flows_delete_is_atomic(self):
+        """Regression test for #258: the DELETE loop in incremental_trace_flows
+        must be wrapped in a transaction so a crash mid-loop cannot leave
+        orphaned flow_memberships rows."""
+        self._add_func("handler", path="routes.py")
+        self._add_func("service", path="services.py")
+        self._add_call("routes.py::handler", "services.py::service", "routes.py")
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        assert len(get_flows(self.store)) > 0
+
+        # Incremental trace touching routes.py should delete old flows and
+        # re-trace them.  The key assertion is that this does NOT raise
+        # "cannot start a transaction within a transaction" and that the
+        # DB ends in a consistent state.
+        count = incremental_trace_flows(self.store, ["routes.py"])
+        # The re-trace should find the same entry points.
+        assert count >= 0
+        # No orphaned memberships: every membership references a valid flow.
+        conn = self.store._conn
+        orphans = conn.execute(
+            "SELECT fm.flow_id FROM flow_memberships fm "
+            "LEFT JOIN flows f ON f.id = fm.flow_id "
+            "WHERE f.id IS NULL"
+        ).fetchall()
+        assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"

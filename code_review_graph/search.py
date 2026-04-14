@@ -35,23 +35,30 @@ def rebuild_fts_index(store: GraphStore) -> int:
     # the FTS5 virtual table DDL, which is tightly coupled to SQLite internals.
     conn = store._conn
 
-    # Drop and recreate the FTS table to avoid content-sync mismatch issues
-    conn.execute("DROP TABLE IF EXISTS nodes_fts")
-    conn.execute("""
-        CREATE VIRTUAL TABLE nodes_fts USING fts5(
-            name, qualified_name, file_path, signature,
-            tokenize='porter unicode61'
-        )
-    """)
-    conn.commit()
-
-    # Populate from nodes table
-    conn.execute("""
-        INSERT INTO nodes_fts(rowid, name, qualified_name, file_path, signature)
-        SELECT id, name, qualified_name, file_path, COALESCE(signature, '')
-        FROM nodes
-    """)
-    conn.commit()
+    # Wrap the full DROP + CREATE + INSERT sequence in an explicit transaction
+    # so a crash mid-rebuild cannot leave the DB without an FTS table at all
+    # (DROP succeeded but CREATE/INSERT didn't).  See #259.
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        conn.execute("""
+            CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                name, qualified_name, file_path, signature,
+                tokenize='porter unicode61'
+            )
+        """)
+        # Populate from nodes table
+        conn.execute("""
+            INSERT INTO nodes_fts(rowid, name, qualified_name, file_path, signature)
+            SELECT id, name, qualified_name, file_path, COALESCE(signature, '')
+            FROM nodes
+        """)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     count = conn.execute("SELECT count(*) FROM nodes_fts").fetchone()[0]
     logger.info("FTS index rebuilt: %d rows indexed", count)

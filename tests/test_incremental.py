@@ -592,3 +592,58 @@ class TestMultiHopDependents:
             assert len(deps) <= 500
         finally:
             store.close()
+
+    def test_truncated_flag_set_when_capped(self, tmp_path):
+        """Regression test for #261: find_dependents must set
+        DependentList.truncated = True when the result is capped."""
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        db_path = tmp_path / "trunc.db"
+        store = GraphStore(db_path)
+        try:
+            store.upsert_node(NodeInfo(
+                kind="File", name="/hub.py", file_path="/hub.py",
+                line_start=1, line_end=10, language="python",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="hub_func", file_path="/hub.py",
+                line_start=2, line_end=8, language="python",
+            ))
+            for i in range(600):
+                path = f"/dep{i}.py"
+                store.upsert_node(NodeInfo(
+                    kind="File", name=path, file_path=path,
+                    line_start=1, line_end=10, language="python",
+                ))
+                store.upsert_node(NodeInfo(
+                    kind="Function", name=f"func_{i}", file_path=path,
+                    line_start=2, line_end=8, language="python",
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="IMPORTS_FROM", source=f"{path}::func_{i}",
+                    target="/hub.py::hub_func", file_path=path, line=1,
+                ))
+            store.commit()
+
+            deps = find_dependents(store, "/hub.py", max_hops=5)
+            assert len(deps) <= 500
+            # The key assertion: truncated flag must be set.
+            assert deps.truncated is True, (
+                "DependentList.truncated should be True when capped at "
+                "_MAX_DEPENDENT_FILES, but it was False"
+            )
+        finally:
+            store.close()
+
+    def test_truncated_flag_false_when_not_capped(self, tmp_path):
+        """Regression test for #261: find_dependents must set
+        DependentList.truncated = False when the result is complete."""
+        store = self._make_chain_store(tmp_path)
+        try:
+            deps = find_dependents(store, "/c.py", max_hops=2)
+            assert deps.truncated is False, (
+                "DependentList.truncated should be False when the "
+                "expansion completed without hitting the cap"
+            )
+        finally:
+            store.close()

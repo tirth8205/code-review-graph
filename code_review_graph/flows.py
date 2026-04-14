@@ -496,10 +496,22 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     # 3. Delete affected flows and their memberships
     # ------------------------------------------------------------------
-    for fid in affected_ids:
-        conn.execute("DELETE FROM flow_memberships WHERE flow_id = ?", (fid,))
-        conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
-    conn.commit()
+    # Wrap in an explicit transaction so a crash mid-loop cannot leave
+    # orphaned flow_memberships rows pointing at deleted flows.  See #258.
+    if affected_ids:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for fid in affected_ids:
+                conn.execute(
+                    "DELETE FROM flow_memberships WHERE flow_id = ?", (fid,),
+                )
+                conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # 4. Re-detect entry points and filter to relevant ones

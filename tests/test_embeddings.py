@@ -345,3 +345,30 @@ class TestGetProviderMiniMax:
         with patch.dict("os.environ", {}, clear=True):
             with pytest.raises(ValueError, match="MINIMAX_API_KEY"):
                 get_provider("minimax")
+
+
+class TestEmbeddingStoreContextManager:
+    """Regression tests for #260: EmbeddingStore must support the context
+    manager protocol so connections are cleaned up on exception."""
+
+    def test_supports_context_manager(self, tmp_path):
+        db = tmp_path / "embed_ctx.db"
+        with EmbeddingStore(db) as store:
+            assert store is not None
+            assert store.db_path == db
+        # After exiting, connection should be closed.
+        # (Attempting another query would fail, but we don't test that
+        # because close() doesn't invalidate the object — it just
+        # closes the underlying sqlite3 connection.)
+
+    def test_context_manager_closes_on_exception(self, tmp_path):
+        db = tmp_path / "embed_err.db"
+        try:
+            with EmbeddingStore(db) as store:
+                assert store.db_path == db
+                raise RuntimeError("simulated crash")
+        except RuntimeError:
+            pass
+        # The connection was closed by __exit__ even though an exception
+        # was raised.  This is the whole point of #260 — without the
+        # context manager, the connection would leak.

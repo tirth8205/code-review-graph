@@ -431,15 +431,39 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
     return dependents
 
 
+class DependentList(list):
+    """A ``list[str]`` with a ``.truncated`` flag.
+
+    When :func:`find_dependents` hits ``_MAX_DEPENDENT_FILES`` it truncates
+    the result and sets ``truncated = True`` so callers can distinguish a
+    complete expansion from a capped one.  See issue #261.
+
+    This is a transparent ``list`` subclass — existing callers that iterate,
+    ``len()``, or slice continue to work unchanged; only callers that
+    specifically check ``.truncated`` benefit from the signal.
+    """
+
+    truncated: bool
+
+    def __init__(self, items: list, *, truncated: bool = False) -> None:
+        super().__init__(items)
+        self.truncated = truncated
+
+
 def find_dependents(
     store: GraphStore,
     file_path: str,
     max_hops: int = _MAX_DEPENDENT_HOPS,
-) -> list[str]:
+) -> DependentList:
     """Find files that import from or depend on the given file.
 
     Performs up to *max_hops* iterations of expansion (default 2).
     Stops early if the total exceeds 500 files.
+
+    Returns a :class:`DependentList` — a regular ``list[str]`` that also
+    carries a ``.truncated`` flag.  When ``truncated is True`` the
+    returned list is capped at ``_MAX_DEPENDENT_FILES`` and the full
+    set of dependents was not explored.  See issue #261.
     """
     all_dependents: set[str] = set()
     visited: set[str] = {file_path}
@@ -460,9 +484,11 @@ def find_dependents(
                 "Dependent expansion capped at %d files for %s",
                 len(all_dependents), file_path,
             )
-            # Truncate to the cap
-            return list(all_dependents)[:_MAX_DEPENDENT_FILES]
-    return list(all_dependents)
+            return DependentList(
+                list(all_dependents)[:_MAX_DEPENDENT_FILES],
+                truncated=True,
+            )
+    return DependentList(list(all_dependents))
 
 
 def _parse_single_file(

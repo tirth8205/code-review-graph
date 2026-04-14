@@ -248,3 +248,23 @@ class TestHybridSearch:
             results = hybrid_search(self.store, dangerous_query)
             # Just assert no exception was raised
             assert isinstance(results, list)
+
+    def test_fts_rebuild_is_atomic(self):
+        """Regression test for #259: rebuild_fts_index must wrap the DROP +
+        CREATE + INSERT sequence in a single transaction so a crash between
+        DROP and CREATE cannot leave the DB without an FTS table."""
+        # Build, rebuild, then verify the table exists and is queryable.
+        rebuild_fts_index(self.store)
+
+        # Verify the FTS table exists and has rows.
+        conn = self.store._conn
+        count = conn.execute("SELECT count(*) FROM nodes_fts").fetchone()[0]
+        assert count > 0
+
+        # Rebuild again — must not raise and must leave the table intact.
+        new_count = rebuild_fts_index(self.store)
+        assert new_count == count
+
+        # Verify search still works after double-rebuild.
+        results = hybrid_search(self.store, "auth")
+        assert isinstance(results, list)
