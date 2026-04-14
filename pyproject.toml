@@ -67,8 +67,12 @@ wiki = [
 all = [
     "code-review-graph[embeddings]",
     "code-review-graph[communities]",
+    "code-review-graph[enrichment]",
     "code-review-graph[eval]",
     "code-review-graph[wiki]",
+]
+enrichment = [
+    "jedi>=0.19.2",
 ]
 dev = [
     "pytest>=8.0,<9",
