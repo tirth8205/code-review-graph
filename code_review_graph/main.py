@@ -904,7 +904,9 @@ def main(repo_root: str | None = None) -> None:
     if sys.platform == "win32":
         import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    mcp.run(transport="stdio")
+    # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
+    # notices corrupt the handshake stream on clients like Codex CLI.
+    mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
