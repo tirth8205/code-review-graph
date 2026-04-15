@@ -16,6 +16,9 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
+    _detect_serve_command,
+    _in_poetry_project,
+    _in_uv_project,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
@@ -315,10 +318,8 @@ class TestInstallPlatformConfigs:
         data = tomllib.loads(codex_config.read_text())
         assert data["model"] == "gpt-5.4"
         assert data["mcp_servers"]["other"]["command"] == "other"
-        assert data["mcp_servers"]["code-review-graph"]["command"] in {
-            "uvx",
-            "code-review-graph",
-        }
+        expected_cmd, _ = _detect_serve_command()
+        assert data["mcp_servers"]["code-review-graph"]["command"] == expected_cmd
 
     def test_install_codex_no_duplicate(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -382,9 +383,7 @@ class TestInstallPlatformConfigs:
         data = json.loads(config_path.read_text())
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
-        import shutil
-
-        expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
+        expected_cmd, _ = _detect_serve_command()
         assert entry["command"] == expected_cmd
 
     def test_install_zed_config(self, tmp_path):
@@ -640,3 +639,156 @@ class TestKiroPlatform:
         assert "Kiro" in configured
         config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
         assert not config_path.exists()
+
+
+class TestDetectServeCommand:
+    """Tests for _detect_serve_command() and its helpers."""
+
+    # ------------------------------------------------------------------
+    # _in_poetry_project() unit tests
+    # ------------------------------------------------------------------
+
+    def test_in_poetry_project_via_poetry_active(self, monkeypatch):
+        """POETRY_ACTIVE=1 signals a poetry shell session."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        assert _in_poetry_project() is True
+
+    def test_in_poetry_project_via_virtual_env(self, monkeypatch):
+        """VIRTUAL_ENV containing 'pypoetry' signals a poetry run session."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/.cache/pypoetry/virtualenvs/proj-xxx")
+        assert _in_poetry_project() is True
+
+    def test_in_poetry_project_false_for_plain_venv(self, monkeypatch):
+        """A plain venv (no pypoetry in path) is not treated as poetry."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/myproject/.venv")
+        assert _in_poetry_project() is False
+
+    def test_in_poetry_project_false_when_nothing_set(self, monkeypatch):
+        """No env vars → not in a poetry project."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        assert _in_poetry_project() is False
+
+    # ------------------------------------------------------------------
+    # _detect_serve_command() integration tests
+    # ------------------------------------------------------------------
+
+    def test_poetry_active_returns_poetry_run(self, monkeypatch):
+        """POETRY_ACTIVE=1 (poetry shell) → 'poetry run' invocation."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "poetry"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_virtual_env_pypoetry_returns_poetry_run(self, monkeypatch):
+        """VIRTUAL_ENV with 'pypoetry' (poetry run) → 'poetry run' invocation."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/.cache/pypoetry/virtualenvs/proj-abc123")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "poetry"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_poetry_env_without_poetry_on_path_falls_through(self, monkeypatch):
+        """If poetry venv is detected but poetry binary is missing, fall through."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        # poetry not on PATH → should fall through to uvx
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uvx" if x == "uvx" else None,
+        )
+        cmd, _ = _detect_serve_command()
+        assert cmd == "uvx"
+
+    def test_uv_project_env_returns_uv_run(self, monkeypatch):
+        """UV_PROJECT_ENVIRONMENT set + uv on PATH → 'uv run' invocation."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/some/.venv")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uv" if x == "uv" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "uv"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_uv_lock_detection_returns_uv_run(self, monkeypatch, tmp_path):
+        """uv.lock alongside sys.executable → detected as a uv project."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (tmp_path / "uv.lock").write_text("")
+        fake_python = venv / "python"
+        fake_python.write_text("")
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uv" if x == "uv" else None,
+        )
+        assert _in_uv_project() is True
+        cmd, args = _detect_serve_command()
+        assert cmd == "uv"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_uvx_fallback(self, monkeypatch):
+        """Not in Poetry/uv but uvx available → use uvx (original behaviour)."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uvx" if x == "uvx" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "uvx"
+        assert args == ["code-review-graph", "serve"]
+
+    def test_sys_executable_fallback(self, monkeypatch):
+        """Nothing else available → fall back to sys.executable -m."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda _: None)
+        cmd, args = _detect_serve_command()
+        assert cmd == sys.executable
+        assert args == ["-m", "code_review_graph", "serve"]
+
+    def test_poetry_takes_priority_over_uv(self, monkeypatch):
+        """Poetry detection wins even when UV_PROJECT_ENVIRONMENT is also set."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/some/.venv")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, _ = _detect_serve_command()
+        assert cmd == "poetry"
+
+    def test_in_uv_project_false_without_lockfile(self, monkeypatch, tmp_path):
+        """_in_uv_project returns False when no uv.lock in ancestor dirs."""
+        fake_python = tmp_path / "bin" / "python"
+        fake_python.parent.mkdir(parents=True)
+        fake_python.write_text("")
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
+        monkeypatch.setattr("code_review_graph.skills.Path.home", staticmethod(lambda: tmp_path))
+        assert _in_uv_project() is False

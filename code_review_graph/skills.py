@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -111,18 +113,91 @@ PLATFORMS: dict[str, dict[str, Any]] = {
 }
 
 
+def _in_poetry_project() -> bool:
+    """Return True when the running interpreter is a Poetry-managed virtualenv.
+
+    Two signals are checked so that **both** ``poetry shell`` and ``poetry run``
+    are detected:
+
+    * ``POETRY_ACTIVE=1`` — set by ``poetry shell`` when the user activates the
+      virtual environment interactively.
+    * ``VIRTUAL_ENV`` containing ``"pypoetry"`` — set by **both** ``poetry shell``
+      and ``poetry run`` because Poetry stores its virtualenvs under a path that
+      includes the string ``pypoetry`` (e.g.
+      ``~/.cache/pypoetry/virtualenvs/<name>`` on Linux/macOS or
+      ``%LOCALAPPDATA%\\pypoetry\\Cache\\virtualenvs\\<name>`` on Windows).
+
+    Checking only ``POETRY_ACTIVE`` would miss the ``poetry run`` case, which is
+    the primary scenario described in issue #256.
+    """
+    if os.environ.get("POETRY_ACTIVE") == "1":
+        return True
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    return bool(virtual_env) and "pypoetry" in virtual_env.lower()
+
+
+def _in_uv_project() -> bool:
+    """Return True if ``sys.executable`` lives inside a uv-managed project.
+
+    A project is considered uv-managed when a ``uv.lock`` file exists in any
+    ancestor directory of the running Python interpreter (stopping at the home
+    directory to avoid false positives on system-wide installations).
+    """
+    exe = Path(sys.executable).resolve()
+    home = Path.home()
+    for parent in exe.parents:
+        if (parent / "uv.lock").exists():
+            return True
+        # Stop searching once we reach the home directory or filesystem root
+        if parent == home or parent == parent.parent:
+            break
+    return False
+
+
+def _detect_serve_command() -> tuple[str, list[str]]:
+    """Return ``(command, args)`` that correctly launches ``code-review-graph serve``.
+
+    Detection priority
+    ------------------
+    1. **Poetry** – ``POETRY_ACTIVE=1`` OR ``VIRTUAL_ENV`` contains ``"pypoetry"``
+       (covers both ``poetry shell`` and ``poetry run``) and ``poetry`` is on PATH
+       → ``poetry run code-review-graph serve``
+    2. **uv project** – ``UV_PROJECT_ENVIRONMENT`` is set, or a ``uv.lock``
+       ancestor is found alongside ``sys.executable``, and ``uv`` is on PATH
+       → ``uv run code-review-graph serve``
+    3. **uvx** – ``uvx`` is available on PATH (existing behaviour, unchanged)
+       → ``uvx code-review-graph serve``
+    4. **Fallback** – use the absolute path of the running Python interpreter
+       → ``sys.executable -m code_review_graph serve``
+
+    The fallback is always safe: ``sys.executable`` is the exact interpreter
+    that is currently running, so it resolves correctly inside any virtual
+    environment, conda env, or system installation.
+    """
+    # 1. Poetry (poetry shell or poetry run)
+    if _in_poetry_project():
+        poetry = shutil.which("poetry")
+        if poetry:
+            return ("poetry", ["run", "code-review-graph", "serve"])
+
+    # 2. uv managed project environment
+    if os.environ.get("UV_PROJECT_ENVIRONMENT") or _in_uv_project():
+        uv = shutil.which("uv")
+        if uv:
+            return ("uv", ["run", "code-review-graph", "serve"])
+
+    # 3. uvx global tool runner (existing behaviour, unchanged)
+    if shutil.which("uvx"):
+        return ("uvx", ["code-review-graph", "serve"])
+
+    # 4. Absolute-path fallback using the running interpreter
+    return (sys.executable, ["-m", "code_review_graph", "serve"])
+
+
 def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
-    if shutil.which("uvx"):
-        entry: dict[str, Any] = {
-            "command": "uvx",
-            "args": ["code-review-graph", "serve"],
-        }
-    else:
-        entry = {
-            "command": "code-review-graph",
-            "args": ["serve"],
-        }
+    command, args = _detect_serve_command()
+    entry: dict[str, Any] = {"command": command, "args": args}
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
