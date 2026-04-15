@@ -143,6 +143,67 @@ class TestCodeParser:
         lines = {e.line for e in calls}
         assert len(lines) == 2  # distinct line numbers
 
+    def test_module_scope_calls_attributed_to_file(self):
+        """Module-scope calls (script glue, top-level code) emit CALLS edges
+        attributed to the File node, so callees aren't flagged as dead by
+        find_dead_code.
+
+        Regression test: prior to this fix, _extract_calls dropped the edge
+        entirely when enclosing_func was None, leaving notebooks, CLI scripts,
+        and top-level entry points with zero outgoing CALLS edges.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(
+                "def helper():\n"
+                "    return 42\n"
+                "\n"
+                "# Module-scope call — no enclosing function\n"
+                "result = helper()\n"
+            )
+            tmp = Path(f.name)
+
+        try:
+            _, edges = self.parser.parse_file(tmp)
+            calls = [e for e in edges if e.kind == "CALLS"]
+            module_scope_calls = [e for e in calls if e.source == str(tmp)]
+            assert any(
+                "helper" in e.target for e in module_scope_calls
+            ), f"Expected module-scope CALLS edge to helper(); got: {[(e.source, e.target) for e in calls]}"
+        finally:
+            tmp.unlink()
+
+    def test_module_scope_calls_in_notebook(self):
+        """Notebook code cells are entirely module-scope — every call inside
+        them should produce a CALLS edge attributed to the .ipynb File node."""
+        import json
+
+        notebook = {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": [
+                        "from helper_module import do_work\n",
+                        "do_work()\n",
+                    ],
+                },
+            ],
+            "metadata": {"language_info": {"name": "python"}},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ipynb", delete=False) as f:
+            json.dump(notebook, f)
+            tmp = Path(f.name)
+
+        try:
+            _, edges = self.parser.parse_file(tmp)
+            calls = [e for e in edges if e.kind == "CALLS"]
+            assert any(
+                "do_work" in e.target and e.source == str(tmp) for e in calls
+            ), f"Expected notebook CALLS edge to do_work(); got: {[(e.source, e.target) for e in calls]}"
+        finally:
+            tmp.unlink()
+
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
         assert nodes == []
@@ -902,3 +963,112 @@ class TestValueReferences:
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
+
+
+class TestModuleScopeCalls:
+    """Module-scope calls (no enclosing function) must attribute to the File node.
+
+    Previously these edges were silently dropped, causing ``find_dead_code`` to
+    flag CLI entrypoints, notebook-helper functions, and top-level JSX renders
+    as dead. The fix emits a CALLS edge with ``source = file_path`` (the File
+    node's qualified name).
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_python_top_level_call_attributes_to_file(self):
+        source = (
+            b"def worker():\n"
+            b"    return 1\n"
+            b"\n"
+            b"worker()\n"
+        )
+        path = FIXTURES / "module_scope_py.py"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("worker")
+        ]
+        assert len(top_level) == 1
+        # Edge originates at the call site (line 4), not the def (line 1).
+        assert top_level[0].line == 4
+
+    def test_python_if_main_block_call_attributes_to_file(self):
+        source = (
+            b"def run_job():\n"
+            b"    return 1\n"
+            b"\n"
+            b"if __name__ == '__main__':\n"
+            b"    run_job()\n"
+        )
+        path = FIXTURES / "module_scope_cli.py"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("run_job")
+        ]
+        assert len(top_level) == 1
+        # Edge originates inside the `if __name__` block (line 5).
+        assert top_level[0].line == 5
+
+    def test_tsx_top_level_jsx_render_attributes_to_file(self):
+        # Bare top-level JSX expression statement exercises the
+        # _extract_jsx_child path specifically (not a value-reference
+        # fallback from the `const element = ...` assignment).
+        source = (
+            b"import App from './App';\n"
+            b"\n"
+            b"<App />;\n"
+        )
+        path = FIXTURES / "module_scope_entry.tsx"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("App")
+        ]
+        assert len(top_level) == 1
+        # Edge originates at the JSX site (line 3), not the import (line 1).
+        assert top_level[0].line == 3
+
+    def test_r_top_level_call_attributes_to_file(self):
+        # R scripts are overwhelmingly module-scope by convention; this is
+        # the highest-leverage language for the fix after Python.
+        source = (
+            b"worker <- function() {\n"
+            b"  1\n"
+            b"}\n"
+            b"\n"
+            b"worker()\n"
+        )
+        path = FIXTURES / "module_scope_sample.R"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        top_level = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.source == str(path)
+            and e.target.endswith("worker")
+        ]
+        assert len(top_level) == 1
+
+    def test_elixir_top_level_dotted_call_attributes_to_file(self):
+        # `.exs` scripts and mix tasks commonly have module-scope `IO.puts`,
+        # which is what the parser comment explicitly calls out.
+        source = b'IO.puts("hello")\n'
+        path = FIXTURES / "module_scope_script.exs"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        top_level = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.source == str(path)
+            and e.target.endswith("puts")
+        ]
+        assert len(top_level) == 1

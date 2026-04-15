@@ -161,8 +161,11 @@ def detect_entry_points(
     When *include_tests* is False (the default), Test nodes are excluded so
     that flow analysis focuses on production entry points.
     """
-    # Build a set of all qualified names that are CALLS targets.
-    called_qnames = store.get_all_call_targets()
+    # Build a set of all qualified names that are CALLS targets. Exclude
+    # edges sourced at File nodes so that script-/notebook-/top-level-only
+    # callees (e.g. ``run_job()`` invoked from module scope, a top-level
+    # ``<App />`` render) remain detectable as entry points.
+    called_qnames = store.get_all_call_targets(include_file_sources=False)
 
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])

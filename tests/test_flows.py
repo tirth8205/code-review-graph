@@ -202,6 +202,30 @@ class TestFlows:
         ep_files_all = {ep.file_path for ep in eps_all}
         assert "src/handler.spec.ts" in ep_files_all
 
+    def test_detect_entry_points_module_scope_caller_is_still_root(self):
+        """A function called only from module scope (File-sourced CALLS) is a root.
+
+        Regression guard: the parser attributes module-scope calls to the File
+        node. Without filtering File-sourced callers, ``run_job`` here would
+        look "called" by ``script.py`` and be excluded from flow analysis,
+        even though in practice it IS an entry point (the script itself is
+        invoked externally).
+        """
+        self._add_func("run_job", path="script.py")
+        # Ensure the File node exists so its qualified_name resolves cleanly
+        # (production code creates this automatically during parsing).
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="script.py", file_path="script.py",
+            line_start=1, line_end=10, language="python",
+        ))
+        self.store.commit()
+        # Module-scope call: source is the File node's qualified_name.
+        self._add_call("script.py", "script.py::run_job", path="script.py")
+
+        eps = detect_entry_points(self.store)
+        ep_names = {ep.name for ep in eps}
+        assert "run_job" in ep_names
+
     def test_trace_simple_flow(self):
         """BFS traces a linear call chain: A -> B -> C."""
         self._add_func("entry")

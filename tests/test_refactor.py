@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 from code_review_graph.refactor import (
     REFACTOR_EXPIRY_SECONDS,
     _pending_refactors,
@@ -821,3 +821,65 @@ class TestTransitiveImportResolution:
         assert "safeJsonParse" not in dead_names, (
             "2-hop import chain should make consumer a plausible caller"
         )
+
+
+class TestFindDeadCodeModuleScope:
+    """End-to-end regression: parse → store → find_dead_code.
+
+    Pins the contract that functions invoked only from module scope are not
+    flagged as dead. Bypasses the hand-built graph fixtures used elsewhere in
+    this file so that a regression in any of the parser's 5 module-scope
+    CALLS paths is caught.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        self.parser = CodeParser()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _store_parsed(self, path: Path, source: bytes) -> None:
+        nodes, edges = self.parser.parse_bytes(path, source)
+        for n in nodes:
+            self.store.upsert_node(n)
+        for e in edges:
+            self.store.upsert_edge(e)
+        self.store.commit()
+
+    def test_module_scope_caller_prevents_dead_code_flag(self, tmp_path):
+        """A function called only from top-level script glue is not dead."""
+        # ``run_job`` has no non-dunder name match and no framework decorator,
+        # so without the module-scope CALLS fix it would be flagged dead.
+        path = tmp_path / "script.py"
+        path.write_bytes(
+            b"def run_job():\n"
+            b"    return 1\n"
+            b"\n"
+            b"run_job()\n"
+        )
+        self._store_parsed(path, path.read_bytes())
+
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "run_job" not in dead_names, (
+            "module-scope caller should prevent run_job from being flagged dead"
+        )
+
+    def test_if_main_block_caller_prevents_dead_code_flag(self, tmp_path):
+        """A function called only inside ``if __name__ == '__main__'`` is not dead."""
+        path = tmp_path / "cli.py"
+        path.write_bytes(
+            b"def launch():\n"
+            b"    return 1\n"
+            b"\n"
+            b"if __name__ == '__main__':\n"
+            b"    launch()\n"
+        )
+        self._store_parsed(path, path.read_bytes())
+
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "launch" not in dead_names

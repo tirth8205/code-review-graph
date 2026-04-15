@@ -1075,12 +1075,33 @@ class GraphStore:
         ).fetchone()
         return row["kind"] if row else None
 
-    def get_all_call_targets(self) -> set[str]:
-        """Return the set of all CALLS-edge target qualified names."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT target_qualified FROM edges "
-            "WHERE kind = 'CALLS'"
-        ).fetchall()
+    def get_all_call_targets(self, include_file_sources: bool = True) -> set[str]:
+        """Return the set of all CALLS-edge target qualified names.
+
+        When ``include_file_sources`` is False, CALLS edges whose source is a
+        File node (module-scope calls from top-level script glue, CLI
+        entrypoints, or notebook cells) are excluded. Callers that treat "has
+        an incoming call" as "is not a root" (e.g. entry-point detection)
+        should pass ``include_file_sources=False`` — otherwise a script-only
+        callee looks called and is hidden from flow analysis.
+
+        The File-node filter joins against ``nodes.kind`` rather than pattern-
+        matching ``source_qualified`` so that file paths containing ``::`` or
+        any future change to the File-node naming convention cannot silently
+        miscategorize edges.
+        """
+        if include_file_sources:
+            rows = self._conn.execute(
+                "SELECT DISTINCT target_qualified FROM edges "
+                "WHERE kind = 'CALLS'"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT DISTINCT e.target_qualified FROM edges e "
+                "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+                "WHERE e.kind = 'CALLS' "
+                "AND (n.kind IS NULL OR n.kind != 'File')"
+            ).fetchall()
         return {r["target_qualified"] for r in rows}
 
     def get_communities_list(
