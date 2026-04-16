@@ -333,6 +333,34 @@ pip install code-review-graph[wiki]                # Wiki generation with LLM su
 pip install code-review-graph[all]                 # All optional dependencies
 ```
 
+#### Tool Filtering
+
+CRG exposes 28 MCP tools by default. In token-constrained environments, you can
+limit the server to a subset of tools using `--tools` or the `CRG_TOOLS`
+environment variable:
+
+```bash
+# Via CLI flag
+code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool,detect_changes_tool
+
+# Via environment variable
+CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
+```
+
+The CLI flag takes precedence over the environment variable. When neither is set,
+all tools are available. This is especially useful for MCP client configurations:
+
+```json
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "code-review-graph",
+      "args": ["serve", "--tools", "query_graph_tool,semantic_search_nodes_tool,detect_changes_tool,get_review_context_tool"]
+    }
+  }
+}
+```
+
 </details>
 
 ---
