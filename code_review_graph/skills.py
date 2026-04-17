@@ -432,7 +432,7 @@ def generate_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows",
+                            "command": "git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows || true",
                             "timeout": 30,
                         },
                     ],
