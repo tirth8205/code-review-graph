@@ -298,6 +298,20 @@ pip install code-review-graph[wiki]                # Wiki generation with LLM su
 pip install code-review-graph[all]                 # All optional dependencies
 ```
 
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations | `30` |
+| `CRG_EMBEDDING_MODEL` | Default model for vector embeddings | `all-MiniLM-L6-v2` |
+| `CRG_MAX_IMPACT_NODES` | Maximum nodes to include in impact analysis | `500` |
+| `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
+| `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
+| `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
+| `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
+| `NO_COLOR` | If set, disables ANSI colors in terminal | - |
+| `CRG_SERIAL_PARSE` | If `1`, disables parallel parsing (use for debugging) | - |
+
 </details>
 
 ---

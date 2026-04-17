@@ -391,7 +391,7 @@ def apply_refactor(
             continue
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = file_path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("apply_refactor: could not read %s: %s", file_path, exc)
             continue

@@ -141,7 +141,7 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text())
+                existing = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
             except (json.JSONDecodeError, OSError):
                 logger.warning("Invalid JSON in %s, will overwrite.", config_path)
                 existing = {}
@@ -381,7 +381,7 @@ def install_hooks(repo_root: Path) -> None:
     existing: dict[str, Any] = {}
     if settings_path.exists():
         try:
-            existing = json.loads(settings_path.read_text())
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
@@ -445,7 +445,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
     """
     existing = ""
     if file_path.exists():
-        existing = file_path.read_text()
+        existing = file_path.read_text(encoding="utf-8", errors="replace")
 
     if marker in existing:
         logger.info("%s already contains instructions, skipping.", file_path.name)

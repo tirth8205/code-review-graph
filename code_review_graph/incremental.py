@@ -113,7 +113,7 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     patterns = list(DEFAULT_IGNORE_PATTERNS)
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
-        for line in ignore_file.read_text().splitlines():
+        for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 patterns.append(line)

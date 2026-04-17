@@ -118,7 +118,7 @@ def get_docs_section(
     for search_root in search_roots:
         candidate = search_root / "docs" / "LLM-OPTIMIZED-REFERENCE.md"
         if candidate.exists():
-            content = candidate.read_text(encoding="utf-8")
+            content = candidate.read_text(encoding="utf-8", errors="replace")
             match = _re.search(
                 rf'<section name="{_re.escape(section_name)}">'
                 r"(.*?)</section>",
