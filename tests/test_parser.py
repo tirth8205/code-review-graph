@@ -1,5 +1,6 @@
 """Tests for the Tree-sitter parser module."""
 
+import tempfile
 from pathlib import Path
 
 from code_review_graph.parser import CodeParser
@@ -344,6 +345,33 @@ class TestCodeParser:
         assert create_dog is not None
         assert create_dog.parent_name is None
 
+    def test_parse_dart_call_edges(self):
+        """Dart CALLS extraction (#87 bug 1).
+
+        tree-sitter-dart doesn't wrap calls in a single ``call_expression``
+        node so the parser has a Dart-specific walker that detects
+        ``identifier + selector > argument_part`` patterns. Verify we
+        capture builtin calls (``print``), constructor calls (``Dog(...)``),
+        and internal method calls (``_run()``).
+        """
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample.dart")
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert calls, "expected at least one CALLS edge for Dart"
+        targets = [e.target for e in calls]
+        # Builtin print is called at least twice in sample.dart
+        assert sum(1 for t in targets if t == "print") >= 2
+        # _run() is called inside Dog.fetch(); the call target should
+        # either be the bare name "_run" or a qualified form ending in
+        # "::Dog._run" once the call resolver has run.
+        assert any(t == "_run" or t.endswith("::Dog._run") for t in targets), (
+            f"expected _run() call, got targets: {targets}"
+        )
+        # Dog(name) constructor call from createDog() — target may be
+        # bare "Dog" or qualified "...::Dog".
+        assert any(t == "Dog" or t.endswith("::Dog") for t in targets), (
+            f"expected Dog() constructor call, got targets: {targets}"
+        )
+
     # --- tsconfig alias resolution ---
 
     def test_tsconfig_alias_resolution(self):
@@ -440,3 +468,437 @@ class TestCodeParser:
             )
         finally:
             tmp_path.unlink(missing_ok=True)
+
+    # --- JSX component CALLS tests ---
+
+    def test_tsx_jsx_component_invocation_creates_call_edge(self):
+        source = (
+            b"import MarkdownMsg from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <section><MarkdownMsg text={value} /></section>;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_intrinsic_dom_elements_do_not_create_call_edges(self):
+        source = (
+            b"export function BookWorkspace() {\n"
+            b"  return <section><div /><span /></section>;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert calls == []
+
+    def test_tsx_member_component_invocation_creates_unqualified_call_edge(self):
+        source = (
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == "MarkdownMsg"
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_namespace_import_component_invocation_resolves_to_module_file(self):
+        source = (
+            b"import * as UI from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_nested_member_component_invocation_resolves_namespace_root(self):
+        source = (
+            b"import * as UI from './MarkdownMsg';\n\n"
+            b"export function BookWorkspace() {\n"
+            b"  return <UI.Messages.MarkdownMsg text={value} />;\n"
+            b"}\n"
+        )
+        path = FIXTURES / "BookWorkspace.tsx"
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        expected_target = f"{str((FIXTURES / 'MarkdownMsg.tsx').resolve())}::MarkdownMsg"
+        jsx_calls = [
+            e for e in calls
+            if e.source == f"{path}::BookWorkspace" and e.target == expected_target
+        ]
+        assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { MarkdownMsg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <MarkdownMsg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_aliased_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export { MarkdownMsg as Msg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { Msg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <Msg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_tsx_barrel_star_reexport_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "components").mkdir()
+            (root / "components" / "MarkdownMsg.tsx").write_text(
+                "export function MarkdownMsg() { return <div />; }\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.ts").write_text(
+                "export * from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.tsx"
+            source = (
+                b"import { MarkdownMsg } from './components';\n\n"
+                b"export function BookWorkspace() {\n"
+                b"  return <MarkdownMsg text={value} />;\n"
+                b"}\n"
+            )
+
+            _, edges = self.parser.parse_bytes(consumer, source)
+
+            calls = [e for e in edges if e.kind == "CALLS"]
+            expected_target = (
+                f"{str((root / 'components' / 'MarkdownMsg.tsx').resolve())}"
+                "::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in calls
+                if e.source == f"{consumer}::BookWorkspace" and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_grimoire_style_jsx_fixture_tracks_all_component_call_sites(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            components = root / "components"
+            components.mkdir()
+            (components / "MarkdownMsg.jsx").write_text(
+                "export function MarkdownMsg({ text }) { return <div>{text}</div>; }\n",
+                encoding="utf-8",
+            )
+            (components / "index.js").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.jsx"
+            consumer.write_text(
+                "import { MarkdownMsg } from './components';\n\n"
+                "export function BookDashboard() {\n"
+                "  return (\n"
+                "    <>\n"
+                "      <MarkdownMsg text='a' />\n"
+                "      <MarkdownMsg text='b' />\n"
+                "      <MarkdownMsg text='c' />\n"
+                "    </>\n"
+                "  );\n"
+                "}\n\n"
+                "export function AIPanel() {\n"
+                "  return (\n"
+                "    <>\n"
+                "      <MarkdownMsg text='d' />\n"
+                "      <MarkdownMsg text='e' />\n"
+                "    </>\n"
+                "  );\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(consumer)
+
+            expected_target = (
+                f"{str((components / 'MarkdownMsg.jsx').resolve())}::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in edges
+                if e.kind == "CALLS" and e.target == expected_target
+            ]
+            by_source = {}
+            for edge in jsx_calls:
+                by_source[edge.source] = by_source.get(edge.source, 0) + 1
+            assert by_source == {
+                f"{consumer}::BookDashboard": 3,
+                f"{consumer}::AIPanel": 2,
+            }
+
+    def test_nested_barrel_chain_resolves_component_to_origin_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            messages = root / "components" / "messages"
+            messages.mkdir(parents=True)
+            (messages / "MarkdownMsg.jsx").write_text(
+                "export function MarkdownMsg({ text }) { return <div>{text}</div>; }\n",
+                encoding="utf-8",
+            )
+            (messages / "index.js").write_text(
+                "export { MarkdownMsg } from './MarkdownMsg';\n",
+                encoding="utf-8",
+            )
+            (root / "components" / "index.js").write_text(
+                "export { MarkdownMsg as Msg } from './messages';\n",
+                encoding="utf-8",
+            )
+            consumer = root / "BookWorkspace.jsx"
+            consumer.write_text(
+                "import { Msg } from './components';\n\n"
+                "export function BookDashboard() {\n"
+                "  return <Msg text='a' />;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(consumer)
+
+            expected_target = (
+                f"{str((messages / 'MarkdownMsg.jsx').resolve())}::MarkdownMsg"
+            )
+            jsx_calls = [
+                e for e in edges
+                if e.kind == "CALLS"
+                and e.source == f"{consumer}::BookDashboard"
+                and e.target == expected_target
+            ]
+            assert len(jsx_calls) == 1
+
+    def test_junit_annotation_marks_test(self):
+        """Java @Test annotation should mark functions as tests."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyTest.java"),
+            b"class MyTest {\n"
+            b"  @Test\n"
+            b"  void verifyBehavior() { }\n"
+            b"  void helperMethod() { }\n"
+            b"}\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "verifyBehavior" in test_names
+        assert "helperMethod" not in test_names
+
+    def test_kotlin_test_annotation_marks_test(self):
+        """Kotlin @Test annotation should mark functions as tests."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/SampleTest.kt"),
+            b"class SampleTest {\n"
+            b"  @Test fun checkResult() { }\n"
+            b"  fun setup() { }\n"
+            b"}\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "checkResult" in test_names
+        assert "setup" not in test_names
+
+    def test_detects_test_functions(self):
+        """Functions with test-like names should be marked is_test=True."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/test_example.py"),
+            b"def test_something(): pass\n"
+            b"def helper(): pass\n",
+        )
+        test_nodes = [n for n in nodes if n.is_test]
+        test_names = {n.name for n in test_nodes}
+        assert "test_something" in test_names
+        assert "helper" not in test_names
+
+
+class TestValueReferences:
+    """Tests for REFERENCES edge extraction from function-as-value patterns."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_ts_object_literal_function_values(self):
+        """Object literal values that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # handleCreate, handleUpdate, handleDelete are values in the handlers object
+        assert "handleCreate" in ref_targets_bare
+        assert "handleUpdate" in ref_targets_bare
+        assert "handleDelete" in ref_targets_bare
+
+    def test_ts_shorthand_property_references(self):
+        """Shorthand properties like { validateInput } emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        assert "validateInput" in ref_targets_bare
+        assert "processData" in ref_targets_bare
+
+    def test_ts_array_function_elements(self):
+        """Array elements that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # pipeline = [validateInput, processData, formatOutput]
+        assert "formatOutput" in ref_targets_bare
+
+    def test_ts_callback_argument_reference(self):
+        """Function identifiers passed as arguments emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # register(handleCreate) in dispatch function
+        assert "handleCreate" in ref_targets_bare
+
+    def test_ts_property_assignment_reference(self):
+        """Property assignment RHS identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # dynamicHandlers['format'] = formatOutput
+        assert "formatOutput" in ref_targets_bare
+
+    def test_python_dict_function_values(self):
+        """Python dict values that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        assert "handle_create" in ref_targets_bare
+        assert "handle_update" in ref_targets_bare
+        assert "handle_delete" in ref_targets_bare
+
+    def test_python_list_function_elements(self):
+        """Python list elements that are function identifiers emit REFERENCES edges."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets_bare = {e.target.split("::")[-1] for e in refs}
+        # pipeline = [validate_input, process_data, format_output]
+        assert "validate_input" in ref_targets_bare
+        assert "process_data" in ref_targets_bare
+        assert "format_output" in ref_targets_bare
+
+    def test_references_have_correct_source(self):
+        """REFERENCES edges should have the enclosing function as source."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        # The register(handleCreate) call is inside 'dispatch'
+        dispatch_refs = [
+            e for e in refs
+            if "dispatch" in e.source and "handleCreate" in e.target
+        ]
+        assert len(dispatch_refs) >= 1
+
+    def test_no_references_for_unknown_identifiers(self):
+        """Identifiers not in defined_names or import_map should NOT emit REFERENCES."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/test/example.ts"),
+            b"function outer() {\n"
+            b"  const map = { key: unknownFunc };\n"
+            b"}\n",
+        )
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets = {e.target for e in refs}
+        assert "unknownFunc" not in ref_targets
+
+    def test_no_references_for_constants(self):
+        """All-uppercase identifiers should NOT emit REFERENCES (likely constants)."""
+        nodes, edges = self.parser.parse_bytes(
+            Path("/test/example.ts"),
+            b"const MAX_SIZE = 100;\n"
+            b"function outer() {\n"
+            b"  const arr = [MAX_SIZE];\n"
+            b"}\n",
+        )
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_targets = {e.target for e in refs}
+        assert "MAX_SIZE" not in ref_targets
+
+    def test_resolve_references_targets(self):
+        """REFERENCES edges should have resolved (qualified) targets for local funcs."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        file_path = str(FIXTURES / "sample_map_dispatch.ts")
+        # At least some targets should be fully qualified
+        qualified_refs = [e for e in refs if "::" in e.target]
+        assert len(qualified_refs) > 0

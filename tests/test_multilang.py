@@ -44,6 +44,44 @@ class TestGoParsing:
         contains = [e for e in self.edges if e.kind == "CONTAINS"]
         assert len(contains) >= 3
 
+    def test_methods_attached_to_receiver(self):
+        """Go methods should be attached to their receiver type (#190).
+
+        `func (r *InMemoryRepo) FindByID(...)` should produce a Function node
+        with parent_name='InMemoryRepo' and a CONTAINS edge from the type to
+        the method, so `inheritors_of`/`query_graph` can find methods via the
+        struct they belong to.
+        """
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        by_name = {f.name: f for f in funcs}
+        assert "FindByID" in by_name
+        assert "Save" in by_name
+        assert by_name["FindByID"].parent_name == "InMemoryRepo"
+        assert by_name["Save"].parent_name == "InMemoryRepo"
+        # Free functions should still have no parent.
+        assert by_name["NewInMemoryRepo"].parent_name is None
+        assert by_name["CreateUser"].parent_name is None
+
+        contains = [(e.source, e.target) for e in self.edges if e.kind == "CONTAINS"]
+        find_by_id_contains = [
+            (s, t) for (s, t) in contains
+            if t.endswith("::InMemoryRepo.FindByID")
+        ]
+        save_contains = [
+            (s, t) for (s, t) in contains
+            if t.endswith("::InMemoryRepo.Save")
+        ]
+        assert find_by_id_contains, (
+            f"no CONTAINS edge for InMemoryRepo.FindByID in {contains}"
+        )
+        assert save_contains, (
+            f"no CONTAINS edge for InMemoryRepo.Save in {contains}"
+        )
+        # Source of each CONTAINS should be the InMemoryRepo type,
+        # not the file path.
+        assert find_by_id_contains[0][0].endswith("::InMemoryRepo")
+        assert save_contains[0][0].endswith("::InMemoryRepo")
+
 
 class TestRustParsing:
     def setup_method(self):
@@ -249,6 +287,14 @@ class TestKotlinParsing:
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
 
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {c.target for c in calls}
+        # Simple call: println(...)
+        assert "println" in targets
+        # Method call: repo.save(user)
+        assert any("save" in t for t in targets)
+
 
 class TestSwiftParsing:
     def setup_method(self):
@@ -261,12 +307,61 @@ class TestSwiftParsing:
     def test_finds_classes(self):
         classes = [n for n in self.nodes if n.kind == "Class"]
         names = {c.name for c in classes}
-        assert "User" in names or "InMemoryRepo" in names
+        assert "User" in names
+        assert "InMemoryRepo" in names
 
     def test_finds_functions(self):
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "createUser" in names or "findById" in names or "save" in names
+
+    def test_finds_enum(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Direction" in names
+
+    def test_finds_actor(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "DataStore" in names
+
+    def test_finds_extension(self):
+        """Extensions should be detected and linked to the extended type."""
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        # Extension of InMemoryRepo should produce a Class node named InMemoryRepo
+        # with swift_kind == "extension"
+        ext_nodes = [c for c in classes if c.extra.get("swift_kind") == "extension"]
+        assert len(ext_nodes) >= 1
+        assert ext_nodes[0].name == "InMemoryRepo"
+
+    def test_finds_protocol(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "UserRepository" in names
+
+    def test_swift_kind_extra(self):
+        """Each Swift type should have the correct swift_kind in extra."""
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert classes["User"].extra.get("swift_kind") == "struct"
+        assert classes["Direction"].extra.get("swift_kind") == "enum"
+        assert classes["DataStore"].extra.get("swift_kind") == "actor"
+        assert classes["UserRepository"].extra.get("swift_kind") == "protocol"
+        # InMemoryRepo appears twice (class + extension); check at least one is "class"
+        repo_nodes = [n for n in self.nodes if n.kind == "Class" and n.name == "InMemoryRepo"]
+        kinds = {n.extra.get("swift_kind") for n in repo_nodes}
+        assert "class" in kinds
+        assert "extension" in kinds
+
+    def test_inheritance_edges(self):
+        """Swift inheritance / conformance should produce INHERITS edges."""
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        # InMemoryRepo: UserRepository
+        assert "UserRepository" in targets
+        # Direction: String
+        assert "String" in targets
+        # extension InMemoryRepo: CustomStringConvertible
+        assert "CustomStringConvertible" in targets
 
 
 class TestScalaParsing:
@@ -807,3 +902,303 @@ class TestLuaParsing:
         sources = {e.source.split("::")[-1] for e in calls}
         assert "Dog.fetch" in sources  # Dog:fetch calls self:speak and print
         assert "Animal.speak" in sources  # Animal:speak calls log:info
+
+
+class TestLuauParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.luau")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("init.luau")) == "luau"
+        assert self.parser.detect_language(Path("module.luau")) == "luau"
+
+    def test_finds_type_aliases(self):
+        types = [n for n in self.nodes if n.kind == "Class"]
+        names = {t.name for t in types}
+        assert "Vector3" in names
+        assert "Callback" in names
+
+    def test_finds_top_level_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        assert "greet" in names
+        assert "add" in names
+        assert "process_animals" in names
+
+    def test_finds_variable_assigned_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        assert "transform" in names
+
+    def test_finds_dot_syntax_methods(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Animal"
+        ]
+        names = {f.name for f in funcs}
+        assert "new" in names
+
+    def test_finds_colon_syntax_methods(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Animal"
+        ]
+        names = {f.name for f in funcs}
+        assert "speak" in names
+        assert "rename" in names
+
+    def test_finds_inherited_table_methods(self):
+        dog_funcs = [
+            n for n in self.nodes
+            if n.kind in ("Function", "Test") and n.parent_name == "Dog"
+        ]
+        names = {f.name for f in dog_funcs}
+        assert "new" in names
+        assert "fetch" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "lib.utils" in targets
+        assert "logging" in targets
+        assert len(imports) >= 2
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "print" in targets
+        assert "setmetatable" in targets
+        assert "assert" in targets
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split("::")[-1] for e in contains}
+        assert "greet" in targets
+        assert "add" in targets
+        assert "Animal.new" in targets
+        assert "Animal.speak" in targets
+        assert "Dog.fetch" in targets
+
+    def test_method_parent_names(self):
+        funcs = {
+            (n.name, n.parent_name) for n in self.nodes
+            if n.kind == "Function" and n.parent_name is not None
+        }
+        assert ("new", "Animal") in funcs
+        assert ("speak", "Animal") in funcs
+        assert ("rename", "Animal") in funcs
+        assert ("new", "Dog") in funcs
+        assert ("fetch", "Dog") in funcs
+
+    def test_detects_test_functions(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        names = {t.name for t in tests}
+        assert "test_greet" in names
+        assert "test_animal_speak" in names
+        assert "test_dog_fetch" in names
+        assert len(tests) == 3
+
+    def test_nodes_have_luau_language(self):
+        for node in self.nodes:
+            assert node.language == "luau"
+
+    def test_calls_inside_methods(self):
+        """Verify that calls inside methods have correct source qualified names."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        sources = {e.source.split("::")[-1] for e in calls}
+        assert "Dog.fetch" in sources
+        assert "Animal.speak" in sources
+
+
+class TestObjectiveCParsing:
+    """Objective-C parser — closes #88."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.m")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("foo.m")) == "objc"
+
+    def test_nodes_have_objc_language(self):
+        for n in self.nodes:
+            assert n.language == "objc"
+
+    def test_finds_class(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        # Both @interface and @implementation produce Class nodes; that's
+        # fine because they upsert to the same qualified name in the store.
+        names = {c.name for c in classes}
+        assert "Calculator" in names
+
+    def test_finds_instance_and_class_methods(self):
+        funcs = {
+            (n.name, n.parent_name) for n in self.nodes if n.kind == "Function"
+        }
+        assert ("add", "Calculator") in funcs
+        assert ("reset", "Calculator") in funcs
+        assert ("logResult", "Calculator") in funcs
+        assert ("sharedCalculator", "Calculator") in funcs
+
+    def test_finds_c_main(self):
+        """Top-level C-style main() must be extracted via the
+        function_declarator pattern that C/C++ already use (#88)."""
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        main_fn = next((f for f in funcs if f.name == "main"), None)
+        assert main_fn is not None
+        assert main_fn.parent_name is None  # top-level, not attached to a class
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        # Angle-bracket system headers and quoted user headers both arrive
+        # as preproc_include in tree-sitter-objc.
+        assert any("Foundation" in t for t in targets)
+        assert any("Logger" in t for t in targets)
+
+    def test_extracts_message_expression_calls(self):
+        """Objective-C uses [receiver method:args] for method calls; these
+        must produce CALLS edges (#88)."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = [e.target for e in calls]
+        # Internal [self logResult:sum] should resolve to Calculator.logResult
+        assert any(t.endswith("::Calculator.logResult") for t in targets)
+        # [Calculator sharedCalculator] from main should also resolve
+        assert any(t.endswith("::Calculator.sharedCalculator") for t in targets)
+        # External NSLog(...) call_expression should be captured too
+        assert "NSLog" in targets
+
+
+class TestBashParsing:
+    """Bash/Shell parser — closes #197."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.sh")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("build.sh")) == "bash"
+        assert self.parser.detect_language(Path("build.bash")) == "bash"
+        assert self.parser.detect_language(Path("run.zsh")) == "bash"
+
+    def test_nodes_have_bash_language(self):
+        for n in self.nodes:
+            assert n.language == "bash"
+
+    def test_finds_functions(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "log_info" in funcs
+        assert "log_error" in funcs
+        assert "ensure_dir" in funcs
+        assert "cleanup" in funcs
+        assert "main" in funcs
+
+    def test_functions_have_no_parent(self):
+        """Bash has no classes so every function should be top-level."""
+        for n in self.nodes:
+            if n.kind == "Function":
+                assert n.parent_name is None
+
+    def test_source_creates_import_edge(self):
+        """`source ./lib.sh` / `. ./config.sh` should produce IMPORTS_FROM
+        edges (#197)."""
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) >= 2
+        targets = [e.target for e in imports]
+        # sample_lib.sh exists on disk so should be resolved to an absolute path
+        assert any(t.endswith("sample_lib.sh") for t in targets)
+        # sample_config.sh doesn't exist; unresolved path is kept as-is
+        assert any("sample_config.sh" in t for t in targets)
+
+    def test_command_invocations_create_call_edges(self):
+        """Each `command` node inside a function body should become a
+        CALLS edge keyed on its command_name (#197)."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # Built-ins and external commands kept as bare names
+        assert "echo" in targets
+        assert "mkdir" in targets
+        # Internal function calls should resolve to qualified names
+        assert any(t.endswith("::log_info") for t in targets)
+        assert any(t.endswith("::ensure_dir") for t in targets)
+        assert any(t.endswith("::cleanup") for t in targets)
+
+    def test_main_calls_resolve_to_internal_functions(self):
+        """main() should have CALLS edges to log_info, ensure_dir, and cleanup."""
+        calls = [
+            e for e in self.edges
+            if e.kind == "CALLS" and e.source.endswith("::main")
+        ]
+        call_targets = {e.target for e in calls}
+        assert any(t.endswith("::log_info") for t in call_targets)
+        assert any(t.endswith("::ensure_dir") for t in call_targets)
+        assert any(t.endswith("::cleanup") for t in call_targets)
+
+
+class TestElixirParsing:
+    """Elixir parser — closes #112."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.ex")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("lib.ex")) == "elixir"
+        assert self.parser.detect_language(Path("script.exs")) == "elixir"
+
+    def test_nodes_have_elixir_language(self):
+        for n in self.nodes:
+            assert n.language == "elixir"
+
+    def test_modules_become_classes(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Calculator" in classes
+        assert "MathHelpers" in classes
+
+    def test_def_defp_produce_functions_with_parent_module(self):
+        funcs = {
+            (n.name, n.parent_name) for n in self.nodes if n.kind == "Function"
+        }
+        # public defs
+        assert ("add", "Calculator") in funcs
+        assert ("subtract", "Calculator") in funcs
+        assert ("compute", "Calculator") in funcs
+        assert ("double", "MathHelpers") in funcs
+        assert ("triple", "MathHelpers") in funcs
+        # private defp
+        assert ("log", "Calculator") in funcs
+
+    def test_alias_import_require_produce_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = [e.target for e in imports]
+        # alias Calculator, import Calculator, require Logger
+        assert targets.count("Calculator") >= 2
+        assert "Logger" in targets
+
+    def test_internal_calls_resolve_to_qualified_names(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # Calculator.compute calls add() and log() — both inside Calculator
+        assert any(t.endswith("::Calculator.add") for t in targets)
+        assert any(t.endswith("::Calculator.log") for t in targets)
+        # MathHelpers.double calls Calculator.compute
+        assert any(t.endswith("::Calculator.compute") for t in targets)
+        # MathHelpers.triple calls double() — within the same module
+        assert any(t.endswith("::MathHelpers.double") for t in targets)
+
+    def test_contains_edges_wire_module_to_functions(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        # Each function should be CONTAINS-linked to its parent module
+        function_targets = {
+            e.target for e in contains
+            if "::" in e.source and "Calculator" in e.source
+        }
+        assert any(t.endswith("::Calculator.add") for t in function_targets)
+        assert any(t.endswith("::Calculator.compute") for t in function_targets)

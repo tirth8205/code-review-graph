@@ -182,6 +182,64 @@ class TestGetProviderModel:
         mock_cls.assert_called_once_with(model_name=None)
 
 
+class TestCloudProviderWarning:
+    """Tests for the stderr warning before cloud provider use (#174)."""
+
+    def test_minimax_triggers_stderr_warning(self, capsys):
+        """Using the MiniMax provider should print a warning to stderr
+        unless CRG_ACCEPT_CLOUD_EMBEDDINGS=1 is set."""
+        with patch.dict(os.environ, {"MINIMAX_API_KEY": "fake"}, clear=False):
+            os.environ.pop("CRG_ACCEPT_CLOUD_EMBEDDINGS", None)
+            with patch(
+                "code_review_graph.embeddings.MiniMaxEmbeddingProvider",
+            ) as mock_cls:
+                mock_cls.return_value = MagicMock()
+                get_provider(provider="minimax")
+        captured = capsys.readouterr()
+        assert "minimax" in captured.err.lower()
+        assert "cloud" in captured.err.lower()
+        assert "sent to an external API" in captured.err
+        # Should NOT have written to stdout (would corrupt MCP stdio).
+        assert captured.out == ""
+
+    def test_google_triggers_stderr_warning(self, capsys):
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": "fake"}, clear=False):
+            os.environ.pop("CRG_ACCEPT_CLOUD_EMBEDDINGS", None)
+            with patch(
+                "code_review_graph.embeddings.GoogleEmbeddingProvider",
+            ) as mock_cls:
+                mock_cls.return_value = MagicMock()
+                get_provider(provider="google")
+        captured = capsys.readouterr()
+        assert "google" in captured.err.lower()
+        assert captured.out == ""
+
+    def test_accept_env_var_suppresses_warning(self, capsys):
+        """Setting CRG_ACCEPT_CLOUD_EMBEDDINGS=1 silences the warning."""
+        with patch.dict(os.environ, {
+            "MINIMAX_API_KEY": "fake",
+            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+        }, clear=False):
+            with patch(
+                "code_review_graph.embeddings.MiniMaxEmbeddingProvider",
+            ) as mock_cls:
+                mock_cls.return_value = MagicMock()
+                get_provider(provider="minimax")
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_local_provider_never_warns(self, capsys):
+        """Local (offline) provider must not trigger the cloud warning."""
+        with patch(
+            "code_review_graph.embeddings.LocalEmbeddingProvider",
+        ) as mock_cls:
+            mock_cls.return_value = MagicMock()
+            get_provider(provider=None)
+        captured = capsys.readouterr()
+        assert "cloud" not in captured.err.lower()
+
+
 class TestEmbeddingStoreModelPassthrough:
     """Tests that EmbeddingStore passes model to get_provider."""
 

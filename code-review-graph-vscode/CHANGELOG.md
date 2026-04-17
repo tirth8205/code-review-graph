@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-04-08
+
+### Fixed
+- Compatible with Python backend schema v6 (no extension-side schema changes in this release)
+
 ## 0.2.0 — 2026-03-20
 
 ### Added

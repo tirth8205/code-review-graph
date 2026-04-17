@@ -2,7 +2,7 @@
   "name": "code-review-graph",
   "displayName": "Code Review Graph",
   "description": "Visualize code dependencies, blast radius, and review context from your code-review-graph database directly in VS Code.",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "publisher": "tirth8205",
   "license": "MIT",
   "icon": "media/icons/icon.png",
@@ -295,7 +295,7 @@
     "test": "node --experimental-vm-modules node_modules/@vscode/test-electron/out/runTest.js"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.8",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/d3": "^7.4.3",
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
@@ -305,7 +305,7 @@
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^12.4.1",
     "d3": "^7.9.0"
   }
 }

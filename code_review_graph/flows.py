@@ -25,14 +25,46 @@ logger = logging.getLogger(__name__)
 
 # Decorator patterns that indicate a function is a framework entry point.
 _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"app\.(get|post|put|delete|patch|route|websocket)", re.IGNORECASE),
+    # Python web frameworks
+    re.compile(r"app\.(get|post|put|delete|patch|route|websocket|on_event)", re.IGNORECASE),
     re.compile(r"router\.(get|post|put|delete|patch|route)", re.IGNORECASE),
     re.compile(r"blueprint\.(route|before_request|after_request)", re.IGNORECASE),
+    re.compile(r"(before|after)_(request|response)", re.IGNORECASE),
+    # CLI frameworks
     re.compile(r"click\.(command|group)", re.IGNORECASE),
-    re.compile(r"celery\.(task|shared_task)", re.IGNORECASE),
+    re.compile(r"\w+\.(command|group)\b", re.IGNORECASE),  # Click subgroups: @mygroup.command()
+    # Pydantic validators/serializers
+    re.compile(r"(field|model)_(serializer|validator)", re.IGNORECASE),
+    # Task queues
+    re.compile(r"(celery\.)?(task|shared_task|periodic_task)", re.IGNORECASE),
+    # Django
+    re.compile(r"receiver", re.IGNORECASE),
     re.compile(r"api_view", re.IGNORECASE),
     re.compile(r"\baction\b", re.IGNORECASE),
-    re.compile(r"@(Get|Post|Put|Delete|Patch|RequestMapping)", re.IGNORECASE),
+    # Testing
+    re.compile(r"pytest\.(fixture|mark)"),
+    re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
+    # SQLAlchemy / event systems
+    re.compile(r"(event\.)?listens_for", re.IGNORECASE),
+    # Java Spring
+    re.compile(r"(Get|Post|Put|Delete|Patch|RequestMapping)Mapping", re.IGNORECASE),
+    re.compile(r"(Scheduled|EventListener|Bean|Configuration)", re.IGNORECASE),
+    # JS/TS frameworks
+    re.compile(r"(Component|Injectable|Controller|Module|Guard|Pipe)", re.IGNORECASE),
+    re.compile(r"(Subscribe|Mutation|Query|Resolver)", re.IGNORECASE),
+    # Express / Koa / Hono route handlers
+    re.compile(r"(app|router)\.(get|post|put|delete|patch|use|all)\b"),
+    # Android lifecycle
+    re.compile(r"@(Override|OnLifecycleEvent|Composable)", re.IGNORECASE),
+    # Kotlin coroutines / Android ViewModel
+    re.compile(r"(HiltViewModel|AndroidEntryPoint|Inject)", re.IGNORECASE),
+    # AI/agent frameworks (pydantic-ai, langchain, etc.)
+    re.compile(r"\w+\.(tool|tool_plain|system_prompt|result_validator)\b", re.IGNORECASE),
+    re.compile(r"^tool\b"),  # bare @tool (LangChain, etc.)
+    # Middleware and exception handlers (Starlette, FastAPI, Sanic)
+    re.compile(r"\w+\.(middleware|exception_handler|on_exception)\b", re.IGNORECASE),
+    # Generic route decorator (Flask blueprints: @bp.route, @auth_bp.route, etc.)
+    re.compile(r"\w+\.route\b", re.IGNORECASE),
 ]
 
 # Name patterns that indicate conventional entry points.
@@ -43,6 +75,38 @@ _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^Test[A-Z]"),
     re.compile(r"^on_"),
     re.compile(r"^handle_"),
+    # Lambda / serverless handler functions (wired via config, not code calls)
+    re.compile(r"^handler$"),
+    re.compile(r"^handle$"),
+    re.compile(r"^lambda_handler$"),
+    # Alembic migration entry points
+    re.compile(r"^upgrade$"),
+    re.compile(r"^downgrade$"),
+    # FastAPI lifecycle / dependency injection
+    re.compile(r"^lifespan$"),
+    re.compile(r"^get_db$"),
+    # Android Activity/Fragment lifecycle
+    re.compile(r"^on(Create|Start|Resume|Pause|Stop|Destroy|Bind|Receive)"),
+    # Servlet / JAX-RS
+    re.compile(r"^do(Get|Post|Put|Delete)$"),
+    # Python BaseHTTPRequestHandler
+    re.compile(r"^do_(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"),
+    re.compile(r"^log_message$"),
+    # Express middleware signature
+    re.compile(r"^(middleware|errorHandler)$"),
+    # Angular lifecycle hooks
+    re.compile(
+        r"^ng(OnInit|OnChanges|OnDestroy|DoCheck"
+        r"|AfterContentInit|AfterContentChecked|AfterViewInit|AfterViewChecked)$"
+    ),
+    # Angular Pipe / ControlValueAccessor / Guards / Resolvers
+    re.compile(r"^(transform|writeValue|registerOnChange|registerOnTouched|setDisabledState)$"),
+    re.compile(r"^(canActivate|canDeactivate|canActivateChild|canLoad|canMatch|resolve)$"),
+    # React class component lifecycle
+    re.compile(
+        r"^(componentDidMount|componentDidUpdate|componentWillUnmount"
+        r"|shouldComponentUpdate|render)$"
+    ),
 ]
 
 
@@ -73,13 +137,29 @@ def _matches_entry_name(node: GraphNode) -> bool:
     return False
 
 
-def detect_entry_points(store: GraphStore) -> list[GraphNode]:
+_TEST_FILE_RE = re.compile(
+    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$)",
+)
+
+
+def _is_test_file(file_path: str) -> bool:
+    """Return True if *file_path* looks like a test file."""
+    return bool(_TEST_FILE_RE.search(file_path))
+
+
+def detect_entry_points(
+    store: GraphStore,
+    include_tests: bool = False,
+) -> list[GraphNode]:
     """Find functions that are entry points in the graph.
 
     An entry point is a Function/Test node that either:
     1. Has no incoming CALLS edges (true root), or
     2. Has a framework decorator (e.g. ``@app.get``), or
     3. Matches a conventional name pattern (``main``, ``test_*``, etc.).
+
+    When *include_tests* is False (the default), Test nodes are excluded so
+    that flow analysis focuses on production entry points.
     """
     # Build a set of all qualified names that are CALLS targets.
     called_qnames = store.get_all_call_targets()
@@ -91,6 +171,9 @@ def detect_entry_points(store: GraphStore) -> list[GraphNode]:
     seen_qn: set[str] = set()
 
     for node in candidate_nodes:
+        if not include_tests and (node.is_test or _is_test_file(node.file_path)):
+            continue
+
         is_entry = False
 
         # True root: no one calls this function.
@@ -189,7 +272,11 @@ def _trace_single_flow(
     return flow
 
 
-def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
+def trace_flows(
+    store: GraphStore,
+    max_depth: int = 15,
+    include_tests: bool = False,
+) -> list[dict]:
     """Trace execution flows from every entry point via forward BFS.
 
     Returns a list of flow dicts, each containing:
@@ -203,7 +290,7 @@ def trace_flows(store: GraphStore, max_depth: int = 15) -> list[dict]:
       - files: list of distinct file paths
       - criticality: computed criticality score (0.0-1.0)
     """
-    entry_points = detect_entry_points(store)
+    entry_points = detect_entry_points(store, include_tests=include_tests)
     flows: list[dict] = []
 
     for ep in entry_points:
@@ -314,41 +401,47 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear old data.
-    conn.execute("DELETE FROM flow_memberships")
-    conn.execute("DELETE FROM flows")
+    # Wrap the full DELETE + INSERT sequence in an explicit transaction
+    # so partial writes cannot occur if an exception interrupts the loop.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM flow_memberships")
+        conn.execute("DELETE FROM flows")
 
-    count = 0
-    for flow in flows:
-        path_json = json.dumps(flow.get("path", []))
-        conn.execute(
-            """INSERT INTO flows
-               (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                flow["name"],
-                flow["entry_point_id"],
-                flow["depth"],
-                flow["node_count"],
-                flow["file_count"],
-                flow["criticality"],
-                path_json,
-            ),
-        )
-        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        # Insert memberships.
-        node_ids = flow.get("path", [])
-        for position, node_id in enumerate(node_ids):
+        count = 0
+        for flow in flows:
+            path_json = json.dumps(flow.get("path", []))
             conn.execute(
-                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                "VALUES (?, ?, ?)",
-                (flow_id, node_id, position),
+                """INSERT INTO flows
+                   (name, entry_point_id, depth, node_count, file_count,
+                    criticality, path_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    flow["name"],
+                    flow["entry_point_id"],
+                    flow["depth"],
+                    flow["node_count"],
+                    flow["file_count"],
+                    flow["criticality"],
+                    path_json,
+                ),
             )
-        count += 1
+            flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-    conn.commit()
+            # Insert memberships.
+            node_ids = flow.get("path", [])
+            for position, node_id in enumerate(node_ids):
+                conn.execute(
+                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                    "VALUES (?, ?, ?)",
+                    (flow_id, node_id, position),
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 

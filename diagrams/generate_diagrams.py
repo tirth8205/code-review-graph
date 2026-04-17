@@ -4,7 +4,10 @@
 All statistics match repo benchmarks exactly. No invented features or numbers.
 """
 
-import json, random, os, math
+import json
+import math
+import os
+import random
 
 random.seed(2024)
 OUT = os.path.dirname(os.path.abspath(__file__))
@@ -592,6 +595,7 @@ def d8():
         ("Continue",     "~/.continue/config.json",              YLW, YLW_BG),
         ("OpenCode",     ".opencode.json",                       RED, RED_BG),
         ("Antigravity",  "~/.gemini/antigravity/mcp_config.json",GRY, GRY_BG),
+        ("Kiro",         ".kiro/settings/mcp.json",              BLU, BLU_BG),
     ]
 
     # Central "install" node

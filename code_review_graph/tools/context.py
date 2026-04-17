@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -85,7 +86,10 @@ def get_minimal_context(
                         for f in analysis.get("changed_functions", [])[:5]
                     ]
                     test_gap_count = len(analysis.get("test_gaps", []))
-            except Exception:
+            except (
+                ImportError, OSError, ValueError,
+                sqlite3.Error, subprocess.SubprocessError,
+            ):
                 logger.debug("Risk analysis failed in get_minimal_context", exc_info=True)
 
         # 3. Top 3 communities
@@ -95,8 +99,8 @@ def get_minimal_context(
                 "SELECT name FROM communities ORDER BY size DESC LIMIT 3"
             ).fetchall()
             communities = [r[0] for r in rows]
-        except Exception:  # nosec B110 — table may not exist yet
-            pass
+        except sqlite3.OperationalError:  # nosec B110 — table may not exist yet
+            logger.debug("communities table not yet populated")
 
         # 4. Top 3 critical flows
         flows: list[str] = []
@@ -105,8 +109,8 @@ def get_minimal_context(
                 "SELECT name FROM flows ORDER BY criticality DESC LIMIT 3"
             ).fetchall()
             flows = [r[0] for r in rows]
-        except Exception:  # nosec B110 — table may not exist yet
-            pass
+        except sqlite3.OperationalError:  # nosec B110 — table may not exist yet
+            logger.debug("flows table not yet populated")
 
         # 5. Suggest next tools based on task keywords
         task_lower = task.lower()

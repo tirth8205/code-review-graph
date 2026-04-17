@@ -149,24 +149,73 @@ def _to_slug(s: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _compute_cohesion(
-    member_qns: set[str], all_edges: list[GraphEdge]
-) -> float:
-    """Compute cohesion: internal_edges / (internal_edges + external_edges)."""
-    internal = 0
-    external = 0
+def _compute_cohesion_batch(
+    community_member_qns: list[set[str]],
+    all_edges: list[GraphEdge],
+) -> list[float]:
+    """Compute cohesion for multiple communities in a single O(edges) pass.
+
+    Builds a ``qualified_name -> community_index`` reverse map (each node
+    appears in at most one community since all callers produce partitions),
+    then walks every edge exactly once, bucketing it into internal/external
+    counters per community.
+
+    Total work: O(edges + sum(|members|)) instead of
+    O(edges * communities) for naive per-community cohesion.
+
+    Returns a list of cohesion scores aligned with ``community_member_qns``.
+    """
+    qn_to_idx: dict[str, int] = {}
+    for idx, members in enumerate(community_member_qns):
+        for qn in members:
+            qn_to_idx[qn] = idx
+
+    n = len(community_member_qns)
+    internal = [0] * n
+    external = [0] * n
+
     for e in all_edges:
-        src_in = e.source_qualified in member_qns
-        tgt_in = e.target_qualified in member_qns
-        if src_in or tgt_in:
-            if src_in and tgt_in:
-                internal += 1
-            else:
-                external += 1
-    total = internal + external
-    if total == 0:
-        return 0.0
-    return internal / total
+        sc = qn_to_idx.get(e.source_qualified)
+        tc = qn_to_idx.get(e.target_qualified)
+        if sc is None and tc is None:
+            continue
+        if sc == tc:
+            # Safe: sc is not None here (sc == tc and not both None).
+            assert sc is not None
+            internal[sc] += 1
+        else:
+            if sc is not None:
+                external[sc] += 1
+            if tc is not None:
+                external[tc] += 1
+
+    results: list[float] = []
+    for i in range(n):
+        total = internal[i] + external[i]
+        results.append(internal[i] / total if total > 0 else 0.0)
+    return results
+
+
+def _build_adjacency(edges: list[GraphEdge]) -> dict[str, list[str]]:
+    """Build adjacency list from edges (one pass over all edges)."""
+    adj: dict[str, list[str]] = defaultdict(list)
+    for e in edges:
+        adj[e.source_qualified].append(e.target_qualified)
+        adj[e.target_qualified].append(e.source_qualified)
+    return adj
+
+
+def _compute_cohesion(
+    member_qns: set[str],
+    all_edges: list[GraphEdge],
+    adj: dict[str, list[str]] | None = None,
+) -> float:
+    """Compute cohesion: internal_edges / (internal_edges + external_edges).
+
+    For multiple communities, prefer :func:`_compute_cohesion_batch`, which
+    runs in O(edges) total instead of O(edges) per community.
+    """
+    return _compute_cohesion_batch([member_qns], all_edges)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +224,20 @@ def _compute_cohesion(
 
 
 def _detect_leiden(
-    nodes: list[GraphNode], edges: list[GraphEdge], min_size: int
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    min_size: int,
+    adj: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Detect communities using Leiden algorithm via igraph."""
+    """Detect communities using Leiden algorithm via igraph.
+
+    Caps Leiden at ``n_iterations=2`` (sufficient for code dependency graphs)
+    and skips the recursive sub-community splitting pass that caused
+    exponential blow-up on large repos (>100k nodes).
+    """
     if ig is None:
         return []
 
-    # Build mapping from qualified_name to index
     qn_to_idx: dict[str, int] = {}
     idx_to_node: dict[int, GraphNode] = {}
     for i, node in enumerate(nodes):
@@ -191,7 +247,8 @@ def _detect_leiden(
     if not qn_to_idx:
         return []
 
-    # Build igraph graph (undirected, weighted)
+    logger.info("Building igraph with %d nodes...", len(qn_to_idx))
+
     g = ig.Graph(n=len(qn_to_idx), directed=False)
     edge_list: list[tuple[int, int]] = []
     weights: list[float] = []
@@ -208,20 +265,36 @@ def _detect_leiden(
                 weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
 
     if not edge_list:
-        # No edges — fall back to file grouping
-        return _detect_file_based(nodes, edges, min_size)
+        return _detect_file_based(nodes, edges, min_size, adj=adj)
 
     g.add_edges(edge_list)
     g.es["weight"] = weights
 
-    # Run Leiden
+    # Run Leiden -- scale resolution inversely with graph size to get
+    # coarser clusters on large repos.  Default resolution=1.0 produces
+    # thousands of tiny communities for 30k+ node graphs.
+    import math
+    n_nodes = g.vcount()
+    resolution = max(0.05, 1.0 / math.log10(max(n_nodes, 10)))
+
+    logger.info(
+        "Running Leiden on %d nodes, %d edges...",
+        g.vcount(), g.ecount(),
+    )
+
     partition = g.community_leiden(
         objective_function="modularity",
         weights="weight",
+        resolution=resolution,
+        n_iterations=2,
     )
 
-    # Build communities from partition
-    communities: list[dict[str, Any]] = []
+    logger.info(
+        "Leiden complete, found %d partitions. Computing cohesion...",
+        len(partition),
+    )
+
+    pending: list[tuple[list[GraphNode], set[str]]] = []
     for cluster_ids in partition:
         if len(cluster_ids) < min_size:
             continue
@@ -229,7 +302,12 @@ def _detect_leiden(
         if len(members) < min_size:
             continue
         member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
+        pending.append((members, member_qns))
+
+    cohesions = _compute_cohesion_batch([p[1] for p in pending], edges)
+
+    communities: list[dict[str, Any]] = []
+    for (members, member_qns), cohesion in zip(pending, cohesions):
         lang_counts = Counter(m.language for m in members if m.language)
         dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
         name = _generate_community_name(members)
@@ -245,94 +323,8 @@ def _detect_leiden(
             "member_qns": member_qns,
         })
 
-    # Second pass: split large communities (>50 nodes)
-    final: list[dict[str, Any]] = []
-    for comm in communities:
-        if comm["size"] > 50:
-            sub_nodes = [n for n in nodes if n.qualified_name in comm["member_qns"]]
-            sub_edges = [
-                e for e in edges
-                if e.source_qualified in comm["member_qns"]
-                and e.target_qualified in comm["member_qns"]
-            ]
-            subs = _detect_leiden_sub(sub_nodes, sub_edges, min_size, parent_name=comm["name"])
-            if len(subs) >= 2:
-                final.extend(subs)
-            else:
-                final.append(comm)
-        else:
-            final.append(comm)
-
-    return final
-
-
-def _detect_leiden_sub(
-    nodes: list[GraphNode],
-    edges: list[GraphEdge],
-    min_size: int,
-    parent_name: str,
-) -> list[dict[str, Any]]:
-    """Second-pass Leiden on a large community for sub-communities."""
-    if ig is None:
-        return []
-
-    qn_to_idx: dict[str, int] = {}
-    idx_to_node: dict[int, GraphNode] = {}
-    for i, node in enumerate(nodes):
-        qn_to_idx[node.qualified_name] = i
-        idx_to_node[i] = node
-
-    g = ig.Graph(n=len(qn_to_idx), directed=False)
-    edge_list: list[tuple[int, int]] = []
-    weights: list[float] = []
-    seen_edges: set[tuple[int, int]] = set()
-
-    for e in edges:
-        src_idx = qn_to_idx.get(e.source_qualified)
-        tgt_idx = qn_to_idx.get(e.target_qualified)
-        if src_idx is not None and tgt_idx is not None and src_idx != tgt_idx:
-            pair = (min(src_idx, tgt_idx), max(src_idx, tgt_idx))
-            if pair not in seen_edges:
-                seen_edges.add(pair)
-                edge_list.append(pair)
-                weights.append(EDGE_WEIGHTS.get(e.kind, 0.5))
-
-    if not edge_list:
-        return []
-
-    g.add_edges(edge_list)
-    g.es["weight"] = weights
-
-    partition = g.community_leiden(
-        objective_function="modularity",
-        weights="weight",
-    )
-
-    subs: list[dict[str, Any]] = []
-    for idx, cluster_ids in enumerate(partition):
-        if len(cluster_ids) < min_size:
-            continue
-        members = [idx_to_node[i] for i in cluster_ids if i in idx_to_node]
-        if len(members) < min_size:
-            continue
-        member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
-        lang_counts = Counter(m.language for m in members if m.language)
-        dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
-        name = _generate_community_name(members)
-
-        subs.append({
-            "name": f"{parent_name}/{name}",
-            "level": 1,
-            "size": len(members),
-            "cohesion": round(cohesion, 4),
-            "dominant_language": dominant_lang,
-            "description": f"Sub-community of {len(members)} nodes within {parent_name}",
-            "members": [m.qualified_name for m in members],
-            "member_qns": member_qns,
-        })
-
-    return subs
+    logger.info("Community detection complete: %d communities", len(communities))
+    return communities
 
 
 # ---------------------------------------------------------------------------
@@ -341,19 +333,73 @@ def _detect_leiden_sub(
 
 
 def _detect_file_based(
-    nodes: list[GraphNode], edges: list[GraphEdge], min_size: int
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    min_size: int,
+    adj: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Group nodes by file_path when igraph is not available."""
-    by_file: dict[str, list[GraphNode]] = defaultdict(list)
-    for n in nodes:
-        by_file[n.file_path].append(n)
+    """Group nodes by directory when Leiden is unavailable or over-fragments.
 
-    communities: list[dict[str, Any]] = []
-    for file_path, members in by_file.items():
+    Strips the longest common directory prefix from all file paths, then
+    adaptively picks a grouping depth that yields 10-200 communities.
+    """
+    # Collect all directory paths (normalized, without filename)
+    all_dir_parts: list[list[str]] = []
+    for n in nodes:
+        parts = n.file_path.replace("\\", "/").split("/")
+        all_dir_parts.append([p for p in parts[:-1] if p])
+
+    # Find the longest common prefix among directory parts
+    prefix_len = 0
+    if all_dir_parts:
+        shortest = min(len(p) for p in all_dir_parts)
+        for i in range(shortest):
+            seg = all_dir_parts[0][i]
+            if all(p[i] == seg for p in all_dir_parts):
+                prefix_len = i + 1
+            else:
+                break
+
+    def _group_at_depth(depth: int) -> dict[str, list[GraphNode]]:
+        groups: dict[str, list[GraphNode]] = defaultdict(list)
+        for n in nodes:
+            parts = n.file_path.replace("\\", "/").split("/")
+            dir_parts = [p for p in parts[:-1] if p]
+            remainder = dir_parts[prefix_len:]
+            if remainder:
+                key = "/".join(remainder[:depth])
+            else:
+                key = parts[-1].rsplit(".", 1)[0] if parts else "root"
+            groups[key].append(n)
+        return groups
+
+    # Try increasing depths until we get 10-200 qualifying groups
+    max_depth = max((len(p) - prefix_len for p in all_dir_parts), default=0)
+    best_groups = _group_at_depth(1)  # depth=1 always works (file stem fallback)
+    for depth in range(1, max_depth + 1):
+        groups = _group_at_depth(depth)
+        qualifying = sum(1 for v in groups.values() if len(v) >= min_size)
+        best_groups = groups
+        if qualifying >= 10:
+            break
+
+    by_dir = best_groups
+
+    # Pre-filter to communities meeting min_size and collect their member
+    # sets so we can batch-compute all cohesions in a single O(edges) pass.
+    # Without this, per-community cohesion is O(edges * files), which makes
+    # community detection effectively hang on large repos.
+    pending: list[tuple[str, list[GraphNode], set[str]]] = []
+    for dir_path, members in by_dir.items():
         if len(members) < min_size:
             continue
         member_qns = {m.qualified_name for m in members}
-        cohesion = _compute_cohesion(member_qns, edges)
+        pending.append((dir_path, members, member_qns))
+
+    cohesions = _compute_cohesion_batch([p[2] for p in pending], edges)
+
+    communities: list[dict[str, Any]] = []
+    for (dir_path, members, member_qns), cohesion in zip(pending, cohesions):
         lang_counts = Counter(m.language for m in members if m.language)
         dominant_lang = lang_counts.most_common(1)[0][0] if lang_counts else ""
         name = _generate_community_name(members)
@@ -364,12 +410,151 @@ def _detect_file_based(
             "size": len(members),
             "cohesion": round(cohesion, 4),
             "dominant_language": dominant_lang,
-            "description": f"File-based community: {file_path}",
+            "description": f"Directory-based community: {dir_path}",
             "members": [m.qualified_name for m in members],
             "member_qns": member_qns,
         })
 
     return communities
+
+
+# ---------------------------------------------------------------------------
+# Oversized community splitting
+# ---------------------------------------------------------------------------
+
+
+def _split_oversized(
+    communities: list[dict],
+    nodes: list[GraphNode],
+    edges: list[GraphEdge],
+    threshold_pct: float = 0.25,
+    min_split_size: int = 10,
+) -> list[dict]:
+    """Recursively split communities that exceed threshold_pct of total.
+
+    Uses Leiden on the subgraph of oversized communities. If igraph is
+    not available, returns communities unchanged.
+    """
+    if not IGRAPH_AVAILABLE:
+        return communities
+
+    total = sum(
+        c.get("size", len(c.get("members", [])))
+        for c in communities
+    )
+    if total == 0:
+        return communities
+
+    threshold = max(int(total * threshold_pct), min_split_size)
+    result: list[dict] = []
+    next_id = max(
+        (c.get("id", 0) for c in communities), default=0
+    ) + 1
+
+    for comm in communities:
+        members = set(comm.get("members", []))
+        if len(members) <= threshold:
+            result.append(comm)
+            continue
+
+        # Build subgraph for this community
+        member_nodes = [
+            n for n in nodes
+            if n.qualified_name in members
+        ]
+        member_edges = [
+            e for e in edges
+            if (
+                e.source_qualified in members
+                and e.target_qualified in members
+            )
+        ]
+
+        if len(member_nodes) < min_split_size:
+            result.append(comm)
+            continue
+
+        # Run Leiden on subgraph
+        qn_to_idx = {
+            n.qualified_name: i
+            for i, n in enumerate(member_nodes)
+        }
+        ig_edges: list[tuple[int, int]] = []
+        ig_weights: list[float] = []
+        for e in member_edges:
+            si = qn_to_idx.get(e.source_qualified)
+            ti = qn_to_idx.get(e.target_qualified)
+            if si is not None and ti is not None and si != ti:
+                ig_edges.append((si, ti))
+                ig_weights.append(
+                    EDGE_WEIGHTS.get(e.kind, 0.5)
+                )
+
+        if not ig_edges:
+            result.append(comm)
+            continue
+
+        try:
+            g = ig.Graph(
+                n=len(member_nodes),
+                edges=ig_edges,
+                directed=False,
+            )
+            g.es["weight"] = ig_weights
+            partition = g.community_leiden(
+                objective_function="modularity",
+                weights="weight",
+                resolution=0.5,
+            )
+
+            sub_communities: dict[int, list[str]] = {}
+            for idx, cid in enumerate(partition.membership):
+                sub_communities.setdefault(cid, []).append(
+                    member_nodes[idx].qualified_name
+                )
+
+            if len(sub_communities) <= 1:
+                result.append(comm)
+                continue
+
+            parent_id = comm.get("id", 0)
+            comm_name = comm.get("name", "")
+            for sub_members in sub_communities.values():
+                sub_comm = {
+                    "id": next_id,
+                    "name": comm_name + f"-sub{next_id}",
+                    "level": comm.get("level", 0) + 1,
+                    "parent_id": parent_id,
+                    "members": sub_members,
+                    "size": len(sub_members),
+                    "cohesion": 0.0,
+                    "dominant_language": comm.get(
+                        "dominant_language"
+                    ),
+                    "description": (
+                        f"Split from {comm_name}"
+                    ),
+                }
+                result.append(sub_comm)
+                next_id += 1
+
+            logger.info(
+                "Split oversized community '%s' "
+                "(%d members) into %d",
+                comm_name,
+                len(members),
+                len(sub_communities),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to split community '%s', "
+                "keeping as-is",
+                comm.get("name", ""),
+                exc_info=True,
+            )
+            result.append(comm)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -395,33 +580,27 @@ def detect_communities(
     """
     # Gather all nodes (exclude File nodes to focus on code entities)
     all_edges = store.get_all_edges()
-    all_files = store.get_all_files()
+    unique_nodes = store.get_all_nodes(exclude_files=True)
 
-    nodes: list[GraphNode] = []
-    for fp in all_files:
-        nodes.extend(store.get_nodes_by_file(fp))
+    # Build adjacency index once for fast cohesion computation
+    adj = _build_adjacency(all_edges)
 
-    # Also gather nodes from files referenced in edges but not in all_files
-    edge_files: set[str] = set()
-    for e in all_edges:
-        edge_files.add(e.file_path)
-    for fp in edge_files - set(all_files):
-        nodes.extend(store.get_nodes_by_file(fp))
-
-    # Deduplicate by qualified_name
-    seen_qns: set[str] = set()
-    unique_nodes: list[GraphNode] = []
-    for n in nodes:
-        if n.qualified_name not in seen_qns:
-            seen_qns.add(n.qualified_name)
-            unique_nodes.append(n)
+    logger.info(
+        "Loaded %d unique nodes, %d edges",
+        len(unique_nodes), len(all_edges),
+    )
 
     if IGRAPH_AVAILABLE:
         logger.info("Detecting communities with Leiden algorithm (igraph)")
-        results = _detect_leiden(unique_nodes, all_edges, min_size)
+        results = _detect_leiden(unique_nodes, all_edges, min_size, adj=adj)
     else:
         logger.info("igraph not available, using file-based community detection")
-        results = _detect_file_based(unique_nodes, all_edges, min_size)
+        results = _detect_file_based(unique_nodes, all_edges, min_size, adj=adj)
+
+    # Split oversized communities
+    results = _split_oversized(
+        results, unique_nodes, all_edges,
+    )
 
     # Convert member_qns (internal set) to a list for serialization safety,
     # then strip it from the returned dicts to avoid leaking internal state.
@@ -493,36 +672,44 @@ def store_communities(
     # that are tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
-    # Clear existing data
-    conn.execute("DELETE FROM communities")
-    conn.execute("UPDATE nodes SET community_id = NULL")
+    # Wrap in explicit transaction so the DELETE + INSERT + UPDATE
+    # sequence is atomic — no partial community data on crash.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DELETE FROM communities")
+        conn.execute("UPDATE nodes SET community_id = NULL")
 
-    count = 0
-    for comm in communities:
-        cursor = conn.execute(
-            """INSERT INTO communities (name, level, cohesion, size, dominant_language, description)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (
-                comm["name"],
-                comm.get("level", 0),
-                comm.get("cohesion", 0.0),
-                comm["size"],
-                comm.get("dominant_language", ""),
-                comm.get("description", ""),
-            ),
-        )
-        community_id = cursor.lastrowid
-
-        # Update community_id on member nodes
-        member_qns = comm.get("members", [])
-        for qn in member_qns:
-            conn.execute(
-                "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
-                (community_id, qn),
+        count = 0
+        for comm in communities:
+            cursor = conn.execute(
+                """INSERT INTO communities
+                       (name, level, cohesion, size, dominant_language, description)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    comm["name"],
+                    comm.get("level", 0),
+                    comm.get("cohesion", 0.0),
+                    comm["size"],
+                    comm.get("dominant_language", ""),
+                    comm.get("description", ""),
+                ),
             )
-        count += 1
+            community_id = cursor.lastrowid
 
-    conn.commit()
+            # Batch update community_id on member nodes
+            member_qns = comm.get("members", [])
+            if member_qns:
+                placeholders = ",".join("?" * len(member_qns))
+                conn.execute(
+                    f"UPDATE nodes SET community_id = ? WHERE qualified_name IN ({placeholders})",  # nosec B608
+                    [community_id] + member_qns,
+                )
+            count += 1
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
     return count
 
 
@@ -575,6 +762,17 @@ def get_communities(
     return communities
 
 
+_TEST_COMMUNITY_RE = re.compile(
+    r"(^test[-/]|[-/]test([:/]|$)|it:should|describe:|spec[-/]|[-/]spec$)",
+    re.IGNORECASE,
+)
+
+
+def _is_test_community(name: str) -> bool:
+    """Return True if a community name indicates it is test-dominated."""
+    return bool(_TEST_COMMUNITY_RE.search(name))
+
+
 def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -602,6 +800,10 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
     cross_counts: Counter[tuple[int, int]] = Counter()
 
     for e in all_edges:
+        # TESTED_BY edges are expected cross-community coupling (test → code),
+        # not an architectural smell.
+        if e.kind == "TESTED_BY":
+            continue
         src_comm = node_to_community.get(e.source_qualified)
         tgt_comm = node_to_community.get(e.target_qualified)
         if (
@@ -619,13 +821,17 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
                 "target": _sanitize_name(e.target_qualified),
             })
 
-    # Generate warnings for high coupling
+    # Generate warnings for high coupling, skipping test-dominated pairs.
     warnings: list[str] = []
     comm_name_map = {c.get("id", 0): c["name"] for c in communities}
     for (c1, c2), count in cross_counts.most_common():
         if count > 10:
             name1 = comm_name_map.get(c1, f"community-{c1}")
             name2 = comm_name_map.get(c2, f"community-{c2}")
+            # Skip pairs where either community is test-dominated — coupling
+            # between test and production code is expected, not architectural.
+            if _is_test_community(name1) or _is_test_community(name2):
+                continue
             warnings.append(
                 f"High coupling ({count} edges) between "
                 f"'{name1}' and '{name2}'"

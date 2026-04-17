@@ -19,7 +19,9 @@ import pytest
 from code_review_graph.changes import parse_git_diff_ranges
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
+    collect_all_files,
     full_build,
+    get_all_tracked_files,
     get_changed_files,
     incremental_update,
 )
@@ -144,6 +146,98 @@ def test_base_validation_rejects_injection(git_repo: Path) -> None:
 # ------------------------------------------------------------------
 # 5. wiki page path traversal is blocked
 # ------------------------------------------------------------------
+
+
+@pytest.fixture()
+def git_repo_with_submodule(tmp_path: Path) -> Path:
+    """Create a parent repo containing a git submodule with a Python file."""
+    # Create the "library" repo that will become a submodule
+    lib_repo = tmp_path / "lib"
+    lib_repo.mkdir()
+    _git(lib_repo, "init")
+    _git(lib_repo, "config", "user.email", "test@test.com")
+    _git(lib_repo, "config", "user.name", "Test")
+    (lib_repo / "util.py").write_text("def helper():\n    pass\n")
+    _git(lib_repo, "add", "util.py")
+    _git(lib_repo, "commit", "-m", "lib initial")
+
+    # Create the parent repo and add lib as a submodule
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    _git(parent, "init")
+    _git(parent, "config", "user.email", "test@test.com")
+    _git(parent, "config", "user.name", "Test")
+    (parent / "main.py").write_text("def main():\n    pass\n")
+    _git(parent, "add", "main.py")
+    _git(parent, "commit", "-m", "parent initial")
+    _git(
+        parent, "-c", "protocol.file.allow=always",
+        "submodule", "add", str(lib_repo), "lib",
+    )
+    _git(parent, "commit", "-m", "add lib submodule")
+
+    return parent
+
+
+def test_get_all_tracked_files_without_recurse(
+    git_repo_with_submodule: Path,
+) -> None:
+    """Without recurse_submodules, submodule files are NOT listed."""
+    files = get_all_tracked_files(
+        git_repo_with_submodule, recurse_submodules=False
+    )
+    assert "main.py" in files
+    # Submodule entry appears as a gitlink, not as individual files
+    assert not any(f.startswith("lib/") for f in files)
+
+
+def test_get_all_tracked_files_with_recurse(
+    git_repo_with_submodule: Path,
+) -> None:
+    """With recurse_submodules=True, submodule files ARE listed."""
+    files = get_all_tracked_files(
+        git_repo_with_submodule, recurse_submodules=True
+    )
+    assert "main.py" in files
+    assert "lib/util.py" in files
+
+
+def test_collect_all_files_with_recurse(
+    git_repo_with_submodule: Path,
+) -> None:
+    """collect_all_files with recurse_submodules includes submodule code."""
+    files = collect_all_files(
+        git_repo_with_submodule, recurse_submodules=True
+    )
+    assert "main.py" in files
+    assert "lib/util.py" in files
+
+
+def test_full_build_with_recurse_submodules(
+    git_repo_with_submodule: Path,
+) -> None:
+    """full_build with recurse_submodules parses submodule files."""
+    db_path = git_repo_with_submodule / ".code-review-graph" / "graph.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    store = GraphStore(db_path)
+    try:
+        result = full_build(
+            git_repo_with_submodule, store, recurse_submodules=True
+        )
+        assert result["files_parsed"] >= 2  # main.py + lib/util.py
+        assert result["errors"] == []
+
+        # Verify both parent and submodule nodes exist
+        parent_nodes = store.get_nodes_by_file(
+            str(git_repo_with_submodule / "main.py")
+        )
+        sub_nodes = store.get_nodes_by_file(
+            str(git_repo_with_submodule / "lib" / "util.py")
+        )
+        assert len(parent_nodes) > 0
+        assert len(sub_nodes) > 0
+    finally:
+        store.close()
 
 
 def test_wiki_page_path_traversal_blocked(tmp_path: Path) -> None:

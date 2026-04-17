@@ -134,6 +134,14 @@ class TestMigrations:
         tables = _get_table_names(self.store._conn)
         assert "community_summaries" in tables
 
+    def test_v7_compound_edge_indexes_exist(self):
+        """v7 compound edge indexes should exist after migration."""
+        rows = self.store._conn.execute("PRAGMA index_list(edges)").fetchall()
+        indexes = {row[1] if isinstance(row, tuple) else row["name"] for row in rows}
+
+        assert "idx_edges_target_kind" in indexes
+        assert "idx_edges_source_kind" in indexes
+
 
 def _get_table_names(conn: sqlite3.Connection) -> set[str]:
     """Helper: return all table/view names in the database."""

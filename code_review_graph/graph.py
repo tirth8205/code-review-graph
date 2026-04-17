@@ -1,7 +1,7 @@
 """SQLite-backed knowledge graph storage and query engine.
 
 Stores code structure as nodes (File, Class, Function, Type, Test) and
-edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON).
+edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
 Supports impact-radius queries and subgraph extraction.
 """
 
@@ -50,12 +50,14 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE TABLE IF NOT EXISTS edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL,           -- CALLS, IMPORTS_FROM, INHERITS, etc.
+    kind TEXT NOT NULL,           -- CALLS, IMPORTS_FROM, INHERITS, REFERENCES, etc.
     source_qualified TEXT NOT NULL,
     target_qualified TEXT NOT NULL,
     file_path TEXT NOT NULL,
     line INTEGER DEFAULT 0,
     extra TEXT DEFAULT '{}',
+    confidence REAL DEFAULT 1.0,
+    confidence_tier TEXT DEFAULT 'EXTRACTED',
     updated_at REAL NOT NULL
 );
 
@@ -70,6 +72,8 @@ CREATE INDEX IF NOT EXISTS idx_nodes_qualified ON nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind);
+CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 """
 
@@ -101,6 +105,8 @@ class GraphEdge:
     file_path: str
     line: int
     extra: dict
+    confidence: float = 1.0
+    confidence_tier: str = "EXTRACTED"
 
 
 @dataclass
@@ -126,7 +132,8 @@ class GraphStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
-            str(self.db_path), timeout=30, check_same_thread=False
+            str(self.db_path), timeout=30, check_same_thread=False,
+            isolation_level=None,  # Disable implicit transactions (#135)
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -201,7 +208,10 @@ class GraphStore:
     def upsert_edge(self, edge: EdgeInfo) -> int:
         """Insert or update an edge."""
         now = time.time()
-        extra = json.dumps(edge.extra) if edge.extra else "{}"
+        extra_dict = edge.extra if edge.extra else {}
+        confidence = float(extra_dict.get("confidence", 1.0))
+        confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
+        extra = json.dumps(extra_dict)
 
         # Check for existing edge (include line so multiple call sites are preserved)
         existing = self._conn.execute(
@@ -213,16 +223,19 @@ class GraphStore:
 
         if existing:
             self._conn.execute(
-                "UPDATE edges SET line=?, extra=?, updated_at=? WHERE id=?",
-                (edge.line, extra, now, existing["id"]),
+                "UPDATE edges SET line=?, extra=?, confidence=?, confidence_tier=?,"
+                " updated_at=? WHERE id=?",
+                (edge.line, extra, confidence, confidence_tier, now, existing["id"]),
             )
             return existing["id"]
 
         self._conn.execute(
             """INSERT INTO edges
-               (kind, source_qualified, target_qualified, file_path, line, extra, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra, now),
+               (kind, source_qualified, target_qualified, file_path, line, extra,
+                confidence, confidence_tier, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
+             confidence, confidence_tier, now),
         )
         return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -236,6 +249,16 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
+        # Defense-in-depth: flush any pending transaction before BEGIN
+        # IMMEDIATE.  The root cause (implicit transactions from legacy
+        # isolation_level="") is fixed by setting isolation_level=None in
+        # __init__, but external code accessing _conn directly (e.g.
+        # _compute_summaries, flows.py, communities.py) could still leave
+        # a transaction open.
+        # See: https://github.com/tirth8205/code-review-graph/issues/135
+        if self._conn.in_transaction:
+            logger.warning("Flushing unexpected open transaction before BEGIN IMMEDIATE")
+            self._conn.commit()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
@@ -243,6 +266,24 @@ class GraphStore:
                 self.upsert_node(node, file_hash=fhash)
             for edge in edges:
                 self.upsert_edge(edge)
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._invalidate_cache()
+
+    def store_file_batch(
+        self, batch: list[tuple[str, list[NodeInfo], list[EdgeInfo], str]]
+    ) -> None:
+        """Atomically replace data for a batch of files in one transaction."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for file_path, nodes, edges, fhash in batch:
+                self.remove_file_data(file_path)
+                for node in nodes:
+                    self.upsert_node(node, file_hash=fhash)
+                for edge in edges:
+                    self.upsert_edge(edge)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -262,6 +303,9 @@ class GraphStore:
     def commit(self) -> None:
         self._conn.commit()
 
+    def rollback(self) -> None:
+        self._conn.rollback()
+
     # --- Read operations ---
 
     def get_node(self, qualified_name: str) -> Optional[GraphNode]:
@@ -274,6 +318,16 @@ class GraphStore:
         rows = self._conn.execute(
             "SELECT * FROM nodes WHERE file_path = ?", (file_path,)
         ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def get_all_nodes(self, exclude_files: bool = True) -> list[GraphNode]:
+        """Return all nodes, optionally excluding File nodes."""
+        if exclude_files:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE kind != 'File'"
+            ).fetchall()
+        else:
+            rows = self._conn.execute("SELECT * FROM nodes").fetchall()
         return [self._row_to_node(r) for r in rows]
 
     def get_edges_by_source(self, qualified_name: str) -> list[GraphEdge]:
@@ -303,6 +357,182 @@ class GraphStore:
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def get_transitive_tests(
+        self, qualified_name: str, max_depth: int = 1,
+    ) -> list[dict]:
+        """Find tests covering a node, including indirect (transitive) coverage.
+
+        1. Direct: TESTED_BY edges targeting this node (+ bare-name fallback).
+        2. Indirect: follow outgoing CALLS edges up to *max_depth* hops,
+           then collect TESTED_BY edges on each callee.
+
+        Returns a list of dicts with node fields plus ``indirect: bool``.
+        """
+        conn = self._conn
+        seen: set[str] = set()
+        results: list[dict] = []
+
+        # If the input is a class, expand to its methods first.
+        input_qns = [qualified_name]
+        row = conn.execute(
+            "SELECT kind FROM nodes WHERE qualified_name = ?",
+            (qualified_name,),
+        ).fetchone()
+        if row and row["kind"] == "Class":
+            for mrow in conn.execute(
+                "SELECT target_qualified FROM edges "
+                "WHERE source_qualified = ? AND kind = 'CONTAINS'",
+                (qualified_name,),
+            ).fetchall():
+                input_qns.append(mrow["target_qualified"])
+
+        def _node_dict(qn: str, indirect: bool) -> dict | None:
+            row = conn.execute(
+                "SELECT * FROM nodes WHERE qualified_name = ?", (qn,)
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "name": row["name"],
+                "qualified_name": row["qualified_name"],
+                "file_path": row["file_path"],
+                "kind": row["kind"],
+                "indirect": indirect,
+            }
+
+        # Direct TESTED_BY
+        for qn in input_qns:
+            for row in conn.execute(
+                "SELECT source_qualified FROM edges "
+                "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                (qn,),
+            ).fetchall():
+                src = row["source_qualified"]
+                if src not in seen:
+                    seen.add(src)
+                    d = _node_dict(src, indirect=False)
+                    if d:
+                        results.append(d)
+
+        # Bare-name fallback for direct
+        bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
+        for row in conn.execute(
+            "SELECT source_qualified FROM edges "
+            "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+            (bare,),
+        ).fetchall():
+            src = row["source_qualified"]
+            if src not in seen:
+                seen.add(src)
+                d = _node_dict(src, indirect=False)
+                if d:
+                    results.append(d)
+
+        # Transitive: follow CALLS edges, then collect TESTED_BY on callees
+        frontier = set(input_qns)
+        for _ in range(max_depth):
+            next_frontier: set[str] = set()
+            for qn in frontier:
+                for row in conn.execute(
+                    "SELECT target_qualified FROM edges "
+                    "WHERE source_qualified = ? AND kind = 'CALLS'",
+                    (qn,),
+                ).fetchall():
+                    next_frontier.add(row["target_qualified"])
+            for callee in next_frontier:
+                for row in conn.execute(
+                    "SELECT source_qualified FROM edges "
+                    "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                    (callee,),
+                ).fetchall():
+                    src = row["source_qualified"]
+                    if src not in seen:
+                        seen.add(src)
+                        d = _node_dict(src, indirect=True)
+                        if d:
+                            results.append(d)
+            frontier = next_frontier
+
+        return results
+
+    def resolve_bare_call_targets(self) -> int:
+        """Batch-resolve bare-name CALLS targets using the global node table.
+
+        After parsing, some CALLS edges have bare targets (no ``::`` separator)
+        because the parser couldn't resolve cross-file.  This method matches
+        them against nodes and updates unambiguous matches in-place.
+
+        Disambiguation strategy:
+          1. Single node with that name -> resolve directly
+          2. Multiple candidates -> prefer one whose file is imported by the
+             source file (via IMPORTS_FROM edges)
+
+        Returns the number of resolved edges.
+        """
+        conn = self._conn
+
+        bare_edges = conn.execute(
+            "SELECT id, source_qualified, target_qualified, file_path "
+            "FROM edges WHERE kind = 'CALLS' AND target_qualified NOT LIKE '%::%'"
+        ).fetchall()
+        if not bare_edges:
+            return 0
+
+        # bare_name -> list of qualified_names
+        node_lookup: dict[str, list[str]] = {}
+        for row in conn.execute(
+            "SELECT name, qualified_name FROM nodes "
+            "WHERE kind IN ('Function', 'Test', 'Class')"
+        ).fetchall():
+            node_lookup.setdefault(row["name"], []).append(row["qualified_name"])
+
+        # source_file -> set of imported files (for disambiguation)
+        import_targets: dict[str, set[str]] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT file_path, target_qualified FROM edges "
+            "WHERE kind = 'IMPORTS_FROM'"
+        ).fetchall():
+            target = row["target_qualified"]
+            target_file = target.split("::", 1)[0] if "::" in target else target
+            import_targets.setdefault(row["file_path"], set()).add(target_file)
+
+        resolved = 0
+        for edge in bare_edges:
+            bare_name = edge["target_qualified"]
+            candidates = node_lookup.get(bare_name, [])
+            if not candidates:
+                continue
+
+            if len(candidates) == 1:
+                qualified = candidates[0]
+            else:
+                # Disambiguate via imports
+                src_qn = edge["source_qualified"]
+                src_file = (
+                    src_qn.split("::", 1)[0] if "::" in src_qn
+                    else edge["file_path"]
+                )
+                imported_files = import_targets.get(src_file, set())
+                imported = [
+                    c for c in candidates
+                    if c.split("::", 1)[0] in imported_files
+                ]
+                if len(imported) == 1:
+                    qualified = imported[0]
+                else:
+                    continue
+
+            conn.execute(
+                "UPDATE edges SET target_qualified = ? WHERE id = ?",
+                (qualified, edge["id"]),
+            )
+            resolved += 1
+
+        if resolved:
+            conn.commit()
+            logger.info("Resolved %d bare-name CALLS targets", resolved)
+        return resolved
+
     def get_all_files(self) -> list[str]:
         rows = self._conn.execute(
             "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File'"
@@ -310,24 +540,43 @@ class GraphStore:
         return [r["file_path"] for r in rows]
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
-        """Keyword search across node names with multi-word AND logic.
+        """Keyword search across node names.
 
-        Each word in the query must match independently (case-insensitive)
-        against the node name or qualified name. For example,
-        ``"firebase auth"`` matches ``verify_firebase_token`` and
-        ``FirebaseAuth`` but not ``get_user``.
+        Tries FTS5 first (fast, tokenized matching), then falls back to
+        LIKE-based substring search when FTS5 returns no results.
         """
-        words = query.lower().split()
+        words = query.split()
         if not words:
             return []
 
+        # Phase 1: FTS5 search (uses the indexed nodes_fts table)
+        try:
+            if len(words) == 1:
+                fts_query = '"' + query.replace('"', '""') + '"'
+            else:
+                fts_query = " AND ".join(
+                    '"' + w.replace('"', '""') + '"' for w in words
+                )
+            rows = self._conn.execute(
+                "SELECT n.* FROM nodes_fts f "
+                "JOIN nodes n ON f.rowid = n.id "
+                "WHERE nodes_fts MATCH ? LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+            if rows:
+                return [self._row_to_node(r) for r in rows]
+        except Exception:  # nosec B110 - FTS5 table may not exist on older schemas
+            pass
+
+        # Phase 2: LIKE fallback (substring matching)
         conditions: list[str] = []
         params: list[str | int] = []
         for word in words:
+            w = word.lower()
             conditions.append(
                 "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)"
             )
-            params.extend([f"%{word}%", f"%{word}%"])
+            params.extend([f"%{w}%", f"%{w}%"])
 
         where = " AND ".join(conditions)
         sql = f"SELECT * FROM nodes WHERE {where} LIMIT ?"  # nosec B608
@@ -685,6 +934,16 @@ class GraphStore:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    def get_flow_criticalities_for_node(self, node_id: int) -> list[float]:
+        """Return criticality values for all flows a node participates in."""
+        rows = self._conn.execute(
+            "SELECT f.criticality FROM flows f "
+            "JOIN flow_memberships fm ON fm.flow_id = f.id "
+            "WHERE fm.node_id = ?",
+            (node_id,),
+        ).fetchall()
+        return [r["criticality"] for r in rows]
+
     def get_node_community_id(self, node_id: int) -> int | None:
         """Return the ``community_id`` for a node, or ``None``."""
         row = self._conn.execute(
@@ -755,7 +1014,9 @@ class GraphStore:
                 r["qualified_name"]: r["community_id"]
                 for r in rows
             }
-        except Exception:
+        except sqlite3.OperationalError as exc:
+            # community_id column may not exist yet on pre-v6 schemas
+            logger.debug("Community IDs unavailable (schema not yet migrated): %s", exc)
             return {}
 
     def get_node_ids_by_files(
@@ -830,7 +1091,9 @@ class GraphStore:
             return self._conn.execute(
                 "SELECT id, name FROM communities"
             ).fetchall()
-        except Exception:
+        except sqlite3.OperationalError as exc:
+            # communities table doesn't exist yet on pre-v4 schemas
+            logger.debug("Communities list unavailable (table missing): %s", exc)
             return []
 
     def get_community_member_qns(
@@ -976,6 +1239,9 @@ class GraphStore:
         )
 
     def _row_to_edge(self, row: sqlite3.Row) -> GraphEdge:
+        extra = json.loads(row["extra"]) if row["extra"] else {}
+        confidence = row["confidence"] if "confidence" in row.keys() else 1.0
+        confidence_tier = row["confidence_tier"] if "confidence_tier" in row.keys() else "EXTRACTED"
         return GraphEdge(
             id=row["id"],
             kind=row["kind"],
@@ -983,7 +1249,9 @@ class GraphStore:
             target_qualified=row["target_qualified"],
             file_path=row["file_path"],
             line=row["line"],
-            extra=json.loads(row["extra"]) if row["extra"] else {},
+            extra=extra,
+            confidence=confidence,
+            confidence_tier=confidence_tier,
         )
 
 
@@ -1021,4 +1289,5 @@ def edge_to_dict(e: GraphEdge) -> dict:
         "source": _sanitize_name(e.source_qualified),
         "target": _sanitize_name(e.target_qualified),
         "file_path": e.file_path, "line": e.line,
+        "confidence": e.confidence, "confidence_tier": e.confidence_tier,
     }

@@ -1,5 +1,7 @@
 """Tests for the graph storage and query engine."""
 
+import logging
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -107,6 +109,51 @@ class TestGraphStore:
         result = self.store.get_nodes_by_file("/test/file.py")
         assert len(result) == 2
 
+    def test_store_after_remove_no_transaction_error(self):
+        """Regression test for #135: store_file_nodes_edges after
+        remove_file_data must not raise 'cannot start a transaction
+        within a transaction'.
+        """
+        # Seed initial data for two files
+        nodes_a = [self._make_file_node("/test/a.py")]
+        nodes_b = [self._make_file_node("/test/b.py")]
+        self.store.store_file_nodes_edges("/test/a.py", nodes_a, [])
+        self.store.store_file_nodes_edges("/test/b.py", nodes_b, [])
+
+        # Without the isolation_level=None fix, this would leave an
+        # implicit transaction open and the next call would crash.
+        self.store.remove_file_data("/test/a.py")
+        # Must not raise sqlite3.OperationalError
+        nodes_c = [self._make_file_node("/test/c.py")]
+        self.store.store_file_nodes_edges("/test/c.py", nodes_c, [])
+
+        assert self.store.get_node("/test/a.py") is None
+        assert self.store.get_node("/test/c.py") is not None
+
+    def test_store_after_multiple_removes_no_transaction_error(self):
+        """Regression test for #181: full_build stale-file purge leaves
+        implicit transaction open after multiple remove_file_data calls.
+        """
+        # Seed data for several files
+        for i in range(5):
+            path = f"/test/file_{i}.py"
+            self.store.store_file_nodes_edges(
+                path, [self._make_file_node(path)], [],
+            )
+
+        # Simulates full_build's stale-file purge: multiple deletes in a
+        # row without explicit commit between them.
+        for i in range(3):
+            self.store.remove_file_data(f"/test/file_{i}.py")
+
+        # Next store call must succeed regardless of prior connection state.
+        new_path = "/test/new_file.py"
+        nodes = [self._make_file_node(new_path)]
+        self.store.store_file_nodes_edges(new_path, nodes, [])
+
+        assert self.store.get_node(new_path) is not None
+        assert self.store.get_node("/test/file_0.py") is None
+
     def test_search_nodes(self):
         self.store.upsert_node(self._make_func_node("authenticate"))
         self.store.upsert_node(self._make_func_node("authorize"))
@@ -178,6 +225,35 @@ class TestGraphStore:
         self.store.set_metadata("test_key", "test_value")
         assert self.store.get_metadata("test_key") == "test_value"
         assert self.store.get_metadata("nonexistent") is None
+
+    def test_get_all_community_ids_logs_when_column_missing(self, caplog):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            "CREATE TABLE nodes (qualified_name TEXT PRIMARY KEY)"
+        )
+        store = GraphStore.__new__(GraphStore)
+        store._conn = conn
+
+        with caplog.at_level(logging.DEBUG, logger="code_review_graph.graph"):
+            result = store.get_all_community_ids()
+
+        assert result == {}
+        assert "Community IDs unavailable" in caplog.text
+        conn.close()
+
+    def test_get_communities_list_logs_when_table_missing(self, caplog):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        store = GraphStore.__new__(GraphStore)
+        store._conn = conn
+
+        with caplog.at_level(logging.DEBUG, logger="code_review_graph.graph"):
+            result = store.get_communities_list()
+
+        assert result == []
+        assert "Communities list unavailable" in caplog.text
+        conn.close()
 
 
 class TestImpactRadiusSql:

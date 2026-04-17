@@ -187,3 +187,68 @@ class TestWiki:
         index_content = (Path(self.wiki_dir) / "index.md").read_text()
         assert "Total communities" in index_content
         assert "0" in index_content  # 0 communities
+
+    def test_generate_wiki_handles_slug_collisions(self, monkeypatch):
+        """Communities whose names slugify to the same string must each get
+        their own page — earlier behaviour silently overwrote the first
+        community's file with the second's content and counted the second
+        as an 'updated' page (see #222 follow-up).
+        """
+        # Fake three communities whose _slugify outputs collide:
+        #   "Data Processing"  -> data-processing
+        #   "data processing"  -> data-processing
+        #   "Data  Processing" -> data-processing
+        colliding_communities = [
+            {
+                "name": "Data Processing", "size": 5, "cohesion": 0.9,
+                "dominant_language": "python", "description": "first",
+                "members": [], "member_qns": set(),
+            },
+            {
+                "name": "data processing", "size": 4, "cohesion": 0.8,
+                "dominant_language": "python", "description": "second",
+                "members": [], "member_qns": set(),
+            },
+            {
+                "name": "Data  Processing", "size": 3, "cohesion": 0.7,
+                "dominant_language": "python", "description": "third",
+                "members": [], "member_qns": set(),
+            },
+        ]
+
+        import code_review_graph.wiki as wiki_mod
+        monkeypatch.setattr(
+            wiki_mod, "get_communities", lambda store: colliding_communities,
+        )
+
+        result = generate_wiki(self.store, self.wiki_dir)
+
+        # 3 unique .md pages + 1 index.md should land on disk.
+        wiki_files = sorted(p.name for p in Path(self.wiki_dir).glob("*.md"))
+        expected = {
+            "data-processing.md",
+            "data-processing-2.md",
+            "data-processing-3.md",
+            "index.md",
+        }
+        assert set(wiki_files) == expected, wiki_files
+
+        # Counter must match what actually hit the disk.
+        page_total = (
+            result["pages_generated"]
+            + result["pages_updated"]
+            + result["pages_unchanged"]
+        )
+        assert page_total == len(wiki_files), (
+            f"counter {result} but {len(wiki_files)} files on disk"
+        )
+
+        # Every community's description must survive (no data loss).
+        content_first = (Path(self.wiki_dir) / "data-processing.md").read_text()
+        content_second = (Path(self.wiki_dir) / "data-processing-2.md").read_text()
+        content_third = (Path(self.wiki_dir) / "data-processing-3.md").read_text()
+        # Descriptions are rendered in the page body; make sure all three
+        # communities produced distinct content.
+        assert content_first != content_second
+        assert content_first != content_third
+        assert content_second != content_third

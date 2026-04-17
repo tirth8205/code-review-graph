@@ -24,6 +24,35 @@ class InMemoryRepo: UserRepository {
     }
 }
 
+enum Direction: String {
+    case north
+    case south
+    case east
+    case west
+}
+
+actor DataStore {
+    private var cache: [String: User] = [:]
+
+    func get(_ key: String) -> User? {
+        return cache[key]
+    }
+
+    func set(_ key: String, user: User) {
+        cache[key] = user
+    }
+}
+
+extension InMemoryRepo: CustomStringConvertible {
+    var description: String {
+        return "InMemoryRepo with \(users.count) users"
+    }
+
+    func clear() {
+        users.removeAll()
+    }
+}
+
 func createUser(repo: UserRepository, name: String, email: String) -> User {
     let user = User(id: 1, name: name, email: email)
     repo.save(user)

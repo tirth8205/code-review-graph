@@ -41,6 +41,7 @@ code-review-graph-vscode/dist/
 
 # Claude Code
 .claude/
+.claude-plugin/
 
 # Coverage
 htmlcov/

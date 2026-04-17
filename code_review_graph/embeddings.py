@@ -13,6 +13,7 @@ import logging
 import os
 import sqlite3
 import struct
+import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -246,6 +247,35 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
         return f"minimax:{self._MODEL}"
 
 
+CLOUD_PROVIDERS = {"google", "minimax"}
+
+
+def _warn_cloud_egress(provider_name: str) -> None:
+    """Print a stderr warning before a cloud embedding provider is used.
+
+    The warning is suppressed when ``CRG_ACCEPT_CLOUD_EMBEDDINGS=1`` is
+    set in the environment, so scripted / CI workloads can acknowledge
+    once and move on. Use stderr (never stdin/input) to stay compatible
+    with the MCP stdio transport — anything we write to stdout would
+    corrupt the JSON-RPC stream. See: #174
+    """
+    if os.environ.get("CRG_ACCEPT_CLOUD_EMBEDDINGS", "").strip() == "1":
+        return
+    print(
+        f"\n⚠️  code-review-graph: about to embed code via the '{provider_name}' "
+        "cloud provider.\n"
+        "    Your source code (function names, docstrings, file paths) will be "
+        "sent to an external API.\n"
+        "    This is necessary for semantic search with the cloud provider you "
+        "selected.\n"
+        "    To skip this warning in future runs, set "
+        "CRG_ACCEPT_CLOUD_EMBEDDINGS=1 in your environment.\n"
+        "    To stay fully offline, use the default 'local' provider instead "
+        "(no API key needed).\n",
+        file=sys.stderr,
+    )
+
+
 def get_provider(
     provider: str | None = None,
     model: str | None = None,
@@ -256,6 +286,8 @@ def get_provider(
         provider: Provider name. One of "local", "google", "minimax", or None for local.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
+                  Cloud providers emit a one-time stderr warning before use
+                  unless ``CRG_ACCEPT_CLOUD_EMBEDDINGS=1`` is set. See: #174
         model: Model name/path to use. For local provider this is any
                sentence-transformers compatible model. Falls back to
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
@@ -268,6 +300,7 @@ def get_provider(
                 "MINIMAX_API_KEY environment variable is required for "
                 "the MiniMax embedding provider."
             )
+        _warn_cloud_egress("minimax")
         return MiniMaxEmbeddingProvider(api_key=api_key)
 
     if provider == "google":
@@ -277,6 +310,7 @@ def get_provider(
                 "GOOGLE_API_KEY environment variable is required for "
                 "the Google embedding provider."
             )
+        _warn_cloud_egress("google")
         try:
             return GoogleEmbeddingProvider(
                 api_key=api_key,
@@ -366,7 +400,10 @@ class EmbeddingStore:
         self.provider = get_provider(provider, model=model)
         self.available = self.provider is not None
         self.db_path = Path(db_path)
-        self._conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
+        self._conn = sqlite3.connect(
+            str(self.db_path), timeout=30, check_same_thread=False,
+            isolation_level=None,
+        )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
 

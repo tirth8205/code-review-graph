@@ -168,11 +168,12 @@ def generate_wiki_func(
     Returns:
         Status with pages_generated, pages_updated, pages_unchanged counts.
     """
+    from ..incremental import get_data_dir
     from ..wiki import generate_wiki
 
     store, root = _get_store(repo_root)
     try:
-        wiki_dir = root / ".code-review-graph" / "wiki"
+        wiki_dir = get_data_dir(root) / "wiki"
         result = generate_wiki(store, wiki_dir, force=force)
         total = (
             result["pages_generated"]
@@ -217,10 +218,11 @@ def get_wiki_page_func(
     Returns:
         Page content or not_found status.
     """
+    from ..incremental import get_data_dir
     from ..wiki import get_wiki_page
 
     _, root = _get_store(repo_root)
-    wiki_dir = root / ".code-review-graph" / "wiki"
+    wiki_dir = get_data_dir(root) / "wiki"
     content = get_wiki_page(wiki_dir, community_name)
     if content is None:
         return {
