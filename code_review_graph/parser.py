@@ -4095,7 +4095,23 @@ class CodeParser:
                     for arg in child.children:
                         if arg.type in ("identifier", "attribute"):
                             bases.append(arg.text.decode("utf-8", errors="replace"))
-        elif language in ("java", "csharp", "kotlin"):
+        elif language == "java":
+            # Java: superclass and super_interfaces wrap the keyword
+            # (extends/implements) around type_identifier children.
+            # Taking .text would include the keyword (e.g. "implements Foo").
+            # Drill into the children to extract bare type names.
+            for child in node.children:
+                if child.type == "superclass":
+                    for sub in child.children:
+                        if sub.type in ("type_identifier", "generic_type"):
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                elif child.type == "super_interfaces":
+                    for sub in child.children:
+                        if sub.type == "type_list":
+                            for ident in sub.children:
+                                if ident.type in ("type_identifier", "generic_type"):
+                                    bases.append(ident.text.decode("utf-8", errors="replace"))
+        elif language in ("csharp", "kotlin"):
             # Look for superclass/interfaces in extends/implements clauses
             for child in node.children:
                 if child.type in (
