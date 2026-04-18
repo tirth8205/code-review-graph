@@ -466,6 +466,7 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #!/bin/sh
 # Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
 if command -v code-review-graph >/dev/null 2>&1; then
+    code-review-graph update || true
     code-review-graph detect-changes --brief || true
 fi
 """
