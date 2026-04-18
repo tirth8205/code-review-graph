@@ -163,6 +163,9 @@ Hotfix on top of 2.2.3 for two bugs surfaced by a full first-time-user smoke tes
 ### Changed
 - Community detection is now bounded — large repos complete in reasonable time instead of hanging indefinitely.
 
+### Fixed
+- **`install_hooks` now merges instead of overwriting** (PR #203, fixes #114): `install_hooks()` previously used `dict.update()` which clobbered any user-defined hooks in `.claude/settings.json`. Now merges new entries into existing hook arrays, preserving user hooks. Creates a backup (`settings.json.bak`) before modification.
+
 ## [2.2.2] - 2026-04-08
 
 ### Added

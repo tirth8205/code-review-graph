@@ -392,6 +392,9 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     # Wrap the full DELETE + INSERT sequence in an explicit transaction
     # so partial writes cannot occur if an exception interrupts the loop.
     conn.execute("BEGIN IMMEDIATE")

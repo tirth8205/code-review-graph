@@ -263,16 +263,9 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
-        # Defense-in-depth: flush any pending transaction before BEGIN
-        # IMMEDIATE.  The root cause (implicit transactions from legacy
-        # isolation_level="") is fixed by setting isolation_level=None in
-        # __init__, but external code accessing _conn directly (e.g.
-        # _compute_summaries, flows.py, communities.py) could still leave
-        # a transaction open.
-        # See: https://github.com/tirth8205/code-review-graph/issues/135
         if self._conn.in_transaction:
-            logger.warning("Flushing unexpected open transaction before BEGIN IMMEDIATE")
-            self._conn.commit()
+            logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+            self._conn.rollback()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
@@ -318,6 +311,7 @@ class GraphStore:
         self._conn.commit()
 
     def rollback(self) -> None:
+        """Rollback the current transaction."""
         self._conn.rollback()
 
     # --- Read operations ---

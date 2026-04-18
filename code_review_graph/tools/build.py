@@ -495,6 +495,7 @@ def run_postprocess(
                 fts_count = rebuild_fts_index(store)
                 result["fts_indexed"] = fts_count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("FTS index rebuild failed: %s", e)
                 warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
 
@@ -507,6 +508,7 @@ def run_postprocess(
                 count = _store_flows(store, traced)
                 result["flows_detected"] = count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("Flow detection failed: %s", e)
                 warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
 
@@ -523,6 +525,7 @@ def run_postprocess(
                 count = _store_communities(store, comms)
                 result["communities_detected"] = count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("Community detection failed: %s", e)
                 warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 

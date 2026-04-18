@@ -56,6 +56,7 @@ def rebuild_fts_index(store: GraphStore) -> int:
         # Rebuild from the content table (nodes) using the FTS5 rebuild command
         conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
 
+
         conn.commit()
     except BaseException:
         conn.rollback()

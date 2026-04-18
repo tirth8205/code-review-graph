@@ -152,6 +152,33 @@ class TestGenerateHooksConfig:
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
 
+    def test_entries_use_claude_code_hook_schema(self):
+        """Regression guard for the Claude Code hook schema.
+
+        Claude Code rejects entries that put ``command`` directly on the
+        event entry. Each entry must wrap its command(s) in a
+        ``hooks: [{"type": "command", "command": ..., "timeout": ...}]``
+        array — missing that wrapper causes the entire settings.json to
+        fail to parse ("Expected array, but received undefined").
+        """
+        config = generate_hooks_config(Path("/repo"))
+        for event_name, entries in config["hooks"].items():
+            for entry in entries:
+                assert "command" not in entry, (
+                    f"{event_name} entry has a flat `command` field; "
+                    "it must be wrapped in an inner `hooks` array"
+                )
+                assert "hooks" in entry, (
+                    f"{event_name} entry is missing the inner `hooks` array"
+                )
+                assert isinstance(entry["hooks"], list)
+                for hook in entry["hooks"]:
+                    assert hook.get("type") == "command", (
+                        f"{event_name} inner hook missing type=\"command\""
+                    )
+                    assert "command" in hook
+                    assert "timeout" in hook
+
 
 class TestInstallGitHook:
     def _make_git_repo(self, tmp_path: Path) -> Path:
@@ -205,10 +232,24 @@ class TestInstallHooks:
 
         data = json.loads((settings_dir / "settings.json").read_text())
         assert data["customSetting"] is True
+        assert "OtherHook" in data["hooks"]
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
         assert "PreCommit" not in data["hooks"]
         assert "OtherHook" in data["hooks"]  # pre-existing hooks must not be clobbered
+
+    def test_creates_settings_backup(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        existing = {"hooks": {"OtherHook": []}}
+        (settings_dir / "settings.json").write_text(json.dumps(existing))
+
+        install_hooks(tmp_path)
+
+        backup_path = settings_dir / "settings.json.bak"
+        assert backup_path.exists()
+        backup = json.loads(backup_path.read_text())
+        assert backup == existing
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
