@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -79,10 +80,29 @@ def _validate_repo_root(path: Path) -> Path:
 
 
 def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
-    """Resolve repo root and open the graph store."""
+    """Resolve repo root and open the graph store.
+
+    Caches one GraphStore per db_path so MCP tool calls don't pay
+    connection setup on every invocation.
+    """
     root = _validate_repo_root(Path(repo_root)) if repo_root else find_project_root()
     db_path = get_db_path(root)
-    return GraphStore(db_path), root
+    db_key = str(db_path)
+    with _store_lock:
+        store = _store_cache.get(db_key)
+        if store is not None:
+            try:
+                store._conn.execute("SELECT 1")
+            except Exception:
+                store = None
+        if store is None:
+            store = GraphStore(db_path)
+            _store_cache[db_key] = store
+    return store, root
+
+
+_store_cache: dict[str, GraphStore] = {}
+_store_lock = threading.Lock()
 
 
 def compact_response(
