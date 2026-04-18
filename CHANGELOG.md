@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **GDScript support** (Godot): `.gd` files are parsed via the `gdscript` tree-sitter grammar shipped with `tree-sitter-language-pack`. Extracts inner classes (`class Name:`), the file-level `class_name` identity, functions (including `static func`), `extends` parent class as an IMPORTS_FROM edge, direct calls (`call`) and method calls (`attribute_call`). Adds 10 tests and `tests/fixtures/sample.gd`.
+
 ## [2.3.2] - 2026-04-14
 
 Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP tools, 4 new languages, multi-format export, and graph analysis suite.
