@@ -2095,26 +2095,27 @@ class CodeParser:
             return True
 
         # ---- Everything else = a regular function/method call ----------
-        # Emit a CALLS edge when we're inside a function (same rule as
-        # the generic _extract_calls path).
-        if enclosing_func:
-            # For dotted calls like `IO.puts(msg)`, prefer the dotted
-            # identifier; for bare calls use the first identifier.
-            call_name = ident
-            caller = self._qualify(
-                enclosing_func, file_path, enclosing_class,
-            )
-            target = self._resolve_call_target(
-                call_name, file_path, language,
-                import_map or {}, defined_names or set(),
-            )
-            edges.append(EdgeInfo(
-                kind="CALLS",
-                source=caller,
-                target=target,
-                file_path=file_path,
-                line=node.start_point[0] + 1,
-            ))
+        # Module-scope calls attribute to the File node (same rule as the
+        # generic _extract_calls path).
+        # For dotted calls like `IO.puts(msg)`, prefer the dotted
+        # identifier; for bare calls use the first identifier.
+        call_name = ident
+        caller = (
+            self._qualify(enclosing_func, file_path, enclosing_class)
+            if enclosing_func
+            else file_path
+        )
+        target = self._resolve_call_target(
+            call_name, file_path, language,
+            import_map or {}, defined_names or set(),
+        )
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=target,
+            file_path=file_path,
+            line=node.start_point[0] + 1,
+        ))
         # Recurse into arguments + do_block so nested calls are caught.
         for sub in node.children:
             if sub.type in ("arguments", "do_block"):
@@ -3021,9 +3022,17 @@ class CodeParser:
             )
             return True
 
-        if call_name and enclosing_func:
-            caller = self._qualify(
-                enclosing_func, file_path, enclosing_class,
+        if call_name:
+            # Module-scope calls (no enclosing function) are attributed to
+            # the File node. Matches the existing convention for CONTAINS
+            # edges and _extract_value_references. Without this fallback,
+            # any function called only from top-level script glue, CLI
+            # entrypoints, or Jupyter/Databricks notebook cells is flagged
+            # as dead by find_dead_code.
+            caller = (
+                self._qualify(enclosing_func, file_path, enclosing_class)
+                if enclosing_func
+                else file_path
             )
             target = self._resolve_call_target(
                 call_name, file_path, language,
@@ -3056,17 +3065,21 @@ class CodeParser:
         Treat uppercase component tags such as ``<MarkdownMsg />`` as call-like
         edges so caller/impact queries can cross the JSX boundary. Intrinsic DOM
         tags (``<div>``) are ignored.
-        """
-        if not enclosing_func:
-            return
 
+        Module-scope JSX (e.g. a top-level ``<App />`` render call) attributes
+        to the File node.
+        """
         target = self._resolve_jsx_component_target(
             child, language, file_path, import_map or {}, defined_names or set(),
         )
         if not target:
             return
 
-        caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        caller = (
+            self._qualify(enclosing_func, file_path, enclosing_class)
+            if enclosing_func
+            else file_path
+        )
         edges.append(EdgeInfo(
             kind="CALLS",
             source=caller,
@@ -3347,15 +3360,20 @@ class CodeParser:
         Returns True if the child was fully handled and should skip
         default recursion.
         """
-        # Emit statements: emit EventName(...) -> CALLS edge
-        if node_type == "emit_statement" and enclosing_func:
+        # Emit statements: emit EventName(...) -> CALLS edge.
+        # Module-scope emits attribute to the File node.
+        if node_type == "emit_statement":
             for sub in child.children:
                 if sub.type == "expression":
                     for ident in sub.children:
                         if ident.type == "identifier":
-                            caller = self._qualify(
-                                enclosing_func, file_path,
-                                enclosing_class,
+                            caller = (
+                                self._qualify(
+                                    enclosing_func, file_path,
+                                    enclosing_class,
+                                )
+                                if enclosing_func
+                                else file_path
                             )
                             edges.append(EdgeInfo(
                                 kind="CALLS",
@@ -4644,21 +4662,25 @@ class CodeParser:
                 import_map, defined_names,
             )
 
-        if enclosing_func:
-            call_name = self._get_call_name(node, language, source)
-            if call_name:
-                caller = self._qualify(enclosing_func, file_path, enclosing_class)
-                target = self._resolve_call_target(
-                    call_name, file_path, language,
-                    import_map or {}, defined_names or set(),
-                )
-                edges.append(EdgeInfo(
-                    kind="CALLS",
-                    source=caller,
-                    target=target,
-                    file_path=file_path,
-                    line=node.start_point[0] + 1,
-                ))
+        # Module-scope R calls attribute to the File node.
+        call_name = self._get_call_name(node, language, source)
+        if call_name:
+            caller = (
+                self._qualify(enclosing_func, file_path, enclosing_class)
+                if enclosing_func
+                else file_path
+            )
+            target = self._resolve_call_target(
+                call_name, file_path, language,
+                import_map or {}, defined_names or set(),
+            )
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=caller,
+                target=target,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+            ))
 
         self._extract_from_tree(
             node, source, language, file_path, nodes, edges,
