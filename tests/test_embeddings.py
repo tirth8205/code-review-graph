@@ -11,9 +11,11 @@ from code_review_graph.embeddings import (
     EmbeddingStore,
     LocalEmbeddingProvider,
     MiniMaxEmbeddingProvider,
+    OpenAIEmbeddingProvider,
     _cosine_similarity,
     _decode_vector,
     _encode_vector,
+    _is_localhost_url,
     _node_to_text,
     get_provider,
 )
@@ -372,3 +374,239 @@ class TestEmbeddingStoreContextManager:
         # The connection was closed by __exit__ even though an exception
         # was raised.  This is the whole point of #260 — without the
         # context manager, the connection would leak.
+
+
+def _make_openai_response(vectors: list[list[float]]) -> MagicMock:
+    body = json.dumps({
+        "data": [{"embedding": v, "index": i} for i, v in enumerate(vectors)],
+        "model": "text-embedding-3-small",
+        "object": "list",
+        "usage": {"prompt_tokens": 5, "total_tokens": 5},
+    }).encode("utf-8")
+    mock = MagicMock()
+    mock.read.return_value = body
+    mock.__enter__ = MagicMock(return_value=mock)
+    mock.__exit__ = MagicMock(return_value=False)
+    return mock
+
+
+class TestIsLocalhostUrl:
+    """Ensure localhost detection is robust against subdomain tricks."""
+
+    def test_plain_localhost(self):
+        assert _is_localhost_url("http://localhost:3000/v1")
+
+    def test_127_loopback(self):
+        assert _is_localhost_url("http://127.0.0.1:3000/v1")
+
+    def test_0000_loopback(self):
+        assert _is_localhost_url("http://0.0.0.0:8080/v1")
+
+    def test_ipv6_loopback(self):
+        assert _is_localhost_url("http://[::1]:3000/v1")
+
+    def test_real_cloud_host(self):
+        assert not _is_localhost_url("https://api.openai.com/v1")
+
+    def test_subdomain_spoof_not_localhost(self):
+        # Architect flagged: plain string match would mis-classify this.
+        assert not _is_localhost_url("https://my-openai.127.0.0.1.nip.io/v1")
+
+    def test_invalid_url(self):
+        assert not _is_localhost_url("not a url")
+
+
+class TestOpenAIEmbeddingProvider:
+    def test_name_includes_model(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="text-embedding-3-small",
+        )
+        assert p.name == "openai:text-embedding-3-small"
+
+    def test_default_dimension_before_call(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        assert p.dimension == 1536  # fallback until first response
+
+    def test_dimension_captured_from_response(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 768]),
+        ):
+            vec = p.embed_query("hello")
+        assert len(vec) == 768
+        assert p.dimension == 768
+
+    def test_embed_calls_api_with_correct_payload(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="secret-key",
+            base_url="http://127.0.0.1:3000/v1",
+            model="text-embedding-3-small",
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1536, [0.2] * 1536]),
+        ) as mock_urlopen:
+            result = p.embed(["hello", "world"])
+
+        assert len(result) == 2
+        assert len(result[0]) == 1536
+
+        req = mock_urlopen.call_args[0][0]
+        payload = json.loads(req.data.decode("utf-8"))
+        assert payload["model"] == "text-embedding-3-small"
+        assert payload["input"] == ["hello", "world"]
+        assert "dimensions" not in payload  # not pinned by default
+        assert req.headers["Authorization"] == "Bearer secret-key"
+        assert req.headers["Content-type"] == "application/json"
+        assert req.full_url == "http://127.0.0.1:3000/v1/embeddings"
+
+    def test_explicit_dimension_forwarded_in_payload(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="text-embedding-3-large", dimension=256,
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 256]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["dimensions"] == 256
+
+    def test_base_url_trailing_slash_stripped(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1/", model="m",
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 10]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "http://localhost:3000/v1/embeddings"
+
+    def test_embed_api_error_raises(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        err_body = json.dumps({
+            "error": {"message": "invalid api key", "type": "invalid_request_error"},
+        }).encode("utf-8")
+        mock = MagicMock()
+        mock.read.return_value = err_body
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(RuntimeError, match="invalid api key"):
+                p.embed_query("x")
+
+    def test_embed_empty_data_raises(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        body = json.dumps({"data": []}).encode("utf-8")
+        mock = MagicMock()
+        mock.read.return_value = body
+        mock.__enter__ = MagicMock(return_value=mock)
+        mock.__exit__ = MagicMock(return_value=False)
+        with patch("urllib.request.urlopen", return_value=mock):
+            with pytest.raises(RuntimeError, match="empty data"):
+                p.embed_query("x")
+
+    def test_batching_splits_into_100_per_request(self):
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1", model="m",
+        )
+        texts = [f"text-{i}" for i in range(250)]
+        call_count = {"n": 0}
+
+        def _mk_response(*_args, **_kwargs):
+            call_count["n"] += 1
+            # match payload size
+            req = _args[0]
+            body = json.loads(req.data.decode("utf-8"))
+            n = len(body["input"])
+            return _make_openai_response([[0.1] * 5 for _ in range(n)])
+
+        with patch("urllib.request.urlopen", side_effect=_mk_response):
+            out = p.embed(texts)
+        assert len(out) == 250
+        assert call_count["n"] == 3  # 100 + 100 + 50
+
+
+class TestGetProviderOpenAI:
+    _MIN_ENV = {
+        "CRG_OPENAI_API_KEY": "sk-test",
+        "CRG_OPENAI_BASE_URL": "http://127.0.0.1:3000/v1",
+        "CRG_OPENAI_MODEL": "text-embedding-3-small",
+    }
+
+    def test_with_all_env_vars(self):
+        with patch.dict("os.environ", self._MIN_ENV, clear=True):
+            p = get_provider("openai")
+        assert isinstance(p, OpenAIEmbeddingProvider)
+        assert p.name == "openai:text-embedding-3-small"
+
+    def test_missing_api_key_raises(self):
+        env = {k: v for k, v in self._MIN_ENV.items() if k != "CRG_OPENAI_API_KEY"}
+        with patch.dict("os.environ", env, clear=True):
+            with pytest.raises(ValueError, match="CRG_OPENAI_API_KEY"):
+                get_provider("openai")
+
+    def test_missing_base_url_raises(self):
+        env = {k: v for k, v in self._MIN_ENV.items() if k != "CRG_OPENAI_BASE_URL"}
+        with patch.dict("os.environ", env, clear=True):
+            with pytest.raises(ValueError, match="CRG_OPENAI_BASE_URL"):
+                get_provider("openai")
+
+    def test_missing_model_raises(self):
+        env = {k: v for k, v in self._MIN_ENV.items() if k != "CRG_OPENAI_MODEL"}
+        with patch.dict("os.environ", env, clear=True):
+            with pytest.raises(ValueError, match="CRG_OPENAI_MODEL"):
+                get_provider("openai")
+
+    def test_model_arg_overrides_env(self):
+        with patch.dict("os.environ", self._MIN_ENV, clear=True):
+            p = get_provider("openai", model="text-embedding-3-large")
+        assert p.name == "openai:text-embedding-3-large"
+
+    def test_dimension_env_forwarded(self):
+        env = {**self._MIN_ENV, "CRG_OPENAI_DIMENSION": "256"}
+        with patch.dict("os.environ", env, clear=True):
+            p = get_provider("openai")
+        assert p._dimension == 256
+
+    def test_localhost_suppresses_egress_warning(self, capsys):
+        with patch.dict("os.environ", self._MIN_ENV, clear=True):
+            get_provider("openai")
+        captured = capsys.readouterr()
+        # localhost must never trigger the cloud-egress warning
+        assert captured.err == ""
+        assert captured.out == ""
+
+    def test_cloud_base_url_triggers_egress_warning(self, capsys):
+        env = {**self._MIN_ENV, "CRG_OPENAI_BASE_URL": "https://api.openai.com/v1"}
+        with patch.dict("os.environ", env, clear=True):
+            # drop accept flag to ensure warning fires
+            os.environ.pop("CRG_ACCEPT_CLOUD_EMBEDDINGS", None)
+            get_provider("openai")
+        captured = capsys.readouterr()
+        assert "openai" in captured.err.lower()
+        assert "cloud" in captured.err.lower()
+        assert captured.out == ""  # MCP stdio safety
+
+    def test_subdomain_spoof_triggers_warning(self, capsys):
+        """my-openai.127.0.0.1.nip.io must NOT be treated as localhost."""
+        env = {
+            **self._MIN_ENV,
+            "CRG_OPENAI_BASE_URL": "https://my-openai.127.0.0.1.nip.io/v1",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            get_provider("openai")
+        captured = capsys.readouterr()
+        assert "cloud" in captured.err.lower()

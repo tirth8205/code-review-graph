@@ -273,6 +273,7 @@ def semantic_search_nodes_tool(
     limit: int = 20,
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
@@ -286,13 +287,15 @@ def semantic_search_nodes_tool(
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
-               during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var,
-               then all-MiniLM-L6-v2.
+               during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var
+               (local) or CRG_OPENAI_MODEL (openai).
+        provider: Embedding provider: "local" (default), "openai", "google",
+                  or "minimax". Must match the provider used during embed_graph.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     return semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root), model=model,
-        detail_level=detail_level,
+        query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root),
+        model=model, provider=provider, detail_level=detail_level,
     )
 
 
@@ -300,31 +303,41 @@ def semantic_search_nodes_tool(
 async def embed_graph_tool(
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
-    Requires: pip install code-review-graph[embeddings]
-    Default model: all-MiniLM-L6-v2. Override via `model` param or
-    CRG_EMBEDDING_MODEL env var (any sentence-transformers compatible model).
-    Changing the model re-embeds all nodes automatically.
+    Requires: pip install code-review-graph[embeddings] (local provider only;
+    cloud providers use stdlib urllib).
+    Default provider: local. Default model: all-MiniLM-L6-v2.
+    Override provider via `provider` param, model via `model` param or
+    CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL env vars.
+    Changing the model or provider re-embeds all nodes automatically.
 
     After running this, semantic_search_nodes_tool will use vector similarity
     instead of keyword matching for much better results.
 
-    Runs the blocking sentence-transformers / Gemini inference in a
+    Runs the blocking sentence-transformers / Gemini / HTTP inference in a
     thread via ``asyncio.to_thread`` so the stdio event loop stays
     responsive — without this wrapper, embedding a large graph would
     silently hang the MCP server on Windows. See: #46, #136.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
-        model: Embedding model name (HuggingFace ID or local path).
-               Falls back to CRG_EMBEDDING_MODEL env var, then all-MiniLM-L6-v2.
+        model: Embedding model. For local: HuggingFace ID/path; for openai:
+               model ID (e.g. "text-embedding-3-small"); for google: Gemini
+               model ID. Falls back to CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL
+               env vars as appropriate.
+        provider: "local" (default), "openai", "google", or "minimax".
+                  "openai" requires CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY +
+                  CRG_OPENAI_MODEL env vars and accepts any OpenAI-compatible
+                  endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, etc.).
     """
     return await asyncio.to_thread(
         embed_graph,
         repo_root=_resolve_repo_root(repo_root),
         model=model,
+        provider=provider,
     )
 
 

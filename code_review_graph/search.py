@@ -176,6 +176,7 @@ def _embedding_search(
     query: str,
     limit: int = 50,
     model: str | None = None,
+    provider: str | None = None,
 ) -> list[tuple[int, float]]:
     """Run a vector similarity search using the embedding store.
 
@@ -188,7 +189,7 @@ def _embedding_search(
         return []
 
     try:
-        emb_store = EmbeddingStore(store.db_path, model=model)
+        emb_store = EmbeddingStore(store.db_path, provider=provider, model=model)
         try:
             if not emb_store.available or emb_store.count() == 0:
                 return []
@@ -273,6 +274,7 @@ def hybrid_search(
     limit: int = 20,
     context_files: Optional[list[str]] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -310,7 +312,9 @@ def hybrid_search(
         logger.warning("FTS5 unavailable, will use fallback: %s", e)
 
     # Try embedding search
-    emb_results = _embedding_search(store, query, limit=fetch_limit, model=model)
+    emb_results = _embedding_search(
+        store, query, limit=fetch_limit, model=model, provider=provider,
+    )
 
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:

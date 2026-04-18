@@ -4,6 +4,8 @@ Supports multiple providers:
 1. Local (sentence-transformers) - Private, fast, offline.
 2. Google Gemini - High-quality, cloud-based. Requires explicit opt-in.
 3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
+4. OpenAI-compatible - Any endpoint speaking OpenAI /v1/embeddings (real OpenAI,
+   Azure OpenAI, self-hosted gateways like new-api / LiteLLM / vLLM / LocalAI / Ollama).
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .graph import GraphNode, GraphStore, node_to_dict
 
@@ -247,7 +250,129 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
         return f"minimax:{self._MODEL}"
 
 
-CLOUD_PROVIDERS = {"google", "minimax"}
+class OpenAIEmbeddingProvider(EmbeddingProvider):
+    """OpenAI-compatible embedding provider.
+
+    Works with any endpoint that speaks the OpenAI ``/v1/embeddings`` schema:
+    - Real OpenAI API (``https://api.openai.com/v1``)
+    - Azure OpenAI
+    - Self-hosted gateways: new-api, LiteLLM, vLLM, LocalAI, Ollama (openai mode)
+
+    Dimension is detected from the first response and frozen; switching the
+    ``model`` in the environment changes ``provider.name``, which forces the
+    embedding store to re-embed (provider-aware isolation in the embeddings table).
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        dimension: int | None = None,
+        timeout: int = 120,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._dimension = dimension
+        self._timeout = timeout
+
+    def _call_api(self, texts: list[str]) -> list[list[float]]:
+        import json as _json
+        import urllib.request
+
+        body: dict[str, Any] = {"model": self._model, "input": texts}
+        # OpenAI v3 models (text-embedding-3-*) support dimension reduction;
+        # only forward the param when the user explicitly pinned one.
+        if self._dimension is not None:
+            body["dimensions"] = self._dimension
+
+        payload = _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self._base_url}/embeddings",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                import ssl
+                _ssl_ctx = ssl.create_default_context()
+                with urllib.request.urlopen(  # nosec B310
+                    req, timeout=self._timeout, context=_ssl_ctx,
+                ) as resp:
+                    raw = resp.read().decode("utf-8")
+                response = _json.loads(raw)
+
+                if "error" in response:
+                    err = response["error"]
+                    msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"OpenAI API error: {msg}")
+
+                data = response.get("data", [])
+                if not data:
+                    raise RuntimeError("OpenAI API returned empty data")
+
+                vectors = [item["embedding"] for item in data]
+                if vectors and self._dimension is None:
+                    self._dimension = len(vectors[0])
+                return vectors
+
+            except Exception as e:
+                err_str = str(e)
+                is_retryable = "429" in err_str or "500" in err_str or "503" in err_str
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(
+                    "OpenAI embeddings API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+
+        return []  # unreachable
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        batch_size = 100
+        results: list[list[float]] = []
+        for i in range(0, len(texts), batch_size):
+            results.extend(self._call_api(texts[i:i + batch_size]))
+        return results
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._call_api([text])[0]
+
+    @property
+    def dimension(self) -> int:
+        if self._dimension is not None:
+            return self._dimension
+        # Default for text-embedding-3-small; updated after first call.
+        return 1536
+
+    @property
+    def name(self) -> str:
+        return f"openai:{self._model}"
+
+
+CLOUD_PROVIDERS = {"google", "minimax", "openai"}
+
+
+def _is_localhost_url(url: str) -> bool:
+    """Return True if url points to a localhost host (never treat as cloud egress).
+
+    Uses urlparse.hostname so we compare the actual host, not a substring
+    match that could be fooled by e.g. ``https://my-openai.127.0.0.1.nip.io``.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    # nosec B104: we're *matching* a URL hostname, not binding a listener.
+    return host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}  # nosec B104
 
 
 def _warn_cloud_egress(provider_name: str) -> None:
@@ -283,16 +408,48 @@ def get_provider(
     """Get an embedding provider by name.
 
     Args:
-        provider: Provider name. One of "local", "google", "minimax", or None for local.
+        provider: Provider name. One of "local", "google", "minimax", "openai",
+                  or None for local.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
+                  OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
+                  CRG_OPENAI_MODEL env vars (or the ``model`` arg). The egress
+                  warning is skipped when the base URL points to localhost.
                   Cloud providers emit a one-time stderr warning before use
                   unless ``CRG_ACCEPT_CLOUD_EMBEDDINGS=1`` is set. See: #174
         model: Model name/path to use. For local provider this is any
                sentence-transformers compatible model. Falls back to
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
                For Google provider this is a Gemini model ID.
+               For OpenAI provider this overrides CRG_OPENAI_MODEL.
     """
+    if provider == "openai":
+        api_key = os.environ.get("CRG_OPENAI_API_KEY")
+        base_url = os.environ.get("CRG_OPENAI_BASE_URL")
+        resolved_model = model or os.environ.get("CRG_OPENAI_MODEL")
+        if not api_key or not base_url or not resolved_model:
+            missing = [
+                name for name, val in [
+                    ("CRG_OPENAI_API_KEY", api_key),
+                    ("CRG_OPENAI_BASE_URL", base_url),
+                    ("CRG_OPENAI_MODEL", resolved_model),
+                ] if not val
+            ]
+            raise ValueError(
+                "Missing required environment variable(s) for the OpenAI "
+                f"embedding provider: {', '.join(missing)}."
+            )
+        dim_env = os.environ.get("CRG_OPENAI_DIMENSION")
+        dimension = int(dim_env) if dim_env else None
+        if not _is_localhost_url(base_url):
+            _warn_cloud_egress("openai")
+        return OpenAIEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=resolved_model,
+            dimension=dimension,
+        )
+
     if provider == "minimax":
         api_key = os.environ.get("MINIMAX_API_KEY")
         if not api_key:

@@ -196,7 +196,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **23 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, or MiniMax |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
 | **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
 | **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
@@ -344,8 +344,27 @@ pip install code-review-graph[all]                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
+| `CRG_OPENAI_BASE_URL` | OpenAI-compatible embeddings endpoint | - |
+| `CRG_OPENAI_API_KEY` | API key for OpenAI-compatible embeddings | - |
+| `CRG_OPENAI_MODEL` | Model name for OpenAI-compatible embeddings | - |
+| `CRG_OPENAI_DIMENSION` | Pin embedding dimension (v3 models support reduction) | - |
 | `NO_COLOR` | If set, disables ANSI colors in terminal | - |
 | `CRG_SERIAL_PARSE` | If `1`, disables parallel parsing (use for debugging) | - |
+
+OpenAI-compatible embeddings (real OpenAI, Azure, or any self-hosted gateway like
+new-api / LiteLLM / vLLM / LocalAI / Ollama in openai mode) need no extra install —
+just set the environment variables and pass `provider="openai"` to `embed_graph`:
+
+```bash
+export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
+export CRG_OPENAI_API_KEY=sk-...
+export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway serves
+# optional:
+export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
+```
+
+The cloud-egress warning is auto-skipped when the base URL points to localhost
+(`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
 
 </details>
 
