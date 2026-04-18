@@ -4982,6 +4982,64 @@ class CodeParser:
 
         first = node.children[0]
 
+        # Julia macrocall: ``@test expr`` — name is inside
+        # ``macro_identifier > identifier``. Prefix with ``@`` to distinguish
+        # from ordinary calls.
+        if language == "julia" and node.type == "macrocall_expression":
+            for child in node.children:
+                if child.type == "macro_identifier":
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            raw = sub.text.decode("utf-8", errors="replace")
+                            return f"@{raw}"
+                    return None
+            return None
+
+        # Julia broadcast call: ``sin.(x)`` — same structure as
+        # call_expression (first child is identifier or field_expression)
+        # so the generic paths below handle it.
+        if language == "php":
+            def _normalize_php_name(text: str) -> str:
+                # PHP global/function names can be prefixed with '\\'.
+                return text.lstrip("\\")
+
+            if node.type == "function_call_expression":
+                for child in node.children:
+                    if child.type in ("name", "qualified_name"):
+                        raw = child.text.decode("utf-8", errors="replace")
+                        return _normalize_php_name(raw)
+                return None
+
+            if node.type in (
+                "member_call_expression",
+                "nullsafe_member_call_expression",
+            ):
+                for child in reversed(node.children):
+                    if child.type == "name":
+                        return child.text.decode("utf-8", errors="replace")
+                return None
+
+            if node.type == "scoped_call_expression":
+                parts = []
+                for child in node.children:
+                    if child.type in ("name", "qualified_name"):
+                        raw = child.text.decode("utf-8", errors="replace")
+                        parts.append(_normalize_php_name(raw))
+                if len(parts) >= 2:
+                    return f"{parts[0]}::{parts[-1]}"
+                if parts:
+                    return parts[0]
+                return None
+
+            if node.type == "object_creation_expression":
+                # new ClassName(args) — children: [new, name/qualified_name, arguments]
+                for child in node.children:
+                    if child.type in ("name", "qualified_name"):
+                        return _normalize_php_name(
+                            child.text.decode("utf-8", errors="replace")
+                        )
+                return None
+
         # Scala: instance_expression (new Foo(...)) – extract the type name
         if node.type == "instance_expression":
             for child in node.children:
@@ -5026,43 +5084,6 @@ class CodeParser:
                 if child.type == "method":
                     return child.text.decode("utf-8", errors="replace")
             return None  # method child not found
-
-        # PHP-specific call handling: tree-sitter-php uses `name` as the
-        # node type for identifiers (not `identifier`), and each call
-        # expression type has a distinct child layout.
-        if language == "php":
-            if node.type == "scoped_call_expression":
-                # Class::method(args) — children: [name, ::, name, arguments]
-                # Use dot notation (Class.method) to match the graph's
-                # qualified name format (file.php::Class.method).
-                names = [c for c in node.children if c.type == "name"]
-                if len(names) >= 2:
-                    cls = names[0].text.decode("utf-8", errors="replace")
-                    method = names[1].text.decode("utf-8", errors="replace")
-                    return f"{cls}.{method}"
-                if names:
-                    return names[0].text.decode("utf-8", errors="replace")
-                return None
-            if node.type == "object_creation_expression":
-                # new ClassName(args) — children: [new, name, arguments]
-                for child in node.children:
-                    if child.type == "name":
-                        return child.text.decode("utf-8", errors="replace")
-                    if child.type == "qualified_name":
-                        return child.text.decode("utf-8", errors="replace")
-                return None
-            if node.type == "member_call_expression":
-                # $obj->method(args) — children: [variable_name, ->, name, arguments]
-                for child in reversed(node.children):
-                    if child.type == "name":
-                        return child.text.decode("utf-8", errors="replace")
-                return None
-            # function_call_expression: func(args) — children: [name, arguments]
-            if first.type == "name":
-                return first.text.decode("utf-8", errors="replace")
-            if first.type == "qualified_name":
-                return first.text.decode("utf-8", errors="replace")
-            return None
 
         # Simple call: func_name(args)
         # Kotlin uses "simple_identifier" instead of "identifier".
