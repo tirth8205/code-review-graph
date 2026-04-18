@@ -588,6 +588,48 @@ def _scan_rescript_modules(cleaned: str, offset_to_line) -> list[dict]:
     return modules
 
 
+# Common JS/TS prototype and built-in method names that should NOT create
+# CALLS edges when seen as instance method calls (obj.method()).  These are
+# so ubiquitous that emitting bare-name edges for them creates noise without
+# helping dead-code or flow analysis.
+_INSTANCE_METHOD_BLOCKLIST: frozenset[str] = frozenset({
+    # Array / iterable
+    "push", "pop", "shift", "unshift", "splice", "slice", "concat",
+    "map", "filter", "reduce", "reduceRight", "find", "findIndex",
+    "forEach", "every", "some", "includes", "indexOf", "lastIndexOf",
+    "flat", "flatMap", "fill", "sort", "reverse", "join", "entries",
+    "keys", "values", "at", "with",
+    # Object / prototype
+    "toString", "valueOf", "toJSON", "hasOwnProperty", "toLocaleString",
+    # String
+    "trim", "trimStart", "trimEnd", "split", "replace", "replaceAll",
+    "match", "matchAll", "search", "startsWith", "endsWith", "padStart",
+    "padEnd", "repeat", "substring", "toLowerCase", "toUpperCase", "charAt",
+    "charCodeAt", "normalize", "localeCompare",
+    # Promise / async
+    "then", "catch", "finally",
+    # Map / Set
+    "get", "set", "has", "delete", "clear", "add", "size",
+    # EventEmitter / stream (very generic)
+    "emit", "pipe", "write", "end", "destroy", "pause", "resume",
+    # Logging / console
+    "log", "warn", "error", "info", "debug", "trace",
+    # DOM / common
+    "addEventListener", "removeEventListener", "querySelector",
+    "querySelectorAll", "getElementById", "setAttribute",
+    "getAttribute", "appendChild", "removeChild", "createElement",
+    "preventDefault", "stopPropagation",
+    # RxJS / Observable
+    "subscribe", "unsubscribe", "next", "complete",
+    # Common generic names (too ambiguous to resolve)
+    "call", "apply", "bind", "resolve", "reject",
+    # Python common builtins used as methods
+    "append", "extend", "insert", "remove", "update", "items",
+    "encode", "decode", "strip", "lstrip", "rstrip", "format",
+    "upper", "lower", "title", "count", "copy", "deepcopy",
+})
+
+
 def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
 
@@ -3004,7 +3046,11 @@ class CodeParser:
         should skip default recursion). Returns False if the caller should
         continue to Solidity handling and default recursion.
         """
-        call_name = self._get_call_name(child, language, source)
+        call_name = self._get_call_name(
+            child, language, source,
+            is_test_file=_is_test_file(file_path),
+            import_map=import_map,
+        )
 
         # For member expressions like describe.only / it.skip / test.each,
         # resolve the base call name so those are treated as test runner
@@ -4448,7 +4494,10 @@ class CodeParser:
 
         return imports
 
-    def _get_call_name(self, node, language: str, source: bytes) -> Optional[str]:
+    def _get_call_name(
+        self, node, language: str, source: bytes, is_test_file: bool = False,
+        import_map: dict[str, str] | None = None,
+    ) -> Optional[str]:
         """Extract the function/method name being called."""
         if not node.children:
             return None
@@ -4527,18 +4576,92 @@ class CodeParser:
             "navigation_expression",
         )
         if first.type in member_types:
+            # In test files, allow all method calls (needed for TESTED_BY edges).
+            # In production code: self/cls/this/super and uppercase receivers
+            # get full resolution.  Other instance method calls (obj.method())
+            # emit bare method names that the post-process resolver can match,
+            # as long as the method name is not in the built-in blocklist.
+            is_instance_call = False
+            if not is_test_file:
+                receiver = first.children[0] if first.children else None
+                if receiver is None:
+                    return None
+                receiver_text = receiver.text.decode("utf-8", errors="replace")
+                is_self_call = (
+                    receiver.type in ("self", "this", "super")
+                    or (
+                        receiver.type in ("identifier", "simple_identifier")
+                        and receiver_text in ("self", "cls", "this", "super")
+                    )
+                    # Python super().method() -- receiver is call(identifier:"super")
+                    or (
+                        receiver.type == "call"
+                        and receiver.children
+                        and receiver.children[0].type == "identifier"
+                        and receiver.children[0].text == b"super"
+                    )
+                )
+                # Uppercase receivers are likely class/companion/static calls
+                # (e.g. MyClass.create(), Companion.method()) -- allow through.
+                is_class_call = (
+                    receiver.type in ("identifier", "simple_identifier")
+                    and receiver_text[:1].isupper()
+                )
+                # Namespace import receivers (import * as X) -- allow through
+                is_ns_import = (
+                    import_map is not None
+                    and receiver.type in ("identifier", "simple_identifier")
+                    and receiver_text in import_map
+                )
+                if not is_self_call and not is_class_call and not is_ns_import:
+                    # If receiver is a nested member expr (os.path.getsize),
+                    # check if leftmost identifier is an imported module.
+                    # If so, return None to let module-qualified handler resolve.
+                    if import_map and receiver.type in (
+                        "attribute", "member_expression",
+                    ):
+                        leftmost = receiver
+                        while leftmost.children and leftmost.type in (
+                            "attribute", "member_expression",
+                        ):
+                            leftmost = leftmost.children[0]
+                        if (
+                            leftmost.type in ("identifier", "simple_identifier")
+                            and leftmost.text.decode(
+                                "utf-8", errors="replace",
+                            ) in import_map
+                        ):
+                            return None
+                    is_instance_call = True
+
             # Get the rightmost identifier (the method name)
             # Kotlin navigation_expression uses navigation_suffix > simple_identifier.
+            # For uppercase receivers (ClassName.method), prefix with receiver name
+            # to produce "ClassName.method" -- enables reverse lookup.
+            receiver = first.children[0] if first.children else None
+            receiver_prefix = ""
+            if receiver and receiver.type in ("identifier", "simple_identifier"):
+                rtxt = receiver.text.decode("utf-8", errors="replace")
+                if rtxt[:1].isupper() or (
+                    import_map is not None and rtxt in import_map
+                ):
+                    receiver_prefix = rtxt + "."
             for child in reversed(first.children):
                 if child.type in (
                     "identifier", "property_identifier", "field_identifier",
                     "field_name", "simple_identifier",
                 ):
-                    return child.text.decode("utf-8", errors="replace")
+                    method = child.text.decode("utf-8", errors="replace")
+                    if is_instance_call and method in _INSTANCE_METHOD_BLOCKLIST:
+                        return None
+                    return receiver_prefix + method if receiver_prefix else method
                 if child.type == "navigation_suffix":
                     for sub in child.children:
                         if sub.type == "simple_identifier":
-                            return sub.text.decode("utf-8", errors="replace")
+                            method = sub.text.decode("utf-8", errors="replace")
+                            if is_instance_call and method in _INSTANCE_METHOD_BLOCKLIST:
+                                return None
+                            return receiver_prefix + method if receiver_prefix else method
             return first.text.decode("utf-8", errors="replace")
 
         # Scoped call (e.g., Rust path::func())
@@ -4791,21 +4914,29 @@ class CodeParser:
                 import_map, defined_names,
             )
 
-        if enclosing_func:
-            call_name = self._get_call_name(node, language, source)
-            if call_name:
-                caller = self._qualify(enclosing_func, file_path, enclosing_class)
-                target = self._resolve_call_target(
-                    call_name, file_path, language,
-                    import_map or {}, defined_names or set(),
-                )
-                edges.append(EdgeInfo(
-                    kind="CALLS",
-                    source=caller,
-                    target=target,
-                    file_path=file_path,
-                    line=node.start_point[0] + 1,
-                ))
+        # Module-scope R calls attribute to the File node.
+        call_name = self._get_call_name(
+            node, language, source,
+            is_test_file=_is_test_file(file_path),
+            import_map=import_map,
+        )
+        if call_name:
+            caller = (
+                self._qualify(enclosing_func, file_path, enclosing_class)
+                if enclosing_func
+                else file_path
+            )
+            target = self._resolve_call_target(
+                call_name, file_path, language,
+                import_map or {}, defined_names or set(),
+            )
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=caller,
+                target=target,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+            ))
 
         self._extract_from_tree(
             node, source, language, file_path, nodes, edges,
