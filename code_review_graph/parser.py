@@ -770,6 +770,16 @@ class CodeParser:
             tree.root_node, language, file_path_str, edges, import_map,
         )
 
+        # Enrich: detect function/class references passed as call arguments
+        self._enrich_func_ref_args(
+            tree.root_node, language, file_path_str, edges, defined_names,
+        )
+
+        # Enrich: detect function/class references returned or assigned
+        self._enrich_func_ref_returns(
+            tree.root_node, language, file_path_str, edges, defined_names,
+        )
+
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str, import_map)
 
@@ -3691,6 +3701,236 @@ class CodeParser:
                     return names
             return set()
         return None
+
+    # ------------------------------------------------------------------
+    # Function-reference-as-argument enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_func_ref_args(
+        self,
+        root,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        defined_names: set[str],
+    ) -> None:
+        """Detect function/class names passed as arguments to calls."""
+        if not defined_names:
+            return
+        arg_list_types = {
+            "argument_list", "arguments", "value_arguments",
+            "actual_parameters", "template_argument_list",
+        }
+        ident_types = {"identifier", "simple_identifier"}
+        kw_types = {"keyword_argument", "value_argument", "named_argument"}
+
+        self._walk_func_ref_args(
+            root, language, file_path, edges, defined_names,
+            arg_list_types, ident_types, kw_types,
+            enclosing_func=None, enclosing_class=None,
+        )
+
+    def _walk_func_ref_args(
+        self,
+        node,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        defined_names: set[str],
+        arg_list_types: set[str],
+        ident_types: set[str],
+        kw_types: set[str],
+        enclosing_func: Optional[str],
+        enclosing_class: Optional[str],
+        _depth: int = 0,
+    ) -> None:
+        if _depth > 50:
+            return
+        func_types = set(_FUNCTION_TYPES.get(language, []))
+
+        for child in node.children:
+            if child.type in func_types:
+                fname = self._get_name(child, language, "function")
+                if fname:
+                    defined_names.add(fname)
+                    self._walk_func_ref_args(
+                        child, language, file_path, edges, defined_names,
+                        arg_list_types, ident_types, kw_types,
+                        enclosing_func=fname, enclosing_class=enclosing_class,
+                        _depth=_depth + 1,
+                    )
+                    continue
+
+            if child.type in arg_list_types:
+                for arg in child.children:
+                    ref_name = None
+                    line = arg.start_point[0] + 1
+                    if arg.type in ident_types:
+                        ref_name = arg.text.decode("utf-8", errors="replace")
+                    elif arg.type in kw_types:
+                        for sub in arg.children:
+                            if sub.type in ident_types:
+                                ref_name = sub.text.decode("utf-8", errors="replace")
+                    elif arg.type == "callable_reference":
+                        for sub in arg.children:
+                            if sub.type in ident_types:
+                                ref_name = sub.text.decode("utf-8", errors="replace")
+
+                    if ref_name and ref_name in defined_names:
+                        source = (
+                            self._qualify(enclosing_func, file_path, enclosing_class)
+                            if enclosing_func else file_path
+                        )
+                        edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=source,
+                            target=ref_name,
+                            file_path=file_path,
+                            line=line,
+                        ))
+                continue
+
+            if child.type == "jsx_expression":
+                for sub in child.children:
+                    if sub.type in ident_types:
+                        ref_name = sub.text.decode("utf-8", errors="replace")
+                        if ref_name in defined_names:
+                            source = (
+                                self._qualify(
+                                    enclosing_func, file_path, enclosing_class,
+                                )
+                                if enclosing_func else file_path
+                            )
+                            edges.append(EdgeInfo(
+                                kind="CALLS",
+                                source=source,
+                                target=ref_name,
+                                file_path=file_path,
+                                line=sub.start_point[0] + 1,
+                            ))
+                continue
+
+            self._walk_func_ref_args(
+                child, language, file_path, edges, defined_names,
+                arg_list_types, ident_types, kw_types,
+                enclosing_func=enclosing_func,
+                enclosing_class=enclosing_class,
+                _depth=_depth + 1,
+            )
+
+    # ------------------------------------------------------------------
+    # Function-reference in return/assignment enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_func_ref_returns(
+        self,
+        root,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        defined_names: set[str],
+    ) -> None:
+        """Detect function/class names used as values in return and assignment."""
+        if not defined_names:
+            return
+        ident_types = {"identifier", "simple_identifier"}
+        return_types = {"return_statement"}
+        assign_types = {
+            "assignment", "variable_declarator",
+            "assignment_expression", "augmented_assignment",
+        }
+        self._walk_func_ref_returns(
+            root, language, file_path, edges, defined_names,
+            ident_types, return_types, assign_types,
+            enclosing_func=None, enclosing_class=None,
+        )
+
+    def _walk_func_ref_returns(
+        self,
+        node,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        defined_names: set[str],
+        ident_types: set[str],
+        return_types: set[str],
+        assign_types: set[str],
+        enclosing_func: Optional[str],
+        enclosing_class: Optional[str],
+        _depth: int = 0,
+    ) -> None:
+        if _depth > 50:
+            return
+        func_types = set(_FUNCTION_TYPES.get(language, []))
+
+        for child in node.children:
+            if child.type in func_types:
+                fname = self._get_name(child, language, "function")
+                if fname:
+                    self._walk_func_ref_returns(
+                        child, language, file_path, edges, defined_names,
+                        ident_types, return_types, assign_types,
+                        enclosing_func=fname, enclosing_class=enclosing_class,
+                        _depth=_depth + 1,
+                    )
+                    continue
+
+            if child.type in return_types:
+                for sub in child.children:
+                    if sub.type in ident_types:
+                        ref_name = sub.text.decode("utf-8", errors="replace")
+                        if ref_name in defined_names:
+                            source = (
+                                self._qualify(
+                                    enclosing_func, file_path, enclosing_class,
+                                )
+                                if enclosing_func else file_path
+                            )
+                            edges.append(EdgeInfo(
+                                kind="CALLS",
+                                source=source,
+                                target=ref_name,
+                                file_path=file_path,
+                                line=sub.start_point[0] + 1,
+                            ))
+                continue
+
+            if child.type in assign_types:
+                last_ident = None
+                for sub in child.children:
+                    if sub.type in ident_types:
+                        last_ident = sub
+                if last_ident:
+                    ref_name = last_ident.text.decode("utf-8", errors="replace")
+                    if ref_name in defined_names:
+                        first_ident = None
+                        for sub in child.children:
+                            if sub.type in ident_types:
+                                first_ident = sub
+                                break
+                        if first_ident and first_ident != last_ident:
+                            source = (
+                                self._qualify(
+                                    enclosing_func, file_path, enclosing_class,
+                                )
+                                if enclosing_func else file_path
+                            )
+                            edges.append(EdgeInfo(
+                                kind="CALLS",
+                                source=source,
+                                target=ref_name,
+                                file_path=file_path,
+                                line=last_ident.start_point[0] + 1,
+                            ))
+                continue
+
+            self._walk_func_ref_returns(
+                child, language, file_path, edges, defined_names,
+                ident_types, return_types, assign_types,
+                enclosing_func=enclosing_func,
+                enclosing_class=enclosing_class,
+                _depth=_depth + 1,
+            )
 
     # ------------------------------------------------------------------
     # Typed-variable call enrichment
