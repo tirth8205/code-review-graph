@@ -404,10 +404,39 @@ class TestPHPParsing:
     def test_finds_static_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
         targets = {e.target for e in calls}
-        # scoped_call_expression uses dot notation: User.find
-        assert any("User.find" in t for t in targets), (
-            f"No static call to 'User.find' in {targets}"
+        # scoped_call_expression: User::find (upstream #298 keeps `::` separator)
+        assert any("User::find" in t for t in targets), (
+            f"No static call to 'User::find' in {targets}"
         )
+
+    def test_finds_calls_comprehensive(self):
+        # Covers upstream #298: plain, member, nullsafe, scoped,
+        # and global-namespaced PHP call extraction.
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
+
+        run_queries_targets = {
+            e.target for e in calls if e.source.endswith("::ExtendedRepo.runQueries")
+        }
+
+        # Plain function calls
+        assert "sqlQuery" in target_names
+        assert "xl" in target_names
+        assert "text" in target_names
+
+        # Member and nullsafe method calls
+        assert "execute" in target_names
+        assert "search" in target_names
+
+        # Scoped/static calls
+        assert "QueryUtils::fetchRecords" in targets
+        assert "EncounterService::create" in targets
+        assert any(t.endswith("__construct") for t in run_queries_targets)
+        assert any(t.endswith("factory") for t in run_queries_targets)
+
+        # Global namespaced calls should normalize to a stable name
+        assert "dirname" in target_names
 
     def test_finds_new_expression(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
@@ -419,7 +448,6 @@ class TestPHPParsing:
     def test_finds_inheritance(self):
         inherits = [e for e in self.edges if e.kind in ("INHERITS", "IMPLEMENTS")]
         targets = {e.target for e in inherits}
-        sources = {e.source for e in inherits}
         # InMemoryRepo implements Repository
         assert any("Repository" in t for t in targets), (
             f"No INHERITS/IMPLEMENTS to Repository in {inherits}"
@@ -559,33 +587,6 @@ class TestBladeParsing:
         nodes, edges = parser.parse_file(FIXTURES / "sample.php")
         classes = [n for n in nodes if n.kind == "Class"]
         assert any(c.name == "User" for c in classes)
-
-    def test_finds_calls(self):
-        calls = [e for e in self.edges if e.kind == "CALLS"]
-        targets = {e.target for e in calls}
-        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
-
-        run_queries_targets = {
-            e.target for e in calls if e.source.endswith("::ExtendedRepo.runQueries")
-        }
-
-        # Plain function calls
-        assert "sqlQuery" in target_names
-        assert "xl" in target_names
-        assert "text" in target_names
-
-        # Member and nullsafe method calls
-        assert "execute" in target_names
-        assert "search" in target_names
-
-        # Scoped/static calls
-        assert "QueryUtils::fetchRecords" in targets
-        assert "EncounterService::create" in targets
-        assert any(t.endswith("__construct") for t in run_queries_targets)
-        assert any(t.endswith("factory") for t in run_queries_targets)
-
-        # Global namespaced calls should normalize to a stable name
-        assert "dirname" in target_names
 
 
 class TestKotlinParsing:
