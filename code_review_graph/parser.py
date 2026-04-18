@@ -1715,11 +1715,22 @@ class CodeParser:
         resolved: list[EdgeInfo] = []
         for edge in edges:
             if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
-                if edge.target in symbols:
+                target = edge.target
+                if target in symbols:
+                    target = symbols[target]
+                elif "." in target:
+                    # ClassName.method -- qualify via the class name so the
+                    # edge points at /path/file::ClassName.method.
+                    cls_name = target.split(".", 1)[0]
+                    if cls_name in symbols:
+                        target = (
+                            f"{symbols[cls_name].rsplit('::', 1)[0]}::{target}"
+                        )
+                if target != edge.target:
                     edge = EdgeInfo(
                         kind=edge.kind,
                         source=edge.source,
-                        target=symbols[edge.target],
+                        target=target,
                         file_path=edge.file_path,
                         line=edge.line,
                         extra=edge.extra,
