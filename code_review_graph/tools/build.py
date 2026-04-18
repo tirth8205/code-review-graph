@@ -13,6 +13,65 @@ from ._common import _get_store
 logger = logging.getLogger(__name__)
 
 
+def _resolve_cross_file_class_methods(store: Any) -> int:
+    """Rewrite bare ``ClassName.method`` edge targets to qualified form.
+
+    The per-file resolver in parser.py qualifies ``ClassName.method`` only
+    when the class lives in the calling file's symbol table. For calls to
+    classes defined in another file the target stays bare. This pass
+    scans all Class nodes, builds a ``name -> file::ClassName`` map
+    (dropping names that collide across files), then rewrites matching
+    edge targets.
+    """
+    conn = store._conn
+
+    class_map: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for row in conn.execute(
+        "SELECT name, qualified_name FROM nodes WHERE kind = 'Class'"
+    ):
+        name, qn = row[0], row[1]
+        if name in ambiguous:
+            continue
+        if name in class_map and class_map[name] != qn:
+            ambiguous.add(name)
+            del class_map[name]
+            continue
+        class_map[name] = qn
+
+    if not class_map:
+        return 0
+
+    candidates = conn.execute(
+        "SELECT id, target_qualified FROM edges "
+        "WHERE kind IN ('CALLS', 'REFERENCES') "
+        "AND instr(target_qualified, '.') > 0 "
+        "AND instr(target_qualified, '::') = 0 "
+        "AND substr(target_qualified, 1, 1) != '/'"
+    ).fetchall()
+
+    rewrites: list[tuple[str, int]] = []
+    for edge_id, target in candidates:
+        cls_name, _, method = target.partition(".")
+        if not method or "." in method:
+            continue
+        cls_qn = class_map.get(cls_name)
+        if not cls_qn or "::" not in cls_qn:
+            continue
+        file_prefix = cls_qn.rsplit("::", 1)[0]
+        rewrites.append((f"{file_prefix}::{cls_name}.{method}", edge_id))
+
+    if not rewrites:
+        return 0
+
+    conn.executemany(
+        "UPDATE edges SET target_qualified = ? WHERE id = ?",
+        rewrites,
+    )
+    conn.commit()
+    return len(rewrites)
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
@@ -32,6 +91,21 @@ def _run_postprocess(
 
     if postprocess == "none":
         return warnings
+
+    # -- Cross-file class.method resolution --
+    t_xref = time.perf_counter()
+    try:
+        resolved_count = _resolve_cross_file_class_methods(store)
+        build_result["cross_file_resolved"] = resolved_count
+    except sqlite3.OperationalError as e:
+        logger.warning("Cross-file class.method resolution failed: %s", e)
+        warnings.append(
+            f"Cross-file class.method resolution failed: {type(e).__name__}: {e}"
+        )
+    logger.info(
+        "Postprocess: cross-file class.method took %.2fs",
+        time.perf_counter() - t_xref,
+    )
 
     # -- Signatures + FTS (fast, always run unless "none") --
     try:
