@@ -8,16 +8,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from code_review_graph.embeddings import (
+    _BODY_MAX_CHARS_BY_PROVIDER,
+    _BODY_MAX_CHARS_FALLBACK,
+    _EMBED_META_KEY_BODY_ENABLED,
     LOCAL_DEFAULT_MODEL,
     EmbeddingStore,
     LocalEmbeddingProvider,
     MiniMaxEmbeddingProvider,
     OpenAIEmbeddingProvider,
+    _body_enabled,
     _cosine_similarity,
     _decode_vector,
     _encode_vector,
+    _extract_body_text,
+    _FileLineCache,
     _is_localhost_url,
+    _looks_like_signature,
     _node_to_text,
+    _resolve_body_max_chars,
+    _split_combined_hash,
     get_provider,
 )
 from code_review_graph.graph import GraphNode
@@ -1034,3 +1043,748 @@ class TestGetProviderOpenAI:
             get_provider("openai")
         captured = capsys.readouterr()
         assert "cloud" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
+# Body enrichment tests (Iter 3 final: ADR-A1+dedup / B4 per-provider / C3 sticky)
+# ---------------------------------------------------------------------------
+
+
+def _mk_node(**kwargs):
+    """Minimal GraphNode factory for body-enrichment tests."""
+    defaults = dict(
+        id=1, kind="Function", name="my_func",
+        qualified_name="sample.py::my_func", file_path="sample.py",
+        line_start=1, line_end=5, language="python",
+        parent_name=None, params=None, return_type=None,
+        is_test=False, file_hash=None, extra={},
+    )
+    defaults.update(kwargs)
+    return GraphNode(**defaults)
+
+
+class TestFileLineCache:
+    def test_reads_existing_file(self, tmp_path):
+        p = tmp_path / "a.py"
+        p.write_text("line1\nline2\nline3\n")
+        cache = _FileLineCache(repo_root=tmp_path)
+        assert cache.get_lines("a.py", 1, 3) == ["line1", "line2", "line3"]
+        assert cache.get_lines("a.py", 2, 2) == ["line2"]
+
+    def test_caches_across_calls(self, tmp_path):
+        p = tmp_path / "a.py"
+        p.write_text("x\ny\nz\n")
+        cache = _FileLineCache(repo_root=tmp_path)
+        cache.get_lines("a.py", 1, 2)
+        cache.get_lines("a.py", 2, 3)
+        cache.get_lines("a.py", 1, 1)
+        assert cache._read_count == 1
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        cache = _FileLineCache(repo_root=tmp_path)
+        assert cache.get_lines("does_not_exist.py", 1, 5) == []
+
+    def test_binary_file_detected_returns_empty(self, tmp_path):
+        p = tmp_path / "b.bin"
+        p.write_bytes(b"abc\x00def\n")
+        cache = _FileLineCache(repo_root=tmp_path)
+        assert cache.get_lines("b.bin", 1, 3) == []
+
+    def test_out_of_range_lines_returns_empty(self, tmp_path):
+        p = tmp_path / "a.py"
+        p.write_text("only-one\n")
+        cache = _FileLineCache(repo_root=tmp_path)
+        assert cache.get_lines("a.py", 999, 1000) == []
+        assert cache.get_lines("a.py", 0, 5) == []
+        assert cache.get_lines("a.py", 3, 1) == []
+
+    def test_lru_eviction_at_max_entries(self, tmp_path):
+        cache = _FileLineCache(repo_root=tmp_path, max_entries=4)
+        for i in range(6):
+            p = tmp_path / f"f{i}.py"
+            p.write_text(f"content {i}\n")
+            cache.get_lines(f"f{i}.py", 1, 1)
+        # Earliest two entries should have been evicted
+        assert "f0.py" not in cache._cache
+        assert "f1.py" not in cache._cache
+        assert "f5.py" in cache._cache
+        assert len(cache._cache) == 4
+
+
+class TestSignatureDedup:
+    @pytest.mark.parametrize("lang,line,name,params", [
+        ("python",     "def my_func(x, y):", "my_func", "(x, y)"),
+        ("javascript", "function handle(req, res) {", "handle", "(req, res)"),
+        ("typescript", "const handle = (req: Req) => {", "handle", "(req: Req)"),
+        ("java",       "public int compute(int x) {", "compute", "(int x)"),
+        ("rust",       "pub fn build_tree(root: Node) -> Tree {",
+                       "build_tree", "(root: Node)"),
+    ])
+    def test_signature_line_deduplication(self, lang, line, name, params):
+        node = _mk_node(language=lang, name=name, params=params,
+                        return_type="int" if lang == "java" else None)
+        assert _looks_like_signature(line, node) is True
+
+    def test_signature_dedup_preserves_body_when_no_match(self):
+        # Decoy signature-like text but node.name is different -> must NOT dedup
+        node = _mk_node(language="python", name="compute_totals",
+                        params="(items)")
+        assert _looks_like_signature("def unrelated(x): pass", node) is False
+
+    def test_signature_dedup_respects_params_mismatch(self):
+        # Overload with different param first-token
+        node = _mk_node(language="python", name="handle", params="(request)")
+        assert _looks_like_signature(
+            "def handle(completely_different_arg):", node,
+        ) is False
+
+    def test_signature_dedup_unknown_language_conservative(self):
+        node = _mk_node(language="kotlin2", name="foo", params="()")
+        assert _looks_like_signature("fun foo() {}", node) is False
+
+    def test_signature_dedup_go_and_typescript(self):
+        go_node = _mk_node(language="go", name="Handle", params="(w, r)")
+        assert _looks_like_signature(
+            "func Handle(w http.ResponseWriter, r *http.Request) {", go_node,
+        ) is True
+        ts_node = _mk_node(language="typescript", name="doThing", params="(x)")
+        assert _looks_like_signature("async function doThing(x) {", ts_node) is True
+
+    def test_decorator_line_not_mistaken_for_signature(self):
+        # Iter 3 D-iter3-5: @decorator line has node.name false-positive risk
+        # because tree-sitter may include the decorator in the node range.
+        # Three-AND gate requires a declaration keyword; @my_decorator has none.
+        node = _mk_node(language="python", name="my_func", params="(x)")
+        assert _looks_like_signature("@my_decorator", node) is False
+        # Also the real def line DOES match.
+        assert _looks_like_signature("def my_func(x):", node) is True
+
+    def test_recursive_call_first_body_line_preserved(self):
+        # Iter 3 D-iter3-5: body first line `return fact(n-1)` contains
+        # node.name but lacks `def ` keyword, so three-AND gate returns False
+        # and dedup does NOT drop the line.
+        node = _mk_node(language="python", name="fact", params="(n)")
+        assert _looks_like_signature("return n * fact(n - 1)", node) is False
+
+
+class TestBlockCommentStateMachine:
+    def _extract(self, fixture_text: str, tmp_path, **node_kwargs) -> str:
+        p = tmp_path / "f.py"
+        p.write_text(fixture_text)
+        reader = _FileLineCache(repo_root=tmp_path)
+        node = _mk_node(
+            file_path="f.py",
+            line_start=node_kwargs.get("line_start", 1),
+            line_end=node_kwargs.get("line_end", fixture_text.count("\n") + 1),
+            language=node_kwargs.get("language", "python"),
+            name=node_kwargs.get("name", "never-matches-anything"),
+        )
+        return _extract_body_text(node, reader, max_chars=4000, max_lines=40)
+
+    def test_jsdoc_multiline_header_skipped(self, tmp_path):
+        src = (
+            "/**\n"
+            " * docstring line 1\n"
+            " * docstring line 2\n"
+            " */\n"
+            "return 42;\n"
+        )
+        out = self._extract(src, tmp_path, language="javascript")
+        assert "docstring" not in out
+        assert "return 42" in out
+
+    def test_javadoc_preserves_body(self, tmp_path):
+        src = (
+            "/** header doc */\n"
+            "int answer = 42;\n"
+            "return answer;\n"
+        )
+        out = self._extract(src, tmp_path, language="java")
+        assert "header doc" not in out
+        assert "answer = 42" in out or "return answer" in out
+
+    def test_block_comment_unclosed_falls_back(self, tmp_path):
+        # Unclosed /* -> state machine stays in block_comment, drops everything.
+        # Fallback cap prevents hang, function returns "".
+        src = "/*\n" + ("noise line\n" * 25)
+        out = self._extract(src, tmp_path, language="javascript")
+        assert out == ""
+
+    def test_inline_block_comment_not_swallowed(self, tmp_path):
+        src = "/* x */ real_code = 1\nmore = 2\n"
+        out = self._extract(src, tmp_path, language="javascript")
+        # inline /* x */ with trailing code: should NOT enter block state
+        assert "real_code = 1" in out or "more = 2" in out
+
+    def test_python_single_line_triple_quote_docstring_skipped(self, tmp_path):
+        src = '"""one-liner docstring."""\nreturn value\n'
+        out = self._extract(src, tmp_path, language="python")
+        assert "one-liner docstring" not in out
+        assert "return value" in out
+
+    def test_python_multiline_triple_quote_docstring_skipped(self, tmp_path):
+        src = (
+            '"""\n'
+            "   line 1\n"
+            "   line 2\n"
+            '"""\n'
+            "compute = 3\n"
+        )
+        out = self._extract(src, tmp_path, language="python")
+        assert "line 1" not in out and "line 2" not in out
+        assert "compute = 3" in out
+
+    def test_comment_prefix_dropped_regardless_of_length(self, tmp_path):
+        long_comment = "# " + ("x" * 200)  # >> 120 chars
+        src = f"{long_comment}\nreal = 1\n"
+        out = self._extract(src, tmp_path, language="python")
+        assert long_comment not in out
+        assert "real = 1" in out
+
+
+class TestBodyExtraction:
+    def _extract(self, src: str, tmp_path, **node_kwargs) -> str:
+        p = tmp_path / "f.py"
+        p.write_text(src)
+        reader = _FileLineCache(repo_root=tmp_path)
+        node = _mk_node(
+            file_path="f.py",
+            line_start=node_kwargs.get("line_start", 1),
+            line_end=node_kwargs.get("line_end", src.count("\n") + 1),
+            language=node_kwargs.get("language", "python"),
+            kind=node_kwargs.get("kind", "Function"),
+            name=node_kwargs.get("name", "whatever-no-sig-match"),
+        )
+        return _extract_body_text(
+            node, reader,
+            max_chars=node_kwargs.get("max_chars", 4000),
+            max_lines=node_kwargs.get("max_lines", 40),
+        )
+
+    def test_python_function_body(self, tmp_path):
+        src = (
+            "def parse_tree(data):\n"
+            "    root = build_root(data)\n"
+            "    walk_all_nodes(root)\n"
+            "    return root\n"
+        )
+        out = self._extract(
+            src, tmp_path, name="parse_tree", line_start=1, line_end=4,
+        )
+        # signature line dropped via dedup; body should contain real code
+        assert "build_root" in out
+        assert "walk_all_nodes" in out
+
+    def test_file_node_returns_empty(self, tmp_path):
+        p = tmp_path / "x.py"
+        p.write_text("print('hi')\n")
+        reader = _FileLineCache(repo_root=tmp_path)
+        node = _mk_node(kind="File", file_path="x.py", line_start=1, line_end=1)
+        assert _extract_body_text(node, reader, max_chars=1000) == ""
+
+    def test_leading_triple_quote_docstring_skipped(self, tmp_path):
+        src = '"""module docstring."""\nvalue = 1\n'
+        out = self._extract(src, tmp_path, name="never")
+        assert "module docstring" not in out
+        assert "value = 1" in out
+
+    def test_comment_only_region_skipped(self, tmp_path):
+        src = "# comment 1\n# comment 2\nactual_code = 42\n"
+        out = self._extract(src, tmp_path, name="never")
+        assert "comment 1" not in out
+        assert "actual_code" in out
+
+    def test_truncation_by_chars(self, tmp_path):
+        src = "value_a = {}\n".format("x" * 100)  # single long line
+        out = self._extract(
+            src, tmp_path, name="never",
+            max_chars=40, line_start=1, line_end=1,
+        )
+        assert out.endswith("…")
+        assert len(out) <= 45  # max_chars + suffix overhead
+
+    def test_truncation_by_lines(self, tmp_path):
+        lines = "\n".join(f"stmt_{i} = {i}" for i in range(30)) + "\n"
+        out = self._extract(
+            src=lines, tmp_path=tmp_path, name="never",
+            max_chars=100000, max_lines=3,
+        )
+        # only 3 stmts kept; stmt_3+ must not appear
+        assert "stmt_0" in out
+        assert "stmt_29" not in out
+
+    def test_single_line_node(self, tmp_path):
+        src = "def tiny(): return 1\n"
+        out = self._extract(
+            src, tmp_path, name="tiny", params="()",
+            line_start=1, line_end=1,
+        )
+        # signature dedup drops the only line; body should be empty
+        assert out == ""
+
+
+class TestBodyMaxCharsPerProvider:
+    @pytest.mark.parametrize("provider_name,expected", [
+        ("local:all-MiniLM-L6-v2",    _BODY_MAX_CHARS_BY_PROVIDER["local"]),
+        ("google:gemini-embedding-001", _BODY_MAX_CHARS_BY_PROVIDER["google"]),
+        ("minimax:embo-01",           _BODY_MAX_CHARS_BY_PROVIDER["minimax"]),
+        ("openai:text-embedding-3-small", _BODY_MAX_CHARS_BY_PROVIDER["openai"]),
+    ])
+    def test_body_max_chars_per_provider(self, provider_name, expected):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRG_EMBED_BODY_MAX_CHARS", None)
+            assert _resolve_body_max_chars(provider_name) == expected
+
+    def test_body_max_chars_env_override(self):
+        with patch.dict(os.environ, {"CRG_EMBED_BODY_MAX_CHARS": "1234"}):
+            assert _resolve_body_max_chars("local:anything") == 1234
+            assert _resolve_body_max_chars("openai:foo") == 1234
+
+    def test_body_max_chars_unknown_provider_fallback(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRG_EMBED_BODY_MAX_CHARS", None)
+            assert _resolve_body_max_chars("exotic:brand-new") == \
+                _BODY_MAX_CHARS_FALLBACK
+
+    def test_body_max_chars_provider_prefix_parsing(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CRG_EMBED_BODY_MAX_CHARS", None)
+            assert _resolve_body_max_chars("openai:text-embedding-v4") == \
+                _BODY_MAX_CHARS_BY_PROVIDER["openai"]
+            assert _resolve_body_max_chars("OPENAI:foo") == \
+                _BODY_MAX_CHARS_BY_PROVIDER["openai"]
+
+
+class TestBodyEnabledStoreGate:
+    """ADR-C3 sticky flag (Iter 3 D-iter3-1 / D-iter3-2)."""
+
+    def _fresh_store(self, tmp_path):
+        with patch("code_review_graph.embeddings.get_provider", return_value=None):
+            return EmbeddingStore(tmp_path / "e.db")
+
+    def _scrub_env(self):
+        for k in ("CRG_EMBED_INCLUDE_BODY",):
+            os.environ.pop(k, None)
+
+    def test_body_enabled_empty_db_auto_enables(self, tmp_path):
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            assert _body_enabled(store) is True
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "1"
+        finally:
+            store.close()
+
+    def test_body_enabled_nonempty_db_requires_opt_in(self, tmp_path):
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            # Simulate an existing embedding row without flag being set yet.
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("x::y", _encode_vector([0.1, 0.2]), "abc", "unknown"),
+            )
+            store._conn.commit()
+            assert _body_enabled(store) is False
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "0"
+        finally:
+            store.close()
+
+    def test_body_enabled_env_on_overrides(self, tmp_path):
+        with patch.dict(os.environ, {"CRG_EMBED_INCLUDE_BODY": "1"}):
+            store = self._fresh_store(tmp_path)
+            try:
+                store._conn.execute(
+                    "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("x::y", _encode_vector([0.1]), "abc", "unknown"),
+                )
+                store._conn.commit()
+                assert _body_enabled(store) is True
+                assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "1"
+            finally:
+                store.close()
+
+    def test_body_enabled_env_off_overrides(self, tmp_path):
+        with patch.dict(os.environ, {"CRG_EMBED_INCLUDE_BODY": "0"}):
+            store = self._fresh_store(tmp_path)
+            try:
+                assert _body_enabled(store) is False
+                assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "0"
+            finally:
+                store.close()
+
+    def test_sticky_flag_empty_db_writes_on(self, tmp_path):
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) is None
+            _body_enabled(store)
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "1"
+        finally:
+            store.close()
+
+    def test_sticky_flag_existing_db_writes_off(self, tmp_path):
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("x::y", _encode_vector([0.1]), "abc", "unknown"),
+            )
+            store._conn.commit()
+            _body_enabled(store)
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "0"
+        finally:
+            store.close()
+
+    def test_sticky_flag_persists_across_runs(self, tmp_path):
+        """Iter 2 mid-run bug regression: once on, stays on after count() > 0."""
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            # Run 1: empty DB -> auto-on, flag = "1"
+            assert _body_enabled(store) is True
+            # Simulate embeddings landing (count > 0).
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("x::y", _encode_vector([0.1]), "h", "unknown"),
+            )
+            store._conn.commit()
+            assert store.count() > 0
+            # Run 2: no env — MUST honour the "1" flag, NOT fall back to
+            # the count()>0 -> False branch.
+            assert _body_enabled(store) is True
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "1"
+        finally:
+            store.close()
+
+    def test_sticky_flag_cli_flip_from_off_to_on(self, tmp_path):
+        self._scrub_env()
+        store = self._fresh_store(tmp_path)
+        try:
+            # Setup: legacy DB with flag="0" (decided at first embed without env)
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("x::y", _encode_vector([0.1]), "h", "unknown"),
+            )
+            store._conn.commit()
+            assert _body_enabled(store) is False
+            assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "0"
+            # CLI user runs `embed --include-body --confirm-reembed`
+            # (sets env var before calling _body_enabled).
+            with patch.dict(os.environ, {"CRG_EMBED_INCLUDE_BODY": "1"}):
+                assert _body_enabled(store) is True
+                assert store._get_meta(_EMBED_META_KEY_BODY_ENABLED) == "1"
+            # Next run without env: flag is now "1" -> stays on.
+            self._scrub_env()
+            assert _body_enabled(store) is True
+        finally:
+            store.close()
+
+
+class TestFilterStageShortCircuit:
+    """Directive 5: metadata_hash short-circuit skips file IO for unchanged nodes."""
+
+    def _fake_provider(self, dim=4):
+        mock = MagicMock()
+        mock.name = "local:fake"
+        mock.embed = MagicMock(return_value=[[0.1] * dim, [0.2] * dim, [0.3] * dim])
+        mock.embed_query = MagicMock(return_value=[0.1] * dim)
+        return mock
+
+    def _store_with_fake(self, tmp_path, provider):
+        with patch(
+            "code_review_graph.embeddings.get_provider", return_value=provider,
+        ):
+            return EmbeddingStore(tmp_path / "e.db")
+
+    def test_incremental_skips_unchanged_node_without_file_read(self, tmp_path):
+        # Create real source file for node
+        src = tmp_path / "sample.py"
+        src.write_text(
+            "def compute(x):\n"
+            "    a = x * 2\n"
+            "    return a\n",
+        )
+        provider = self._fake_provider()
+        # Force sticky flag on so stage-2 would normally read file
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                # Unchanged node carries a populated file_hash — only then
+                # can stage 1 safely short-circuit (empty fingerprints now
+                # force a re-read; see Codex round 3 regression fix).
+                node = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=3,
+                    qualified_name="sample.py::compute",
+                    file_hash="file-fingerprint-v1",
+                )
+                # First embed — reader WILL be used; returns 1 embedded.
+                assert store.embed_nodes([node]) == 1
+                provider.embed.reset_mock()
+
+                # Now patch reader.get_lines so we can assert it's not hit
+                with patch.object(
+                    _FileLineCache, "get_lines",
+                    autospec=True, return_value=[],
+                ) as mock_get_lines:
+                    # Re-embed same node — metadata + file_hash both match
+                    # the stored combined hash → stage 1 short-circuits
+                    # with no file IO.
+                    assert store.embed_nodes([node]) == 0
+                    assert mock_get_lines.call_count == 0
+                    assert provider.embed.call_count == 0
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+    def test_read_failure_does_not_freeze_node(self, tmp_path):
+        """Codex round 5: transient file-read failure (missing file, binary,
+        permission error, out-of-repo) must NOT persist an empty-body
+        sentinel that makes stage 1 skip forever. Once the file becomes
+        readable again the body must be recomputed."""
+        src = tmp_path / "maybe.py"
+        src.write_text("def maybe():\n    a = 1\n    return a\n")
+        provider = self._fake_provider()
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                node = _mk_node(
+                    language="python", name="maybe", params="()",
+                    file_path=str(src), line_start=1, line_end=3,
+                    qualified_name="maybe.py::maybe",
+                    file_hash="maybe-fingerprint",
+                )
+                # First embed with a patched reader that simulates a
+                # transient read failure (last_read_ok=False).
+                with patch.object(
+                    _FileLineCache, "get_lines",
+                    autospec=True, return_value=[],
+                ) as mock_get_lines:
+                    def fake_fail(self, *a, **kw):
+                        self._last_read_ok = False
+                        return []
+                    mock_get_lines.side_effect = fake_fail
+                    assert store.embed_nodes([node]) == 1
+
+                provider.embed.reset_mock()
+                # Second embed with a real reader — the failed body
+                # snippet should NOT short-circuit stage 1 (stored_body
+                # is ""), so stage 2 reads the file again and persists a
+                # proper body hash.
+                assert store.embed_nodes([node]) == 1
+                assert provider.embed.call_count == 1
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+    def test_empty_body_does_not_reread_on_unchanged_run(self, tmp_path):
+        """Codex round 4: single-line functions whose body extracts to ""
+        used to fall through stage 1 on every incremental run. Stage 1
+        must now skip them too (empty body hash is written as sha256('')
+        to distinguish 'body ran, produced nothing' from legacy rows)."""
+        src = tmp_path / "tiny.py"
+        src.write_text("def tiny(): return 1\n")
+        provider = self._fake_provider()
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                node = _mk_node(
+                    language="python", name="tiny", params="()",
+                    file_path=str(src), line_start=1, line_end=1,
+                    qualified_name="tiny.py::tiny",
+                    file_hash="tiny-fingerprint",
+                )
+                assert store.embed_nodes([node]) == 1
+                provider.embed.reset_mock()
+                with patch.object(
+                    _FileLineCache, "get_lines",
+                    autospec=True, return_value=[],
+                ) as mock_get_lines:
+                    assert store.embed_nodes([node]) == 0
+                    assert mock_get_lines.call_count == 0
+                    assert provider.embed.call_count == 0
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+    def test_body_edit_with_empty_file_hash_still_reembeds(self, tmp_path):
+        """Codex round 3: when both stored and current file_hash are empty,
+        stage 1 must NOT short-circuit — otherwise body-only edits slip
+        through on callers that don't populate node.file_hash."""
+        src = tmp_path / "sample.py"
+        src.write_text("def compute(x):\n    return x * 2\n")
+        provider = self._fake_provider()
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                # file_hash deliberately omitted (None → empty string slot)
+                node_v1 = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute",
+                )
+                assert store.embed_nodes([node_v1]) == 1
+                provider.embed.reset_mock()
+                src.write_text("def compute(x):\n    return x * 3\n")
+                node_v2 = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute",
+                )
+                # Without a file_hash signal we must re-read and recompute
+                # body_hash; the body text has changed so this is 1 embed.
+                assert store.embed_nodes([node_v2]) == 1
+                assert provider.embed.call_count == 1
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+    def test_metadata_change_triggers_stage2_read(self, tmp_path):
+        src = tmp_path / "sample.py"
+        src.write_text("def compute(x):\n    return x * 2\n")
+        provider = self._fake_provider()
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                node = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute",
+                )
+                store.embed_nodes([node])
+                provider.embed.reset_mock()
+                # Flip return_type => metadata_hash changes => stage 2 must run.
+                node_changed = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    return_type="int",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute",
+                )
+                with patch.object(
+                    _FileLineCache, "get_lines", autospec=True,
+                    return_value=["def compute(x):", "    return x * 2"],
+                ) as mock_get_lines:
+                    assert store.embed_nodes([node_changed]) == 1
+                    assert mock_get_lines.call_count >= 1
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+    def test_split_combined_hash_legacy_row(self):
+        # Iter 1: pure sha256 hex, no separator
+        legacy = "a" * 64
+        assert _split_combined_hash(legacy) == (legacy, "", "")
+        # Iter 2: metadata + body only (no file fingerprint yet)
+        iter2 = "abc:def"
+        assert _split_combined_hash(iter2) == ("abc", "def", "")
+        # Iter 2 body-disabled stored form
+        iter2_body_off = "abc:"
+        assert _split_combined_hash(iter2_body_off) == ("abc", "", "")
+        # Iter 3.2: metadata + body + file fingerprint
+        iter3 = "meta:body:fhash"
+        assert _split_combined_hash(iter3) == ("meta", "body", "fhash")
+        # Iter 3.2 body-disabled but file_hash captured
+        iter3_body_off = "meta::fhash"
+        assert _split_combined_hash(iter3_body_off) == ("meta", "", "fhash")
+
+    def test_body_only_change_triggers_reembed(self, tmp_path):
+        """Codex-review regression: metadata-unchanged body edit used to be
+        skipped forever. Now file_hash shift forces stage-2 re-read."""
+        src = tmp_path / "sample.py"
+        src.write_text("def compute(x):\n    return x * 2\n")
+        provider = self._fake_provider()
+        os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+        try:
+            store = self._store_with_fake(tmp_path, provider)
+            try:
+                node_v1 = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute", file_hash="h-v1",
+                )
+                assert store.embed_nodes([node_v1]) == 1
+                provider.embed.reset_mock()
+                # Body edits but metadata identical; file_hash changes.
+                src.write_text("def compute(x):\n    return x * 3\n")
+                node_v2 = _mk_node(
+                    language="python", name="compute", params="(x)",
+                    file_path=str(src), line_start=1, line_end=2,
+                    qualified_name="sample.py::compute", file_hash="h-v2",
+                )
+                assert store.embed_nodes([node_v2]) == 1
+                assert provider.embed.call_count == 1
+            finally:
+                store.close()
+        finally:
+            os.environ.pop("CRG_EMBED_INCLUDE_BODY", None)
+
+
+class TestFileLineCacheContainment:
+    """Codex-review regression: file_path must stay inside repo_root."""
+
+    def test_absolute_path_outside_root_rejected(self, tmp_path):
+        outside = tmp_path.parent / ("outside-" + tmp_path.name + ".secret")
+        outside.write_text("top secret\n")
+        try:
+            cache = _FileLineCache(repo_root=tmp_path)
+            assert cache.get_lines(str(outside), 1, 1) == []
+        finally:
+            outside.unlink(missing_ok=True)
+
+    def test_relative_traversal_rejected(self, tmp_path):
+        outside = tmp_path.parent / "escape-target.secret"
+        outside.write_text("top secret\n")
+        try:
+            cache = _FileLineCache(repo_root=tmp_path)
+            # "../escape-target.secret" tries to pop out of the repo
+            assert cache.get_lines(
+                f"../{outside.name}", 1, 1,
+            ) == []
+        finally:
+            outside.unlink(missing_ok=True)
+
+    def test_inside_root_still_reads(self, tmp_path):
+        inside = tmp_path / "hello.py"
+        inside.write_text("x = 1\n")
+        cache = _FileLineCache(repo_root=tmp_path)
+        assert cache.get_lines("hello.py", 1, 1) == ["x = 1"]
+
+    def test_no_root_preserves_absolute_behavior(self, tmp_path):
+        inside = tmp_path / "hello.py"
+        inside.write_text("y = 2\n")
+        # Without repo_root we intentionally skip the containment check so
+        # unit tests that construct nodes with absolute fixture paths still
+        # work (see TestFileLineCache.test_reads_existing_file style, but
+        # called with no repo_root).
+        cache = _FileLineCache(repo_root=None)
+        assert cache.get_lines(str(inside), 1, 1) == ["y = 2"]
+
+
+class TestKotlinFunSignatureDedup:
+    """Codex-review regression: Kotlin ``fun`` without return type."""
+
+    def test_kotlin_fun_without_return_type(self):
+        node = _mk_node(
+            language="kotlin", name="save", params="(user: User)",
+            return_type=None,
+        )
+        assert _looks_like_signature(
+            "override fun save(user: User) {", node,
+        ) is True

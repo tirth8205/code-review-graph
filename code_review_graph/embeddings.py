@@ -18,6 +18,7 @@ import struct
 import sys
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -662,6 +663,11 @@ CREATE TABLE IF NOT EXISTS embeddings (
     text_hash TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT 'unknown'
 );
+
+CREATE TABLE IF NOT EXISTS embeddings_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -688,8 +694,403 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _node_to_text(node: GraphNode) -> str:
-    """Convert a node to a searchable text representation."""
+# ---------------------------------------------------------------------------
+# Body enrichment helpers (Iter 3 final: ADR-A1+dedup / B4 per-provider / C3 sticky)
+# ---------------------------------------------------------------------------
+
+# ADR-B4: per-provider body char budget. Keys are provider-name prefixes
+# (the part before ':'). Fallback applies to unknown providers.
+_BODY_MAX_CHARS_BY_PROVIDER: dict[str, int] = {
+    "local":   700,   # MiniLM ~256 token window; body + metadata must fit together
+    "google":  3000,  # gemini-embedding-001 ~2048 token window, conservative 50%
+    "minimax": 3000,  # embo-01 ~1024 token window, pay-per-use
+    "openai":  6000,  # text-embedding-3-* 8192 token ceiling, safety margin
+}
+_BODY_MAX_CHARS_FALLBACK = 700
+_BODY_MAX_LINES_DEFAULT = 15
+_FILE_CACHE_MAX_ENTRIES = 128
+_FILE_CACHE_MAX_BYTES = 2 * 1024 * 1024  # skip files larger than 2 MB
+_FILE_CACHE_SNIFF_BYTES = 4096           # null-byte probe window for binary detect
+_EMBED_META_KEY_BODY_ENABLED = "embed_body_enabled"
+
+
+def _resolve_body_max_chars(provider_name: str) -> int:
+    """Return the per-provider char budget for body-enriched embeddings.
+
+    Precedence:
+      1. ``CRG_EMBED_BODY_MAX_CHARS`` env var (positive int) — global override
+      2. ``_BODY_MAX_CHARS_BY_PROVIDER[prefix]`` where prefix is
+         ``provider_name.split(':', 1)[0].lower()``
+      3. ``_BODY_MAX_CHARS_FALLBACK`` for unknown providers
+    """
+    override = os.environ.get("CRG_EMBED_BODY_MAX_CHARS")
+    if override:
+        try:
+            n = int(override)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    prefix = provider_name.split(":", 1)[0].lower() if provider_name else ""
+    return _BODY_MAX_CHARS_BY_PROVIDER.get(prefix, _BODY_MAX_CHARS_FALLBACK)
+
+
+class _FileLineCache:
+    """Per-embed-batch file reader with bounded LRU (``OrderedDict``).
+
+    Returns a slice of file lines for a given 1-indexed inclusive range.
+    Returns ``[]`` (empty, never raises) for:
+      - missing file / directory / permission / generic ``OSError``
+      - binary file (null byte in first ``_FILE_CACHE_SNIFF_BYTES``)
+      - oversize file (> ``_FILE_CACHE_MAX_BYTES``)
+      - out-of-range line numbers (``line_start <= 0`` or beyond EOF)
+
+    Not thread-safe. ``embed_nodes`` is single-threaded; do not share
+    instances across batches.
+    """
+
+    def __init__(
+        self,
+        repo_root: Path | None = None,
+        max_entries: int = _FILE_CACHE_MAX_ENTRIES,
+    ) -> None:
+        self._repo_root = repo_root
+        self._max_entries = max_entries
+        # value ``None`` marks a known-failed read so we don't re-probe
+        self._cache: OrderedDict[str, list[str] | None] = OrderedDict()
+        self._read_count = 0
+        # Whether the most recent ``get_lines`` call saw a file that
+        # loaded at all. ``False`` only when the underlying file
+        # read/decode failed (missing / permission / binary / oversized
+        # / outside repo). Callers use this to decide whether an empty
+        # return reflects a legitimate empty slice or a transient read
+        # failure that should be retried on the next run, NOT persisted
+        # as an empty-body sentinel (Codex round 5 regression).
+        self._last_read_ok = True
+
+    def _resolve(self, file_path: str) -> Path | None:
+        """Resolve ``file_path`` to an absolute path within the repo root.
+
+        Returns ``None`` (treated as a read failure) if the resolved path
+        escapes the repo root. ``file_path`` comes straight out of the
+        graph DB, so an attacker who can write to ``nodes.file_path``
+        could otherwise point us at ``/etc/passwd`` or ``../../secret``
+        and get the contents embedded into a cloud provider. We only
+        allow the escape when ``repo_root`` is unset (e.g. unit tests that
+        construct the cache with absolute fixture paths).
+        """
+        p = Path(file_path)
+        if not p.is_absolute() and self._repo_root is not None:
+            p = self._repo_root / p
+        if self._repo_root is None:
+            return p
+        try:
+            resolved = p.resolve()
+            root = self._repo_root.resolve()
+        except (OSError, RuntimeError):
+            return None
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved
+
+    def _load(self, file_path: str) -> list[str] | None:
+        """Read and split a file; return ``None`` on any failure."""
+        try:
+            p = self._resolve(file_path)
+            if p is None:
+                return None
+            st = p.stat()
+            if st.st_size > _FILE_CACHE_MAX_BYTES:
+                return None
+            with p.open("rb") as fh:
+                head = fh.read(_FILE_CACHE_SNIFF_BYTES)
+                if b"\x00" in head:
+                    return None
+                rest = fh.read()
+            raw = head + rest
+        except (OSError, ValueError):
+            return None
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            return None
+        return text.splitlines()
+
+    def get_lines(self, file_path: str, line_start: int, line_end: int) -> list[str]:
+        if line_start <= 0 or line_end < line_start:
+            # Bogus range is a caller-side issue, not a read failure —
+            # retrying would hit the same bug, so mark as OK and let the
+            # caller persist whatever result they compute.
+            self._last_read_ok = True
+            return []
+        key = file_path
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            lines = self._cache[key]
+        else:
+            lines = self._load(key)
+            self._read_count += 1
+            self._cache[key] = lines
+            if len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+        self._last_read_ok = lines is not None
+        if lines is None:
+            return []
+        if line_start > len(lines):
+            return []
+        return lines[line_start - 1:line_end]
+
+    @property
+    def last_read_ok(self) -> bool:
+        return self._last_read_ok
+
+    def clear(self) -> None:
+        self._cache.clear()
+        self._last_read_ok = True
+
+
+def _looks_like_signature(line: str, node: GraphNode) -> bool:
+    """Conservative substring check: is ``line`` the declaration of ``node``?
+
+    Returns True only when ALL of:
+      - ``node.name`` appears in the line
+      - the line contains a language-specific declaration keyword
+      - (if ``node.params`` is set) the first param identifier appears
+
+    Unknown languages return False (do not dedup — keep the line).
+    """
+    s = line.strip()
+    if not s:
+        return False
+    if node.name not in s:
+        return False
+
+    lang = (node.language or "").lower()
+
+    if lang == "python":
+        if not ("def " in s or "class " in s):
+            return False
+    elif lang in ("javascript", "typescript", "jsx", "tsx"):
+        if not (
+            "function " in s or "=>" in s or "class " in s or "async " in s
+        ):
+            return False
+    elif lang in ("java", "kotlin"):
+        has_type_name = bool(
+            node.return_type and node.return_type in s and node.name in s
+        )
+        # Kotlin methods commonly omit an explicit return type (e.g.
+        # ``override fun save(user: User) { ... }``); fall back to the
+        # ``fun `` keyword so dedup still fires for those.
+        has_kotlin_fun = lang == "kotlin" and "fun " in s
+        if not (
+            has_type_name or "class " in s or "interface " in s or has_kotlin_fun
+        ):
+            return False
+    elif lang == "rust":
+        if not any(
+            k in s for k in ("fn ", "impl ", "struct ", "enum ", "trait ")
+        ):
+            return False
+    elif lang == "go":
+        if "func " not in s:
+            return False
+    else:
+        return False
+
+    if node.params:
+        pstripped = node.params.strip("()").strip()
+        if pstripped:
+            first = pstripped.split(",", 1)[0].split(":", 1)[0].strip()
+            # tokens like `*args`, `**kwargs`, `&self`, `self` are safe
+            # to skip param gate on (always match): bail only when we have
+            # a real identifier we can check.
+            bare = first.lstrip("*&")
+            if bare and bare != "self" and bare not in s:
+                return False
+    return True
+
+
+def _extract_body_text(
+    node: GraphNode,
+    reader: _FileLineCache,
+    *,
+    max_chars: int,
+    max_lines: int = _BODY_MAX_LINES_DEFAULT,
+) -> str:
+    """Return a truncated body snippet for semantic embedding.
+
+    Pipeline:
+      1. Skip ``File`` nodes and bogus line ranges.
+      2. Read the node's ``[line_start, line_end]`` range via ``reader``.
+      3. Drop line 0 if it looks like the node's signature (dedup with metadata).
+      4. Run a block-comment + triple-quote state machine to skip leading
+         docstrings and header comments; leading single-line comments
+         (``#`` ``//`` ``--`` ``///`` ``*``) are dropped regardless of length.
+      5. Collapse consecutive blank lines.
+      6. Truncate by ``max_lines`` then by ``max_chars`` (prefer word boundary,
+         append ``' …'`` suffix when cut).
+    """
+    if node.kind == "File":
+        return ""
+    if node.line_start is None or node.line_end is None:
+        return ""
+    if node.line_start <= 0 or node.line_end < node.line_start:
+        return ""
+
+    lines = reader.get_lines(node.file_path, node.line_start, node.line_end)
+    if not lines:
+        return ""
+
+    # Step 3: signature dedup
+    if _looks_like_signature(lines[0], node):
+        lines = lines[1:]
+    if not lines:
+        return ""
+
+    # Step 4: block-comment + triple-quote state machine
+    kept: list[str] = []
+    in_block_comment = False
+    in_triple_quote: str | None = None
+    drops = 0
+    for line in lines:
+        s = line.strip()
+
+        # triple-quote state (Python docstring continuation)
+        if in_triple_quote is not None:
+            drops += 1
+            if in_triple_quote in s:
+                in_triple_quote = None
+            continue
+
+        # block-comment state (C/Java/JS /* ... */)
+        if in_block_comment:
+            drops += 1
+            if "*/" in s:
+                in_block_comment = False
+            continue
+
+        # leading-only triple-quote open
+        if not kept:
+            matched_triple = False
+            for q in ('"""', "'''"):
+                if s.startswith(q):
+                    # same-line open+close: """one-liner."""
+                    if len(s) >= len(q) * 2 and s.endswith(q):
+                        drops += 1
+                        matched_triple = True
+                        break
+                    # multi-line open: enter state (only if no closer on this line)
+                    if q not in s[len(q):]:
+                        in_triple_quote = q
+                        drops += 1
+                        matched_triple = True
+                        break
+            if matched_triple:
+                continue
+
+        # block-comment open: /* or /** on its own line
+        if s.startswith("/*") or s.startswith("/**"):
+            if "*/" not in s:
+                # multi-line opener
+                in_block_comment = True
+                drops += 1
+                continue
+            # single-line inline block comment: drop only if the line has no
+            # trailing code after the closing ``*/``.  Lines like
+            # ``/* x */ real_code = 1`` keep flowing into the real-content
+            # branch (handled by the leading-``*`` case below + kept).
+            after_close = s.split("*/", 1)[1].strip()
+            if not kept and not after_close:
+                drops += 1
+                continue
+
+        # leading single-line comments: drop regardless of length (D-iter3-4)
+        if not kept and s.startswith(("#", "//", "--", "///", "*")):
+            drops += 1
+            continue
+
+        # blank line before any real code
+        if not kept and s == "":
+            drops += 1
+            continue
+
+        kept.append(line)
+
+        # fallback safety cap
+        if drops >= 20 and not kept:
+            break
+
+    if not kept:
+        return ""
+
+    # Step 5: collapse blank-line runs
+    collapsed: list[str] = []
+    prev_blank = False
+    for ln in kept:
+        is_blank = ln.strip() == ""
+        if is_blank and prev_blank:
+            continue
+        collapsed.append(ln)
+        prev_blank = is_blank
+
+    # Step 6: truncate
+    collapsed = collapsed[:max_lines]
+    normalised = [ln.replace("\t", "    ").rstrip() for ln in collapsed]
+    text = " \n ".join(normalised)
+    if len(text) > max_chars:
+        cut = text[:max_chars].rsplit(" ", 1)
+        text = (cut[0] if len(cut) == 2 and cut[0] else text[:max_chars]) + " …"
+    return text
+
+
+def _split_combined_hash(stored: str) -> tuple[str, str, str]:
+    """Parse the combined hash stored in ``embeddings.text_hash``.
+
+    Format evolution (all three forms round-trip through this helper):
+
+      * **Iter 1 legacy**: single sha256 hex, no ``':'``
+        → ``(stored, '', '')``
+      * **Iter 2 (body flag only)**: ``'meta_hash:body_hash'``
+        → ``(meta, body, '')``
+      * **Iter 3.2 (body + file fingerprint)**: ``'meta:body:file_hash'``
+        → ``(meta, body, file_hash)``
+
+    The third slot lets ``embed_nodes`` detect a body change without
+    reading the file again: when metadata is unchanged but the node's
+    file-level hash has shifted, the body snippet may have changed
+    (Codex-review finding: metadata-only stage-1 filter would otherwise
+    leave edits like ``return x * 2`` → ``return x * 3`` permanently
+    stale). Rows older than Iter 3.2 report an empty file-hash slot,
+    which callers treat as "unknown — must re-verify".
+    """
+    parts = stored.split(":", 2)
+    if len(parts) == 1:
+        return parts[0], "", ""
+    if len(parts) == 2:
+        return parts[0], parts[1], ""
+    return parts[0], parts[1], parts[2]
+
+
+def _node_to_text(
+    node: GraphNode,
+    reader: _FileLineCache | None = None,
+    *,
+    max_chars: int | None = None,
+) -> str:
+    """Build searchable text = metadata + optional body snippet.
+
+    Backward-compatible: callers passing ``reader=None`` get the pre-Iter-2
+    metadata-only string exactly as before. Legacy tests that construct a
+    node and call ``_node_to_text(node)`` continue to pass unchanged.
+
+    When ``reader`` is provided, ``max_chars`` is required (raises
+    ``ValueError`` otherwise — ``assert`` would be stripped under
+    ``python -O``). Caller is responsible for gating via ``_body_enabled``
+    before passing a reader; this function does not re-check.
+    """
     parts = [node.name]
     if node.kind != "File":
         parts.append(node.kind.lower())
@@ -701,7 +1102,51 @@ def _node_to_text(node: GraphNode) -> str:
         parts.append(f"returns {node.return_type}")
     if node.language:
         parts.append(node.language)
+
+    if reader is not None:
+        if max_chars is None:
+            raise ValueError("max_chars required when reader provided")
+        body = _extract_body_text(node, reader, max_chars=max_chars)
+        if body:
+            parts.append("body:")
+            parts.append(body)
     return " ".join(parts)
+
+
+def _body_enabled(store: "EmbeddingStore") -> bool:
+    """ADR-C3 sticky-flag gate for body enrichment (Iter 3 D-iter3-1).
+
+    Decision priority (first match wins; ALL paths write back the flag to
+    ``embeddings_meta.embed_body_enabled`` so subsequent runs honour it):
+
+      1. ``CRG_EMBED_INCLUDE_BODY=0`` -> False (write ``"0"``)
+      2. ``CRG_EMBED_INCLUDE_BODY=1`` -> True  (write ``"1"``)
+      3. Existing flag -> honour stored value
+      4. No flag + ``store.count() == 0`` -> True  (auto-on for fresh DB)
+      5. No flag + ``store.count()  > 0`` -> False (legacy DB opts out by default)
+
+    The CLI ``--include-body --confirm-reembed`` combo is implemented by
+    setting ``CRG_EMBED_INCLUDE_BODY=1`` before invoking embed, so case (2)
+    fires and flips ``"0"`` -> ``"1"`` on legacy DBs.
+    """
+    env = os.environ.get("CRG_EMBED_INCLUDE_BODY")
+    if env == "0":
+        store._set_meta(_EMBED_META_KEY_BODY_ENABLED, "0")
+        return False
+    if env == "1":
+        store._set_meta(_EMBED_META_KEY_BODY_ENABLED, "1")
+        return True
+    stored = store._get_meta(_EMBED_META_KEY_BODY_ENABLED)
+    if stored == "1":
+        return True
+    if stored == "0":
+        return False
+    # Flag absent: decide based on DB emptiness and persist the choice.
+    if store.count() == 0:
+        store._set_meta(_EMBED_META_KEY_BODY_ENABLED, "1")
+        return True
+    store._set_meta(_EMBED_META_KEY_BODY_ENABLED, "0")
+    return False
 
 
 class EmbeddingStore:
@@ -743,31 +1188,146 @@ class EmbeddingStore:
     def close(self) -> None:
         self._conn.close()
 
+    def _repo_root_guess(self) -> Path | None:
+        """Best-effort root inference for the ``_FileLineCache``.
+
+        Graph files live in ``.code-review-graph/graph.db``; walk upward from
+        ``db_path`` to find that directory and return its parent. Returns
+        ``None`` if we can't pin it down — callers interpret that as
+        "use absolute file paths only".
+        """
+        try:
+            parent = self.db_path.resolve().parent
+            if parent.name == ".code-review-graph":
+                return parent.parent
+            # db_path may live directly inside a repo root (tests/tmp_path)
+            return parent
+        except OSError:
+            return None
+
+    # --- embeddings_meta (Iter 3 D-iter3-1 sticky flag storage) ---
+
+    def _get_meta(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT value FROM embeddings_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO embeddings_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
     def embed_nodes(self, nodes: list[GraphNode], batch_size: int = 64) -> int:
-        """Compute and store embeddings for a list of nodes."""
+        """Compute and store embeddings for a list of nodes.
+
+        Two-stage filter (Iter 3 Directive 5):
+
+          * **Stage 1 (zero IO)** — compute ``metadata_hash`` from the
+            metadata-only ``_node_to_text`` form and compare with the stored
+            hash's metadata half. If it matches AND body is disabled OR the
+            row already has a body part embedded, skip without reading any
+            file.
+          * **Stage 2 (with IO)** — only for nodes that pass stage 1's
+            escape-hatch branches (metadata changed, or body was just
+            enabled on a legacy row): read the file through the
+            ``_FileLineCache``, compute ``body_hash``, and store the
+            combined ``"{metadata_hash}:{body_hash}"`` in ``text_hash``.
+        """
         if not self.provider:
             return 0
 
-        # Filter to nodes that need embedding
-        to_embed: list[tuple[GraphNode, str, str]] = []
         provider_name = self.provider.name
+        body_on = _body_enabled(self)
+        max_chars = _resolve_body_max_chars(provider_name) if body_on else 0
+        reader = _FileLineCache(repo_root=self._repo_root_guess()) if body_on else None
 
-        for node in nodes:
+        to_embed: list[tuple[GraphNode, str, str]] = []
+
+        # Sort by file so the LRU cache gets consecutive hits within a file
+        sorted_nodes = sorted(
+            nodes,
+            key=lambda n: (n.file_path or "", n.line_start or 0),
+        )
+
+        for node in sorted_nodes:
             if node.kind == "File":
                 continue
-            text = _node_to_text(node)
-            text_hash = hashlib.sha256(text.encode()).hexdigest()
+
+            # --- Stage 1: metadata-only hash, zero IO ---
+            meta_text = _node_to_text(node, reader=None)
+            meta_hash = hashlib.sha256(meta_text.encode()).hexdigest()
 
             existing = self._conn.execute(
                 "SELECT text_hash, provider FROM embeddings WHERE qualified_name = ?",
                 (node.qualified_name,),
             ).fetchone()
 
-            # Re-embed if text changed OR provider changed
-            if (existing and existing["text_hash"] == text_hash
-                    and existing["provider"] == provider_name):
+            node_file_hash = node.file_hash or ""
+            if existing and existing["provider"] == provider_name:
+                stored_meta, stored_body, stored_file_hash = _split_combined_hash(
+                    existing["text_hash"]
+                )
+                if stored_meta == meta_hash:
+                    # Metadata identical. Skip when we can PROVE the body
+                    # snippet is still fresh too. We require *both* sides
+                    # to carry a non-empty file fingerprint that matches;
+                    # an empty fingerprint on either side is not proof of
+                    # freshness — it just means we don't know — so we
+                    # fall through to stage 2 and reread the file. This
+                    # is the conservative path Codex round 3 flagged:
+                    # metadata-only rows with absent ``node.file_hash``
+                    # would otherwise let body-only edits slip through.
+                    if not body_on:
+                        continue
+                    if (stored_body != ""
+                            and stored_file_hash != ""
+                            and node_file_hash != ""
+                            and stored_file_hash == node_file_hash):
+                        continue
+                    # else: fall through to stage 2 to refresh body_hash
+
+            # --- Stage 2: body-enriched hash (reads file only when needed) ---
+            if body_on and reader is not None:
+                full_text = _node_to_text(node, reader=reader, max_chars=max_chars)
+                body_part = full_text[len(meta_text):]
+                if reader.last_read_ok:
+                    # Always hash the body slot when body enrichment is
+                    # on and the read succeeded, even when ``body_part``
+                    # is empty (single-line function whose only line was
+                    # the signature, or a body entirely stripped as
+                    # docstring/header). Writing ``sha256("")`` here
+                    # lets stage 1 distinguish "body ran and produced
+                    # nothing" from "body never ran" (legacy / body-off
+                    # rows), so empty-body nodes short-circuit too.
+                    body_hash = hashlib.sha256(body_part.encode()).hexdigest()
+                    combined_hash = f"{meta_hash}:{body_hash}:{node_file_hash}"
+                    final_text = full_text
+                else:
+                    # File read failed (missing / permission / binary /
+                    # oversized / outside repo). Do NOT persist the
+                    # empty-body sentinel — that would freeze the node
+                    # on a transient failure (Codex round 5). Fall back
+                    # to the body-off stored form so the next run
+                    # retries. We still embed the metadata-only text
+                    # now, since we need *some* vector for this node.
+                    combined_hash = f"{meta_hash}::{node_file_hash}"
+                    final_text = meta_text
+            else:
+                combined_hash = f"{meta_hash}::{node_file_hash}"
+                final_text = meta_text
+
+            if (existing and existing["provider"] == provider_name
+                    and existing["text_hash"] == combined_hash):
                 continue
-            to_embed.append((node, text, text_hash))
+
+            to_embed.append((node, final_text, combined_hash))
+
+        if reader is not None:
+            reader.clear()
 
         if not to_embed:
             return 0

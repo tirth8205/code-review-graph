@@ -480,6 +480,41 @@ def main() -> None:
     eval_cmd.add_argument("--report", action="store_true", help="Generate report from results")
     eval_cmd.add_argument("--output-dir", default=None, help="Output directory for results")
 
+    # embed (opt-in body enrichment gate)
+    embed_cmd = sub.add_parser(
+        "embed",
+        help="Compute embeddings for all graph nodes (opt-in body enrichment)",
+    )
+    embed_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    embed_cmd.add_argument(
+        "--provider",
+        default=None,
+        help="Embedding provider: local (default) / google / minimax / openai",
+    )
+    embed_cmd.add_argument(
+        "--model",
+        default=None,
+        help="Model name (local: sentence-transformers; openai: CRG_OPENAI_MODEL)",
+    )
+    embed_cmd.add_argument(
+        "--include-body",
+        action="store_true",
+        help="Embed function bodies alongside signatures (sets CRG_EMBED_INCLUDE_BODY=1)",
+    )
+    embed_cmd.add_argument(
+        "--confirm-reembed",
+        action="store_true",
+        help="Required alongside --include-body when embeddings.db already has rows — "
+        "without this flag the command refuses to trigger a full re-embed "
+        "(cost-safety gate for cloud providers).",
+    )
+    embed_cmd.add_argument(
+        "--skip-cost-check",
+        action="store_true",
+        help="Bypass the ballpark token/cost estimate warning shown before "
+        "re-embed on cloud providers (CI / automation).",
+    )
+
     # detect-changes
     detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
     detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
@@ -721,6 +756,68 @@ def main() -> None:
             )
             if result.get("files_updated", 0) > 0:
                 _cli_post_process(store)
+
+        elif args.command == "embed":
+            from .embeddings import (
+                CLOUD_PROVIDERS,
+                EmbeddingStore,
+                _warn_cloud_egress,
+                embed_all_nodes,
+            )
+
+            provider = getattr(args, "provider", None) or "local"
+            model = getattr(args, "model", None)
+
+            # --include-body safety gate: existing DB requires --confirm-reembed.
+            if getattr(args, "include_body", False):
+                emb_for_count = EmbeddingStore(store.db_path)
+                try:
+                    existing = emb_for_count.count()
+                finally:
+                    emb_for_count.close()
+                if existing > 0 and not getattr(args, "confirm_reembed", False):
+                    logging.error(
+                        "--include-body on a non-empty embeddings DB (%d rows) "
+                        "triggers a full re-embed. Re-run with --confirm-reembed "
+                        "to proceed, or unset --include-body to keep the current "
+                        "sticky gate. See CHANGELOG for cost notes.",
+                        existing,
+                    )
+                    sys.exit(2)
+                if (
+                    provider in CLOUD_PROVIDERS
+                    and existing >= 500
+                    and not getattr(args, "skip_cost_check", False)
+                ):
+                    print(
+                        f"Heads up: re-embedding {existing} nodes via '{provider}' "
+                        f"will spend API tokens. A rough ballpark is "
+                        f"{existing * 200} tokens; check your provider's pricing. "
+                        "Pass --skip-cost-check to silence this notice.",
+                        file=sys.stderr,
+                    )
+                os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+
+            emb_store = EmbeddingStore(store.db_path, provider=provider, model=model)
+            try:
+                if emb_store.provider is None:
+                    logging.error(
+                        "Embedding provider '%s' unavailable. For 'local', "
+                        "install the 'embeddings' extra: "
+                        "pip install code-review-graph[embeddings]",
+                        provider,
+                    )
+                    sys.exit(1)
+                if provider in CLOUD_PROVIDERS:
+                    _warn_cloud_egress(emb_store.provider.name)
+                count = embed_all_nodes(store, emb_store)
+                print(
+                    f"Embedded {count} new/changed nodes "
+                    f"(provider={emb_store.provider.name}, "
+                    f"total={emb_store.count()})"
+                )
+            finally:
+                emb_store.close()
 
         elif args.command == "status":
             stats = store.get_stats()
