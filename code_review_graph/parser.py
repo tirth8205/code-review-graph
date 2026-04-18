@@ -2438,13 +2438,19 @@ class CodeParser:
 
     def _julia_short_func_name(self, call_expr) -> Optional[str]:
         """Extract the name from a ``call_expression`` that is the LHS of
-        a short-form function ``f(x) = expr`` or ``Base.f(x) = expr``.
+        a short-form function ``f(x) = expr`` or ``Base.f(x) = expr`` or
+        ``Foo{T}(x) = expr``.
         """
         for child in call_expr.children:
             if child.type == "identifier":
                 return child.text.decode("utf-8", errors="replace")
             if child.type == "field_expression":
                 for ident in reversed(child.children):
+                    if ident.type == "identifier":
+                        return ident.text.decode("utf-8", errors="replace")
+                return None
+            if child.type == "parametrized_type_expression":
+                for ident in child.children:
                     if ident.type == "identifier":
                         return ident.text.decode("utf-8", errors="replace")
                 return None
@@ -2498,6 +2504,13 @@ class CodeParser:
         # ``=`` (plain variable, const) is left to the generic path.
         if node_type == "assignment":
             lhs = child.children[0] if child.children else None
+            # Unwrap typed LHS: ``f(x)::RetT = expr`` parses as
+            # ``assignment > typed_expression > call_expression``.
+            if lhs is not None and lhs.type == "typed_expression":
+                for sub in lhs.children:
+                    if sub.type == "call_expression":
+                        lhs = sub
+                        break
             if lhs is not None and lhs.type == "call_expression":
                 name = self._julia_short_func_name(lhs)
                 if name:
@@ -3295,13 +3308,22 @@ class CodeParser:
                 if sub.type != "signature":
                     continue
                 call_expr = None
-                for inner in sub.children:
-                    if inner.type == "where_expression":
-                        for w in inner.children:
-                            if w.type == "call_expression":
-                                call_expr = w
-                                break
+                scope = sub
+                # Peel where_expression / typed_expression wrappers so we
+                # land on the inner call_expression regardless of
+                # ``func(x) where T`` or ``func(x)::T`` sugar.
+                for _ in range(2):
+                    found_wrapper = False
+                    for inner in scope.children:
+                        if inner.type in (
+                            "where_expression", "typed_expression",
+                        ):
+                            scope = inner
+                            found_wrapper = True
+                            break
+                    if not found_wrapper:
                         break
+                for inner in scope.children:
                     if inner.type == "call_expression":
                         call_expr = inner
                         break
@@ -4492,6 +4514,12 @@ class CodeParser:
                             if sub.type == "where_expression":
                                 call = sub
                                 break
+                        # Unwrap typed_expression: signature > typed_expression > call_expression
+                        # (``function foo(x)::ReturnType``)
+                        for sub in call.children:
+                            if sub.type == "typed_expression":
+                                call = sub
+                                break
                         for sub in call.children:
                             if sub.type == "call_expression":
                                 for target in sub.children:
@@ -4504,6 +4532,13 @@ class CodeParser:
                                         for ident in reversed(target.children):
                                             if ident.type == "identifier":
                                                 return ident.text.decode(
+                                                    "utf-8", errors="replace",
+                                                )
+                                    if target.type == "parametrized_type_expression":
+                                        # Parametric constructor: Foo{T}(x) = ...
+                                        for p in target.children:
+                                            if p.type == "identifier":
+                                                return p.text.decode(
                                                     "utf-8", errors="replace",
                                                 )
                                 return None
