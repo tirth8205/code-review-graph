@@ -1202,3 +1202,82 @@ class TestElixirParsing:
         }
         assert any(t.endswith("::Calculator.add") for t in function_targets)
         assert any(t.endswith("::Calculator.compute") for t in function_targets)
+
+
+class TestGDScriptParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.gd")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("player.gd")) == "gdscript"
+        assert self.parser.detect_language(Path("globals/manager.gd")) == "gdscript"
+
+    def test_finds_class_name_statement(self):
+        """File-level ``class_name X`` declaration becomes a Class node."""
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "SampleManager" in classes
+
+    def test_finds_inner_class(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Item" in classes
+
+    def test_finds_top_level_functions(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        ]
+        names = {f.name for f in funcs}
+        for expected in ("_ready", "_load_items", "get_item", "helper"):
+            assert expected in names, f"missing top-level function {expected}"
+
+    def test_finds_inner_class_methods(self):
+        """Methods defined inside ``class Inner:`` should attach to the inner class."""
+        inner_funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Item"
+        ]
+        names = {f.name for f in inner_funcs}
+        assert "promote" in names
+
+    def test_finds_extends_as_import(self):
+        """``extends Node`` is the GDScript analogue of an import — parent class."""
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "Node" in targets, f"expected Node in imports, got {targets}"
+
+    def test_finds_direct_calls(self):
+        """Bare calls (``range(...)``, ``_load_items()``) produce CALLS edges."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "range" in targets
+
+    def test_finds_attribute_calls(self):
+        """``obj.method(...)`` calls live inside ``attribute`` nodes as ``attribute_call``."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # timer.start(), items.append(item), item_added.emit(item)
+        assert "start" in targets
+        assert "append" in targets
+        assert "emit" in targets
+
+    def test_internal_calls_resolve_to_qualified_names(self):
+        """A bare ``_load_items()`` call inside _ready should resolve to the
+        same-file function's qualified name."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any(t.endswith("::_load_items") for t in targets), (
+            f"expected ::_load_items in call targets, got {targets}"
+        )
+
+    def test_contains_edges_wire_classes_and_functions(self):
+        contains = [(e.source, e.target) for e in self.edges if e.kind == "CONTAINS"]
+        # File CONTAINS the top-level Class and Function nodes.
+        file_contains = {t for s, t in contains if not s.endswith(".gd::Item")
+                         and not s.endswith(".gd::SampleManager")}
+        assert any(t.endswith("::SampleManager") for t in file_contains)
+        assert any(t.endswith("::Item") for t in file_contains)
+        assert any(t.endswith("::_ready") for t in file_contains)
+        # Inner class CONTAINS its method.
+        item_contains = {t for s, t in contains if s.endswith("::Item")}
+        assert any(t.endswith("::Item.promote") for t in item_contains)
