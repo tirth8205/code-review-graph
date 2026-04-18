@@ -788,11 +788,20 @@ class CodeParser:
         if language == "notebook":
             return self._parse_notebook(path, source)
 
-        # Databricks .py notebook exports
-        if language == "python" and source.startswith(
-            b"# Databricks notebook source\n",
-        ):
-            return self._parse_databricks_py_notebook(path, source)
+        # Databricks .py notebook exports.  The header is ALWAYS the very
+        # first line, but the file may have CRLF line endings on Windows
+        # (git's core.autocrlf=true default).  Match the first line robustly
+        # after stripping any trailing ``\r`` so the detection works on both
+        # platforms.  See issue #239.
+        if language == "python":
+            first_newline = source.find(b"\n")
+            first_line = (
+                source[:first_newline].rstrip(b"\r")
+                if first_newline != -1
+                else source.rstrip(b"\r")
+            )
+            if first_line == b"# Databricks notebook source":
+                return self._parse_databricks_py_notebook(path, source)
 
         # ReScript: regex-based parser (no tree-sitter grammar bundled).
         if language == "rescript":
