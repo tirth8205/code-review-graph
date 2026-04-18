@@ -2589,12 +2589,21 @@ class CodeParser:
                     # the CALLS edge and recurse for nested calls.
                     return False
 
-        # --- export_statement -> REFERENCES edges ---
-        if node_type == "export_statement":
+        # --- export_statement / public_statement -> REFERENCES edges ---
+        # ``public`` (1.11+) is a softer variant of ``export`` — symbols
+        # are part of the public API but not brought into scope by
+        # ``using``. Track both so review tools can answer "what's the
+        # public surface of this module?".
+        if node_type in ("export_statement", "public_statement"):
             source_qual = (
                 self._qualify(enclosing_class, file_path, None)
                 if enclosing_class
                 else file_path
+            )
+            marker = (
+                "julia_export"
+                if node_type == "export_statement"
+                else "julia_public"
             )
             for sub in child.children:
                 if sub.type == "identifier":
@@ -2605,7 +2614,7 @@ class CodeParser:
                         target=name,
                         file_path=file_path,
                         line=child.start_point[0] + 1,
-                        extra={"julia_export": True},
+                        extra={marker: True},
                     ))
             return True
 
@@ -2621,6 +2630,81 @@ class CodeParser:
                             )
                             break
                     break
+
+            if macro_name == "enum":
+                # @enum Color RED BLUE GREEN
+                # First argument is the enum type name; the rest are
+                # variant names. Model the type as a Class and each
+                # variant as a Function child, so callers referencing a
+                # variant resolve to something in the graph.
+                type_name: Optional[str] = None
+                variant_identifiers: list = []
+                for sub in child.children:
+                    if sub.type != "macro_argument_list":
+                        continue
+                    for arg in sub.children:
+                        if arg.type != "identifier":
+                            continue
+                        if type_name is None:
+                            type_name = arg.text.decode(
+                                "utf-8", errors="replace",
+                            )
+                        else:
+                            variant_identifiers.append(arg)
+                    break
+                if type_name:
+                    line_start = child.start_point[0] + 1
+                    line_end = child.end_point[0] + 1
+                    qualified_type = self._qualify(
+                        type_name, file_path, enclosing_class,
+                    )
+                    nodes.append(NodeInfo(
+                        kind="Class",
+                        name=type_name,
+                        file_path=file_path,
+                        line_start=line_start,
+                        line_end=line_end,
+                        language=language,
+                        parent_name=enclosing_class,
+                        extra={"julia_kind": "enum"},
+                    ))
+                    container = (
+                        self._qualify(enclosing_class, file_path, None)
+                        if enclosing_class
+                        else file_path
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=qualified_type,
+                        file_path=file_path,
+                        line=line_start,
+                    ))
+                    for variant in variant_identifiers:
+                        vname = variant.text.decode(
+                            "utf-8", errors="replace",
+                        )
+                        qualified_v = self._qualify(
+                            vname, file_path, type_name,
+                        )
+                        nodes.append(NodeInfo(
+                            kind="Function",
+                            name=vname,
+                            file_path=file_path,
+                            line_start=variant.start_point[0] + 1,
+                            line_end=variant.end_point[0] + 1,
+                            language=language,
+                            parent_name=type_name,
+                            extra={"julia_kind": "enum_variant"},
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS",
+                            source=qualified_type,
+                            target=qualified_v,
+                            file_path=file_path,
+                            line=variant.start_point[0] + 1,
+                        ))
+                return True
 
             if macro_name == "testset":
                 # @testset "desc" begin ... end
