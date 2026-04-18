@@ -11,6 +11,7 @@ Usage:
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
+    code-review-graph enrich
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -404,6 +405,7 @@ def main() -> None:
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    build_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     build_cmd.add_argument(
         "--skip-flows",
         action="store_true",
@@ -419,6 +421,7 @@ def main() -> None:
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
     update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    update_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     update_cmd.add_argument(
         "--skip-flows",
         action="store_true",
@@ -447,6 +450,11 @@ def main() -> None:
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    status_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    status_cmd.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output as JSON",
+    )
 
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
@@ -512,6 +520,9 @@ def main() -> None:
     detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     detect_cmd.add_argument("--brief", action="store_true", help="Show brief summary only")
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
+    # enrich (PreToolUse hook -- reads hook JSON from stdin)
+    sub.add_parser("enrich", help="Enrich search results with graph context (hook)")
 
     # serve
     serve_cmd = sub.add_parser(
@@ -681,6 +692,11 @@ def main() -> None:
             handler(args)
         return
 
+    if args.command == "enrich":
+        from .enrich import run_hook
+        run_hook()
+        return
+
     if args.command == "eval":
         from .eval.reporter import generate_full_report, generate_readme_tables
         from .eval.runner import run_eval
@@ -822,9 +838,14 @@ def main() -> None:
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
-            if result.get("errors"):
-                print(f"Errors: {len(result['errors'])}")
+            if not getattr(args, "quiet", False):
+                print(
+                    f"Full build: {parsed} files, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+                if result.get("errors"):
+                    print(f"Errors: {len(result['errors'])}")
             _cli_post_process(store)
 
         elif args.command == "update":
@@ -844,45 +865,65 @@ def main() -> None:
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Incremental: {updated} files updated, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
+            if not getattr(args, "quiet", False):
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
             if result.get("files_updated", 0) > 0:
                 _cli_post_process(store)
 
         elif args.command == "status":
             stats = store.get_stats()
-            print(f"Nodes: {stats.total_nodes}")
-            print(f"Edges: {stats.total_edges}")
-            print(f"Files: {stats.files_count}")
-            print(f"Languages: {', '.join(stats.languages)}")
-            print(f"Last updated: {stats.last_updated or 'never'}")
-            # Show branch info and warn if stale
             stored_branch = store.get_metadata("git_branch")
             stored_sha = store.get_metadata("git_head_sha")
-            if stored_branch:
-                print(f"Built on branch: {stored_branch}")
-            if stored_sha:
-                print(f"Built at commit: {stored_sha[:12]}")
             from .incremental import _git_branch_info, detect_vcs
             vcs = detect_vcs(repo_root)
+            current_branch = None
+            current_sha = None
             if vcs == "git":
                 current_branch, current_sha = _git_branch_info(repo_root)
+            if getattr(args, "json_output", False):
+                import json as _json
+                stored_rev = store.get_metadata("svn_revision")
+                stored_svn_branch = store.get_metadata("svn_branch")
+                print(_json.dumps({
+                    "nodes": stats.total_nodes,
+                    "edges": stats.total_edges,
+                    "files": stats.files_count,
+                    "languages": list(stats.languages),
+                    "last_updated": stats.last_updated,
+                    "built_on_branch": stored_branch,
+                    "built_at_commit": stored_sha,
+                    "current_branch": current_branch,
+                    "vcs": vcs,
+                    "svn_revision": stored_rev,
+                    "svn_branch": stored_svn_branch,
+                }))
+            elif not getattr(args, "quiet", False):
+                print(f"Nodes: {stats.total_nodes}")
+                print(f"Edges: {stats.total_edges}")
+                print(f"Files: {stats.files_count}")
+                print(f"Languages: {', '.join(stats.languages)}")
+                print(f"Last updated: {stats.last_updated or 'never'}")
+                if stored_branch:
+                    print(f"Built on branch: {stored_branch}")
+                if stored_sha:
+                    print(f"Built at commit: {stored_sha[:12]}")
                 if stored_branch and current_branch and stored_branch != current_branch:
                     print(
                         f"WARNING: Graph was built on '{stored_branch}' "
                         f"but you are now on '{current_branch}'. "
                         f"Run 'code-review-graph build' to rebuild."
                     )
-            elif vcs == "svn":
-                stored_rev = store.get_metadata("svn_revision")
-                stored_svn_branch = store.get_metadata("svn_branch")
-                if stored_svn_branch:
-                    print(f"SVN branch: {stored_svn_branch}")
-                if stored_rev:
-                    print(f"SVN revision at build: {stored_rev}")
+                if vcs == "svn":
+                    stored_rev = store.get_metadata("svn_revision")
+                    stored_svn_branch = store.get_metadata("svn_branch")
+                    if stored_svn_branch:
+                        print(f"SVN branch: {stored_svn_branch}")
+                    if stored_rev:
+                        print(f"SVN revision at build: {stored_rev}")
 
         elif args.command == "watch":
             from .postprocessing import run_post_processing
