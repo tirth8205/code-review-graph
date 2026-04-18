@@ -524,6 +524,28 @@ def main() -> None:
     # enrich (PreToolUse hook -- reads hook JSON from stdin)
     sub.add_parser("enrich", help="Enrich search results with graph context (hook)")
 
+    # dead-code
+    dead_cmd = sub.add_parser(
+        "dead-code", help="Find functions/classes with no callers or test refs"
+    )
+    dead_cmd.add_argument(
+        "--kind", default=None,
+        help="Filter by node kind (Function or Class)",
+    )
+    dead_cmd.add_argument(
+        "--file-pattern", default=None,
+        help="Filter by file path substring",
+    )
+    dead_cmd.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Emit JSON instead of a table",
+    )
+    dead_cmd.add_argument(
+        "--limit", type=int, default=0,
+        help="Cap rows printed (0 = no cap, default)",
+    )
+    dead_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
     # serve
     serve_cmd = sub.add_parser(
         "serve",
@@ -695,6 +717,37 @@ def main() -> None:
     if args.command == "enrich":
         from .enrich import run_hook
         run_hook()
+        return
+
+    if args.command == "dead-code":
+        from .graph import GraphStore
+        from .refactor import find_dead_code
+
+        repo = Path(args.repo).resolve() if args.repo else Path.cwd()
+        db_path = repo / ".code-review-graph" / "graph.db"
+        if not db_path.exists():
+            print(f"No graph found at {db_path}. Run `code-review-graph build` first.")
+            return
+        store = GraphStore(db_path)
+        try:
+            items = find_dead_code(
+                store, kind=args.kind, file_pattern=args.file_pattern,
+            )
+        finally:
+            store.close()
+        if args.limit > 0:
+            items = items[: args.limit]
+        if args.json_output:
+            import json as _json
+            print(_json.dumps(items, indent=2))
+        else:
+            print(f"Dead code: {len(items)} item(s)")
+            for it in items:
+                kind = it.get("kind", "?")
+                name = it.get("name", "?")
+                file = it.get("file", "?")
+                line = it.get("line", "?")
+                print(f"  [{kind}] {name}  ({file}:{line})")
         return
 
     if args.command == "eval":
