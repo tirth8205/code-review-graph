@@ -180,6 +180,48 @@ def _handle_init(args: argparse.Namespace) -> None:
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
 
+    # --auto-embed-hook / --no-auto-embed-hook (mutually exclusive).
+    if getattr(args, "no_auto_embed_hook", False):
+        want_auto_embed = False
+        want_remove_auto_embed = True
+    elif getattr(args, "auto_embed_hook", False):
+        want_auto_embed = True
+        want_remove_auto_embed = False
+    else:
+        want_auto_embed = False
+        want_remove_auto_embed = False
+
+    # Q4 warning (stderr): --auto-embed-hook only applies to claude/qoder.
+    # The hook block below skips non-matching targets, so the warning must
+    # fire here to reach the user. Warning goes to stderr to match the
+    # _warn_cloud_egress precedent at embeddings.py:558.
+    if want_auto_embed and target not in ("claude", "qoder", "all"):
+        print(
+            f"[warn] --auto-embed-hook only applies to claude/qoder; "
+            f"skipping for platform '{target}'.",
+            file=sys.stderr,
+        )
+        want_auto_embed = False
+
+    # Driver #4 pre-flight: warn (non-blocking) when the default local
+    # provider's sentence-transformers extra is missing. Without the
+    # extras, the hook silently no-ops forever; the warning gives the
+    # user a one-time nudge to install them.
+    if want_auto_embed:
+        import importlib.util
+
+        provider_env = os.environ.get("CRG_EMBED_PROVIDER", "local").lower()
+        if (
+            provider_env == "local"
+            and importlib.util.find_spec("sentence_transformers") is None
+        ):
+            print(
+                "[warn] --auto-embed-hook enabled but 'sentence-transformers' "
+                "is not installed. The hook will silently no-op until you "
+                "run: pip install code-review-graph[embeddings]",
+                file=sys.stderr,
+            )
+
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
 
@@ -223,6 +265,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_git_hook,
         install_hooks,
         install_qoder_skills,
+        remove_auto_embed_hook_entry,
     )
 
     if not skip_skills:
@@ -258,8 +301,25 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
-            install_hooks(repo_root, platform=plat)
-            print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
+            if want_remove_auto_embed:
+                # IMPORTANT: removal path MUST NOT call install_hooks — that
+                # would re-merge the default update/SessionStart entries on
+                # top of any user customisations. Just remove and move on.
+                removed = remove_auto_embed_hook_entry(repo_root, platform=plat)
+                if removed:
+                    print(f"Removed auto-embed hook from .{plat}/settings.json")
+                else:
+                    print(
+                        f"No auto-embed hook present in .{plat}/settings.json"
+                        f" (no-op)"
+                    )
+            else:
+                install_hooks(
+                    repo_root,
+                    platform=plat,
+                    include_auto_embed=want_auto_embed,
+                )
+                print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
@@ -335,6 +395,23 @@ def main() -> None:
         default="all",
         help="Target platform for MCP config (default: all detected)",
     )
+    _install_auto_embed = install_cmd.add_mutually_exclusive_group()
+    _install_auto_embed.add_argument(
+        "--auto-embed-hook",
+        action="store_true",
+        help=(
+            "Install a PostToolUse hook that runs code-review-graph embed "
+            "after each Edit/Write/MultiEdit (claude/qoder only; opt-in)."
+        ),
+    )
+    _install_auto_embed.add_argument(
+        "--no-auto-embed-hook",
+        action="store_true",
+        help=(
+            "Remove the auto-embed PostToolUse hook if previously installed "
+            "(idempotent; preserves user-customised entries)."
+        ),
+    )
 
     init_cmd = sub.add_parser("init", help="Alias for install")
     init_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -372,6 +449,23 @@ def main() -> None:
         choices=_PLATFORM_CHOICES,
         default="all",
         help="Target platform for MCP config (default: all detected)",
+    )
+    _init_auto_embed = init_cmd.add_mutually_exclusive_group()
+    _init_auto_embed.add_argument(
+        "--auto-embed-hook",
+        action="store_true",
+        help=(
+            "Install a PostToolUse hook that runs code-review-graph embed "
+            "after each Edit/Write/MultiEdit (claude/qoder only; opt-in)."
+        ),
+    )
+    _init_auto_embed.add_argument(
+        "--no-auto-embed-hook",
+        action="store_true",
+        help=(
+            "Remove the auto-embed PostToolUse hook if previously installed "
+            "(idempotent; preserves user-customised entries)."
+        ),
     )
 
     # build
