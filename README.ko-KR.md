@@ -198,6 +198,8 @@ code-review-graph register <path>  # 멀티 레포 레지스트리에 저장소 
 code-review-graph unregister <id>  # 레지스트리에서 저장소 제거
 code-review-graph repos            # 등록된 저장소 목록
 code-review-graph eval             # 평가 벤치마크 실행
+code-review-graph embed            # 임베딩 벡터 계산 / 갱신 (신규 repo는 body enrichment 자동 활성화)
+code-review-graph embed --include-body --confirm-reembed  # 기존 DB: body enrichment 명시적 opt-in
 code-review-graph serve            # MCP 서버 시작
 ```
 

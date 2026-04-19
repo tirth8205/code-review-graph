@@ -258,6 +258,8 @@ code-review-graph register <path>  # Register repo in multi-repo registry
 code-review-graph unregister <id>  # Remove repo from registry
 code-review-graph repos            # List registered repositories
 code-review-graph eval             # Run evaluation benchmarks
+code-review-graph embed            # Compute / refresh embeddings (new repos auto-enable body)
+code-review-graph embed --include-body --confirm-reembed  # Existing DB: opt in to body enrichment
 code-review-graph serve            # Start MCP server
 ```
 

@@ -196,6 +196,8 @@ code-review-graph register <path>  # 将仓库注册到多仓库注册表
 code-review-graph unregister <id>  # 从注册表移除仓库
 code-review-graph repos            # 列出已注册的仓库
 code-review-graph eval             # 运行评估基准测试
+code-review-graph embed            # 计算 / 刷新向量嵌入（新 repo 自动启用 body enrichment）
+code-review-graph embed --include-body --confirm-reembed  # 既有 DB：显式 opt-in body enrichment
 code-review-graph serve            # 启动 MCP 服务器
 ```
 
