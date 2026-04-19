@@ -377,12 +377,46 @@ class TestGenerateAutoEmbedHookEntry:
         ), "env var must immediately prefix 'code-review-graph embed'"
 
     def test_quotes_repo_paths_with_spaces(self):
-        """Repo paths with spaces must be json-quoted so they survive
+        """Repo paths with spaces must be shell-quoted so they survive
         shell parsing without breaking the command.
         """
+        import shlex
         entry = generate_auto_embed_hook_entry(Path("/tmp/has space"))
         cmd = entry["hooks"][0]["command"]
-        assert '"/tmp/has space"' in cmd
+        assert shlex.quote("/tmp/has space") in cmd
+
+    def test_command_resists_shell_substitution_via_path(self):
+        """Regression guard for Codex round 1 issue 1: repo paths containing
+        `$(...)` must not trigger command substitution when the hook runs.
+        json.dumps is NOT sufficient because bash still expands `$()` and
+        backticks inside double quotes; shlex.quote produces a safe
+        single-quoted token that blocks all bash expansion.
+        """
+        import shlex
+        hostile = Path("/tmp/repo$(touch /tmp/pwned)")
+        entry = generate_auto_embed_hook_entry(hostile)
+        cmd = entry["hooks"][0]["command"]
+        quoted = shlex.quote(hostile.resolve().as_posix())
+        assert quoted in cmd
+        # shlex.quote wraps any path containing shell metacharacters in
+        # single quotes, which bash does NOT expand.
+        assert quoted.startswith("'") and quoted.endswith("'"), (
+            f"shlex.quote output should be single-quoted when path contains "
+            f"shell metacharacters: {quoted}"
+        )
+        # The command must NOT wrap the path in double quotes — that would
+        # re-expose it to $() / backtick / $var expansion.
+        assert f'"{hostile.resolve().as_posix()}"' not in cmd
+
+    def test_command_resists_backtick_substitution_via_path(self):
+        """Backtick command substitution must also be neutralised."""
+        import shlex
+        hostile = Path("/tmp/repo`whoami`")
+        entry = generate_auto_embed_hook_entry(hostile)
+        cmd = entry["hooks"][0]["command"]
+        quoted = shlex.quote(hostile.resolve().as_posix())
+        assert quoted in cmd
+        assert quoted.startswith("'") and quoted.endswith("'")
 
     def test_embed_hook_matcher_includes_multiedit(self):
         """Q2 decision: MultiEdit is in the new matcher; Bash is NOT —
@@ -440,6 +474,24 @@ class TestInstallHooksAutoEmbed:
         post = data["hooks"]["PostToolUse"]
         matchers = {e["matcher"] for e in post}
         assert "Edit|Write|MultiEdit" in matchers
+
+    def test_install_aborts_on_malformed_json_with_backup(self, tmp_path):
+        """Regression guard for Codex round 1 issue 3: install_hooks must
+        NOT silently overwrite an unreadable settings.json. It must raise
+        RuntimeError and leave a `.bak` of the original file.
+        """
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        original = '// JSONC with a comment\n{"hooks": {}}\n'
+        (settings_dir / "settings.json").write_text(original)
+
+        with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+            install_hooks(tmp_path, include_auto_embed=True)
+
+        # .bak must exist AND original file must be untouched.
+        assert (settings_dir / "settings.json.bak").exists()
+        assert (settings_dir / "settings.json").read_text() == original
+        assert (settings_dir / "settings.json.bak").read_text() == original
 
 
 class TestRemoveAutoEmbedHook:

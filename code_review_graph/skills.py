@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import platform
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -585,7 +586,11 @@ def generate_auto_embed_hook_entry(repo_root: Path) -> dict[str, Any]:
     the MCP stdio JSON-RPC stream uncorrupted; ``|| true`` swallows
     non-zero exit codes (e.g. provider unavailable).
     """
-    repo_arg = json.dumps(repo_root.resolve().as_posix())
+    # SECURITY: shell-quote the path for POSIX sh, not json.dumps. A repo path
+    # like `/tmp/repo$(whoami)` would still trigger command substitution inside
+    # double quotes if we relied on json.dumps alone. shlex.quote produces a
+    # safe single-quoted token that survives bash parameter expansion.
+    repo_arg = shlex.quote(repo_root.resolve().as_posix())
     return {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
@@ -675,12 +680,27 @@ def install_hooks(
 
     existing: dict[str, Any] = {}
     if settings_path.exists():
+        # SAFETY: back up FIRST, then parse. If we parse first and a
+        # JSONDecodeError fires (e.g. the user's settings.json is JSONC
+        # with comments), the backup step is skipped and the subsequent
+        # write destroys the original file with no recovery path. See
+        # Codex review round 1 issue 3.
+        backup_path = settings_dir / "settings.json.bak"
         try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
-            backup_path = settings_dir / "settings.json.bak"
             shutil.copy2(settings_path, backup_path)
             logger.info("Backed up existing settings to %s", backup_path)
-        except (json.JSONDecodeError, OSError) as exc:
+        except OSError as exc:
+            logger.warning("Could not back up %s before install: %s", settings_path, exc)
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+        except json.JSONDecodeError as exc:
+            # Refuse to silently overwrite an unreadable settings file.
+            raise RuntimeError(
+                f"Cannot parse {settings_path} as JSON ({exc}). Refusing to "
+                f"overwrite. Fix the file manually (a backup exists at "
+                f"{backup_path}) and re-run install."
+            ) from exc
+        except OSError as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
     hooks_config = generate_hooks_config(repo_root)

@@ -63,7 +63,7 @@ def test_install_parser_rejects_both_flags(tmp_path):
         "--platform", "claude",
         "--repo", str(tmp_path),
     )
-    assert result.returncode == 2, f"argparse should exit 2 on mutex violation"
+    assert result.returncode == 2, "argparse should exit 2 on mutex violation"
     assert "not allowed with argument" in result.stderr or "mutually exclusive" in result.stderr
 
 
@@ -166,3 +166,92 @@ def test_both_subcommands_expose_auto_embed_flag(subcommand, tmp_path):
     )
     assert "--auto-embed-hook" in result.stdout
     assert "--no-auto-embed-hook" in result.stdout
+
+
+def test_no_auto_embed_hook_short_circuits_install_flow(tmp_path, capsys):
+    """Regression guard for Codex round 1 issue 2: --no-auto-embed-hook
+    must NOT run install_platform_configs, .gitignore update, skill
+    generation, instruction injection, or git-hook install. Only
+    remove the auto-embed entry and return.
+    """
+    (tmp_path / ".git").mkdir()
+    args = _build_install_args(
+        tmp_path,
+        auto_embed_hook=False,
+        no_auto_embed_hook=True,
+    )
+    cli._handle_init(args)
+
+    captured = capsys.readouterr()
+    assert "no-op" in captured.out or "No auto-embed hook present" in captured.out
+
+    # None of the full-install side effects should have fired.
+    assert not (tmp_path / ".mcp.json").exists()
+    assert not (tmp_path / ".gitignore").exists()
+    assert not (tmp_path / ".claude" / "skills").exists()
+    assert not (tmp_path / "CLAUDE.md").exists()
+    assert not (tmp_path / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_no_auto_embed_hook_dry_run_prints_preview(tmp_path, capsys):
+    """--no-auto-embed-hook with --dry-run prints the `[dry-run]`
+    preview and does not touch any file.
+    """
+    (tmp_path / ".git").mkdir()
+    args = _build_install_args(
+        tmp_path,
+        auto_embed_hook=False,
+        no_auto_embed_hook=True,
+        dry_run=True,
+    )
+    cli._handle_init(args)
+
+    captured = capsys.readouterr()
+    assert "[dry-run]" in captured.out
+    assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_extras_warning_gated_by_skip_hooks(tmp_path, monkeypatch, capsys):
+    """Regression guard for Codex round 1 issue 4: --auto-embed-hook
+    together with --no-hooks must NOT fire the extras-missing warning
+    because no hook will be written.
+    """
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name, *a, **kw: None if name == "sentence_transformers" else object(),
+    )
+    monkeypatch.delenv("CRG_EMBED_PROVIDER", raising=False)
+    args = _build_install_args(
+        tmp_path,
+        auto_embed_hook=True,
+        no_hooks=True,
+    )
+    (tmp_path / ".git").mkdir()
+    cli._handle_init(args)
+
+    captured = capsys.readouterr()
+    assert "sentence-transformers" not in captured.err
+    assert "only applies to claude/qoder" not in captured.err
+
+
+def test_extras_warning_gated_by_dry_run(tmp_path, monkeypatch, capsys):
+    """Regression guard for Codex round 1 issue 4: --auto-embed-hook
+    with --dry-run must NOT fire warnings — no hook is actually written.
+    """
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name, *a, **kw: None if name == "sentence_transformers" else object(),
+    )
+    monkeypatch.delenv("CRG_EMBED_PROVIDER", raising=False)
+    args = _build_install_args(
+        tmp_path,
+        auto_embed_hook=True,
+        dry_run=True,
+        platform="cursor",
+    )
+    (tmp_path / ".git").mkdir()
+    cli._handle_init(args)
+
+    captured = capsys.readouterr()
+    assert "sentence-transformers" not in captured.err
+    assert "only applies to claude/qoder" not in captured.err
