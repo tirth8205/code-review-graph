@@ -1835,6 +1835,39 @@ class TestRepoRootGuessExternalDataDir:
             finally:
                 store.close()
 
+    def test_crg_data_dir_named_dot_code_review_graph(self, tmp_path):
+        """Codex round 8: a ``CRG_DATA_DIR`` whose last segment happens
+        to be ``.code-review-graph`` (e.g. ``/var/tmp/.code-review-graph``
+        or a shared cache dir set up that way) must NOT trigger the
+        fast path — ``db_path.parent.parent`` would be the cache's
+        parent directory, not the repo root. When the env override is
+        set we always defer to ``find_project_root`` so that the
+        repo-root resolution uses the real git walk / ``CRG_REPO_ROOT``
+        override instead of a coincidental directory name."""
+        repo = tmp_path / "real-repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "sample.py").write_text("x = 1\n")
+        # Cache dir whose last segment IS '.code-review-graph' but
+        # sits far away from the real repo — classic misfire case.
+        cache = tmp_path / "var-tmp" / ".code-review-graph"
+        cache.mkdir(parents=True)
+        db = cache / "graph.db"
+        db.touch()
+        with patch.dict(
+            os.environ,
+            {"CRG_DATA_DIR": str(cache), "CRG_REPO_ROOT": str(repo)},
+        ):
+            store = self._store(db)
+            try:
+                root = store._repo_root_guess()
+                # WRONG (fast-path trap): tmp_path / "var-tmp"
+                # RIGHT: repo (via find_project_root + CRG_REPO_ROOT)
+                assert root == repo.resolve()
+                reader = _FileLineCache(repo_root=root)
+                assert reader.get_lines("sample.py", 1, 1) == ["x = 1"]
+            finally:
+                store.close()
+
     def test_external_data_dir_resolves_file_read(self, tmp_path):
         repo = tmp_path / "my-repo"
         (repo / ".git").mkdir(parents=True)

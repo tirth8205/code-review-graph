@@ -1191,29 +1191,35 @@ class EmbeddingStore:
     def _repo_root_guess(self) -> Path | None:
         """Best-effort repo-root inference for the ``_FileLineCache``.
 
-        Priority (Codex round 7 fix — ``CRG_DATA_DIR`` lets users keep
-        ``graph.db`` outside the repo, so ``db_path.parent`` is NOT a
-        reliable proxy for the repo root in that case):
+        Priority (Codex rounds 7 + 8 — ``CRG_DATA_DIR`` lets users keep
+        ``graph.db`` outside the repo, so neither ``db_path.parent`` nor
+        even the ``.code-review-graph`` directory name is a reliable
+        proxy for the repo root in that case; an override like
+        ``CRG_DATA_DIR=/var/tmp/.code-review-graph`` would otherwise
+        hand us ``/var/tmp`` as the repo root):
 
-          1. Legacy layout ``<repo>/.code-review-graph/graph.db`` — if
-             the parent directory is named ``.code-review-graph`` the
-             repo root is its parent. This keeps the common case
-             zero-config and cheap.
-          2. Delegate to :func:`incremental.find_project_root`, which
-             honors ``CRG_REPO_ROOT`` first and otherwise walks up from
-             cwd for a ``.git`` (or SVN) marker. This covers
-             ``CRG_DATA_DIR`` external-cache setups and MCP servers
-             launched with the repo as cwd.
-          3. ``None`` if neither yields a path we can resolve — callers
-             must treat that as "use absolute file paths only" (which
-             graph-emitted ``file_path`` already is).
+          1. When ``CRG_DATA_DIR`` is NOT set, trust the zero-config
+             default layout: if ``db_path.parent`` is literally named
+             ``.code-review-graph`` then the repo root is its parent.
+             This keeps the common case cheap (no env reads, no dir
+             walk).
+          2. Otherwise — ``CRG_DATA_DIR`` is set, or the DB lives
+             somewhere non-standard — delegate to
+             :func:`incremental.find_project_root`, which honors
+             ``CRG_REPO_ROOT`` first and otherwise walks up from cwd
+             for a ``.git`` (or SVN) marker.
+          3. Returns ``None`` only when both paths fail to resolve;
+             callers then treat absolute ``file_path`` values on
+             ``GraphNode`` as self-locating.
         """
-        try:
-            parent = self.db_path.resolve().parent
-            if parent.name == ".code-review-graph":
-                return parent.parent
-        except OSError:
-            pass
+        data_dir_override = os.environ.get("CRG_DATA_DIR", "").strip()
+        if not data_dir_override:
+            try:
+                parent = self.db_path.resolve().parent
+                if parent.name == ".code-review-graph":
+                    return parent.parent
+            except OSError:
+                pass
         try:
             from .incremental import find_project_root
             root = find_project_root()
