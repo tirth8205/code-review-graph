@@ -1948,6 +1948,49 @@ class TestLogOnlyLineSkipping:
             "x = logger.info('x')"  # assignment, not pure log
         ) is False
 
+    def test_is_log_only_line_tail_continuation_preserved(self):
+        """Codex round 10 regression: lines that start with a log call but
+        continue with executable code must NOT be dropped. Requires
+        balanced-paren walk, not prefix-only match."""
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("logger.info('x') or do_work()") is False
+        assert _is_log_only_line("console.log(x) && doThing()") is False
+        assert _is_log_only_line(
+            "logger.info('hello') if verbose else default()"
+        ) is False
+        # Balanced-paren walker handles nested parens inside the log call.
+        assert _is_log_only_line(
+            "logger.info('val=' + str(compute(x, y)))"
+        ) is True
+        # Log call with trailing `;` is still log-only.
+        assert _is_log_only_line(
+            "console.log(payload);"
+        ) is True
+
+    def test_is_log_only_line_non_logger_identifier_preserved(self):
+        """Codex round 10 regression: ``x.error(...)`` / ``x.warn(...)`` on
+        NON-logger receivers is legitimate API behaviour (argparse
+        parsers, custom repos, HTTP response writers) and must not be
+        treated as log-only."""
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("serve_cmd.error('bad arg')") is False
+        assert _is_log_only_line("db.warn(tx, 'slow')") is False
+        assert _is_log_only_line("item.notice(code, reason)") is False
+        # Real logger names still match
+        assert _is_log_only_line("logger.warn('slow')") is True
+        assert _is_log_only_line("self.logger.debug('x')") is True
+
+    def test_is_log_only_line_fprint_not_skipped(self):
+        """Codex round 10 regression: ``fmt.Fprintf(w, ...)`` writes to an
+        arbitrary io.Writer (HTTP response, file handle) — that IS the
+        function's real output, not a log."""
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line('fmt.Fprintf(w, "ok")') is False
+        assert _is_log_only_line('fmt.Fprintln(stdout, "hi")') is False
+        # Pure fmt.Print* still is log-like (goes to stdout).
+        assert _is_log_only_line('fmt.Println(msg)') is True
+        assert _is_log_only_line('fmt.Printf("%v", err)') is True
+
     def test_is_log_only_line_not_a_log(self):
         from code_review_graph.embeddings import _is_log_only_line
         assert _is_log_only_line("return self.compute(x)") is False

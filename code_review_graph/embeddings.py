@@ -722,31 +722,80 @@ _BODY_MAX_LINES_DEFAULT = 15
 _LOG_ONLY_LINE_RE = re.compile(
     r'^\s*'
     r'(?:'
-    # identifier.method(...)  — catches logger.info / log.debug /
-    # self.logger.warning / console.log / trace.error / etc.
-    r'(?:[A-Za-z_][\w.]*)\s*\.\s*'
+    # identifier.method(...) — receiver identifier is deliberately
+    # restricted to conventional logger names so we don't swallow
+    # meaningful calls like argparse's ``serve_cmd.error(...)`` or a
+    # repository's ``db.warn(...)`` (Codex round 10).
+    r'(?:'
+    r'log|logger|logging|logs|console|slog|trace|LOG|Logger|LOGGER'
+    r'|(?:self|this|cls)\s*\.\s*(?:log|logger|logging|slog|trace|_log|_logger)'
+    r'|_log|_logger'
+    r')\s*\.\s*'
     r'(?:log|debug|info|warn|warning|error|trace|fatal|notice|fine|finer|finest'
+    r'|Log|Debug|Info|Warn|Warning|Error|Trace|Fatal'
     r'|Print|Println|Printf)\s*\('
     r'|'
-    # bare calls: print(...) / println!(...) / eprintln!(...) / dbg!(...)
+    # bare calls: print(...) / println!(...) / eprintln!(...) / dbg!(...).
+    # Excludes ``Fprint*`` and other writer-parameterised calls because
+    # they usually emit to response streams, not logs.
     r'(?:print|println|eprintln|dbg)\s*!?\s*\('
     r'|'
-    # java: System.out.println(...) / System.err.print(...)
+    # java: System.out.println(...) / System.err.print(...).
     r'System\s*\.\s*(?:out|err)\s*\.\s*(?:print|println|printf)\s*\('
     r'|'
-    # go: fmt.Println(...) / fmt.Printf(...) / fmt.Fprintln(...)
-    r'fmt\s*\.\s*(?:Print|Println|Printf|Fprintln|Fprintf|Fprint)\s*\('
+    # go: fmt.Print / Println / Printf — stdout-ish. Excludes fmt.Fprint*
+    # because those take an arbitrary io.Writer (HTTP responses, files)
+    # and carry real output, not logs.
+    r'fmt\s*\.\s*(?:Print|Println|Printf)\s*\('
     r')'
 )
 
 
 def _is_log_only_line(s: str) -> bool:
     """Return True when the line is purely a log/print call with no
-    other executable content."""
+    other executable content.
+
+    ``re.match`` alone is prefix-anchored, which would misclassify
+    lines like ``logger.info('x') or do_work()`` as log-only (Codex
+    round 10). Walk the string, tracking string literals and paren
+    depth, to find the balanced close of the log call's opening
+    ``(``; the line only counts as log-only when nothing substantive
+    follows that closing paren.
+    """
     stripped = s.strip().rstrip(";").strip()
-    if not stripped.endswith(")"):
+    m = _LOG_ONLY_LINE_RE.match(stripped)
+    if not m:
         return False
-    return bool(_LOG_ONLY_LINE_RE.match(stripped))
+    # The regex ends on the opening ``(`` of the log call. Find its
+    # balanced ``)`` accounting for nested calls and string literals
+    # (`'`, `"`, or `` ` ``), respecting backslash escapes. Anything
+    # non-trivial after that closing paren means the line has other
+    # executable content and is NOT log-only.
+    i = m.end() - 1
+    assert stripped[i] == "("
+    depth = 0
+    quote: str | None = None
+    escape = False
+    while i < len(stripped):
+        c = stripped[i]
+        if escape:
+            escape = False
+        elif quote:
+            if c == "\\":
+                escape = True
+            elif c == quote:
+                quote = None
+        elif c in ("'", '"', "`"):
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                rest = stripped[i + 1:].strip().rstrip(";").strip()
+                return rest == ""
+        i += 1
+    return False
 _FILE_CACHE_MAX_ENTRIES = 128
 _FILE_CACHE_MAX_BYTES = 2 * 1024 * 1024  # skip files larger than 2 MB
 _FILE_CACHE_SNIFF_BYTES = 4096           # null-byte probe window for binary detect
