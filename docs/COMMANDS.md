@@ -250,6 +250,15 @@ code-review-graph register <path> [--alias name]  # Register a repository
 code-review-graph unregister <path_or_alias>       # Remove from registry
 code-review-graph repos                            # List registered repositories
 
+# Raw SQL query
+code-review-graph query --sql "SELECT name, kind FROM nodes LIMIT 10"
+code-review-graph query --file query.sql                       # Read SQL from file
+code-review-graph query --sql "SELECT * FROM nodes WHERE name = :n" --param n=main
+code-review-graph query --sql "..." --format table             # ASCII table output
+code-review-graph query --sql "..." --limit 500                # Up to 1000 rows
+code-review-graph query --sql "..." --timeout 30               # Custom timeout (seconds)
+code-review-graph query --sql "..." --repo /path/to/repo       # Explicit repo root
+
 # Evaluation
 code-review-graph eval                         # Run evaluation benchmarks
 

@@ -14,6 +14,8 @@ Usage:
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
+    code-review-graph query --sql <SELECT> [options]
+    code-review-graph query --file <path> [options]
 """
 
 from __future__ import annotations
@@ -103,6 +105,7 @@ def _print_banner() -> None:
     {g}postprocess{r} Run post-processing {d}(flows, communities, FTS){r}
     {g}eval{r}        Run evaluation benchmarks
     {g}serve{r}       Start MCP server {d}(stdio, or {g}--http{r} on localhost:5555){r}
+    {g}query{r}       Execute a raw SQL SELECT against the graph database
 
   {d}Run{r} {b}code-review-graph <command> --help{r} {d}for details{r}
 """)
@@ -283,6 +286,70 @@ def _cli_post_process(store: GraphStore) -> None:
         print(f"Flows: {pp['flows_detected']}")
     if pp.get("communities_detected") is not None:
         print(f"Communities: {pp['communities_detected']}")
+
+
+def _handle_query(args: argparse.Namespace) -> None:
+    """Execute a raw SQL SELECT against the graph database."""
+    from .incremental import find_project_root, get_db_path
+    from .query import _MAX_LIMIT, QueryError, format_table, run_query
+
+    # Resolve SQL source
+    if args.sql:
+        sql = args.sql
+    elif args.file:
+        try:
+            sql = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(json.dumps({"error": str(exc), "type": "file_error"}), file=sys.stderr)
+            sys.exit(1)
+    elif not sys.stdin.isatty():
+        sql = sys.stdin.read()
+    else:
+        print(
+            json.dumps(
+                {"error": "provide --sql, --file, or pipe SQL via stdin",
+                 "type": "missing_input"}
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Parse --param key=value flags
+    params: dict[str, str] = {}
+    for p in args.param or []:
+        if "=" not in p:
+            print(
+                json.dumps(
+                    {"error": f"--param must be key=value format, got: {p!r}",
+                     "type": "invalid_param"}
+                ),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        k, _, v = p.partition("=")
+        params[k] = v
+
+    limit = min(max(1, args.limit), _MAX_LIMIT)
+
+    repo_root = Path(args.repo) if args.repo else find_project_root()
+    db_path = get_db_path(repo_root)
+
+    try:
+        rows = run_query(
+            db_path,
+            sql,
+            params=params or None,
+            limit=limit,
+            timeout=args.timeout,
+        )
+    except QueryError as exc:
+        print(json.dumps(exc.to_dict()), file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_format == "table":
+        print(format_table(rows))
+    else:
+        print(json.dumps(rows, indent=2, default=str))
 
 
 def main() -> None:
@@ -486,6 +553,43 @@ def main() -> None:
     detect_cmd.add_argument("--brief", action="store_true", help="Show brief summary only")
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
+    # query
+    query_cmd = sub.add_parser(
+        "query", help="Execute a raw SQL SELECT against the graph database"
+    )
+    query_sql_group = query_cmd.add_mutually_exclusive_group()
+    query_sql_group.add_argument("--sql", default=None, help="SQL SELECT statement")
+    query_sql_group.add_argument("--file", default=None, help="Path to a .sql file")
+    query_cmd.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="key=value",
+        help="Bind a named parameter (:key) in the SQL (repeatable)",
+    )
+    query_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=100,
+        help="Maximum rows returned (default: 100, max: 1000)",
+    )
+    query_cmd.add_argument(
+        "--format",
+        choices=["json", "table"],
+        default="json",
+        dest="output_format",
+        help="Output format: json (default) | table",
+    )
+    query_cmd.add_argument(
+        "--timeout",
+        type=int,
+        default=10,
+        help="Query timeout in seconds (default: 10)",
+    )
+    query_cmd.add_argument(
+        "--repo", default=None, help="Repository root (default: current directory)"
+    )
+
     # serve
     serve_cmd = sub.add_parser(
         "serve",
@@ -622,6 +726,11 @@ def main() -> None:
                     alias = entry.get("alias", "")
                     alias_str = f"  ({alias})" if alias else ""
                     print(f"  {entry['path']}{alias_str}")
+        return
+
+    if args.command == "query":
+        logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+        _handle_query(args)
         return
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
