@@ -1182,6 +1182,18 @@ class TestSignatureDedup:
         assert _looks_like_signature(
             "trait HasTimestamps {", trait_node,
         ) is True
+        enum_node = _mk_node(
+            language="php", name="OrderStatus", params=None,
+        )
+        assert _looks_like_signature(
+            "enum OrderStatus: string {", enum_node,
+        ) is True
+        # ``case PENDING = 'pending';`` is an enum VALUE, not a
+        # declaration — must NOT match (``case`` isn't in the keyword
+        # allowlist).
+        assert _looks_like_signature(
+            "case PENDING = 'pending';", enum_node,
+        ) is False
         # Body line that happens to contain the name but not a decl
         # keyword → must NOT be classified as signature.
         assert _looks_like_signature(
