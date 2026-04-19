@@ -1498,10 +1498,18 @@ class TestFilterStageShortCircuit:
         return mock
 
     def _store_with_fake(self, tmp_path, provider):
+        # Put the DB under ``<tmp_path>/.code-review-graph/`` so
+        # ``_repo_root_guess`` takes the legacy fast-path and returns
+        # ``tmp_path`` — that's where these tests stage their fixture
+        # source files. Without this layout the fallback walks up from
+        # cwd and returns the real project root, which sits outside
+        # ``tmp_path`` and makes every body read fail containment.
+        crg_dir = tmp_path / ".code-review-graph"
+        crg_dir.mkdir(exist_ok=True)
         with patch(
             "code_review_graph.embeddings.get_provider", return_value=provider,
         ):
-            return EmbeddingStore(tmp_path / "e.db")
+            return EmbeddingStore(crg_dir / "e.db")
 
     def test_incremental_skips_unchanged_node_without_file_read(self, tmp_path):
         # Create real source file for node
@@ -1775,6 +1783,81 @@ class TestFileLineCacheContainment:
         # called with no repo_root).
         cache = _FileLineCache(repo_root=None)
         assert cache.get_lines(str(inside), 1, 1) == ["y = 2"]
+
+
+class TestRepoRootGuessExternalDataDir:
+    """Codex round 7 regression: ``CRG_DATA_DIR`` / ``CRG_REPO_ROOT``.
+
+    When ``graph.db`` lives outside the repo (``CRG_DATA_DIR`` is set),
+    ``_repo_root_guess`` must NOT return the cache directory — otherwise
+    ``_FileLineCache`` resolves repo-relative paths against the cache
+    and every body read fails the containment check, silently degrading
+    to metadata-only embeddings. We verify the guess falls back to
+    ``find_project_root`` (which honors ``CRG_REPO_ROOT`` or walks up to
+    a ``.git`` marker) in that case, while preserving the fast legacy
+    ``<repo>/.code-review-graph/graph.db`` inference.
+    """
+
+    def _store(self, db_path):
+        with patch(
+            "code_review_graph.embeddings.get_provider", return_value=None,
+        ):
+            return EmbeddingStore(db_path)
+
+    def test_legacy_layout_infers_repo_from_db_parent(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".code-review-graph").mkdir(parents=True)
+        (repo / ".git").mkdir()
+        db = repo / ".code-review-graph" / "graph.db"
+        db.touch()
+        store = self._store(db)
+        try:
+            assert store._repo_root_guess() == repo.resolve()
+        finally:
+            store.close()
+
+    def test_external_data_dir_falls_back_to_crg_repo_root(self, tmp_path):
+        repo = tmp_path / "my-repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "sample.py").write_text("def f():\n    return 42\n")
+        cache = tmp_path / "external-cache"
+        cache.mkdir()
+        db = cache / "graph.db"
+        db.touch()
+        with patch.dict(
+            os.environ, {"CRG_REPO_ROOT": str(repo)},
+        ):
+            store = self._store(db)
+            try:
+                # Without the fix this would point at ``cache`` and make
+                # every downstream read fail containment.
+                assert store._repo_root_guess() == repo.resolve()
+            finally:
+                store.close()
+
+    def test_external_data_dir_resolves_file_read(self, tmp_path):
+        repo = tmp_path / "my-repo"
+        (repo / ".git").mkdir(parents=True)
+        (repo / "sample.py").write_text("def f():\n    return 42\n")
+        cache = tmp_path / "external-cache"
+        cache.mkdir()
+        db = cache / "graph.db"
+        db.touch()
+        with patch.dict(
+            os.environ, {"CRG_REPO_ROOT": str(repo)},
+        ):
+            store = self._store(db)
+            try:
+                root = store._repo_root_guess()
+                reader = _FileLineCache(repo_root=root)
+                # Repo-relative file_path resolves correctly against the
+                # real repo, not the external cache dir.
+                assert reader.get_lines("sample.py", 1, 2) == [
+                    "def f():", "    return 42",
+                ]
+                assert reader.last_read_ok is True
+            finally:
+                store.close()
 
 
 class TestKotlinFunSignatureDedup:

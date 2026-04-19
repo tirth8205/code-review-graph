@@ -1189,20 +1189,36 @@ class EmbeddingStore:
         self._conn.close()
 
     def _repo_root_guess(self) -> Path | None:
-        """Best-effort root inference for the ``_FileLineCache``.
+        """Best-effort repo-root inference for the ``_FileLineCache``.
 
-        Graph files live in ``.code-review-graph/graph.db``; walk upward from
-        ``db_path`` to find that directory and return its parent. Returns
-        ``None`` if we can't pin it down — callers interpret that as
-        "use absolute file paths only".
+        Priority (Codex round 7 fix — ``CRG_DATA_DIR`` lets users keep
+        ``graph.db`` outside the repo, so ``db_path.parent`` is NOT a
+        reliable proxy for the repo root in that case):
+
+          1. Legacy layout ``<repo>/.code-review-graph/graph.db`` — if
+             the parent directory is named ``.code-review-graph`` the
+             repo root is its parent. This keeps the common case
+             zero-config and cheap.
+          2. Delegate to :func:`incremental.find_project_root`, which
+             honors ``CRG_REPO_ROOT`` first and otherwise walks up from
+             cwd for a ``.git`` (or SVN) marker. This covers
+             ``CRG_DATA_DIR`` external-cache setups and MCP servers
+             launched with the repo as cwd.
+          3. ``None`` if neither yields a path we can resolve — callers
+             must treat that as "use absolute file paths only" (which
+             graph-emitted ``file_path`` already is).
         """
         try:
             parent = self.db_path.resolve().parent
             if parent.name == ".code-review-graph":
                 return parent.parent
-            # db_path may live directly inside a repo root (tests/tmp_path)
-            return parent
         except OSError:
+            pass
+        try:
+            from .incremental import find_project_root
+            root = find_project_root()
+            return root.resolve() if root else None
+        except Exception:
             return None
 
     # --- embeddings_meta (Iter 3 D-iter3-1 sticky flag storage) ---
