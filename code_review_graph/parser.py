@@ -724,7 +724,7 @@ class CodeParser:
         )
 
         # Resolve bare call targets to qualified names using same-file definitions
-        edges = self._resolve_call_targets(nodes, edges, file_path_str)
+        edges = self._resolve_call_targets(nodes, edges, file_path_str, import_map)
 
         # Generate TESTED_BY edges: when a test function calls a production
         # function, create an edge from the production function back to the test.
@@ -1100,6 +1100,7 @@ class CodeParser:
         # so line numbers restart at 1 for each group.
         all_cell_offsets: list[tuple[int, int, int]] = []
         max_line = 1
+        merged_import_map: dict[str, str] = {}
 
         for lang, lang_group in lang_cells.items():
             if lang == "sql":
@@ -1157,6 +1158,8 @@ class CodeParser:
                 file_path_str, all_nodes, all_edges,
                 import_map=import_map, defined_names=defined_names,
             )
+            for k, v in import_map.items():
+                merged_import_map.setdefault(k, v)
 
             all_cell_offsets.extend(cell_offsets)
             max_line = max(max_line, current_line)
@@ -1175,7 +1178,7 @@ class CodeParser:
 
         # Resolve call targets
         all_edges = self._resolve_call_targets(
-            all_nodes, all_edges, file_path_str,
+            all_nodes, all_edges, file_path_str, merged_import_map,
         )
 
         # Tag nodes with cell_index
@@ -1693,6 +1696,7 @@ class CodeParser:
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         file_path: str,
+        import_map: Optional[dict[str, str]] = None,
     ) -> list[EdgeInfo]:
         """Resolve bare call targets to qualified names using same-file definitions.
 
@@ -1726,6 +1730,10 @@ class CodeParser:
                         target = (
                             f"{symbols[cls_name].rsplit('::', 1)[0]}::{target}"
                         )
+                    elif import_map and cls_name in import_map:
+                        target = f"{import_map[cls_name]}::{target}"
+                elif import_map and target in import_map:
+                    target = f"{import_map[target]}::{target}"
                 if target != edge.target:
                     edge = EdgeInfo(
                         kind=edge.kind,
