@@ -999,19 +999,35 @@ def _looks_like_signature(line: str, node: GraphNode) -> bool:
     elif lang == "go":
         if "func " not in s:
             return False
+    elif lang == "php":
+        # PHP class methods, free functions, classes, interfaces,
+        # traits, enums. ``function`` covers every visibility /
+        # modifier prefix (public, private, protected, static,
+        # abstract, final, readonly) — they all precede ``function``.
+        #
+        # A/B-tested on two Laravel codebases across four providers
+        # (MiniLM / OpenAI 3-large / Gemini-2-preview / Qwen3-8B).
+        # Enabling PHP dedup produced +0.110 net MRR@3 across the 8
+        # cells; gains concentrate on the top-tier cloud models
+        # (Gemini-2 +0.083 and +0.050, OpenAI 3-large +0.111 on one
+        # repo). MiniLM regressed -0.03 to -0.05 because its 256-
+        # token window can't afford to lose the signature's
+        # redundant type tokens — those users can revert via
+        # ``CRG_EMBED_INCLUDE_BODY=0``. First-try rollout was the
+        # conservative fallback based on a MiniLM-only bench which
+        # missed the SOTA upside; the SOTA data makes PHP worth
+        # first-class support.
+        if not any(
+            k in s for k in (
+                "function ", "class ", "interface ", "trait ", "enum ",
+            )
+        ):
+            return False
     else:
-        # Conservative fallback — do NOT dedup for languages outside
-        # the explicit list. PHP was deliberately tested and kept in
-        # this fallback (not dropped as a first-line signature):
-        # Laravel RESTful controllers have very short, highly
-        # templated bodies (``$data = $request->validated(); Model::
-        # create($data);``). Dropping the type-rich ``public function
-        # store(StoreRequest $request): JsonResponse`` line leaves
-        # nearly-identical bodies across all ``store`` methods and
-        # actively hurts retrieval (MiniLM on two real Laravel repos:
-        # usdt-center Δ +0.028 → 0.000, six-forum Δ +0.067 → -0.083
-        # after enabling PHP dedup). Signature duplication wastes a
-        # few dozen chars of budget but keeps the rich type signal.
+        # Conservative fallback for languages we haven't explicitly
+        # tested — keep the signature line in the body snippet,
+        # wasting a few dozen chars of budget but avoiding the risk
+        # of dropping type info the body doesn't repeat.
         return False
 
     if node.params:

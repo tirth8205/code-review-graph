@@ -1142,39 +1142,54 @@ class TestSignatureDedup:
         node = _mk_node(language="kotlin2", name="foo", params="()")
         assert _looks_like_signature("fun foo() {}", node) is False
 
-    def test_signature_dedup_php_conservative(self):
-        """PHP stays in the conservative fallback branch — do NOT dedup.
+    def test_signature_dedup_php(self):
+        """PHP classes, methods, interfaces, traits, enums.
 
-        Rationale: Laravel RESTful controllers have very short bodies
-        (``$data = $request->validated(); Model::create($data);``) and
-        the signature line carries type information that the body
-        does NOT repeat (``StoreRequest``, ``JsonResponse``, etc.).
-        Dropping the signature wastes more signal than it saves; a
-        pre/post A/B on two real Laravel repos showed MiniLM regress
-        from Δ +0.028 → 0.000 and Δ +0.067 → -0.083 after enabling
-        PHP dedup. See ``_looks_like_signature`` for the full note.
+        PHP dedup was SOTA A/B tested on two Laravel codebases
+        (usdt-center + six-forum-api) across MiniLM / OpenAI 3-large /
+        Gemini-2-preview / Qwen3-8B. Net MRR@3 change across the 8
+        cells was +0.110, gains concentrated on Gemini-2 (+0.083 and
+        +0.050) and OpenAI 3-large (+0.111 on one repo). MiniLM
+        regressed slightly (-0.03 to -0.05) and those users can revert
+        via ``CRG_EMBED_INCLUDE_BODY=0``. See ``_looks_like_signature``
+        docstring for the full rationale.
         """
         node = _mk_node(
             language="php", name="store", params="(StoreRequest $request)",
             parent_name="AdminController",
         )
-        # Even a line that perfectly matches a PHP signature pattern
-        # still returns False — dedup is intentionally OFF for PHP.
+        # Common modifier prefixes
         assert _looks_like_signature(
             "public function store(StoreRequest $request): JsonResponse", node,
-        ) is False
+        ) is True
         assert _looks_like_signature(
             "private static function store(StoreRequest $request)", node,
-        ) is False
+        ) is True
+        # Class / interface / trait / enum
         cls_node = _mk_node(
             language="php", name="AdminController", params=None,
         )
         assert _looks_like_signature(
             "class AdminController extends BaseController {", cls_node,
-        ) is False
-        # Body lines are also False (expected), same as before.
+        ) is True
+        iface_node = _mk_node(language="php", name="Repository", params=None)
+        assert _looks_like_signature(
+            "interface Repository {", iface_node,
+        ) is True
+        trait_node = _mk_node(
+            language="php", name="HasTimestamps", params=None,
+        )
+        assert _looks_like_signature(
+            "trait HasTimestamps {", trait_node,
+        ) is True
+        # Body line that happens to contain the name but not a decl
+        # keyword → must NOT be classified as signature.
         assert _looks_like_signature(
             "$admin = Admin::where('id', $id)->first();", node,
+        ) is False
+        # Overload-style param mismatch must not dedup either.
+        assert _looks_like_signature(
+            "public function store(DifferentType $arg): void", node,
         ) is False
 
     def test_signature_dedup_go_and_typescript(self):
