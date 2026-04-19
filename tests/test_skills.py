@@ -20,6 +20,7 @@ from code_review_graph.skills import (
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
+    generate_auto_embed_hook_entry,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
@@ -27,6 +28,7 @@ from code_review_graph.skills import (
     install_git_hook,
     install_hooks,
     install_platform_configs,
+    remove_auto_embed_hook_entry,
 )
 
 try:
@@ -275,6 +277,342 @@ class TestInstallHooks:
         data = json.loads((settings_dir / "settings.json").read_text())
         assert data["customSetting"] is True
         assert "hooks" in data
+
+
+class TestGenerateAutoEmbedHookEntry:
+    """Unit tests for the auto-embed PostToolUse hook entry."""
+
+    def test_returns_dict_with_matcher(self):
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        assert entry["matcher"] == "Edit|Write|MultiEdit"
+
+    def test_command_invokes_embed(self):
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        assert "code-review-graph embed --repo" in cmd
+
+    def test_command_chains_update_before_embed(self):
+        """Q6 chaining: update --skip-flows must run before embed so the
+        graph DB is fresh when embed reads it (no cross-process race).
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        update_pos = cmd.find("code-review-graph update")
+        embed_pos = cmd.find("code-review-graph embed")
+        assert update_pos != -1, "update command missing from chain"
+        assert embed_pos != -1, "embed command missing from chain"
+        assert update_pos < embed_pos, "update must precede embed in chain"
+        # Chained via '&&' — short-circuits on update failure.
+        between = cmd[update_pos:embed_pos]
+        assert "&&" in between, "update and embed must be chained via &&"
+
+    def test_command_includes_git_guard(self):
+        """The command must no-op when the repo is not a git checkout."""
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        assert cmd.startswith("git rev-parse --git-dir >/dev/null 2>&1")
+
+    def test_command_redirects_all_output(self):
+        """Regression guard for MCP stdio hygiene (A-H1): stdout AND
+        stderr from every CLI invocation must be redirected to /dev/null.
+        `|| true` alone only protects the exit code, not the stream
+        contents that `embed` prints at cli.py:813-818.
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        # Once after `update`, once after `embed` — at minimum.
+        assert cmd.count(">/dev/null 2>&1") >= 2, (
+            f"expected ≥2 stream redirects, got {cmd.count('>/dev/null 2>&1')}"
+        )
+
+    def test_ends_with_silent_failure(self):
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        assert cmd.rstrip().endswith("|| true")
+
+    def test_async_is_true(self):
+        """Canonical Claude Code schema field (Jan 2026):
+        https://code.claude.com/docs/en/hooks
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        inner = entry["hooks"][0]
+        assert inner["async"] is True
+
+    def test_no_run_in_background_field(self):
+        """Regression guard: v1 incorrectly used `run_in_background`
+        which is not a valid hook schema field. v2 uses `async`.
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        inner = entry["hooks"][0]
+        assert "run_in_background" not in inner
+
+    def test_no_async_rewake_field(self):
+        """Q2.5 decision: asyncRewake off for v1 — we don't want embed
+        stderr surfaced as a system-reminder. Deferred to future work.
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        inner = entry["hooks"][0]
+        assert "asyncRewake" not in inner
+
+    def test_timeout_is_120(self):
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        assert entry["hooks"][0]["timeout"] == 120
+
+    def test_command_disables_body_embedding_env(self):
+        """Regression guard (v2.1 strengthened): `CRG_EMBED_INCLUDE_BODY=0`
+        must appear IMMEDIATELY BEFORE each `code-review-graph` invocation,
+        not just "somewhere in the command string". An implementation bug
+        that placed the env assignment in the wrong position must fail
+        this test.
+        """
+        import re
+
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        cmd = entry["hooks"][0]["command"]
+        assert re.search(
+            r"CRG_EMBED_INCLUDE_BODY=0\s+code-review-graph\s+update", cmd
+        ), "env var must immediately prefix 'code-review-graph update'"
+        assert re.search(
+            r"CRG_EMBED_INCLUDE_BODY=0\s+code-review-graph\s+embed", cmd
+        ), "env var must immediately prefix 'code-review-graph embed'"
+
+    def test_quotes_repo_paths_with_spaces(self):
+        """Repo paths with spaces must be shell-quoted so they survive
+        shell parsing without breaking the command.
+        """
+        import shlex
+        entry = generate_auto_embed_hook_entry(Path("/tmp/has space"))
+        cmd = entry["hooks"][0]["command"]
+        assert shlex.quote("/tmp/has space") in cmd
+
+    def test_command_resists_shell_substitution_via_path(self):
+        """Regression guard for Codex round 1 issue 1: repo paths containing
+        `$(...)` must not trigger command substitution when the hook runs.
+        json.dumps is NOT sufficient because bash still expands `$()` and
+        backticks inside double quotes; shlex.quote produces a safe
+        single-quoted token that blocks all bash expansion.
+        """
+        import shlex
+        hostile = Path("/tmp/repo$(touch /tmp/pwned)")
+        entry = generate_auto_embed_hook_entry(hostile)
+        cmd = entry["hooks"][0]["command"]
+        quoted = shlex.quote(hostile.resolve().as_posix())
+        assert quoted in cmd
+        # shlex.quote wraps any path containing shell metacharacters in
+        # single quotes, which bash does NOT expand.
+        assert quoted.startswith("'") and quoted.endswith("'"), (
+            f"shlex.quote output should be single-quoted when path contains "
+            f"shell metacharacters: {quoted}"
+        )
+        # The command must NOT wrap the path in double quotes — that would
+        # re-expose it to $() / backtick / $var expansion.
+        assert f'"{hostile.resolve().as_posix()}"' not in cmd
+
+    def test_command_resists_backtick_substitution_via_path(self):
+        """Backtick command substitution must also be neutralised."""
+        import shlex
+        hostile = Path("/tmp/repo`whoami`")
+        entry = generate_auto_embed_hook_entry(hostile)
+        cmd = entry["hooks"][0]["command"]
+        quoted = shlex.quote(hostile.resolve().as_posix())
+        assert quoted in cmd
+        assert quoted.startswith("'") and quoted.endswith("'")
+
+    def test_embed_hook_matcher_includes_multiedit(self):
+        """Q2 decision: MultiEdit is in the new matcher; Bash is NOT —
+        the standalone update hook handles Bash-triggered updates.
+        """
+        entry = generate_auto_embed_hook_entry(Path("/repo"))
+        matcher = entry["matcher"]
+        assert "MultiEdit" in matcher
+        assert "Bash" not in matcher
+
+
+class TestInstallHooksAutoEmbed:
+    """Behaviour of install_hooks when include_auto_embed=True."""
+
+    def test_include_auto_embed_adds_entry(self, tmp_path):
+        install_hooks(tmp_path, include_auto_embed=True)
+        data = json.loads((tmp_path / ".claude/settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        assert len(post) == 2, f"expected 2 entries (update + auto-embed), got {len(post)}"
+        matchers = {e["matcher"] for e in post}
+        assert "Edit|Write|MultiEdit" in matchers
+        assert "Edit|Write|Bash" in matchers
+
+    def test_include_auto_embed_is_idempotent(self, tmp_path):
+        install_hooks(tmp_path, include_auto_embed=True)
+        install_hooks(tmp_path, include_auto_embed=True)
+        data = json.loads((tmp_path / ".claude/settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        # Still 2 entries — exact-dict dedup prevents duplicates.
+        assert len(post) == 2
+
+    def test_install_hooks_flag_absent_matches_pre_change_behavior(self, tmp_path):
+        """JSON-struct-identical regression guard (v2 downgraded from
+        byte-identical). Calling install_hooks with the default kwarg
+        value must deep-equal calling install_hooks without the kwarg.
+        """
+        import shutil
+
+        # Baseline: pre-change signature (no kwarg passed).
+        install_hooks(tmp_path)
+        baseline = json.loads((tmp_path / ".claude/settings.json").read_text())
+        # Reset before re-running so we don't trigger the merge path.
+        shutil.rmtree(tmp_path / ".claude")
+        # With the new default kwarg explicitly.
+        install_hooks(tmp_path, include_auto_embed=False)
+        current = json.loads((tmp_path / ".claude/settings.json").read_text())
+        assert baseline == current  # JSON deep-equal, not byte-equal
+
+    def test_auto_embed_on_qoder(self, tmp_path):
+        """--platform qoder writes the auto-embed entry to
+        .qoder/settings.json, not .claude/.
+        """
+        install_hooks(tmp_path, platform="qoder", include_auto_embed=True)
+        data = json.loads((tmp_path / ".qoder/settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        matchers = {e["matcher"] for e in post}
+        assert "Edit|Write|MultiEdit" in matchers
+
+    def test_install_aborts_on_malformed_json_with_backup(self, tmp_path):
+        """Regression guard for Codex round 1 issue 3: install_hooks must
+        NOT silently overwrite an unreadable settings.json. It must raise
+        RuntimeError and leave a `.bak` of the original file.
+        """
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        original = '// JSONC with a comment\n{"hooks": {}}\n'
+        (settings_dir / "settings.json").write_text(original)
+
+        with pytest.raises(RuntimeError, match="Refusing to overwrite"):
+            install_hooks(tmp_path, include_auto_embed=True)
+
+        # .bak must exist AND original file must be untouched.
+        assert (settings_dir / "settings.json.bak").exists()
+        assert (settings_dir / "settings.json").read_text() == original
+        assert (settings_dir / "settings.json.bak").read_text() == original
+
+
+class TestRemoveAutoEmbedHook:
+    """remove_auto_embed_hook_entry defensive semantics."""
+
+    def test_remove_removes_exact_entry(self, tmp_path):
+        install_hooks(tmp_path, include_auto_embed=True)
+        assert remove_auto_embed_hook_entry(tmp_path) is True
+        data = json.loads((tmp_path / ".claude/settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        # Only the update entry remains.
+        assert len(post) == 1
+        assert post[0]["matcher"] == "Edit|Write|Bash"
+
+    def test_remove_noop_when_absent(self, tmp_path):
+        """When the entry is absent, remove returns False AND writes
+        nothing — no .bak is created. Protects pristine baselines.
+        """
+        install_hooks(tmp_path)  # no auto-embed
+        before = (tmp_path / ".claude/settings.json").read_bytes()
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+        after = (tmp_path / ".claude/settings.json").read_bytes()
+        assert before == after
+        # No .bak created on no-match.
+        assert not (tmp_path / ".claude/settings.json.bak").exists()
+
+    def test_remove_does_not_touch_user_customized_entry(self, tmp_path):
+        """A user-modified entry with the same matcher but different
+        command must not be removed (exact-dict match).
+        """
+        install_hooks(tmp_path, include_auto_embed=True)
+        settings_path = tmp_path / ".claude/settings.json"
+        data = json.loads(settings_path.read_text())
+        # Find the auto-embed entry and change its command.
+        for entry in data["hooks"]["PostToolUse"]:
+            if entry["matcher"] == "Edit|Write|MultiEdit":
+                entry["hooks"][0]["command"] = "echo user-customized"
+        settings_path.write_text(json.dumps(data, indent=2) + "\n")
+        # Now remove — should be no-op because the dict no longer matches.
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+        data_after = json.loads(settings_path.read_text())
+        post = data_after["hooks"]["PostToolUse"]
+        matchers = {e["matcher"] for e in post}
+        assert "Edit|Write|MultiEdit" in matchers  # user's custom entry survived
+
+    def test_remove_creates_backup_when_removing(self, tmp_path):
+        """The .bak file exists only when an actual removal happened."""
+        install_hooks(tmp_path, include_auto_embed=True)
+        # Clear any .bak from install_hooks first.
+        bak = tmp_path / ".claude/settings.json.bak"
+        if bak.exists():
+            bak.unlink()
+        assert remove_auto_embed_hook_entry(tmp_path) is True
+        assert bak.exists()
+
+    def test_remove_handles_malformed_json(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text("{ this is not json")
+        # Must not raise.
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+        # Malformed file stays untouched.
+        assert (settings_dir / "settings.json").read_text() == "{ this is not json"
+        assert not (settings_dir / "settings.json.bak").exists()
+
+    def test_remove_handles_non_dict_root(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text("[1, 2, 3]")
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+        assert not (settings_dir / "settings.json.bak").exists()
+
+    def test_remove_handles_non_dict_hooks(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text('{"hooks": "not-a-dict"}')
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+
+    def test_remove_handles_non_list_posttooluse(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        (settings_dir / "settings.json").write_text(
+            '{"hooks": {"PostToolUse": {"not": "a list"}}}'
+        )
+        assert remove_auto_embed_hook_entry(tmp_path) is False
+
+    def test_no_auto_embed_preserves_user_custom_update_hook(self, tmp_path):
+        """Simulates the `install --no-auto-embed-hook` path: calling
+        remove_auto_embed_hook_entry on a settings file that the user
+        has customised the update-hook of must leave that customisation
+        untouched.
+        """
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        user_custom_update = {
+            "matcher": "Edit|Write|Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "echo user-customized update",
+                    "timeout": 60,
+                },
+            ],
+        }
+        # Full settings.json: user's custom update entry + an auto-embed entry.
+        auto_entry = generate_auto_embed_hook_entry(tmp_path)
+        (settings_dir / "settings.json").write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [user_custom_update, auto_entry],
+                    }
+                },
+                indent=2,
+            )
+        )
+        assert remove_auto_embed_hook_entry(tmp_path) is True
+        data = json.loads((settings_dir / "settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        assert len(post) == 1
+        assert post[0] == user_custom_update  # user's entry survived unchanged
 
 
 class TestInjectClaudeMd:

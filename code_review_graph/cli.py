@@ -179,6 +179,89 @@ def _handle_init(args: argparse.Namespace) -> None:
         target = "claude"
     auto_yes = getattr(args, "yes", False)
     skip_instructions = getattr(args, "no_instructions", False)
+    skip_hooks = getattr(args, "no_hooks", False)
+
+    # --auto-embed-hook / --no-auto-embed-hook (mutually exclusive).
+    if getattr(args, "no_auto_embed_hook", False):
+        want_auto_embed = False
+        want_remove_auto_embed = True
+    elif getattr(args, "auto_embed_hook", False):
+        want_auto_embed = True
+        want_remove_auto_embed = False
+    else:
+        want_auto_embed = False
+        want_remove_auto_embed = False
+
+    # --no-auto-embed-hook is a pure removal path. It must NOT run the
+    # rest of the install flow (MCP config write, .gitignore update,
+    # skills/instruction regeneration, git hook install) because the
+    # flag is documented as "idempotent removal that preserves user
+    # config" — any side effects would violate that contract.
+    # Short-circuit here after removal and return. Codex review round 1
+    # issue 2.
+    if want_remove_auto_embed:
+        from .skills import remove_auto_embed_hook_entry
+
+        if skip_hooks:
+            print(
+                "[info] --no-hooks and --no-auto-embed-hook both passed; "
+                "nothing to remove because hook management is disabled.",
+                file=sys.stderr,
+            )
+            return
+        if target not in ("claude", "qoder", "all"):
+            print(
+                f"[warn] --no-auto-embed-hook only applies to claude/qoder; "
+                f"nothing to remove for platform '{target}'.",
+                file=sys.stderr,
+            )
+            return
+        platforms_to_remove = [target] if target != "all" else ["claude", "qoder"]
+        if dry_run:
+            for plat in platforms_to_remove:
+                print(f"[dry-run] Would remove auto-embed hook from .{plat}/settings.json")
+            return
+        for plat in platforms_to_remove:
+            removed = remove_auto_embed_hook_entry(repo_root, platform=plat)
+            if removed:
+                print(f"Removed auto-embed hook from .{plat}/settings.json")
+            else:
+                print(
+                    f"No auto-embed hook present in .{plat}/settings.json (no-op)"
+                )
+        return
+
+    # Pre-flight warnings only fire when a hook will actually be written:
+    # gated on `want_auto_embed and not skip_hooks and not dry_run`.
+    # Codex review round 1 issue 4.
+    if want_auto_embed and not skip_hooks and not dry_run:
+        # Q4 warning (stderr): --auto-embed-hook only applies to claude/qoder.
+        if target not in ("claude", "qoder", "all"):
+            print(
+                f"[warn] --auto-embed-hook only applies to claude/qoder; "
+                f"skipping for platform '{target}'.",
+                file=sys.stderr,
+            )
+            want_auto_embed = False
+
+        # Driver #4 pre-flight: warn when the default local provider's
+        # sentence-transformers extra is missing. Without the extras, the
+        # hook silently no-ops forever; the warning gives the user a
+        # one-time nudge to install them.
+        if want_auto_embed:
+            import importlib.util
+
+            provider_env = os.environ.get("CRG_EMBED_PROVIDER", "local").lower()
+            if (
+                provider_env == "local"
+                and importlib.util.find_spec("sentence_transformers") is None
+            ):
+                print(
+                    "[warn] --auto-embed-hook enabled but 'sentence-transformers' "
+                    "is not installed. The hook will silently no-op until you "
+                    "run: pip install code-review-graph[embeddings]",
+                    file=sys.stderr,
+                )
 
     print("Installing MCP server config...")
     configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
@@ -211,9 +294,9 @@ def _handle_init(args: argparse.Namespace) -> None:
 
     # Skills and hooks are installed by default so Claude actually uses the
     # graph tools proactively.  Use --no-skills / --no-hooks / --no-instructions
-    # to opt out.
+    # to opt out. `skip_hooks` was already computed above for the
+    # --no-auto-embed-hook short-circuit.
     skip_skills = getattr(args, "no_skills", False)
-    skip_hooks = getattr(args, "no_hooks", False)
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
@@ -256,9 +339,15 @@ def _handle_init(args: argparse.Namespace) -> None:
         if qoder_skills_dir:
             print(f"Installed Qoder skills to {qoder_skills_dir}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
+        # Removal path is handled at the top of _handle_init (early return);
+        # by the time we reach here, want_remove_auto_embed is always False.
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
-            install_hooks(repo_root, platform=plat)
+            install_hooks(
+                repo_root,
+                platform=plat,
+                include_auto_embed=want_auto_embed,
+            )
             print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
@@ -335,6 +424,23 @@ def main() -> None:
         default="all",
         help="Target platform for MCP config (default: all detected)",
     )
+    _install_auto_embed = install_cmd.add_mutually_exclusive_group()
+    _install_auto_embed.add_argument(
+        "--auto-embed-hook",
+        action="store_true",
+        help=(
+            "Install a PostToolUse hook that runs code-review-graph embed "
+            "after each Edit/Write/MultiEdit (claude/qoder only; opt-in)."
+        ),
+    )
+    _install_auto_embed.add_argument(
+        "--no-auto-embed-hook",
+        action="store_true",
+        help=(
+            "Remove the auto-embed PostToolUse hook if previously installed "
+            "(idempotent; preserves user-customised entries)."
+        ),
+    )
 
     init_cmd = sub.add_parser("init", help="Alias for install")
     init_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -372,6 +478,23 @@ def main() -> None:
         choices=_PLATFORM_CHOICES,
         default="all",
         help="Target platform for MCP config (default: all detected)",
+    )
+    _init_auto_embed = init_cmd.add_mutually_exclusive_group()
+    _init_auto_embed.add_argument(
+        "--auto-embed-hook",
+        action="store_true",
+        help=(
+            "Install a PostToolUse hook that runs code-review-graph embed "
+            "after each Edit/Write/MultiEdit (claude/qoder only; opt-in)."
+        ),
+    )
+    _init_auto_embed.add_argument(
+        "--no-auto-embed-hook",
+        action="store_true",
+        help=(
+            "Remove the auto-embed PostToolUse hook if previously installed "
+            "(idempotent; preserves user-customised entries)."
+        ),
     )
 
     # build
@@ -479,6 +602,41 @@ def main() -> None:
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
     eval_cmd.add_argument("--report", action="store_true", help="Generate report from results")
     eval_cmd.add_argument("--output-dir", default=None, help="Output directory for results")
+
+    # embed (opt-in body enrichment gate)
+    embed_cmd = sub.add_parser(
+        "embed",
+        help="Compute embeddings for all graph nodes (opt-in body enrichment)",
+    )
+    embed_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    embed_cmd.add_argument(
+        "--provider",
+        default=None,
+        help="Embedding provider: local (default) / google / minimax / openai",
+    )
+    embed_cmd.add_argument(
+        "--model",
+        default=None,
+        help="Model name (local: sentence-transformers; openai: CRG_OPENAI_MODEL)",
+    )
+    embed_cmd.add_argument(
+        "--include-body",
+        action="store_true",
+        help="Embed function bodies alongside signatures (sets CRG_EMBED_INCLUDE_BODY=1)",
+    )
+    embed_cmd.add_argument(
+        "--confirm-reembed",
+        action="store_true",
+        help="Required alongside --include-body when embeddings.db already has rows — "
+        "without this flag the command refuses to trigger a full re-embed "
+        "(cost-safety gate for cloud providers).",
+    )
+    embed_cmd.add_argument(
+        "--skip-cost-check",
+        action="store_true",
+        help="Bypass the ballpark token/cost estimate warning shown before "
+        "re-embed on cloud providers (CI / automation).",
+    )
 
     # detect-changes
     detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
@@ -721,6 +879,68 @@ def main() -> None:
             )
             if result.get("files_updated", 0) > 0:
                 _cli_post_process(store)
+
+        elif args.command == "embed":
+            from .embeddings import (
+                CLOUD_PROVIDERS,
+                EmbeddingStore,
+                _warn_cloud_egress,
+                embed_all_nodes,
+            )
+
+            provider = getattr(args, "provider", None) or "local"
+            model = getattr(args, "model", None)
+
+            # --include-body safety gate: existing DB requires --confirm-reembed.
+            if getattr(args, "include_body", False):
+                emb_for_count = EmbeddingStore(store.db_path)
+                try:
+                    existing = emb_for_count.count()
+                finally:
+                    emb_for_count.close()
+                if existing > 0 and not getattr(args, "confirm_reembed", False):
+                    logging.error(
+                        "--include-body on a non-empty embeddings DB (%d rows) "
+                        "triggers a full re-embed. Re-run with --confirm-reembed "
+                        "to proceed, or unset --include-body to keep the current "
+                        "sticky gate. See CHANGELOG for cost notes.",
+                        existing,
+                    )
+                    sys.exit(2)
+                if (
+                    provider in CLOUD_PROVIDERS
+                    and existing >= 500
+                    and not getattr(args, "skip_cost_check", False)
+                ):
+                    print(
+                        f"Heads up: re-embedding {existing} nodes via '{provider}' "
+                        f"will spend API tokens. A rough ballpark is "
+                        f"{existing * 200} tokens; check your provider's pricing. "
+                        "Pass --skip-cost-check to silence this notice.",
+                        file=sys.stderr,
+                    )
+                os.environ["CRG_EMBED_INCLUDE_BODY"] = "1"
+
+            emb_store = EmbeddingStore(store.db_path, provider=provider, model=model)
+            try:
+                if emb_store.provider is None:
+                    logging.error(
+                        "Embedding provider '%s' unavailable. For 'local', "
+                        "install the 'embeddings' extra: "
+                        "pip install code-review-graph[embeddings]",
+                        provider,
+                    )
+                    sys.exit(1)
+                if provider in CLOUD_PROVIDERS:
+                    _warn_cloud_egress(emb_store.provider.name)
+                count = embed_all_nodes(store, emb_store)
+                print(
+                    f"Embedded {count} new/changed nodes "
+                    f"(provider={emb_store.provider.name}, "
+                    f"total={emb_store.count()})"
+                )
+            finally:
+                emb_store.close()
 
         elif args.command == "status":
             stats = store.get_stats()
