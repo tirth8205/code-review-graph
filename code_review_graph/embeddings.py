@@ -747,6 +747,20 @@ _LOG_ONLY_LINE_RE = re.compile(
     # because those take an arbitrary io.Writer (HTTP responses, files)
     # and carry real output, not logs.
     r'fmt\s*\.\s*(?:Print|Println|Printf)\s*\('
+    r'|'
+    # PHP / Laravel:
+    #   instance: $logger->info(...)  /  $this->logger->debug(...)
+    #   static:   Log::info(...)  /  \Log::debug(...)  (Laravel facade)
+    #   bare:     error_log(...)  /  syslog(...)  /  trigger_error(...)
+    # PSR-3 log levels covered: debug, info, notice, warning, error,
+    # critical, alert, emergency (plus common "log"/"warn" aliases).
+    r'\$(?:logger|log|this->logger|this->log)\s*->\s*'
+    r'(?:log|debug|info|warn|warning|error|notice|alert|emergency|critical)\s*\('
+    r'|'
+    r'\\?(?:Log|Logger)\s*::\s*'
+    r'(?:log|debug|info|warn|warning|error|notice|alert|emergency|critical)\s*\('
+    r'|'
+    r'(?:error_log|syslog|trigger_error)\s*\('
     r')'
 )
 
@@ -986,6 +1000,18 @@ def _looks_like_signature(line: str, node: GraphNode) -> bool:
         if "func " not in s:
             return False
     else:
+        # Conservative fallback — do NOT dedup for languages outside
+        # the explicit list. PHP was deliberately tested and kept in
+        # this fallback (not dropped as a first-line signature):
+        # Laravel RESTful controllers have very short, highly
+        # templated bodies (``$data = $request->validated(); Model::
+        # create($data);``). Dropping the type-rich ``public function
+        # store(StoreRequest $request): JsonResponse`` line leaves
+        # nearly-identical bodies across all ``store`` methods and
+        # actively hurts retrieval (MiniLM on two real Laravel repos:
+        # usdt-center Δ +0.028 → 0.000, six-forum Δ +0.067 → -0.083
+        # after enabling PHP dedup). Signature duplication wastes a
+        # few dozen chars of budget but keeps the rich type signal.
         return False
 
     if node.params:

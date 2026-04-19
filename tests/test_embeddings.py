@@ -1142,6 +1142,41 @@ class TestSignatureDedup:
         node = _mk_node(language="kotlin2", name="foo", params="()")
         assert _looks_like_signature("fun foo() {}", node) is False
 
+    def test_signature_dedup_php_conservative(self):
+        """PHP stays in the conservative fallback branch — do NOT dedup.
+
+        Rationale: Laravel RESTful controllers have very short bodies
+        (``$data = $request->validated(); Model::create($data);``) and
+        the signature line carries type information that the body
+        does NOT repeat (``StoreRequest``, ``JsonResponse``, etc.).
+        Dropping the signature wastes more signal than it saves; a
+        pre/post A/B on two real Laravel repos showed MiniLM regress
+        from Δ +0.028 → 0.000 and Δ +0.067 → -0.083 after enabling
+        PHP dedup. See ``_looks_like_signature`` for the full note.
+        """
+        node = _mk_node(
+            language="php", name="store", params="(StoreRequest $request)",
+            parent_name="AdminController",
+        )
+        # Even a line that perfectly matches a PHP signature pattern
+        # still returns False — dedup is intentionally OFF for PHP.
+        assert _looks_like_signature(
+            "public function store(StoreRequest $request): JsonResponse", node,
+        ) is False
+        assert _looks_like_signature(
+            "private static function store(StoreRequest $request)", node,
+        ) is False
+        cls_node = _mk_node(
+            language="php", name="AdminController", params=None,
+        )
+        assert _looks_like_signature(
+            "class AdminController extends BaseController {", cls_node,
+        ) is False
+        # Body lines are also False (expected), same as before.
+        assert _looks_like_signature(
+            "$admin = Admin::where('id', $id)->first();", node,
+        ) is False
+
     def test_signature_dedup_go_and_typescript(self):
         go_node = _mk_node(language="go", name="Handle", params="(w, r)")
         assert _looks_like_signature(
@@ -1979,6 +2014,29 @@ class TestLogOnlyLineSkipping:
         # Real logger names still match
         assert _is_log_only_line("logger.warn('slow')") is True
         assert _is_log_only_line("self.logger.debug('x')") is True
+
+    def test_is_log_only_line_php(self):
+        """PHP + Laravel log patterns: ``->`` for instance, ``::`` for
+        static facades, bare ``error_log`` / ``syslog`` /
+        ``trigger_error`` helpers."""
+        from code_review_graph.embeddings import _is_log_only_line
+        # Monolog-style instance logger
+        assert _is_log_only_line("$logger->info('fetched user');") is True
+        assert _is_log_only_line("$this->logger->debug($payload);") is True
+        assert _is_log_only_line("$log->warning('slow query');") is True
+        # Laravel static facades (with and without leading backslash)
+        assert _is_log_only_line("Log::info('merchant debit');") is True
+        assert _is_log_only_line("Log::error($e->getMessage());") is True
+        assert _is_log_only_line("\\Log::debug('detail');") is True
+        # Bare helpers
+        assert _is_log_only_line("error_log('boot failure');") is True
+        assert _is_log_only_line("syslog(LOG_WARNING, $msg);") is True
+        assert _is_log_only_line("trigger_error('deprecated', E_USER_WARNING);") is True
+        # Non-logger PHP calls stay kept
+        assert _is_log_only_line("$response->setStatusCode(200);") is False
+        assert _is_log_only_line("$user->save();") is False
+        assert _is_log_only_line("User::create($data);") is False
+        assert _is_log_only_line("$db->query('SELECT *');") is False
 
     def test_is_log_only_line_fprint_not_skipped(self):
         """Codex round 10 regression: ``fmt.Fprintf(w, ...)`` writes to an
