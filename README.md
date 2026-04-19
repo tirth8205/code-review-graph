@@ -260,6 +260,8 @@ code-review-graph repos            # List registered repositories
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph embed            # Compute / refresh embeddings (new repos auto-enable body)
 code-review-graph embed --include-body --confirm-reembed  # Existing DB: opt in to body enrichment
+code-review-graph install --auto-embed-hook     # Opt in: auto-refresh embeddings after every edit (claude/qoder, POSIX shells)
+code-review-graph install --no-auto-embed-hook  # Remove that hook (idempotent; preserves user-customised entries)
 code-review-graph serve            # Start MCP server
 ```
 
@@ -388,6 +390,19 @@ The cloud-egress warning is auto-skipped when the base URL points to localhost
 > with `code-review-graph embed --include-body --confirm-reembed` (a
 > one-time re-embed that may spend API tokens on cloud providers — set
 > `CRG_EMBED_INCLUDE_BODY=0` to stay on signatures).
+>
+> **Auto-refresh hook (opt-in).** `code-review-graph install
+> --auto-embed-hook` drops a `PostToolUse` hook that chains
+> `update --skip-flows && embed` after every Edit/Write/MultiEdit so
+> signature embeddings stay fresh between manual runs. Claude Code and
+> Qoder only; POSIX shells only (bash/zsh on macOS/Linux, WSL or
+> git-bash on Windows — native PowerShell is deferred to a follow-up).
+> The hook forces `CRG_EMBED_INCLUDE_BODY=0` on every fire, so if you
+> previously opted into body-mode via
+> `embed --include-body --confirm-reembed`, that sticky flag is reset
+> to off each time the hook runs — re-apply the opt-in manually when
+> you want body-mode preserved. Remove with
+> `install --no-auto-embed-hook`.
 
 #### Tool Filtering
 
