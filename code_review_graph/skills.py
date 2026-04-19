@@ -547,6 +547,65 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def generate_auto_embed_hook_entry(repo_root: Path) -> dict[str, Any]:
+    """Return a single ``PostToolUse`` hook entry that refreshes embeddings.
+
+    The entry matches the Claude Code hook schema
+    (https://code.claude.com/docs/en/hooks)::
+
+        {
+            "matcher": "Edit|Write|MultiEdit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": <chained update && embed command>,
+                    "timeout": 120,
+                    "async": True,
+                },
+            ],
+        }
+
+    The command chains ``update --skip-flows`` before ``embed`` so the
+    graph DB is refreshed before embeddings are recomputed. Running
+    ``update`` twice per edit (once from the standalone update hook,
+    once here) is cheap because the second call is a hash-dedup no-op
+    on unchanged files; the chaining eliminates a cross-process race
+    between the two hooks on ``graph.db``.
+
+    ``CRG_EMBED_INCLUDE_BODY=0`` is prefixed to each CLI invocation so
+    the hook never auto-triggers body-mode re-embeds (which would
+    bypass PR #345's ``--confirm-reembed`` cost gate). Users who want
+    body enrichment must run ``code-review-graph embed --include-body
+    --confirm-reembed`` manually and accept that this hook will reset
+    the sticky flag back to ``"0"`` on each fire — documented as
+    intentional friction.
+
+    ``async: True`` makes the hook non-blocking per the January 2026
+    schema. All stdout / stderr is redirected to ``/dev/null`` to keep
+    the MCP stdio JSON-RPC stream uncorrupted; ``|| true`` swallows
+    non-zero exit codes (e.g. provider unavailable).
+    """
+    repo_arg = json.dumps(repo_root.resolve().as_posix())
+    return {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+            {
+                "type": "command",
+                "command": (
+                    "git rev-parse --git-dir >/dev/null 2>&1"
+                    f" && CRG_EMBED_INCLUDE_BODY=0 code-review-graph update"
+                    f" --skip-flows --repo {repo_arg} >/dev/null 2>&1"
+                    f" && CRG_EMBED_INCLUDE_BODY=0 code-review-graph embed"
+                    f" --repo {repo_arg} >/dev/null 2>&1"
+                    " || true"
+                ),
+                "timeout": 120,
+                "async": True,
+            },
+        ],
+    }
+
+
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
@@ -586,7 +645,11 @@ fi
     return hook_path
 
 
-def install_hooks(repo_root: Path, platform: str = "claude") -> None:
+def install_hooks(
+    repo_root: Path,
+    platform: str = "claude",
+    include_auto_embed: bool = False,
+) -> None:
     """Write hooks config to platform-specific settings.json.
 
     Merges new hook entries into existing settings, preserving both
@@ -596,6 +659,12 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
     Args:
         repo_root: Repository root directory.
         platform: Target platform ("claude" or "qoder").
+        include_auto_embed: When True, also append the auto-embed
+            ``PostToolUse`` entry produced by
+            ``generate_auto_embed_hook_entry``. Default False keeps
+            the resulting ``settings.json`` JSON-struct-identical to
+            the pre-change behaviour so this function is backwards
+            compatible for callers that don't pass the kwarg.
     """
     if platform == "qoder":
         settings_dir = repo_root / ".qoder"
@@ -631,10 +700,81 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
         else:
             merged_hooks[hook_name] = hook_entries
 
+    if include_auto_embed:
+        auto_entry = generate_auto_embed_hook_entry(repo_root)
+        post_list = merged_hooks.get("PostToolUse")
+        if not isinstance(post_list, list):
+            logger.warning(
+                "PostToolUse is not a list in merged hooks; resetting "
+                "before appending auto-embed entry"
+            )
+            post_list = []
+            merged_hooks["PostToolUse"] = post_list
+        if auto_entry not in post_list:
+            post_list.append(auto_entry)
+
     existing["hooks"] = merged_hooks
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
+
+
+def remove_auto_embed_hook_entry(
+    repo_root: Path, platform: str = "claude",
+) -> bool:
+    """Remove the auto-embed ``PostToolUse`` entry if present.
+
+    Returns True only when a matching entry was removed (a ``.bak``
+    backup is created in that case). Returns False — **without
+    writing anything, and without creating a .bak** — when:
+
+    - The settings file does not exist.
+    - The file is unreadable / malformed JSON.
+    - The JSON root is not a dict.
+    - ``hooks`` is not a dict.
+    - ``hooks.PostToolUse`` is not a list.
+    - No entry in ``PostToolUse`` exact-matches the auto-embed entry
+      produced by ``generate_auto_embed_hook_entry``.
+
+    The "no ``.bak`` on no-match" rule protects a clean-state repo
+    from accidental modification when a user runs
+    ``--no-auto-embed-hook`` on a settings.json that never had the
+    entry installed.
+    """
+    settings_dir = repo_root / (".qoder" if platform == "qoder" else ".claude")
+    settings_path = settings_dir / "settings.json"
+    if not settings_path.exists():
+        return False
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Cannot parse %s: %s; nothing to remove", settings_path, exc)
+        return False
+    if not isinstance(data, dict):
+        logger.warning("%s root is not a dict; nothing to remove", settings_path)
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        logger.warning("%s 'hooks' is not a dict; nothing to remove", settings_path)
+        return False
+    post = hooks.get("PostToolUse")
+    if not isinstance(post, list):
+        logger.warning(
+            "%s 'hooks.PostToolUse' is not a list; nothing to remove",
+            settings_path,
+        )
+        return False
+
+    target = generate_auto_embed_hook_entry(repo_root)
+    filtered = [e for e in post if e != target]
+    if len(filtered) == len(post):
+        return False  # no match; do not write, do not create .bak
+
+    shutil.copy2(settings_path, settings_dir / "settings.json.bak")
+    hooks["PostToolUse"] = filtered
+    settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    logger.info("Removed auto-embed hook entry from %s", settings_path)
+    return True
 
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
