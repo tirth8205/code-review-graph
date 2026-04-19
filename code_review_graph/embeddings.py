@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import struct
 import sys
@@ -708,6 +709,44 @@ _BODY_MAX_CHARS_BY_PROVIDER: dict[str, int] = {
 }
 _BODY_MAX_CHARS_FALLBACK = 700
 _BODY_MAX_LINES_DEFAULT = 15
+
+# Pure log/print lines carry almost no semantic signal for code retrieval
+# — a function's purpose is almost never "the fact that it logs" — but
+# framework-heavy codebases (Discord bots, Rails controllers, Flask
+# views, Spring services) can easily burn the body budget on them.
+# Skip lines that ARE a log/print call and nothing else. Language-
+# agnostic: Python logger/logging/print, JS/TS console.X / logger.X,
+# Java System.out.println + log.X, Go fmt.Print* + log.Print*, Rust
+# println!/eprintln!/dbg!. Keep lines where the log is mixed with
+# other statements.
+_LOG_ONLY_LINE_RE = re.compile(
+    r'^\s*'
+    r'(?:'
+    # identifier.method(...)  — catches logger.info / log.debug /
+    # self.logger.warning / console.log / trace.error / etc.
+    r'(?:[A-Za-z_][\w.]*)\s*\.\s*'
+    r'(?:log|debug|info|warn|warning|error|trace|fatal|notice|fine|finer|finest'
+    r'|Print|Println|Printf)\s*\('
+    r'|'
+    # bare calls: print(...) / println!(...) / eprintln!(...) / dbg!(...)
+    r'(?:print|println|eprintln|dbg)\s*!?\s*\('
+    r'|'
+    # java: System.out.println(...) / System.err.print(...)
+    r'System\s*\.\s*(?:out|err)\s*\.\s*(?:print|println|printf)\s*\('
+    r'|'
+    # go: fmt.Println(...) / fmt.Printf(...) / fmt.Fprintln(...)
+    r'fmt\s*\.\s*(?:Print|Println|Printf|Fprintln|Fprintf|Fprint)\s*\('
+    r')'
+)
+
+
+def _is_log_only_line(s: str) -> bool:
+    """Return True when the line is purely a log/print call with no
+    other executable content."""
+    stripped = s.strip().rstrip(";").strip()
+    if not stripped.endswith(")"):
+        return False
+    return bool(_LOG_ONLY_LINE_RE.match(stripped))
 _FILE_CACHE_MAX_ENTRIES = 128
 _FILE_CACHE_MAX_BYTES = 2 * 1024 * 1024  # skip files larger than 2 MB
 _FILE_CACHE_SNIFF_BYTES = 4096           # null-byte probe window for binary detect
@@ -1014,6 +1053,15 @@ def _extract_body_text(
 
         # blank line before any real code
         if not kept and s == "":
+            drops += 1
+            continue
+
+        # Pure log/print lines: drop anywhere in the body. Framework-
+        # heavy code (Discord / Rails / Flask / Spring) otherwise burns
+        # the budget on Discord.defer() / console.log / logger.info
+        # that carry no retrieval signal. Keep lines where logging is
+        # mixed with other statements.
+        if _is_log_only_line(s):
             drops += 1
             continue
 

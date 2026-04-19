@@ -1893,6 +1893,93 @@ class TestRepoRootGuessExternalDataDir:
                 store.close()
 
 
+class TestLogOnlyLineSkipping:
+    """Language-agnostic log/print-line skipping.
+
+    Framework-heavy code (Discord bots, web controllers, server
+    handlers) interleaves ``console.log`` / ``logger.info`` /
+    ``fmt.Println`` / ``print()`` lines throughout function bodies.
+    Those lines carry almost no retrieval signal — a function's
+    purpose is rarely "the fact that it logs" — but they eat the body
+    char budget, and on small models (MiniLM 256-token window) they
+    crowd out the real logic tokens. Dropping pure log lines is a
+    language-agnostic way to raise token-to-signal density.
+    """
+
+    def test_is_log_only_line_python(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("    logger.info('handling request')") is True
+        assert _is_log_only_line("logging.debug('x', extra={'y': 1})") is True
+        assert _is_log_only_line("    print('hi')") is True
+        assert _is_log_only_line("    print('hi');") is True  # trailing ;
+
+    def test_is_log_only_line_js_ts(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("    console.log('hi');") is True
+        assert _is_log_only_line("  console.error(err);") is True
+        assert _is_log_only_line("logger.warn(`connection ${host}`);") is True
+
+    def test_is_log_only_line_java(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("    System.out.println(\"hi\");") is True
+        assert _is_log_only_line("log.debug(msg);") is True
+
+    def test_is_log_only_line_go(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("    fmt.Println(msg)") is True
+        assert _is_log_only_line("    log.Printf(\"%v\", err)") is True
+
+    def test_is_log_only_line_rust(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("    println!(\"hi\");") is True
+        assert _is_log_only_line("    eprintln!(\"err: {}\", e);") is True
+        assert _is_log_only_line("    dbg!(value);") is True
+
+    def test_is_log_only_line_keeps_mixed_statements(self):
+        """Log call mixed with other code is retrieval signal — keep it."""
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line(
+            "value = compute(); logger.info(value); return value"
+        ) is False
+        assert _is_log_only_line(
+            "if err: logger.error(err); raise"
+        ) is False
+        assert _is_log_only_line(
+            "x = logger.info('x')"  # assignment, not pure log
+        ) is False
+
+    def test_is_log_only_line_not_a_log(self):
+        from code_review_graph.embeddings import _is_log_only_line
+        assert _is_log_only_line("return self.compute(x)") is False
+        assert _is_log_only_line("db.execute('SELECT *')") is False
+        assert _is_log_only_line("await interaction.deferReply()") is False
+
+    def test_body_extraction_drops_scattered_log_lines(self, tmp_path):
+        """Log lines interleaved with real code get stripped, freeing
+        the budget for actual logic."""
+        src = tmp_path / "handler.ts"
+        src.write_text(
+            "export async function handle(req) {\n"
+            "    const user = await lookupUser(req.id);\n"
+            "    logger.info('fetched user', { id: req.id });\n"
+            "    const result = await computeScore(user);\n"
+            "    console.log('score', result);\n"
+            "    return { score: result, user: user.name };\n"
+            "}\n"
+        )
+        reader = _FileLineCache(repo_root=tmp_path)
+        node = _mk_node(
+            language="typescript", name="handle", params="(req)",
+            file_path=str(src), line_start=1, line_end=7,
+        )
+        body = _extract_body_text(node, reader, max_chars=4000)
+        assert "logger.info" not in body
+        assert "console.log" not in body
+        assert "lookupUser" in body
+        assert "computeScore" in body
+        assert "return { score" in body
+
+
 class TestKotlinFunSignatureDedup:
     """Codex-review regression: Kotlin ``fun`` without return type."""
 
