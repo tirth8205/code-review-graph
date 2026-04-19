@@ -19,31 +19,39 @@ def _resolve_cross_file_class_methods(store: Any) -> int:
     The per-file resolver in parser.py qualifies ``ClassName.method`` only
     when the class lives in the calling file's symbol table. For calls to
     classes defined in another file the target stays bare. This pass
-    scans all Class nodes, builds a ``name -> file::ClassName`` map
-    (dropping names that collide across files), then rewrites matching
-    edge targets.
+    scans all Class nodes and builds a ``name -> [file::ClassName, ...]``
+    map. For each candidate edge we pick the class qn whose file path
+    shares the deepest directory prefix with the edge's file (same package
+    / same module tree), so same-directory duplicates still resolve.
+    Names with multiple candidates whose best match isn't unique remain
+    bare.
     """
     conn = store._conn
 
-    class_map: dict[str, str] = {}
-    ambiguous: set[str] = set()
+    class_candidates: dict[str, list[str]] = {}
     for row in conn.execute(
         "SELECT name, qualified_name FROM nodes WHERE kind = 'Class'"
     ):
         name, qn = row[0], row[1]
-        if name in ambiguous:
+        if "::" not in qn:
             continue
-        if name in class_map and class_map[name] != qn:
-            ambiguous.add(name)
-            del class_map[name]
-            continue
-        class_map[name] = qn
+        class_candidates.setdefault(name, []).append(qn)
 
-    if not class_map:
+    if not class_candidates:
         return 0
 
+    def _dir_prefix_len(a: str, b: str) -> int:
+        a_parts = a.split("/")
+        b_parts = b.split("/")
+        n = 0
+        for x, y in zip(a_parts[:-1], b_parts[:-1]):
+            if x != y:
+                break
+            n += 1
+        return n
+
     candidates = conn.execute(
-        "SELECT id, target_qualified FROM edges "
+        "SELECT id, target_qualified, file_path FROM edges "
         "WHERE kind IN ('CALLS', 'REFERENCES') "
         "AND instr(target_qualified, '.') > 0 "
         "AND instr(target_qualified, '::') = 0 "
@@ -51,14 +59,24 @@ def _resolve_cross_file_class_methods(store: Any) -> int:
     ).fetchall()
 
     rewrites: list[tuple[str, int]] = []
-    for edge_id, target in candidates:
+    for edge_id, target, edge_file in candidates:
         cls_name, _, method = target.partition(".")
         if not method or "." in method:
             continue
-        cls_qn = class_map.get(cls_name)
-        if not cls_qn or "::" not in cls_qn:
+        qns = class_candidates.get(cls_name)
+        if not qns:
             continue
-        file_prefix = cls_qn.rsplit("::", 1)[0]
+        if len(qns) == 1:
+            chosen = qns[0]
+        else:
+            scored = [(_dir_prefix_len(edge_file or "", qn), qn) for qn in qns]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_score = scored[0][0]
+            top_matches = [qn for score, qn in scored if score == top_score]
+            if len(top_matches) != 1 or top_score == 0:
+                continue
+            chosen = top_matches[0]
+        file_prefix = chosen.rsplit("::", 1)[0]
         rewrites.append((f"{file_prefix}::{cls_name}.{method}", edge_id))
 
     if not rewrites:
