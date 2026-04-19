@@ -2781,6 +2781,27 @@ class CodeParser:
             elif child.type == "protocol_declaration":
                 extra["swift_kind"] = "protocol"
 
+        # Collect class-level decorators / annotations (same shape as
+        # functions so flows._has_framework_decorator can match).
+        deco_list: list[str] = []
+        for sub in child.children:
+            if sub.type == "modifiers":
+                for mod in sub.children:
+                    if mod.type in ("annotation", "marker_annotation"):
+                        deco_list.append(
+                            mod.text.decode("utf-8", errors="replace")
+                            .lstrip("@").strip()
+                        )
+        if child.parent and child.parent.type == "decorated_definition":
+            for sib in child.parent.children:
+                if sib.type == "decorator":
+                    deco_list.append(
+                        sib.text.decode("utf-8", errors="replace")
+                        .lstrip("@").strip()
+                    )
+        if deco_list:
+            extra["decorators"] = deco_list
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -2889,6 +2910,7 @@ class CodeParser:
             params=params,
             return_type=ret_type,
             is_test=is_test,
+            extra={"decorators": list(decorators)} if decorators else {},
         )
         nodes.append(node)
 
