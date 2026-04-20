@@ -385,7 +385,10 @@ class TestInstallPlatformConfigs:
         data = tomllib.loads(codex_config.read_text())
         entry = data["mcp_servers"]["code-review-graph"]
         assert entry["type"] == "stdio"
-        assert "serve" in entry["args"]
+        expected_cmd, expected_args = _detect_serve_command()
+        assert entry["command"] == expected_cmd
+        assert entry["args"] == expected_args
+        assert entry["cwd"] == str(tmp_path)
 
     @_needs_tomllib
     def test_install_codex_preserves_existing_toml(self, tmp_path):
@@ -411,6 +414,7 @@ class TestInstallPlatformConfigs:
         assert data["mcp_servers"]["other"]["command"] == "other"
         expected_cmd, _ = _detect_serve_command()
         assert data["mcp_servers"]["code-review-graph"]["command"] == expected_cmd
+        assert data["mcp_servers"]["code-review-graph"]["cwd"] == str(tmp_path)
 
     def test_install_codex_no_duplicate(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -453,7 +457,9 @@ class TestInstallPlatformConfigs:
         assert config_path.exists()
         data = json.loads(config_path.read_text())
         assert "code-review-graph" in data["mcpServers"]
-        assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert entry["cwd"] == str(tmp_path)
 
     def test_install_windsurf_config(self, tmp_path):
         windsurf_dir = tmp_path / ".codeium" / "windsurf"
@@ -476,6 +482,7 @@ class TestInstallPlatformConfigs:
         assert "type" not in entry
         expected_cmd, _ = _detect_serve_command()
         assert entry["command"] == expected_cmd
+        assert entry["cwd"] == str(tmp_path)
 
     def test_install_zed_config(self, tmp_path):
         zed_settings = tmp_path / "zed" / "settings.json"
@@ -514,8 +521,10 @@ class TestInstallPlatformConfigs:
         assert "Continue" in configured
         data = json.loads(config_path.read_text())
         assert isinstance(data["mcpServers"], list)
-        assert data["mcpServers"][0]["name"] == "code-review-graph"
-        assert data["mcpServers"][0]["type"] == "stdio"
+        arr_entry = data["mcpServers"][0]
+        assert arr_entry["name"] == "code-review-graph"
+        assert arr_entry["type"] == "stdio"
+        assert arr_entry["cwd"] == str(tmp_path)
 
     def test_install_opencode_config(self, tmp_path):
         configured = install_platform_configs(tmp_path, target="opencode")
@@ -525,6 +534,7 @@ class TestInstallPlatformConfigs:
         entry = data["mcpServers"]["code-review-graph"]
         assert entry["type"] == "stdio"
         assert entry["env"] == []
+        assert entry["cwd"] == str(tmp_path)
 
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
@@ -545,6 +555,7 @@ class TestInstallPlatformConfigs:
         entry = data["mcpServers"]["code-review-graph"]
         assert entry["type"] == "stdio"
         assert entry["args"][-1] == "serve"
+        assert entry["cwd"] == str(tmp_path)
 
     def test_install_qwen_preserves_existing_servers(self, tmp_path):
         """Adding qwen should merge with, not clobber, existing mcpServers."""
@@ -656,9 +667,10 @@ class TestInstallPlatformConfigs:
         assert "mcpServers" in data
         assert "code-review-graph" in data["mcpServers"]
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
-        import shutil
-        expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
+        expected_cmd, expected_args = _detect_serve_command()
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
+        assert data["mcpServers"]["code-review-graph"]["args"] == expected_args
+        assert data["mcpServers"]["code-review-graph"]["cwd"] == str(tmp_path)
 
 
 class TestKiroPlatform:
@@ -683,6 +695,7 @@ class TestKiroPlatform:
         assert "code-review-graph" in data["mcpServers"]
         entry = data["mcpServers"]["code-review-graph"]
         assert entry["type"] == "stdio"
+        assert entry["cwd"] == str(tmp_path)
 
     def test_install_kiro_preserves_existing_servers(self, tmp_path):
         """Existing mcpServers entries are preserved when adding code-review-graph."""

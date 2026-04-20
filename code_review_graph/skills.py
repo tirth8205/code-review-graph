@@ -202,10 +202,18 @@ def _detect_serve_command() -> tuple[str, list[str]]:
     return (sys.executable, ["-m", "code_review_graph", "serve"])
 
 
-def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
-    """Build the MCP server entry for a platform."""
+def _build_server_entry(plat: dict[str, Any], repo_root: Path, key: str = "") -> dict[str, Any]:
+    """Build the MCP server entry for a platform.
+
+    Args:
+        plat: Platform metadata dict from PLATFORMS.
+        repo_root: Absolute path to the project root.  Written as ``cwd`` so
+            that MCP clients always launch ``code-review-graph serve`` from the
+            correct directory and can locate ``.code-review-graph/graph.db``.
+        key: Platform key (e.g. ``"opencode"``), used for platform-specific tweaks.
+    """
     command, args = _detect_serve_command()
-    entry: dict[str, Any] = {"command": command, "args": args}
+    entry: dict[str, Any] = {"command": command, "args": args, "cwd": str(repo_root)}
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
@@ -288,7 +296,7 @@ def install_platform_configs(
     for key, plat in platforms_to_install.items():
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
-        server_entry = _build_server_entry(plat, key=key)
+        server_entry = _build_server_entry(plat, repo_root, key=key)
 
         if plat["format"] == "toml":
             changed = _merge_toml_mcp_server(
