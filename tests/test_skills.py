@@ -661,6 +661,154 @@ class TestInstallPlatformConfigs:
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
 
 
+class TestInstallRefusesToClobberMalformedConfig:
+    """Regression tests for #344: ``install_platform_configs`` previously
+    read existing config files and, on ``JSONDecodeError``, silently
+    reset the in-memory data to ``{}`` and overwrote the file — erasing
+    the user's entire config (Zed themes, keymaps, language servers,
+    etc.).  The fix refuses to overwrite and surfaces a clear error.
+    """
+
+    def _fake_zed_platform(self, settings_path: Path):
+        return patch.dict(
+            PLATFORMS,
+            {
+                "zed": {
+                    **PLATFORMS["zed"],
+                    "config_path": lambda root: settings_path,
+                    "detect": lambda: True,
+                },
+            },
+        )
+
+    def test_zed_refuses_to_overwrite_malformed_json(self, tmp_path, capsys):
+        """The bug: before #344, ``install --platform zed`` would eat a
+        user's entire ``settings.json`` on any JSON parse error."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = '{ this is not valid JSON }\n'
+        settings.write_text(original, encoding="utf-8")
+
+        with self._fake_zed_platform(settings):
+            configured = install_platform_configs(tmp_path, target="zed")
+
+        # Platform NOT marked configured (we skipped it, didn't overwrite).
+        assert "Zed" not in configured
+
+        # Original file content preserved byte-for-byte.
+        assert settings.read_text(encoding="utf-8") == original
+
+        # User got a clear, actionable message.
+        out = capsys.readouterr().out
+        assert "REFUSING to overwrite" in out
+        assert str(settings) in out
+
+    def test_zed_refuses_when_top_level_is_array(self, tmp_path, capsys):
+        """A file that parses as a valid JSON array (not object) must
+        also be preserved — we expect an object and treating an array as
+        one would lose user data."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('["not", "an", "object"]', encoding="utf-8")
+
+        with self._fake_zed_platform(settings):
+            configured = install_platform_configs(tmp_path, target="zed")
+
+        assert "Zed" not in configured
+        assert settings.read_text() == '["not", "an", "object"]'
+        out = capsys.readouterr().out
+        assert "REFUSING to overwrite" in out
+
+    def test_empty_file_is_treated_as_empty_config(self, tmp_path):
+        """An empty settings file is not malformed — it's just an empty
+        config.  We should proceed and write a fresh one."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("", encoding="utf-8")
+
+        with self._fake_zed_platform(settings):
+            configured = install_platform_configs(tmp_path, target="zed")
+
+        assert "Zed" in configured
+        data = json.loads(settings.read_text())
+        assert "context_servers" in data
+        assert "code-review-graph" in data["context_servers"]
+
+
+class TestInstallSkillsRespectTargetPlatform:
+    """Regression tests for #350: ``install --platform cursor`` previously
+    generated Claude skill markdown at ``<repo>/.claude/skills/``
+    unconditionally.  Cursor (and Windsurf, Zed, etc.) never reads that
+    directory, so the extra files confused users.  Skills should be
+    generated ONLY for Claude-family targets.
+    """
+
+    def _run_install(self, tmp_path, platform: str) -> tuple[bool, str]:
+        """Run ``_handle_init`` with --platform <x> and return
+        (skills_dir_was_created, captured_stdout).
+        """
+        import argparse
+        from io import StringIO
+
+        from code_review_graph import cli as crg_cli
+
+        args = argparse.Namespace(
+            command="install",
+            repo=str(tmp_path),
+            platform=platform,
+            yes=True,
+            dry_run=False,
+            no_skills=False,
+            no_hooks=True,         # we only care about the skills path
+            no_instructions=True,  # skip the instruction-injection prompt
+        )
+
+        buf = StringIO()
+        with patch("sys.stdout", buf):
+            # Silence the prompt machinery entirely by patching input().
+            with patch("builtins.input", return_value="n"):
+                crg_cli._handle_init(args)
+        claude_skills = tmp_path / ".claude" / "skills"
+        return claude_skills.is_dir(), buf.getvalue()
+
+    def test_cursor_install_does_not_create_claude_skills(self, tmp_path):
+        """The bug: ``--platform cursor`` used to create ``.claude/skills/``
+        in the repo, which is only read by Claude Code, not Cursor."""
+        created, output = self._run_install(tmp_path, "cursor")
+        assert not created, (
+            f".claude/skills/ should NOT be created for --platform cursor, "
+            f"but it was.  stdout: {output!r}"
+        )
+        # And we should have told the user we skipped.
+        assert "Skipped generating .claude/skills/" in output
+
+    def test_claude_install_still_creates_skills(self, tmp_path):
+        """Regression guard: the pre-existing Claude path must not
+        regress — ``--platform claude`` still generates skills."""
+        created, _ = self._run_install(tmp_path, "claude")
+        assert created, (
+            ".claude/skills/ should still be created for --platform claude"
+        )
+
+    def test_all_target_still_creates_skills(self, tmp_path):
+        """Regression guard: ``--platform all`` still generates skills
+        so Claude users running the default command are unchanged."""
+        created, _ = self._run_install(tmp_path, "all")
+        assert created
+
+    def test_windsurf_install_does_not_create_claude_skills(self, tmp_path):
+        """Same as cursor: Windsurf does not read .claude/skills/."""
+        created, output = self._run_install(tmp_path, "windsurf")
+        assert not created
+        assert "Skipped generating .claude/skills/" in output
+
+    def test_zed_install_does_not_create_claude_skills(self, tmp_path):
+        """Same as cursor: Zed does not read .claude/skills/."""
+        created, output = self._run_install(tmp_path, "zed")
+        assert not created
+        assert "Skipped generating .claude/skills/" in output
+
+
 class TestKiroPlatform:
     """Tests for Kiro platform support."""
 

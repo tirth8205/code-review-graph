@@ -225,9 +225,26 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_qoder_skills,
     )
 
-    if not skip_skills:
+    # #350: ``generate_skills`` writes Claude Code skill markdown to
+    # ``<repo>/.claude/skills/``.  That directory is only read by Claude
+    # Code (and by Qoder via a separate global install path).  Previously
+    # we generated it for every platform, which confused Cursor / Windsurf /
+    # Zed users into thinking the tool created Claude config against their
+    # will.  Restrict skill generation to Claude-family targets only; other
+    # platforms get the relevant ``<platform>rules`` / ``AGENTS.md``
+    # injection instead (handled below).
+    _claude_skill_targets = {"claude", "claude-code", "qoder", "all"}
+    if not skip_skills and target in _claude_skill_targets:
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
+    elif not skip_skills:
+        # Non-Claude target: make the decision explicit so users know the
+        # platform-appropriate instructions live elsewhere.
+        print(
+            f"Skipped generating .claude/skills/ for platform '{target}' — "
+            f"skills are read only by Claude Code / Qoder.  Use "
+            f"--platform all (or --platform claude) to generate them."
+        )
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -663,12 +680,23 @@ def main() -> None:
         # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
         if not repo_root:
-            logging.error(
-                "Not in a git repository. '%s' requires git for diffing.",
-                args.command,
+            # #312: Claude Code hooks invoke ``update`` after every
+            # Write/Edit/Bash.  In monorepos with no root ``.git`` (e.g.
+            # frontend/ and backend/ each have their own repo but the
+            # workspace root does not), every tool-use previously spammed
+            # ``PostToolUse:Edit hook error`` because we exited with code
+            # 1.  Emit a friendly warning to stderr (so MCP stdio is not
+            # corrupted) and exit 0 so the hook is non-blocking.  Using
+            # ``print`` instead of ``logging.warning`` because hook/CLI
+            # invocations do not configure the root logger — we want the
+            # message visible without forcing logging setup.
+            print(
+                f"note: not in a git repository; '{args.command}' "
+                f"requires git for diffing, skipping.  Use 'build' for "
+                f"a full parse, or 'git init' to enable incremental updates.",
+                file=sys.stderr,
             )
-            logging.error("Use 'build' for a full parse, or run 'git init' first.")
-            sys.exit(1)
+            sys.exit(0)
     else:
         repo_root = Path(args.repo) if args.repo else find_project_root()
 

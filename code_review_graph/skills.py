@@ -308,14 +308,56 @@ def install_platform_configs(
             configured.append(plat["name"])
             continue
 
-        # Read existing config
+        # Read existing config.
+        # #344: Previously, a JSONDecodeError silently reset ``existing`` to
+        # an empty dict, and the subsequent write clobbered the user's
+        # entire config file (losing Zed themes, keymaps, language servers,
+        # etc.).  Now we refuse to overwrite a malformed config and surface
+        # a clear, actionable error — the user decides whether to fix the
+        # file manually or delete it and retry.
         existing: dict[str, Any] = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
-            except (json.JSONDecodeError, OSError):
-                logger.warning("Invalid JSON in %s, will overwrite.", config_path)
-                existing = {}
+                raw = config_path.read_text(encoding="utf-8", errors="replace")
+                existing = json.loads(raw) if raw.strip() else {}
+            except json.JSONDecodeError as exc:
+                msg = (
+                    f"  {plat['name']}: REFUSING to overwrite {config_path} — "
+                    f"the file contains invalid JSON ({exc.msg} at "
+                    f"line {exc.lineno}, col {exc.colno}).  Please fix or "
+                    f"remove this file by hand, then re-run install.  "
+                    f"No changes made."
+                )
+                print(msg)
+                logger.error(
+                    "Invalid JSON in %s (line %d, col %d): %s — refusing "
+                    "to overwrite so user data is not lost.",
+                    config_path, exc.lineno, exc.colno, exc.msg,
+                )
+                continue
+            except OSError as exc:
+                msg = (
+                    f"  {plat['name']}: cannot read {config_path} "
+                    f"({exc.strerror or exc!r}); skipping."
+                )
+                print(msg)
+                logger.error("Cannot read %s: %s", config_path, exc)
+                continue
+        if not isinstance(existing, dict):
+            # File parsed as valid JSON but at the top level is a list or
+            # scalar.  Same data-loss risk — refuse to overwrite.
+            msg = (
+                f"  {plat['name']}: REFUSING to overwrite {config_path} — "
+                f"expected a JSON object at the top level but got "
+                f"{type(existing).__name__}.  Please fix the file by hand "
+                f"or remove it, then re-run install."
+            )
+            print(msg)
+            logger.error(
+                "Unexpected JSON shape in %s: top-level is %s, not object.",
+                config_path, type(existing).__name__,
+            )
+            continue
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])
