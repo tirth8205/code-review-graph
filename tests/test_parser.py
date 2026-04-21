@@ -21,6 +21,143 @@ class TestCodeParser:
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
 
+    # --- Shebang detection for extension-less Unix scripts (#237) ---
+
+    def _write_shebang_file(self, tmp_path: Path, name: str, content: str) -> Path:
+        """Helper: write an extension-less file with ``content`` and return its path."""
+        p = tmp_path / name
+        p.write_text(content, encoding="utf-8")
+        return p
+
+    def test_detect_shebang_bin_bash(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "deploy", "#!/bin/bash\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_bin_sh_routed_to_bash(self, tmp_path):
+        """/bin/sh scripts are parsed through the bash grammar."""
+        p = self._write_shebang_file(
+            tmp_path, "install-hook", "#!/bin/sh\necho hello\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_env_bash(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "runner", "#!/usr/bin/env bash\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_env_python3(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "myapp",
+            "#!/usr/bin/env python3\ndef main():\n    pass\n",
+        )
+        assert self.parser.detect_language(p) == "python"
+
+    def test_detect_shebang_direct_python(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "tool", "#!/usr/bin/python3\nprint('hi')\n",
+        )
+        assert self.parser.detect_language(p) == "python"
+
+    def test_detect_shebang_node(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "cli", "#!/usr/bin/env node\nconsole.log(1);\n",
+        )
+        assert self.parser.detect_language(p) == "javascript"
+
+    def test_detect_shebang_env_dash_s_flag(self, tmp_path):
+        """``#!/usr/bin/env -S node --flag`` (Linux -S) resolves to the interpreter."""
+        p = self._write_shebang_file(
+            tmp_path, "esm-tool",
+            "#!/usr/bin/env -S node --experimental-vm-modules\n"
+            "console.log('esm');\n",
+        )
+        assert self.parser.detect_language(p) == "javascript"
+
+    def test_detect_shebang_ruby(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "rake-task", "#!/usr/bin/env ruby\nputs 1\n",
+        )
+        assert self.parser.detect_language(p) == "ruby"
+
+    def test_detect_shebang_perl(self, tmp_path):
+        p = self._write_shebang_file(
+            tmp_path, "cgi-script", "#!/usr/bin/env perl\nprint 1;\n",
+        )
+        assert self.parser.detect_language(p) == "perl"
+
+    def test_detect_shebang_with_trailing_flags(self, tmp_path):
+        """``#!/bin/bash -e`` still maps to bash (flags ignored)."""
+        p = self._write_shebang_file(
+            tmp_path, "strict", "#!/bin/bash -e\nfoo() { echo hi; }\n",
+        )
+        assert self.parser.detect_language(p) == "bash"
+
+    def test_detect_shebang_missing_returns_none(self, tmp_path):
+        """Extension-less text files without a shebang return None, not bash."""
+        p = self._write_shebang_file(
+            tmp_path, "README", "# just a readme, no shebang\nsome content\n",
+        )
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_empty_file_returns_none(self, tmp_path):
+        p = tmp_path / "EMPTY"
+        p.write_bytes(b"")
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_binary_content_returns_none(self, tmp_path):
+        """A garbage-byte first line that happens not to start with ``#!``
+        must not raise and must return None."""
+        p = tmp_path / "binary-blob"
+        p.write_bytes(b"\x00\x01\x02\x03 garbage bytes not a shebang\n")
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_unknown_interpreter_returns_none(self, tmp_path):
+        """A valid shebang to an interpreter we don't route is treated as
+        'unknown language' — same as an unmapped extension."""
+        p = self._write_shebang_file(
+            tmp_path, "ocaml-script", "#!/usr/bin/env ocaml\nlet x = 1\n",
+        )
+        assert self.parser.detect_language(p) is None
+
+    def test_detect_shebang_does_not_override_extension(self, tmp_path):
+        """A file with a known extension must still use extension-based
+        detection, even if its first line is a misleading shebang."""
+        p = tmp_path / "script.py"
+        p.write_text("#!/bin/bash\nprint('hi')\n", encoding="utf-8")
+        # .py wins over the bash shebang — non-intuitive-looking content
+        # in a .py file must not fool the detector.
+        assert self.parser.detect_language(p) == "python"
+
+    def test_parse_shebang_script_produces_function_nodes(self, tmp_path):
+        """End-to-end regression: an extension-less bash script is not only
+        detected but also fully parsed into structural nodes via parse_file.
+        """
+        script = (
+            "#!/usr/bin/env bash\n"
+            "greet() {\n"
+            '    echo "hi $1"\n'
+            "}\n"
+            "main() {\n"
+            "    greet world\n"
+            "}\n"
+            "main\n"
+        )
+        p = self._write_shebang_file(tmp_path, "deploy", script)
+
+        nodes, edges = self.parser.parse_file(p)
+
+        # We at least got the File node plus both functions.
+        assert len(nodes) >= 3
+        funcs = [n for n in nodes if n.kind == "Function"]
+        func_names = {f.name for f in funcs}
+        assert "greet" in func_names
+        assert "main" in func_names
+        for n in nodes:
+            assert n.language == "bash"
+
     def test_parse_python_file(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
 
@@ -142,6 +279,67 @@ class TestCodeParser:
         assert len(calls) == 2
         lines = {e.line for e in calls}
         assert len(lines) == 2  # distinct line numbers
+
+    def test_module_scope_calls_attributed_to_file(self):
+        """Module-scope calls (script glue, top-level code) emit CALLS edges
+        attributed to the File node, so callees aren't flagged as dead by
+        find_dead_code.
+
+        Regression test: prior to this fix, _extract_calls dropped the edge
+        entirely when enclosing_func was None, leaving notebooks, CLI scripts,
+        and top-level entry points with zero outgoing CALLS edges.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(
+                "def helper():\n"
+                "    return 42\n"
+                "\n"
+                "# Module-scope call — no enclosing function\n"
+                "result = helper()\n"
+            )
+            tmp = Path(f.name)
+
+        try:
+            _, edges = self.parser.parse_file(tmp)
+            calls = [e for e in edges if e.kind == "CALLS"]
+            module_scope_calls = [e for e in calls if e.source == str(tmp)]
+            assert any(
+                "helper" in e.target for e in module_scope_calls
+            ), f"Expected module-scope CALLS edge to helper(); got: {[(e.source, e.target) for e in calls]}"
+        finally:
+            tmp.unlink()
+
+    def test_module_scope_calls_in_notebook(self):
+        """Notebook code cells are entirely module-scope — every call inside
+        them should produce a CALLS edge attributed to the .ipynb File node."""
+        import json
+
+        notebook = {
+            "cells": [
+                {
+                    "cell_type": "code",
+                    "source": [
+                        "from helper_module import do_work\n",
+                        "do_work()\n",
+                    ],
+                },
+            ],
+            "metadata": {"language_info": {"name": "python"}},
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".ipynb", delete=False) as f:
+            json.dump(notebook, f)
+            tmp = Path(f.name)
+
+        try:
+            _, edges = self.parser.parse_file(tmp)
+            calls = [e for e in edges if e.kind == "CALLS"]
+            assert any(
+                "do_work" in e.target and e.source == str(tmp) for e in calls
+            ), f"Expected notebook CALLS edge to do_work(); got: {[(e.source, e.target) for e in calls]}"
+        finally:
+            tmp.unlink()
 
     def test_parse_nonexistent_file(self):
         nodes, edges = self.parser.parse_file(Path("/nonexistent/file.py"))
@@ -902,3 +1100,112 @@ class TestValueReferences:
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
+
+
+class TestModuleScopeCalls:
+    """Module-scope calls (no enclosing function) must attribute to the File node.
+
+    Previously these edges were silently dropped, causing ``find_dead_code`` to
+    flag CLI entrypoints, notebook-helper functions, and top-level JSX renders
+    as dead. The fix emits a CALLS edge with ``source = file_path`` (the File
+    node's qualified name).
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_python_top_level_call_attributes_to_file(self):
+        source = (
+            b"def worker():\n"
+            b"    return 1\n"
+            b"\n"
+            b"worker()\n"
+        )
+        path = FIXTURES / "module_scope_py.py"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("worker")
+        ]
+        assert len(top_level) == 1
+        # Edge originates at the call site (line 4), not the def (line 1).
+        assert top_level[0].line == 4
+
+    def test_python_if_main_block_call_attributes_to_file(self):
+        source = (
+            b"def run_job():\n"
+            b"    return 1\n"
+            b"\n"
+            b"if __name__ == '__main__':\n"
+            b"    run_job()\n"
+        )
+        path = FIXTURES / "module_scope_cli.py"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("run_job")
+        ]
+        assert len(top_level) == 1
+        # Edge originates inside the `if __name__` block (line 5).
+        assert top_level[0].line == 5
+
+    def test_tsx_top_level_jsx_render_attributes_to_file(self):
+        # Bare top-level JSX expression statement exercises the
+        # _extract_jsx_child path specifically (not a value-reference
+        # fallback from the `const element = ...` assignment).
+        source = (
+            b"import App from './App';\n"
+            b"\n"
+            b"<App />;\n"
+        )
+        path = FIXTURES / "module_scope_entry.tsx"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = [e for e in edges if e.kind == "CALLS"]
+        top_level = [
+            e for e in calls
+            if e.source == str(path) and e.target.endswith("App")
+        ]
+        assert len(top_level) == 1
+        # Edge originates at the JSX site (line 3), not the import (line 1).
+        assert top_level[0].line == 3
+
+    def test_r_top_level_call_attributes_to_file(self):
+        # R scripts are overwhelmingly module-scope by convention; this is
+        # the highest-leverage language for the fix after Python.
+        source = (
+            b"worker <- function() {\n"
+            b"  1\n"
+            b"}\n"
+            b"\n"
+            b"worker()\n"
+        )
+        path = FIXTURES / "module_scope_sample.R"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        top_level = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.source == str(path)
+            and e.target.endswith("worker")
+        ]
+        assert len(top_level) == 1
+
+    def test_elixir_top_level_dotted_call_attributes_to_file(self):
+        # `.exs` scripts and mix tasks commonly have module-scope `IO.puts`,
+        # which is what the parser comment explicitly calls out.
+        source = b'IO.puts("hello")\n'
+        path = FIXTURES / "module_scope_script.exs"
+        _, edges = self.parser.parse_bytes(path, source)
+
+        top_level = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.source == str(path)
+            and e.target.endswith("puts")
+        ]
+        assert len(top_level) == 1

@@ -7,7 +7,7 @@ Usage:
     code-review-graph update [--base BASE]
     code-review-graph watch
     code-review-graph status
-    code-review-graph serve
+    code-review-graph serve [--http] [--host ADDR] [--port PORT]
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
@@ -35,8 +35,19 @@ import os
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .graph import GraphStore
 
 logger = logging.getLogger(__name__)
+
+# Shared platform choices for install and init commands
+_PLATFORM_CHOICES = [
+    "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
+    "continue", "opencode", "antigravity", "qwen", "kiro", "qoder",
+    "copilot", "copilot-cli", "all",
+]
 
 
 def _get_version() -> str:
@@ -63,12 +74,12 @@ def _print_banner() -> None:
     version = _get_version()
 
     # ANSI escape codes
-    c = "\033[36m" if color else ""   # cyan — graph art
-    y = "\033[33m" if color else ""   # yellow — center node
-    b = "\033[1m" if color else ""    # bold
-    d = "\033[2m" if color else ""    # dim
-    g = "\033[32m" if color else ""   # green — commands
-    r = "\033[0m" if color else ""    # reset
+    c = "\033[36m" if color else ""  # cyan — graph art
+    y = "\033[33m" if color else ""  # yellow — center node
+    b = "\033[1m" if color else ""  # bold
+    d = "\033[2m" if color else ""  # dim
+    g = "\033[32m" if color else ""  # green — commands
+    r = "\033[0m" if color else ""  # reset
 
     print(f"""
 {c}  ●──●──●{r}
@@ -92,14 +103,15 @@ def _print_banner() -> None:
     {g}repos{r}       List registered repositories
     {g}postprocess{r} Run post-processing {d}(flows, communities, FTS){r}
     {g}eval{r}        Run evaluation benchmarks
-    {g}serve{r}       Start MCP server
+    {g}serve{r}       Start MCP server {d}(stdio, or {g}--http{r} on localhost:5555){r}
 
   {d}Run{r} {b}code-review-graph <command> --help{r} {d}for details{r}
 """)
 
 
 def _instruction_files_to_modify(
-    repo_root: Path, target: str,
+    repo_root: Path,
+    target: str,
 ) -> list[str]:
     """Return the list of instruction files that ``install`` would write
     or modify, given the current state of the repo and the selected
@@ -211,6 +223,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         inject_platform_instructions,
         install_git_hook,
         install_hooks,
+        install_qoder_skills,
     )
 
     if not skip_skills:
@@ -237,9 +250,17 @@ def _handle_init(args: argparse.Namespace) -> None:
     elif skip_instructions:
         print("Skipped instruction injection (--no-instructions).")
 
-    if not skip_hooks and target in ("claude", "all"):
-        install_hooks(repo_root)
-        print(f"Installed hooks in {repo_root / '.claude' / 'settings.json'}")
+
+    # Install Qoder skills (global user-level skills directory)
+    if not skip_skills and target in ("qoder", "all"):
+        qoder_skills_dir = install_qoder_skills(repo_root)
+        if qoder_skills_dir:
+            print(f"Installed Qoder skills to {qoder_skills_dir}")
+    if not skip_hooks and target in ("claude", "qoder", "all"):
+        platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
+        for plat in platforms_to_install:
+            install_hooks(repo_root, platform=plat)
+            print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
@@ -250,93 +271,106 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
+def _cli_post_process(store: GraphStore) -> None:
+    """Run post-build pipeline and print a summary line for each step."""
+    from .postprocessing import run_post_processing
+
+    pp = run_post_processing(store)
+    if pp.get("signatures_computed"):
+        print(f"Signatures: {pp['signatures_computed']} nodes")
+    if pp.get("fts_indexed"):
+        print(f"FTS indexed: {pp['fts_indexed']} nodes")
+    if pp.get("flows_detected") is not None:
+        print(f"Flows: {pp['flows_detected']}")
+    if pp.get("communities_detected") is not None:
+        print(f"Communities: {pp['communities_detected']}")
+
+
 def main() -> None:
     """Main CLI entry point."""
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
     )
-    ap.add_argument(
-        "-v", "--version", action="store_true", help="Show version and exit"
-    )
+    ap.add_argument("-v", "--version", action="store_true", help="Show version and exit")
     sub = ap.add_subparsers(dest="command")
 
     # install (primary) + init (alias)
-    install_cmd = sub.add_parser(
-        "install", help="Register MCP server with AI coding platforms"
-    )
+    install_cmd = sub.add_parser("install", help="Register MCP server with AI coding platforms")
     install_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     install_cmd.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would be done without writing files",
     )
     install_cmd.add_argument(
-        "--no-skills", action="store_true",
+        "--no-skills",
+        action="store_true",
         help="Skip generating Claude Code skill files",
     )
     install_cmd.add_argument(
-        "--no-hooks", action="store_true",
+        "--no-hooks",
+        action="store_true",
         help="Skip installing Claude Code hooks",
     )
     install_cmd.add_argument(
-        "--no-instructions", action="store_true",
+        "--no-instructions",
+        action="store_true",
         help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
     )
     install_cmd.add_argument(
-        "-y", "--yes", action="store_true",
+        "-y",
+        "--yes",
+        action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
     )
     # Legacy flags (kept for backwards compat, now no-ops since all is default)
     install_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     install_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
-    install_cmd.add_argument("--all", action="store_true", dest="install_all",
-                             help=argparse.SUPPRESS)
+    install_cmd.add_argument(
+        "--all", action="store_true", dest="install_all", help=argparse.SUPPRESS
+    )
     install_cmd.add_argument(
         "--platform",
-        choices=[
-            "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "qwen", "kiro",
-            "copilot", "copilot-cli", "all",
-        ],
+        choices=_PLATFORM_CHOICES,
         default="all",
         help="Target platform for MCP config (default: all detected)",
     )
 
-    init_cmd = sub.add_parser(
-        "init", help="Alias for install"
-    )
+    init_cmd = sub.add_parser("init", help="Alias for install")
     init_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     init_cmd.add_argument(
-        "--dry-run", action="store_true",
+        "--dry-run",
+        action="store_true",
         help="Show what would be done without writing files",
     )
     init_cmd.add_argument(
-        "--no-skills", action="store_true",
+        "--no-skills",
+        action="store_true",
         help="Skip generating Claude Code skill files",
     )
     init_cmd.add_argument(
-        "--no-hooks", action="store_true",
+        "--no-hooks",
+        action="store_true",
         help="Skip installing Claude Code hooks",
     )
     init_cmd.add_argument(
-        "--no-instructions", action="store_true",
+        "--no-instructions",
+        action="store_true",
         help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
     )
     init_cmd.add_argument(
-        "-y", "--yes", action="store_true",
+        "-y",
+        "--yes",
+        action="store_true",
         help="Auto-confirm instruction injection without an interactive prompt",
     )
     init_cmd.add_argument("--skills", action="store_true", help=argparse.SUPPRESS)
     init_cmd.add_argument("--hooks", action="store_true", help=argparse.SUPPRESS)
-    init_cmd.add_argument("--all", action="store_true", dest="install_all",
-                             help=argparse.SUPPRESS)
+    init_cmd.add_argument("--all", action="store_true", dest="install_all", help=argparse.SUPPRESS)
     init_cmd.add_argument(
         "--platform",
-        choices=[
-            "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-            "continue", "opencode", "antigravity", "qwen", "kiro",
-            "copilot", "copilot-cli", "all",
-        ],
+        choices=_PLATFORM_CHOICES,
         default="all",
         help="Target platform for MCP config (default: all detected)",
     )
@@ -345,11 +379,13 @@ def main() -> None:
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     build_cmd.add_argument(
-        "--skip-flows", action="store_true",
+        "--skip-flows",
+        action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
     )
     build_cmd.add_argument(
-        "--skip-postprocess", action="store_true",
+        "--skip-postprocess",
+        action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
 
@@ -358,11 +394,13 @@ def main() -> None:
     update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     update_cmd.add_argument(
-        "--skip-flows", action="store_true",
+        "--skip-flows",
+        action="store_true",
         help="Skip flow/community detection (signatures + FTS only)",
     )
     update_cmd.add_argument(
-        "--skip-postprocess", action="store_true",
+        "--skip-postprocess",
+        action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
 
@@ -394,7 +432,8 @@ def main() -> None:
         help="Rendering mode: auto (default), full, community, or file",
     )
     vis_cmd.add_argument(
-        "--serve", action="store_true",
+        "--serve",
+        action="store_true",
         help="Start a local HTTP server to view the visualization (localhost:8765)",
     )
     vis_cmd.add_argument(
@@ -408,7 +447,8 @@ def main() -> None:
     wiki_cmd = sub.add_parser("wiki", help="Generate markdown wiki from community structure")
     wiki_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     wiki_cmd.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Regenerate all pages even if content unchanged",
     )
 
@@ -431,9 +471,10 @@ def main() -> None:
     # eval
     eval_cmd = sub.add_parser("eval", help="Run evaluation benchmarks")
     eval_cmd.add_argument(
-        "--benchmark", default=None,
+        "--benchmark",
+        default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
-             "flow_completeness, search_quality, build_performance)",
+        "flow_completeness, search_quality, build_performance)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
@@ -442,17 +483,43 @@ def main() -> None:
 
     # detect-changes
     detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
-    detect_cmd.add_argument(
-        "--base", default="HEAD~1", help="Git diff base (default: HEAD~1)"
-    )
-    detect_cmd.add_argument(
-        "--brief", action="store_true", help="Show brief summary only"
-    )
+    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument("--brief", action="store_true", help="Show brief summary only")
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
 
     # serve
-    serve_cmd = sub.add_parser("serve", help="Start MCP server (stdio transport)")
+    serve_cmd = sub.add_parser(
+        "serve",
+        help="Start MCP server (stdio by default, or HTTP on localhost with --http)",
+    )
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    serve_cmd.add_argument(
+        "--tools", default=None,
+        help=(
+            "Comma-separated list of tool names to expose "
+            "(e.g. query_graph_tool,semantic_search_nodes_tool). "
+            "Unlisted tools are removed. Falls back to CRG_TOOLS env var. "
+            "When unset, all tools are available."
+        ),
+    )
+    serve_cmd.add_argument(
+        "--http",
+        action="store_true",
+        help="Listen for MCP over Streamable HTTP on localhost (default port 5555)",
+    )
+    serve_cmd.add_argument(
+        "--host",
+        default=None,
+        metavar="ADDR",
+        help="Bind address for --http (default: 127.0.0.1)",
+    )
+    serve_cmd.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Port for --http (default: 5555)",
+    )
 
     args = ap.parse_args()
 
@@ -466,7 +533,23 @@ def main() -> None:
 
     if args.command == "serve":
         from .main import main as serve_main
-        serve_main(repo_root=args.repo)
+
+        if args.port is not None and not args.http:
+            serve_cmd.error("--port requires --http")
+        if args.host is not None and not args.http:
+            serve_cmd.error("--host requires --http")
+        if args.http:
+            host = args.host if args.host is not None else "127.0.0.1"
+            port = args.port if args.port is not None else 5555
+            serve_main(
+                repo_root=args.repo,
+                transport="streamable-http",
+                host=host,
+                port=port,
+                tools=args.tools,
+            )
+        else:
+            serve_main(repo_root=args.repo, tools=args.tools)
         return
 
     if args.command == "eval":
@@ -474,9 +557,7 @@ def main() -> None:
         from .eval.runner import run_eval
 
         if getattr(args, "report", False):
-            output_dir = Path(
-                getattr(args, "output_dir", None) or "evaluate/results"
-            )
+            output_dir = Path(getattr(args, "output_dir", None) or "evaluate/results")
             report = generate_full_report(output_dir)
             report_path = Path("evaluate/reports/summary.md")
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -488,9 +569,7 @@ def main() -> None:
             print(tables)
         else:
             repos = (
-                [r.strip() for r in args.repo.split(",")]
-                if getattr(args, "repo", None)
-                else None
+                [r.strip() for r in args.repo.split(",")] if getattr(args, "repo", None) else None
             )
             benchmarks = (
                 [b.strip() for b in args.benchmark.split(",")]
@@ -562,6 +641,7 @@ def main() -> None:
         store = GraphStore(db_path)
         try:
             from .tools.build import run_postprocess
+
             result = run_postprocess(
                 flows=not getattr(args, "no_flows", False),
                 communities=not getattr(args, "no_communities", False),
@@ -598,32 +678,39 @@ def main() -> None:
 
     try:
         if args.command == "build":
-            pp = "none" if getattr(args, "skip_postprocess", False) else (
-                "minimal" if getattr(args, "skip_flows", False) else "full"
+            pp = (
+                "none"
+                if getattr(args, "skip_postprocess", False)
+                else ("minimal" if getattr(args, "skip_flows", False) else "full")
             )
             from .tools.build import build_or_update_graph
+
             result = build_or_update_graph(
-                full_rebuild=True, repo_root=str(repo_root), postprocess=pp,
+                full_rebuild=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
             )
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
-            print(
-                f"Full build: {parsed} files, "
-                f"{nodes} nodes, {edges} edges"
-                f" (postprocess={pp})"
-            )
+            print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
+            _cli_post_process(store)
 
         elif args.command == "update":
-            pp = "none" if getattr(args, "skip_postprocess", False) else (
-                "minimal" if getattr(args, "skip_flows", False) else "full"
+            pp = (
+                "none"
+                if getattr(args, "skip_postprocess", False)
+                else ("minimal" if getattr(args, "skip_flows", False) else "full")
             )
             from .tools.build import build_or_update_graph
+
             result = build_or_update_graph(
-                full_rebuild=False, repo_root=str(repo_root),
-                base=args.base, postprocess=pp,
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
             )
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
@@ -633,6 +720,8 @@ def main() -> None:
                 f"{nodes} nodes, {edges} edges"
                 f" (postprocess={pp})"
             )
+            if result.get("files_updated", 0) > 0:
+                _cli_post_process(store)
 
         elif args.command == "status":
             stats = store.get_stats()
@@ -648,45 +737,62 @@ def main() -> None:
                 print(f"Built on branch: {stored_branch}")
             if stored_sha:
                 print(f"Built at commit: {stored_sha[:12]}")
-            from .incremental import _git_branch_info
-            current_branch, current_sha = _git_branch_info(repo_root)
-            if stored_branch and current_branch and stored_branch != current_branch:
-                print(
-                    f"WARNING: Graph was built on '{stored_branch}' "
-                    f"but you are now on '{current_branch}'. "
-                    f"Run 'code-review-graph build' to rebuild."
-                )
+            from .incremental import _git_branch_info, detect_vcs
+            vcs = detect_vcs(repo_root)
+            if vcs == "git":
+                current_branch, current_sha = _git_branch_info(repo_root)
+                if stored_branch and current_branch and stored_branch != current_branch:
+                    print(
+                        f"WARNING: Graph was built on '{stored_branch}' "
+                        f"but you are now on '{current_branch}'. "
+                        f"Run 'code-review-graph build' to rebuild."
+                    )
+            elif vcs == "svn":
+                stored_rev = store.get_metadata("svn_revision")
+                stored_svn_branch = store.get_metadata("svn_branch")
+                if stored_svn_branch:
+                    print(f"SVN branch: {stored_svn_branch}")
+                if stored_rev:
+                    print(f"SVN revision at build: {stored_rev}")
 
         elif args.command == "watch":
-            watch(repo_root, store)
+            from .postprocessing import run_post_processing
+
+            watch(repo_root, store, on_files_updated=run_post_processing)
 
         elif args.command == "visualize":
             from .incremental import get_data_dir
+
             data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
             if fmt == "graphml":
                 from .exports import export_graphml
+
                 out = data_dir / "graph.graphml"
                 export_graphml(store, out)
                 print(f"GraphML exported: {out}")
             elif fmt == "cypher":
                 from .exports import export_neo4j_cypher
+
                 out = data_dir / "graph.cypher"
                 export_neo4j_cypher(store, out)
                 print(f"Neo4j Cypher exported: {out}")
             elif fmt == "obsidian":
                 from .exports import export_obsidian_vault
+
                 out = data_dir / "obsidian"
                 export_obsidian_vault(store, out)
                 print(f"Obsidian vault exported: {out}")
             elif fmt == "svg":
                 from .exports import export_svg
+
                 out = data_dir / "graph.svg"
                 export_svg(store, out)
                 print(f"SVG exported: {out}")
             else:
                 from .visualization import generate_html
+
                 html_path = data_dir / "graph.html"
                 vis_mode = getattr(args, "mode", "auto") or "auto"
                 generate_html(store, html_path, mode=vis_mode)
@@ -694,20 +800,16 @@ def main() -> None:
                 if getattr(args, "serve", False):
                     import functools
                     import http.server
+
                     serve_dir = html_path.parent
                     port = 8765
                     handler = functools.partial(
                         http.server.SimpleHTTPRequestHandler,
                         directory=str(serve_dir),
                     )
-                    print(
-                        f"Serving at http://localhost:{port}"
-                        f"/graph.html"
-                    )
+                    print(f"Serving at http://localhost:{port}/graph.html")
                     print("Press Ctrl+C to stop.")
-                    with http.server.HTTPServer(
-                        ("localhost", port), handler
-                    ) as httpd:
+                    with http.server.HTTPServer(("localhost", port), handler) as httpd:
                         try:
                             httpd.serve_forever()
                         except KeyboardInterrupt:
@@ -718,6 +820,7 @@ def main() -> None:
         elif args.command == "wiki":
             from .incremental import get_data_dir
             from .wiki import generate_wiki
+
             wiki_dir = get_data_dir(repo_root) / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]

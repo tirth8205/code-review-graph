@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **GDScript support** (Godot): `.gd` files are parsed via the `gdscript` tree-sitter grammar shipped with `tree-sitter-language-pack`. Extracts inner classes (`class Name:`), the file-level `class_name` identity, functions (including `static func`), `extends` parent class as an IMPORTS_FROM edge, direct calls (`call`) and method calls (`attribute_call`). Adds 10 tests and `tests/fixtures/sample.gd`.
+
 ## [2.3.2] - 2026-04-14
 
 Major feature release — 15 new capabilities, 6 community PRs merged, 6 new MCP tools, 4 new languages, multi-format export, and graph analysis suite.
@@ -158,6 +162,9 @@ Hotfix on top of 2.2.3 for two bugs surfaced by a full first-time-user smoke tes
 
 ### Changed
 - Community detection is now bounded — large repos complete in reasonable time instead of hanging indefinitely.
+
+### Fixed
+- **`install_hooks` now merges instead of overwriting** (PR #203, fixes #114): `install_hooks()` previously used `dict.update()` which clobbered any user-defined hooks in `.claude/settings.json`. Now merges new entries into existing hook arrays, preserving user hooks. Creates a backup (`settings.json.bak`) before modification.
 
 ## [2.2.2] - 2026-04-08
 

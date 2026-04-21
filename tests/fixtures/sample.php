@@ -41,3 +41,60 @@ function createUser(Repository $repo, string $name): User {
     $repo->save($user);
     return $user;
 }
+
+function sqlQuery(string $query): array {
+    return [];
+}
+
+function xl(string $value): string {
+    return $value;
+}
+
+function text(string $value): string {
+    return $value;
+}
+
+class SearchService {
+    public function search(string $term): array {
+        return [];
+    }
+}
+
+class QueryUtils {
+    public static function fetchRecords(): array {
+        return [];
+    }
+}
+
+class EncounterService {
+    public static function create(array $payload): bool {
+        return true;
+    }
+}
+
+class ExtendedRepo extends InMemoryRepo {
+    public function __construct() {
+        parent::__construct();
+    }
+
+    public static function factory(): self {
+        return new self();
+    }
+
+    private function execute(): void {
+        // no-op helper used for call extraction coverage
+    }
+
+    public function runQueries(?SearchService $service): void {
+        sqlQuery("SELECT 1");
+        xl("hello");
+        text("world");
+        $this->execute();
+        $service?->search("blood pressure");
+        QueryUtils::fetchRecords();
+        EncounterService::create([]);
+        parent::__construct();
+        self::factory();
+        \dirname("/tmp");
+    }
+}

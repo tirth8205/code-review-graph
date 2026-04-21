@@ -1,7 +1,9 @@
 """MCP server entry point for Code Review Graph.
 
 Run as: code-review-graph serve
-Communicates via stdio (standard MCP transport).
+Communicates via stdio (standard MCP transport), or use
+``code-review-graph serve --http`` for Streamable HTTP on localhost (port 5555
+by default).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from .tools import (
     get_suggested_questions_func,
     get_surprising_connections_func,
     get_wiki_page_func,
+    traverse_graph_func,
     list_communities_func,
     list_flows,
     list_graph_stats,
@@ -49,7 +52,6 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
-    traverse_graph_func,
 )
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
@@ -273,12 +275,16 @@ def semantic_search_nodes_tool(
     limit: int = 20,
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
     Uses vector embeddings for semantic search when available (run embed_graph_tool
-    first, requires sentence-transformers). Falls back to keyword matching otherwise.
+    first, with a provider of your choice: "local" needs sentence-transformers,
+    "openai" / "google" / "minimax" need their respective env vars). Falls back
+    to FTS5 / keyword matching when no matching embeddings exist for the given
+    provider.
 
     Args:
         query: Search string to match against node names.
@@ -286,13 +292,15 @@ def semantic_search_nodes_tool(
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
-               during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var,
-               then all-MiniLM-L6-v2.
+               during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var
+               (local) or CRG_OPENAI_MODEL (openai).
+        provider: Embedding provider: "local" (default), "openai", "google",
+                  or "minimax". Must match the provider used during embed_graph.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     return semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root), model=model,
-        detail_level=detail_level,
+        query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root),
+        model=model, provider=provider, detail_level=detail_level,
     )
 
 
@@ -300,31 +308,41 @@ def semantic_search_nodes_tool(
 async def embed_graph_tool(
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
-    Requires: pip install code-review-graph[embeddings]
-    Default model: all-MiniLM-L6-v2. Override via `model` param or
-    CRG_EMBEDDING_MODEL env var (any sentence-transformers compatible model).
-    Changing the model re-embeds all nodes automatically.
+    Requires: pip install code-review-graph[embeddings] (local provider only;
+    cloud providers use stdlib urllib).
+    Default provider: local. Default model: all-MiniLM-L6-v2.
+    Override provider via `provider` param, model via `model` param or
+    CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL env vars.
+    Changing the model or provider re-embeds all nodes automatically.
 
     After running this, semantic_search_nodes_tool will use vector similarity
     instead of keyword matching for much better results.
 
-    Runs the blocking sentence-transformers / Gemini inference in a
+    Runs the blocking sentence-transformers / Gemini / HTTP inference in a
     thread via ``asyncio.to_thread`` so the stdio event loop stays
     responsive — without this wrapper, embedding a large graph would
     silently hang the MCP server on Windows. See: #46, #136.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
-        model: Embedding model name (HuggingFace ID or local path).
-               Falls back to CRG_EMBEDDING_MODEL env var, then all-MiniLM-L6-v2.
+        model: Embedding model. For local: HuggingFace ID/path; for openai:
+               model ID (e.g. "text-embedding-3-small"); for google: Gemini
+               model ID. Falls back to CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL
+               env vars as appropriate.
+        provider: "local" (default), "openai", "google", or "minimax".
+                  "openai" requires CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY +
+                  CRG_OPENAI_MODEL env vars and accepts any OpenAI-compatible
+                  endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, etc.).
     """
     return await asyncio.to_thread(
         embed_graph,
         repo_root=_resolve_repo_root(repo_root),
         model=model,
+        provider=provider,
     )
 
 
@@ -346,6 +364,7 @@ def list_graph_stats_tool(
 @mcp.tool()
 def get_docs_section_tool(
     section_name: str,
+    repo_root: Optional[str] = None,
 ) -> dict:
     """Get a specific section from the LLM-optimized documentation reference.
 
@@ -357,8 +376,9 @@ def get_docs_section_tool(
 
     Args:
         section_name: The section to retrieve (e.g. "review-delta", "usage").
+        repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_docs_section(section_name=section_name, repo_root=_default_repo_root)
+    return get_docs_section(section_name=section_name, repo_root=repo_root)
 
 
 @mcp.tool()
@@ -888,8 +908,56 @@ def pre_merge_check(base: str = "HEAD~1") -> list[dict]:
     return pre_merge_check_prompt(base=base)
 
 
-def main(repo_root: str | None = None) -> None:
-    """Run the MCP server via stdio.
+def _apply_tool_filter(tools: str | None = None) -> None:
+    """Remove tools not listed in the allow-list.
+
+    Accepts a comma-separated string of tool names to keep.  When set,
+    every registered MCP tool whose name is **not** in the list is
+    removed via ``FastMCP.remove_tool()``.
+
+    The allow-list can be supplied in two ways (first match wins):
+
+    1. ``tools`` argument (from ``serve --tools ...``).
+    2. ``CRG_TOOLS`` environment variable.
+
+    When neither is set, all tools remain available.
+
+    This is useful for token-constrained environments: CRG exposes 28+
+    tools by default (~8k description tokens per LLM turn).  Filtering
+    to a working set of 5-10 tools can reduce overhead by 70-85%.
+
+    Example::
+
+        # via CLI
+        code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool
+
+        # via env var
+        CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool
+    """
+    import os
+
+    raw = tools or os.environ.get("CRG_TOOLS")
+    if not raw:
+        return
+    allowed = {t.strip() for t in raw.split(",") if t.strip()}
+    if not allowed:
+        return
+    registered = list(mcp._tool_manager._tools.keys())
+    for name in registered:
+        if name not in allowed:
+            mcp.remove_tool(name)
+
+
+
+def main(
+    repo_root: str | None = None,
+    tools: str | None = None,
+    *,
+    transport: str = "stdio",
+    host: str | None = None,
+    port: int | None = None,
+) -> None:
+    """Run the MCP server (stdio or HTTP).
 
     On Windows, Python 3.8+ defaults to ``ProactorEventLoop``, which
     interacts poorly with ``concurrent.futures.ProcessPoolExecutor``
@@ -898,13 +966,32 @@ def main(repo_root: str | None = None) -> None:
     ``embed_graph_tool``. Switching to ``WindowsSelectorEventLoopPolicy``
     before fastmcp starts its loop avoids the deadlock.
     See: #46, #136
+
+    Args:
+        repo_root: Default repository root for all tool calls.
+        tools: Comma-separated list of tool names to expose.
+            Falls back to ``CRG_TOOLS`` env var.  When unset, all
+            tools are available.
+        transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
+        host: Bind address when using HTTP (required for HTTP; set by CLI).
+        port: Port when using HTTP (required for HTTP; set by CLI).
     """
     global _default_repo_root
     _default_repo_root = repo_root
+    _apply_tool_filter(tools)
     if sys.platform == "win32":
         import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    mcp.run(transport="stdio")
+    if transport == "stdio":
+        # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
+        # notices corrupt the handshake stream on clients like Codex CLI.
+        mcp.run(transport="stdio", show_banner=False)
+    elif transport == "streamable-http":
+        if host is None or port is None:
+            raise ValueError("streamable-http transport requires host and port")
+        mcp.run(transport="streamable-http", host=host, port=port)
+    else:
+        raise ValueError(f"unsupported transport: {transport!r}")
 
 
 if __name__ == "__main__":

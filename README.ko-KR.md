@@ -135,7 +135,7 @@ git 커밋이나 파일 저장마다 훅이 실행됩니다. 그래프는 변경
 | **23개 언어 + 노트북** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **영향 범위 분석** | 변경에 의해 영향 받는 함수, 클래스, 파일을 정확히 보여줍니다 |
 | **자동 업데이트 훅** | 수동 개입 없이 파일 편집 및 git 커밋마다 그래프가 업데이트됩니다 |
-| **시맨틱 검색** | sentence-transformers, Google Gemini, MiniMax를 통한 선택적 벡터 임베딩 |
+| **시맨틱 검색** | sentence-transformers, Google Gemini, MiniMax, 또는 OpenAI 호환 엔드포인트(실제 OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI)를 통한 선택적 벡터 임베딩 |
 | **인터랙티브 시각화** | 검색, 커뮤니티 범례 토글, 차수 기반 노드 크기 조정이 가능한 D3.js 포스 다이렉티드 그래프 |
 | **허브 및 브릿지 감지** | 가장 많이 연결된 노드와 매개 중심성을 통한 아키텍처 병목 지점 탐색 |
 | **서프라이즈 스코어링** | 예상치 못한 결합 감지: 커뮤니티 간, 언어 간, 주변부-허브 엣지 |
@@ -271,6 +271,24 @@ pip install code-review-graph[eval]                # 평가 벤치마크 (matplo
 pip install code-review-graph[wiki]                # LLM 요약 위키 생성 (ollama)
 pip install code-review-graph[all]                 # 모든 선택적 의존성
 ```
+
+OpenAI 호환 임베딩(실제 OpenAI, Azure, 또는 자체 호스팅 게이트웨이 new-api / LiteLLM / vLLM / LocalAI / Ollama openai 모드)은 추가 설치가 필요하지 않습니다. 환경 변수만 설정하고 `embed_graph`에 `provider="openai"`를 전달하면 됩니다:
+
+```bash
+export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # 또는 https://api.openai.com/v1
+export CRG_OPENAI_API_KEY=sk-...
+export CRG_OPENAI_MODEL=text-embedding-3-small          # 게이트웨이에서 제공하는 모델
+# 선택:
+export CRG_OPENAI_DIMENSION=1536                        # 차원 고정 (v3 모델은 차원 축소 지원)
+export CRG_OPENAI_BATCH_SIZE=100                        # 배치 제한이 엄격한 게이트웨이에서 낮추기
+                                                        # (예: Qwen text-embedding-v4 는 최대 10)
+```
+
+base URL이 localhost(`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`)를 가리킬 때는 클라우드 egress 경고가 자동으로 생략됩니다.
+
+> **모델 선택 팁.** `-preview` / `-beta` / `-exp` 접미사가 붙은 model ID(예: `google/gemini-embedding-2-preview`)는 장기 운영용으로 피하세요. preview 모델은 가중치가 바뀌거나(차원 변경 시 전체 re-embed 필수) 예고 없이 deprecate될 수 있습니다. 안정 GA 모델 권장: `text-embedding-3-small` / `text-embedding-3-large`(OpenAI), `Qwen/Qwen3-Embedding-8B`(vLLM / LocalAI 자체 호스팅 경유), 또는 `gemini-embedding-001`(네이티브 Gemini provider 경유, `GOOGLE_API_KEY` 필요).
+>
+> 참고로 현재 `code-review-graph`는 **함수 시그니처만** 임베딩합니다(노드당 약 10 토큰, 예: `"parse_file function (path: str) returns Tree"`). 긴 context로 함수 body를 이해하는 능력으로 차별화되는 모델(Gemini 2 또는 Qwen3-8B의 MTEB-code SOTA 점수)은 이 입력 길이에서 소형 모델과의 품질 차이가 훨씬 좁아집니다. Body / docstring 임베딩은 후속 개선 과제로 추적 중입니다.
 
 </details>
 

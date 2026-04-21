@@ -15,7 +15,7 @@ from collections import deque
 from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
-from .graph import GraphNode, GraphStore, _sanitize_name
+from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
 
@@ -161,8 +161,11 @@ def detect_entry_points(
     When *include_tests* is False (the default), Test nodes are excluded so
     that flow analysis focuses on production entry points.
     """
-    # Build a set of all qualified names that are CALLS targets.
-    called_qnames = store.get_all_call_targets()
+    # Build a set of all qualified names that are CALLS targets. Exclude
+    # edges sourced at File nodes so that script-/notebook-/top-level-only
+    # callees (e.g. ``run_job()`` invoked from module scope, a top-level
+    # ``<App />`` render) remain detectable as entry points.
+    called_qnames = store.get_all_call_targets(include_file_sources=False)
 
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
@@ -201,7 +204,7 @@ def detect_entry_points(
 
 
 def _trace_single_flow(
-    store: GraphStore,
+    adj: FlowAdjacency,
     ep: GraphNode,
     max_depth: int = 15,
 ) -> Optional[dict]:
@@ -210,18 +213,14 @@ def _trace_single_flow(
     Returns a flow dict (see :func:`trace_flows` for the schema) or ``None``
     if the flow is trivial (single-node, no outgoing CALLS that resolve).
     """
-    path_ids: list[int] = []
-    path_qnames: list[str] = []
-    visited: set[str] = set()
-    queue: deque[tuple[str, int]] = deque()
-
-    # Seed with the entry point itself.
-    queue.append((ep.qualified_name, 0))
-    visited.add(ep.qualified_name)
-    path_ids.append(ep.id)
-    path_qnames.append(ep.qualified_name)
+    path_ids: list[int] = [ep.id]
+    path_qnames: list[str] = [ep.qualified_name]
+    visited: set[str] = {ep.qualified_name}
+    queue: deque[tuple[str, int]] = deque([(ep.qualified_name, 0)])
 
     actual_depth = 0
+    nodes_by_qn = adj.nodes_by_qn
+    calls_out = adj.calls_out
 
     while queue:
         current_qn, depth = queue.popleft()
@@ -230,16 +229,10 @@ def _trace_single_flow(
         if depth >= max_depth:
             continue
 
-        # Follow forward CALLS edges.
-        edges = store.get_edges_by_source(current_qn)
-        for edge in edges:
-            if edge.kind != "CALLS":
-                continue
-            target_qn = edge.target_qualified
+        for target_qn in calls_out.get(current_qn, ()):
             if target_qn in visited:
                 continue
-            # Resolve the target node to get its id.
-            target_node = store.get_node(target_qn)
+            target_node = nodes_by_qn.get(target_qn)
             if target_node is None:
                 continue
             visited.add(target_qn)
@@ -254,7 +247,7 @@ def _trace_single_flow(
     files = list({
         n.file_path
         for qn in path_qnames
-        if (n := store.get_node(qn)) is not None
+        if (n := nodes_by_qn.get(qn)) is not None
     })
 
     flow: dict = {
@@ -268,7 +261,7 @@ def _trace_single_flow(
         "files": files,
         "criticality": 0.0,
     }
-    flow["criticality"] = compute_criticality(flow, store)
+    flow["criticality"] = compute_criticality(flow, adj)
     return flow
 
 
@@ -291,10 +284,14 @@ def trace_flows(
       - criticality: computed criticality score (0.0-1.0)
     """
     entry_points = detect_entry_points(store, include_tests=include_tests)
+    if not entry_points:
+        return []
+
+    adj = store.load_flow_adjacency()
     flows: list[dict] = []
 
     for ep in entry_points:
-        flow = _trace_single_flow(store, ep, max_depth)
+        flow = _trace_single_flow(adj, ep, max_depth)
         if flow is not None:
             flows.append(flow)
 
@@ -308,7 +305,7 @@ def trace_flows(
 # ---------------------------------------------------------------------------
 
 
-def compute_criticality(flow: dict, store: GraphStore) -> float:
+def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     """Score a flow from 0.0 to 1.0 based on multiple weighted factors.
 
     Weights:
@@ -322,13 +319,14 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     if not node_ids:
         return 0.0
 
-    # Resolve nodes once.
-    nodes: list[GraphNode] = []
-    for nid in node_ids:
-        n = store.get_node_by_id(nid)
-        if n:
-            nodes.append(n)
+    nodes_by_id = adj.nodes_by_id
+    nodes_by_qn = adj.nodes_by_qn
+    calls_out = adj.calls_out
+    has_tested_by = adj.has_tested_by
 
+    nodes: list[GraphNode] = [
+        n for nid in node_ids if (n := nodes_by_id.get(nid)) is not None
+    ]
     if not nodes:
         return 0.0
 
@@ -341,9 +339,8 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     # Calls that target nodes NOT in the graph are considered external.
     external_count = 0
     for n in nodes:
-        edges = store.get_edges_by_source(n.qualified_name)
-        for e in edges:
-            if e.kind == "CALLS" and store.get_node(e.target_qualified) is None:
+        for target_qn in calls_out.get(n.qualified_name, ()):
+            if target_qn not in nodes_by_qn:
                 external_count += 1
     # Normalize: 0 => 0.0, 5+ => 1.0
     external_score = min(external_count / 5.0, 1.0)
@@ -360,13 +357,7 @@ def compute_criticality(flow: dict, store: GraphStore) -> float:
     security_score = min(security_hits / max(len(nodes), 1), 1.0)
 
     # --- Test coverage gap (0.0 - 1.0) ---
-    tested_count = 0
-    for n in nodes:
-        tested_edges = store.get_edges_by_target(n.qualified_name)
-        for te in tested_edges:
-            if te.kind == "TESTED_BY":
-                tested_count += 1
-                break
+    tested_count = sum(1 for n in nodes if n.qualified_name in has_tested_by)
     coverage = tested_count / max(len(nodes), 1)
     test_gap = 1.0 - coverage
 
@@ -401,6 +392,9 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
     # tightly coupled to the DB transaction lifecycle.
     conn = store._conn
 
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     # Wrap the full DELETE + INSERT sequence in an explicit transaction
     # so partial writes cannot occur if an exception interrupts the loop.
     conn.execute("BEGIN IMMEDIATE")
@@ -496,10 +490,22 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     # 3. Delete affected flows and their memberships
     # ------------------------------------------------------------------
-    for fid in affected_ids:
-        conn.execute("DELETE FROM flow_memberships WHERE flow_id = ?", (fid,))
-        conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
-    conn.commit()
+    # Wrap in an explicit transaction so a crash mid-loop cannot leave
+    # orphaned flow_memberships rows pointing at deleted flows.  See #258.
+    if affected_ids:
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for fid in affected_ids:
+                conn.execute(
+                    "DELETE FROM flow_memberships WHERE flow_id = ?", (fid,),
+                )
+                conn.execute("DELETE FROM flows WHERE id = ?", (fid,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
 
     # ------------------------------------------------------------------
     # 4. Re-detect entry points and filter to relevant ones
@@ -514,10 +520,12 @@ def incremental_trace_flows(
     # 5. BFS-trace each relevant entry point
     # ------------------------------------------------------------------
     new_flows: list[dict] = []
-    for ep in relevant_eps:
-        flow = _trace_single_flow(store, ep, max_depth)
-        if flow is not None:
-            new_flows.append(flow)
+    if relevant_eps:
+        adj = store.load_flow_adjacency()
+        for ep in relevant_eps:
+            flow = _trace_single_flow(adj, ep, max_depth)
+            if flow is not None:
+                new_flows.append(flow)
 
     # ------------------------------------------------------------------
     # 6. INSERT new flows without clearing unrelated ones

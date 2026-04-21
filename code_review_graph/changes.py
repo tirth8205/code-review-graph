@@ -1,6 +1,6 @@
 """Change impact analysis for code review.
 
-Maps git diffs to affected functions, flows, communities, and test coverage
+Maps git/svn diffs to affected functions, flows, communities, and test coverage
 gaps. Produces risk-scored, priority-ordered review guidance.
 """
 
@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
@@ -21,10 +22,11 @@ logger = logging.getLogger(__name__)
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
+_SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
-# 1. parse_git_diff_ranges
+# 1. parse_git_diff_ranges / parse_svn_diff_ranges
 # ---------------------------------------------------------------------------
 
 
@@ -63,6 +65,70 @@ def parse_git_diff_ranges(
         return {}
 
     return _parse_unified_diff(result.stdout)
+
+
+def parse_svn_diff_ranges(
+    repo_root: str,
+    rev_range: str | None = None,
+) -> dict[str, list[tuple[int, int]]]:
+    """Run ``svn diff`` and extract changed line ranges per file.
+
+    Args:
+        repo_root: Absolute path to the SVN working copy root.
+        rev_range: Optional SVN revision range in ``rXXX:HEAD`` format.
+            When *None*, diffs the working copy against BASE (local changes).
+
+    Returns:
+        Mapping of file paths to lists of ``(start_line, end_line)`` tuples.
+        Returns an empty dict on error.
+    """
+    cmd = ["svn", "diff", "--non-interactive"]
+    if rev_range:
+        if not _SAFE_SVN_REV.match(rev_range):
+            logger.warning("Invalid SVN revision range rejected: %s", rev_range)
+            return {}
+        cmd.extend(["-r", rev_range])
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=repo_root,
+            timeout=_GIT_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning("svn diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return {}
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("svn diff error: %s", exc)
+        return {}
+
+    return _parse_unified_diff(result.stdout)
+
+
+def parse_diff_ranges(
+    repo_root: str,
+    base: str = "HEAD~1",
+) -> dict[str, list[tuple[int, int]]]:
+    """Auto-detect VCS and return changed line ranges per file.
+
+    Dispatches to :func:`parse_git_diff_ranges` for Git repositories and
+    :func:`parse_svn_diff_ranges` for SVN working copies.
+
+    Args:
+        repo_root: Absolute path to the repository/working-copy root.
+        base: For Git: the ref to diff against (default ``HEAD~1``).
+              For SVN: an optional revision range (e.g. ``"r100:HEAD"``);
+              when *base* is not a valid SVN revision, working-copy changes
+              (``svn diff``) are used instead.
+    """
+    root_path = Path(repo_root)
+    if (root_path / ".svn").exists():
+        rev_range = base if _SAFE_SVN_REV.match(base) else None
+        return parse_svn_diff_ranges(repo_root, rev_range)
+    return parse_git_diff_ranges(repo_root, base)
 
 
 def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
@@ -219,9 +285,10 @@ def analyze_changes(
         store: The graph store.
         changed_files: List of changed file paths.
         changed_ranges: Optional pre-parsed diff ranges. If not provided and
-            ``repo_root`` is given, they are computed via git.
-        repo_root: Repository root (for git diff).
-        base: Git ref to diff against.
+            ``repo_root`` is given, they are computed via the detected VCS
+            (Git or SVN).
+        repo_root: Repository root (for git/svn diff).
+        base: Git ref or SVN revision range to diff against.
 
     Returns:
         Dict with ``summary``, ``risk_score``, ``changed_functions``,
@@ -229,7 +296,7 @@ def analyze_changes(
     """
     # Compute changed ranges if not provided.
     if changed_ranges is None and repo_root is not None:
-        changed_ranges = parse_git_diff_ranges(repo_root, base)
+        changed_ranges = parse_diff_ranges(repo_root, base)
 
     # Map changes to nodes.
     if changed_ranges:

@@ -34,7 +34,9 @@ Exposes 27 tools:
 from __future__ import annotations
 
 # Re-export names that external code may patch via "code_review_graph.tools.*"
+from ..changes import parse_diff_ranges as parse_diff_ranges
 from ..changes import parse_git_diff_ranges as parse_git_diff_ranges
+from ..changes import parse_svn_diff_ranges as parse_svn_diff_ranges
 from ..incremental import (
     get_changed_files as get_changed_files,
 )
@@ -149,4 +151,6 @@ __all__ = [
     "get_changed_files",
     "get_staged_and_unstaged",
     "parse_git_diff_ranges",
+    "parse_svn_diff_ranges",
+    "parse_diff_ranges",
 ]

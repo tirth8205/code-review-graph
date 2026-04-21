@@ -16,6 +16,10 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
+    _build_server_entry,
+    _detect_serve_command,
+    _in_poetry_project,
+    _in_uv_project,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
@@ -97,11 +101,11 @@ class TestGenerateSkills:
 
 class TestGenerateHooksConfig:
     def test_returns_dict_with_hooks(self):
-        config = generate_hooks_config()
+        config = generate_hooks_config(Path("/repo"))
         assert "hooks" in config
 
     def test_has_post_tool_use(self):
-        config = generate_hooks_config()
+        config = generate_hooks_config(Path("/repo"))
         assert "PostToolUse" in config["hooks"]
         entry = config["hooks"]["PostToolUse"][0]
         assert entry["matcher"] == "Edit|Write|Bash"
@@ -111,7 +115,7 @@ class TestGenerateHooksConfig:
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
-        config = generate_hooks_config()
+        config = generate_hooks_config(Path("/repo"))
         assert "SessionStart" in config["hooks"]
         entry = config["hooks"]["SessionStart"][0]
         assert "matcher" in entry
@@ -120,16 +124,60 @@ class TestGenerateHooksConfig:
         assert "status" in inner["command"]
         assert 0 < inner["timeout"] <= 600
 
-    def test_no_pre_commit(self):
-        config = generate_hooks_config()
+    def test_does_not_emit_invalid_pre_commit_hook(self):
+        config = generate_hooks_config(Path("/repo"))
         assert "PreCommit" not in config["hooks"]
 
+    def test_has_only_valid_hook_types(self):
+        config = generate_hooks_config(Path("/repo"))
+        hook_types = set(config["hooks"].keys())
+        assert hook_types == {"PostToolUse", "SessionStart"}
+
     def test_hook_entries_use_nested_hooks_array(self):
-        config = generate_hooks_config()
+        config = generate_hooks_config(Path("/repo"))
         for hook_type, entries in config["hooks"].items():
             for entry in entries:
                 assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
                 assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
+
+    def test_repo_root_embedded_in_commands(self):
+        config = generate_hooks_config(Path("/my/project"))
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "/my/project" in post_cmd
+        assert "/my/project" in session_cmd
+
+    def test_quotes_repo_paths_with_spaces(self):
+        config = generate_hooks_config(Path("/repo with spaces"))
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
+
+    def test_entries_use_claude_code_hook_schema(self):
+        """Regression guard for the Claude Code hook schema.
+
+        Claude Code rejects entries that put ``command`` directly on the
+        event entry. Each entry must wrap its command(s) in a
+        ``hooks: [{"type": "command", "command": ..., "timeout": ...}]``
+        array — missing that wrapper causes the entire settings.json to
+        fail to parse ("Expected array, but received undefined").
+        """
+        config = generate_hooks_config(Path("/repo"))
+        for event_name, entries in config["hooks"].items():
+            for entry in entries:
+                assert "command" not in entry, (
+                    f"{event_name} entry has a flat `command` field; "
+                    "it must be wrapped in an inner `hooks` array"
+                )
+                assert "hooks" in entry, (
+                    f"{event_name} entry is missing the inner `hooks` array"
+                )
+                assert isinstance(entry["hooks"], list)
+                for hook in entry["hooks"]:
+                    assert hook.get("type") == "command", (
+                        f"{event_name} inner hook missing type=\"command\""
+                    )
+                    assert "command" in hook
+                    assert "timeout" in hook
 
 
 class TestInstallGitHook:
@@ -184,13 +232,49 @@ class TestInstallHooks:
 
         data = json.loads((settings_dir / "settings.json").read_text())
         assert data["customSetting"] is True
+        assert "OtherHook" in data["hooks"]
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
         assert "PreCommit" not in data["hooks"]
+        assert "OtherHook" in data["hooks"]  # pre-existing hooks must not be clobbered
+
+    def test_creates_settings_backup(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        existing = {"hooks": {"OtherHook": []}}
+        (settings_dir / "settings.json").write_text(json.dumps(existing))
+
+        install_hooks(tmp_path)
+
+        backup_path = settings_dir / "settings.json.bak"
+        assert backup_path.exists()
+        backup = json.loads(backup_path.read_text())
+        assert backup == existing
 
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
+
+    def test_install_qoder_hooks(self, tmp_path):
+        install_hooks(tmp_path, platform="qoder")
+        settings_path = tmp_path / ".qoder" / "settings.json"
+        assert settings_path.exists()
+        data = json.loads(settings_path.read_text())
+        assert "hooks" in data
+        assert "PostToolUse" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
+
+    def test_install_qoder_hooks_merges_existing(self, tmp_path):
+        settings_dir = tmp_path / ".qoder"
+        settings_dir.mkdir(parents=True)
+        existing = {"customSetting": True}
+        (settings_dir / "settings.json").write_text(json.dumps(existing))
+
+        install_hooks(tmp_path, platform="qoder")
+
+        data = json.loads((settings_dir / "settings.json").read_text())
+        assert data["customSetting"] is True
+        assert "hooks" in data
 
 
 class TestInjectClaudeMd:
@@ -239,11 +323,11 @@ class TestInjectClaudeMd:
 class TestInjectPlatformInstructionsFiltering:
     def test_all_writes_every_file(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="all")
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
 
     def test_default_is_all(self, tmp_path):
         updated = inject_platform_instructions(tmp_path)
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
 
     def test_claude_writes_nothing(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="claude")
@@ -252,12 +336,14 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / "GEMINI.md").exists()
         assert not (tmp_path / ".cursorrules").exists()
         assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
 
     def test_cursor_writes_only_cursor_files(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="cursor")
         assert set(updated) == {"AGENTS.md", ".cursorrules"}
         assert not (tmp_path / "GEMINI.md").exists()
         assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
 
     def test_windsurf_writes_only_windsurfrules(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="windsurf")
@@ -270,6 +356,14 @@ class TestInjectPlatformInstructionsFiltering:
     def test_opencode_writes_only_agents(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="opencode")
         assert updated == ["AGENTS.md"]
+
+    def test_qoder_writes_only_qoder_md(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="qoder")
+        assert updated == ["QODER.md"]
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
 
 
 class TestInstallPlatformConfigs:
@@ -291,7 +385,7 @@ class TestInstallPlatformConfigs:
         data = tomllib.loads(codex_config.read_text())
         entry = data["mcp_servers"]["code-review-graph"]
         assert entry["type"] == "stdio"
-        assert entry["args"] == ["code-review-graph", "serve"] or entry["args"] == ["serve"]
+        assert "serve" in entry["args"]
 
     @_needs_tomllib
     def test_install_codex_preserves_existing_toml(self, tmp_path):
@@ -315,10 +409,8 @@ class TestInstallPlatformConfigs:
         data = tomllib.loads(codex_config.read_text())
         assert data["model"] == "gpt-5.4"
         assert data["mcp_servers"]["other"]["command"] == "other"
-        assert data["mcp_servers"]["code-review-graph"]["command"] in {
-            "uvx",
-            "code-review-graph",
-        }
+        expected_cmd, _ = _detect_serve_command()
+        assert data["mcp_servers"]["code-review-graph"]["command"] == expected_cmd
 
     def test_install_codex_no_duplicate(self, tmp_path):
         codex_config = tmp_path / ".codex" / "config.toml"
@@ -382,9 +474,7 @@ class TestInstallPlatformConfigs:
         data = json.loads(config_path.read_text())
         entry = data["mcpServers"]["code-review-graph"]
         assert "type" not in entry
-        import shutil
-
-        expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
+        expected_cmd, _ = _detect_serve_command()
         assert entry["command"] == expected_cmd
 
     def test_install_zed_config(self, tmp_path):
@@ -550,6 +640,28 @@ class TestInstallPlatformConfigs:
             install_platform_configs(tmp_path, target="continue")
         data = json.loads(config_path.read_text())
         assert len(data["mcpServers"]) == 1
+
+    def test_install_qoder_config(self, tmp_path):
+        qoder_config = tmp_path / ".qoder" / "mcp.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "qoder": {
+                    **PLATFORMS["qoder"],
+                    "config_path": lambda root: qoder_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="qoder")
+        assert "Qoder" in configured
+        data = json.loads(qoder_config.read_text())
+        assert "mcpServers" in data
+        assert "code-review-graph" in data["mcpServers"]
+        assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
+        import shutil
+        expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
+        assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
 
 
 class TestInstallCopilotConfigs:
@@ -871,3 +983,156 @@ class TestKiroPlatform:
         assert "Kiro" in configured
         config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
         assert not config_path.exists()
+
+
+class TestDetectServeCommand:
+    """Tests for _detect_serve_command() and its helpers."""
+
+    # ------------------------------------------------------------------
+    # _in_poetry_project() unit tests
+    # ------------------------------------------------------------------
+
+    def test_in_poetry_project_via_poetry_active(self, monkeypatch):
+        """POETRY_ACTIVE=1 signals a poetry shell session."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        assert _in_poetry_project() is True
+
+    def test_in_poetry_project_via_virtual_env(self, monkeypatch):
+        """VIRTUAL_ENV containing 'pypoetry' signals a poetry run session."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/.cache/pypoetry/virtualenvs/proj-xxx")
+        assert _in_poetry_project() is True
+
+    def test_in_poetry_project_false_for_plain_venv(self, monkeypatch):
+        """A plain venv (no pypoetry in path) is not treated as poetry."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/myproject/.venv")
+        assert _in_poetry_project() is False
+
+    def test_in_poetry_project_false_when_nothing_set(self, monkeypatch):
+        """No env vars → not in a poetry project."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        assert _in_poetry_project() is False
+
+    # ------------------------------------------------------------------
+    # _detect_serve_command() integration tests
+    # ------------------------------------------------------------------
+
+    def test_poetry_active_returns_poetry_run(self, monkeypatch):
+        """POETRY_ACTIVE=1 (poetry shell) → 'poetry run' invocation."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "poetry"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_virtual_env_pypoetry_returns_poetry_run(self, monkeypatch):
+        """VIRTUAL_ENV with 'pypoetry' (poetry run) → 'poetry run' invocation."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", "/home/user/.cache/pypoetry/virtualenvs/proj-abc123")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "poetry"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_poetry_env_without_poetry_on_path_falls_through(self, monkeypatch):
+        """If poetry venv is detected but poetry binary is missing, fall through."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        # poetry not on PATH → should fall through to uvx
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uvx" if x == "uvx" else None,
+        )
+        cmd, _ = _detect_serve_command()
+        assert cmd == "uvx"
+
+    def test_uv_project_env_returns_uv_run(self, monkeypatch):
+        """UV_PROJECT_ENVIRONMENT set + uv on PATH → 'uv run' invocation."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/some/.venv")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uv" if x == "uv" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "uv"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_uv_lock_detection_returns_uv_run(self, monkeypatch, tmp_path):
+        """uv.lock alongside sys.executable → detected as a uv project."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        (tmp_path / "uv.lock").write_text("")
+        fake_python = venv / "python"
+        fake_python.write_text("")
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uv" if x == "uv" else None,
+        )
+        assert _in_uv_project() is True
+        cmd, args = _detect_serve_command()
+        assert cmd == "uv"
+        assert args == ["run", "code-review-graph", "serve"]
+
+    def test_uvx_fallback(self, monkeypatch):
+        """Not in Poetry/uv but uvx available → use uvx (original behaviour)."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/uvx" if x == "uvx" else None,
+        )
+        cmd, args = _detect_serve_command()
+        assert cmd == "uvx"
+        assert args == ["code-review-graph", "serve"]
+
+    def test_sys_executable_fallback(self, monkeypatch):
+        """Nothing else available → fall back to sys.executable -m."""
+        monkeypatch.delenv("POETRY_ACTIVE", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
+        monkeypatch.setattr("code_review_graph.skills._in_uv_project", lambda: False)
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda _: None)
+        cmd, args = _detect_serve_command()
+        assert cmd == sys.executable
+        assert args == ["-m", "code_review_graph", "serve"]
+
+    def test_poetry_takes_priority_over_uv(self, monkeypatch):
+        """Poetry detection wins even when UV_PROJECT_ENVIRONMENT is also set."""
+        monkeypatch.setenv("POETRY_ACTIVE", "1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "/some/.venv")
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda x: "/usr/bin/poetry" if x == "poetry" else None,
+        )
+        cmd, _ = _detect_serve_command()
+        assert cmd == "poetry"
+
+    def test_in_uv_project_false_without_lockfile(self, monkeypatch, tmp_path):
+        """_in_uv_project returns False when no uv.lock in ancestor dirs."""
+        fake_python = tmp_path / "bin" / "python"
+        fake_python.parent.mkdir(parents=True)
+        fake_python.write_text("")
+        monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
+        monkeypatch.setattr("code_review_graph.skills.Path.home", staticmethod(lambda: tmp_path))
+        assert _in_uv_project() is False

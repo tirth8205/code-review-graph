@@ -43,6 +43,10 @@ code-review-graph-vscode/dist/
 .claude/
 .claude-plugin/
 
+# Qoder
+.qoder/
+QODER.md
+
 # Coverage
 htmlcov/
 .coverage

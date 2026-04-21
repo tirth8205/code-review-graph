@@ -15,16 +15,26 @@ import re
 import subprocess
 import time
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Callable, Optional
 
 from .graph import GraphStore
 from .parser import CodeParser
 
-_MAX_PARSE_WORKERS = int(os.environ.get(
-    "CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))
-))
+_MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
 
 logger = logging.getLogger(__name__)
+
+
+def _run_rescript_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the ReScript cross-module resolver, swallowing any failure so
+    build never fails because of it. Returns stats or None on error.
+    """
+    try:
+        from .rescript_resolver import resolve_rescript_cross_module
+        return resolve_rescript_cross_module(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("ReScript cross-module resolver failed: %s", exc)
+        return None
 
 # Default ignore patterns (in addition to .gitignore).
 #
@@ -35,6 +45,7 @@ DEFAULT_IGNORE_PATTERNS = [
     ".code-review-graph/**",
     "node_modules/**",
     ".git/**",
+    ".svn/**",
     "__pycache__/**",
     "*.pyc",
     ".venv/**",
@@ -71,19 +82,72 @@ DEFAULT_IGNORE_PATTERNS = [
 ]
 
 
-def find_repo_root(start: Path | None = None) -> Optional[Path]:
-    """Walk up from start to find the nearest .git directory."""
+def find_svn_root(start: Path | None = None) -> Optional[Path]:
+    """Walk up from start to find the SVN working copy root.
+
+    For SVN 1.7+, there is a single ``.svn`` at the WC root.
+    For older SVN, every directory has ``.svn`` — we return the topmost one
+    found so that the WC root is correctly identified.
+    """
+    current = start or Path.cwd()
+    candidate: Optional[Path] = None
+    while current != current.parent:
+        if (current / ".svn").exists():
+            candidate = current
+        current = current.parent
+    if (current / ".svn").exists():
+        candidate = current
+    return candidate
+
+
+def find_repo_root(
+    start: Path | None = None,
+    stop_at: Path | None = None,
+) -> Optional[Path]:
+    """Walk up from ``start`` to find the nearest ``.git`` directory or SVN working copy root.
+
+    Args:
+        start: Starting directory.  Defaults to ``Path.cwd()``.
+        stop_at: Optional boundary — if provided, the walk examines
+            ``stop_at`` for a ``.git`` directory and then stops without
+            crossing above it.  Useful for tests that create a synthetic
+            repo under ``tmp_path`` (so the walk does not accidentally
+            climb into a developer's home-directory dotfiles repo) and
+            for any production caller that wants to bound the ancestor
+            walk — e.g. multi-repo orchestrators, CI containers with
+            bind-mounted volumes, embedded sandboxes.  See #241.
+
+    Returns:
+        The first ancestor containing ``.git`` or an SVN working copy,
+        or ``None`` if no ancestor up to and including ``stop_at`` (when
+        set) or the filesystem root (when ``stop_at is None``) contains one.
+    """
     current = start or Path.cwd()
     while current != current.parent:
         if (current / ".git").exists():
             return current
+        if stop_at is not None and current == stop_at:
+            return None
         current = current.parent
     if (current / ".git").exists():
         return current
-    return None
+    # No Git root found — try SVN
+    return find_svn_root(start)
 
 
-def find_project_root(start: Path | None = None) -> Path:
+def detect_vcs(root: Path) -> str:
+    """Return ``'git'``, ``'svn'``, or ``'none'`` based on VCS markers at *root*."""
+    if (root / ".git").exists():
+        return "git"
+    if (root / ".svn").exists():
+        return "svn"
+    return "none"
+
+
+def find_project_root(
+    start: Path | None = None,
+    stop_at: Path | None = None,
+) -> Path:
     """Find the project root.
 
     Resolution order (highest precedence first):
@@ -91,15 +155,20 @@ def find_project_root(start: Path | None = None) -> Path:
     1. ``CRG_REPO_ROOT`` environment variable — explicit override for
        anyone scripting the CLI from outside the repo (CI jobs, daemons,
        multi-repo orchestrators). See: #155
-    2. Git repository root via :func:`find_repo_root` from ``start``.
+    2. Git repository root via :func:`find_repo_root` from ``start``,
+       honoring ``stop_at`` if provided.
     3. ``start`` itself (or cwd if no start given).
+
+    ``stop_at`` is forwarded to :func:`find_repo_root` so callers that
+    want to bound the ancestor walk (typically tests; see #241) can do so
+    without having to call ``find_repo_root`` directly.
     """
     env_override = os.environ.get("CRG_REPO_ROOT", "").strip()
     if env_override:
         p = Path(env_override).expanduser().resolve()
         if p.exists():
             return p
-    root = find_repo_root(start)
+    root = find_repo_root(start, stop_at=stop_at)
     if root:
         return root
     return start or Path.cwd()
@@ -128,10 +197,16 @@ def get_data_dir(repo_root: Path) -> Path:
     inner_gitignore = data_dir / ".gitignore"
     if not inner_gitignore.exists():
         try:
+            # `encoding="utf-8"` is REQUIRED — the em-dash in the header is
+            # U+2014 which falls outside cp1252.  On Windows, calling
+            # write_text without an encoding silently uses the system default
+            # codepage, producing a file that subsequently fails to decode as
+            # UTF-8 (see issue #239).
             inner_gitignore.write_text(
                 "# Auto-generated by code-review-graph — do not commit database files.\n"
                 "# The graph.db contains absolute paths and code structure metadata.\n"
-                "*\n"
+                "*\n",
+                encoding="utf-8",
             )
         except OSError:
             # Data dir might be read-only (rare); that's OK, it's a best-effort guard.
@@ -198,7 +273,7 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     patterns = list(DEFAULT_IGNORE_PATTERNS)
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
-        for line in ignore_file.read_text().splitlines():
+        for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 patterns.append(line)
@@ -247,9 +322,7 @@ _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configur
 # When True, `git ls-files --recurse-submodules` is used so that files
 # inside git submodules are included in the graph.  Opt-in via env var;
 # can also be overridden per-call through function parameters.
-_RECURSE_SUBMODULES = os.environ.get(
-    "CRG_RECURSE_SUBMODULES", ""
-).lower() in ("1", "true", "yes")
+_RECURSE_SUBMODULES = os.environ.get("CRG_RECURSE_SUBMODULES", "").lower() in ("1", "true", "yes")
 
 
 def _git_branch_info(repo_root: Path) -> tuple[str, str]:
@@ -259,8 +332,10 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True, text=True,
-            cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=_GIT_TIMEOUT,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
@@ -269,8 +344,10 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True,
-            cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=_GIT_TIMEOUT,
         )
         if result.returncode == 0:
             sha = result.stdout.strip()
@@ -278,11 +355,68 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         pass
     return branch, sha
 
+
+def _svn_revision_info(repo_root: Path) -> tuple[str, str]:
+    """Return (branch_path, revision_str) for the current SVN working copy."""
+    branch = ""
+    rev = ""
+    try:
+        result = subprocess.run(
+            ["svn", "info", "--non-interactive"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("URL: "):
+                    url = line[5:].strip()
+                    # Extract trunk/branches/tags segment from SVN URL
+                    for marker in ("/branches/", "/tags/", "/trunk"):
+                        if marker in url:
+                            idx = url.index(marker)
+                            branch = url[idx:].lstrip("/")
+                            break
+                    if not branch and url:
+                        branch = url.rstrip("/").split("/")[-1]
+                elif line.startswith("Revision: "):
+                    rev = line[10:].strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return branch, rev
+
+
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
+_SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
+
+
+def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
+    """Persist VCS branch/revision info into the graph metadata table."""
+    vcs = detect_vcs(repo_root)
+    if vcs == "git":
+        branch, sha = _git_branch_info(repo_root)
+        if branch:
+            store.set_metadata("git_branch", branch)
+        if sha:
+            store.set_metadata("git_head_sha", sha)
+    elif vcs == "svn":
+        branch, rev = _svn_revision_info(repo_root)
+        if branch:
+            store.set_metadata("svn_branch", branch)
+        if rev:
+            store.set_metadata("svn_revision", rev)
 
 
 def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
-    """Get list of changed files via git diff."""
+    """Get list of changed files via git diff or svn status.
+
+    For SVN working copies the *base* parameter is ignored; modified/added/
+    deleted files are detected from ``svn status``.  Pass an SVN revision
+    range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
+    revision instead.
+    """
+    if detect_vcs(repo_root) == "svn":
+        return _get_svn_changed_files(repo_root, base if _SAFE_SVN_REV.match(base) else None)
+    # Git path
     if not _SAFE_GIT_REF.match(base):
         logger.warning("Invalid git ref rejected: %s", base)
         return []
@@ -309,8 +443,55 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         return []
 
 
+def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
+    """Return changed files in an SVN working copy.
+
+    When *rev_range* is given (e.g. ``"r100:HEAD"``), ``svn diff --summarize``
+    is used to list files changed between those revisions.  Otherwise
+    ``svn status`` reports working-copy modifications.
+    """
+    try:
+        if rev_range:
+            result = subprocess.run(
+                ["svn", "diff", "--summarize", "--non-interactive", "-r", rev_range],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+            )
+            if result.returncode != 0:
+                logger.warning("svn diff --summarize failed (rc=%d): %s",
+                               result.returncode, result.stderr[:200])
+                return []
+            files = []
+            for line in result.stdout.splitlines():
+                # Format: "M       path/to/file"  (first char is status)
+                if len(line) >= 2 and line[0] in ("M", "A", "D"):
+                    files.append(line[1:].strip())
+            return files
+        else:
+            result = subprocess.run(
+                ["svn", "status", "--non-interactive"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+            )
+            files = []
+            for line in result.stdout.splitlines():
+                if len(line) < 2:
+                    continue
+                status_char = line[0]
+                # M=modified, A=added, D=deleted, R=replaced, C=conflicted
+                if status_char in ("M", "A", "D", "R", "C"):
+                    # SVN status: 8 fixed-width columns then the path
+                    path = line[8:].strip() if len(line) > 8 else line[1:].strip()
+                    files.append(path)
+            return files
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+
+
 def get_staged_and_unstaged(repo_root: Path) -> list[str]:
     """Get all modified files (staged + unstaged + untracked)."""
+    if detect_vcs(repo_root) == "svn":
+        return _get_svn_changed_files(repo_root)
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
@@ -336,7 +517,7 @@ def get_all_tracked_files(
     repo_root: Path,
     recurse_submodules: bool | None = None,
 ) -> list[str]:
-    """Get all files tracked by git.
+    """Get all files tracked by git or svn.
 
     Args:
         repo_root: Repository root directory.
@@ -344,7 +525,11 @@ def get_all_tracked_files(
             ``git ls-files`` so that files inside git submodules are
             included.  When *None* (default), falls back to the
             ``CRG_RECURSE_SUBMODULES`` environment variable.
+            (Ignored for SVN working copies.)
     """
+    if detect_vcs(repo_root) == "svn":
+        return _get_svn_all_tracked_files(repo_root)
+
     if recurse_submodules is None:
         recurse_submodules = _RECURSE_SUBMODULES
 
@@ -363,6 +548,33 @@ def get_all_tracked_files(
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
+
+
+def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
+    """Return SVN-versioned files by walking the working copy.
+
+    Uses ``svn list -R`` to get the server-side file list, falling back to
+    a filesystem walk (which is also the fallback in :func:`collect_all_files`).
+    """
+    try:
+        result = subprocess.run(
+            ["svn", "list", "--recursive", "--non-interactive"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(repo_root), timeout=60,  # svn list queries the server
+        )
+        if result.returncode == 0:
+            # svn list returns paths relative to the WC URL; directories end with "/"
+            files = [
+                f.strip()
+                for f in result.stdout.splitlines()
+                if f.strip() and not f.strip().endswith("/")
+            ]
+            if files:
+                return files
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    # Fallback: let collect_all_files do a filesystem walk
+    return []
 
 
 def collect_all_files(
@@ -386,11 +598,7 @@ def collect_all_files(
         candidates = tracked
     else:
         # Fallback: walk directory
-        candidates = [
-            str(p.relative_to(repo_root))
-            for p in repo_root.rglob("*")
-            if p.is_file()
-        ]
+        candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
 
     for rel_path in candidates:
         if _should_ignore(rel_path, ignore_patterns):
@@ -431,15 +639,39 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
     return dependents
 
 
+class DependentList(list):
+    """A ``list[str]`` with a ``.truncated`` flag.
+
+    When :func:`find_dependents` hits ``_MAX_DEPENDENT_FILES`` it truncates
+    the result and sets ``truncated = True`` so callers can distinguish a
+    complete expansion from a capped one.  See issue #261.
+
+    This is a transparent ``list`` subclass — existing callers that iterate,
+    ``len()``, or slice continue to work unchanged; only callers that
+    specifically check ``.truncated`` benefit from the signal.
+    """
+
+    truncated: bool
+
+    def __init__(self, items: list, *, truncated: bool = False) -> None:
+        super().__init__(items)
+        self.truncated = truncated
+
+
 def find_dependents(
     store: GraphStore,
     file_path: str,
     max_hops: int = _MAX_DEPENDENT_HOPS,
-) -> list[str]:
+) -> DependentList:
     """Find files that import from or depend on the given file.
 
     Performs up to *max_hops* iterations of expansion (default 2).
     Stops early if the total exceeds 500 files.
+
+    Returns a :class:`DependentList` — a regular ``list[str]`` that also
+    carries a ``.truncated`` flag.  When ``truncated is True`` the
+    returned list is capped at ``_MAX_DEPENDENT_FILES`` and the full
+    set of dependents was not explored.  See issue #261.
     """
     all_dependents: set[str] = set()
     visited: set[str] = {file_path}
@@ -458,11 +690,14 @@ def find_dependents(
         if len(all_dependents) > _MAX_DEPENDENT_FILES:
             logger.warning(
                 "Dependent expansion capped at %d files for %s",
-                len(all_dependents), file_path,
+                len(all_dependents),
+                file_path,
             )
-            # Truncate to the cap
-            return list(all_dependents)[:_MAX_DEPENDENT_FILES]
-    return list(all_dependents)
+            return DependentList(
+                list(all_dependents)[:_MAX_DEPENDENT_FILES],
+                truncated=True,
+            )
+    return DependentList(list(all_dependents))
 
 
 def _parse_single_file(
@@ -545,7 +780,8 @@ def full_build(
             max_workers=_MAX_PARSE_WORKERS,
         ) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
-                executor.map(_parse_single_file, args_list, chunksize=20), 1,
+                executor.map(_parse_single_file, args_list, chunksize=20),
+                1,
             ):
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
@@ -553,7 +789,10 @@ def full_build(
                     continue
                 full_path = repo_root / rel_path
                 store.store_file_nodes_edges(
-                    str(full_path), nodes, edges, fhash,
+                    str(full_path),
+                    nodes,
+                    edges,
+                    fhash,
                 )
                 total_nodes += len(nodes)
                 total_edges += len(edges)
@@ -562,18 +801,17 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
-    branch, sha = _git_branch_info(repo_root)
-    if branch:
-        store.set_metadata("git_branch", branch)
-    if sha:
-        store.set_metadata("git_head_sha", sha)
+    _store_vcs_metadata(repo_root, store)
     store.commit()
+
+    rescript_stats = _run_rescript_resolver(store)
 
     return {
         "files_parsed": len(files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
         "errors": errors,
+        "rescript_resolution": rescript_stats,
     }
 
 
@@ -671,26 +909,36 @@ def incremental_update(
             max_workers=_MAX_PARSE_WORKERS,
         ) as executor:
             for rel_path, nodes, edges, error, fhash in executor.map(
-                _parse_single_file, args_list, chunksize=20,
+                _parse_single_file,
+                args_list,
+                chunksize=20,
             ):
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
                     continue
                 store.store_file_nodes_edges(
-                    str(repo_root / rel_path), nodes, edges, fhash,
+                    str(repo_root / rel_path),
+                    nodes,
+                    edges,
+                    fhash,
                 )
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
-    branch, sha = _git_branch_info(repo_root)
-    if branch:
-        store.set_metadata("git_branch", branch)
-    if sha:
-        store.set_metadata("git_head_sha", sha)
+    _store_vcs_metadata(repo_root, store)
     store.commit()
+
+    # Only re-run ReScript resolver when changed files touched .res/.resi;
+    # otherwise prior resolution state is unaffected.
+    rescript_changed = any(
+        rp.endswith((".res", ".resi")) for rp in all_files
+    )
+    rescript_stats = (
+        _run_rescript_resolver(store) if rescript_changed else None
+    )
 
     return {
         "files_updated": len(all_files),
@@ -699,6 +947,7 @@ def incremental_update(
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "errors": errors,
+        "rescript_resolution": rescript_stats,
     }
 
 
@@ -710,10 +959,22 @@ def incremental_update(
 _DEBOUNCE_SECONDS = 0.3
 
 
-def watch(repo_root: Path, store: GraphStore) -> None:
+def watch(
+    repo_root: Path,
+    store: GraphStore,
+    on_files_updated: Optional[Callable] = None,
+) -> None:
     """Watch for file changes and auto-update the graph.
 
     Uses a 300ms debounce to batch rapid-fire saves into a single update.
+
+    Args:
+        repo_root: Repository root to watch.
+        store: Graph database to update.
+        on_files_updated: Optional callback invoked after each debounced
+            batch of file updates completes.  Receives the store as its
+            only argument.  Used by the CLI to run post-processing
+            (FTS, flows, communities) after watch updates.
     """
     import threading
 
@@ -777,9 +1038,7 @@ def watch(repo_root: Path, store: GraphStore) -> None:
                 self._pending.add(abs_path)
                 if self._timer is not None:
                     self._timer.cancel()
-                self._timer = threading.Timer(
-                    _DEBOUNCE_SECONDS, self._flush
-                )
+                self._timer = threading.Timer(_DEBOUNCE_SECONDS, self._flush)
                 self._timer.start()
 
         def _flush(self):
@@ -789,33 +1048,43 @@ def watch(repo_root: Path, store: GraphStore) -> None:
                 self._pending.clear()
                 self._timer = None
 
+            updated = 0
             for abs_path in paths:
-                self._update_file(abs_path)
+                if self._update_file(abs_path):
+                    updated += 1
 
-        def _update_file(self, abs_path: str):
+            if updated > 0 and on_files_updated is not None:
+                try:
+                    on_files_updated(store)
+                except Exception as e:
+                    logger.error("Post-update callback failed: %s", e)
+
+        def _update_file(self, abs_path: str) -> bool:
             path = Path(abs_path)
             if not path.is_file():
-                return
+                return False
             if path.is_symlink():
-                return
+                return False
             if _is_binary(path):
-                return
+                return False
             try:
                 source = path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(path, source)
                 store.store_file_nodes_edges(abs_path, nodes, edges, fhash)
-                store.set_metadata(
-                    "last_updated", time.strftime("%Y-%m-%dT%H:%M:%S")
-                )
+                store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
                 store.commit()
                 rel = str(path.relative_to(repo_root))
                 logger.info(
                     "Updated: %s (%d nodes, %d edges)",
-                    rel, len(nodes), len(edges),
+                    rel,
+                    len(nodes),
+                    len(edges),
                 )
+                return True
             except Exception as e:
                 logger.error("Error updating %s: %s", abs_path, e)
+                return False
 
     handler = GraphUpdateHandler()
     observer = Observer()
@@ -825,11 +1094,10 @@ def watch(repo_root: Path, store: GraphStore) -> None:
     logger.info("Watching %s for changes... (Ctrl+C to stop)", repo_root)
     try:
         import time as _time
+
         while True:
             _time.sleep(1)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
     logger.info("Watch stopped.")
-
-

@@ -263,6 +263,70 @@ class TestDatabricksPyNotebook:
         file_node = [n for n in nodes if n.kind == "File"][0]
         assert "notebook_format" not in file_node.extra
 
+    def test_databricks_header_crlf_line_endings(self):
+        """Regression guard for #239 bug 2: the Databricks auto-detection
+        must handle ``\\r\\n`` (CRLF) line endings as well as ``\\n`` (LF).
+
+        On Windows, ``git config core.autocrlf=true`` (the default) rewrites
+        text files to CRLF on checkout.  Before the fix, the detection
+        ``source.startswith(b"# Databricks notebook source\\n")`` matched
+        only LF, so Windows checkouts silently parsed Databricks exports
+        as plain Python — missing SQL-cell table extraction, cell-index
+        metadata, and the ``notebook_format`` tag.
+        """
+        # Exact byte sequence a Windows checkout produces.
+        crlf_source = (
+            b"# Databricks notebook source\r\n"
+            b"# COMMAND ----------\r\n"
+            b"\r\n"
+            b"def crlf_fn():\r\n"
+            b"    return 1\r\n"
+        )
+        nodes, edges = self.parser.parse_bytes(Path("nb.py"), crlf_source)
+        file_nodes = [n for n in nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].extra.get("notebook_format") == "databricks_py", (
+            "Databricks header with CRLF line endings was not detected; "
+            "the auto-detect check is still hard-coded to \\n only"
+        )
+        # The body function must still be extracted through the notebook path.
+        funcs = [n for n in nodes if n.kind == "Function"]
+        assert any(f.name == "crlf_fn" for f in funcs)
+
+    def test_databricks_header_lf_line_endings_still_work(self):
+        """Regression guard for #239 bug 2: ensure the CRLF fix does not
+        break the existing LF path (pre-existing behavior)."""
+        lf_source = (
+            b"# Databricks notebook source\n"
+            b"# COMMAND ----------\n"
+            b"\n"
+            b"def lf_fn():\n"
+            b"    return 1\n"
+        )
+        nodes, edges = self.parser.parse_bytes(Path("nb.py"), lf_source)
+        file_nodes = [n for n in nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].extra.get("notebook_format") == "databricks_py"
+
+    def test_databricks_header_prefix_false_positive_rejected(self):
+        """Regression guard for #239 bug 2: a file whose first line only
+        *starts with* the Databricks phrase but has extra characters must
+        NOT be detected as a Databricks export.  Protects against the
+        naive fix of using ``startswith`` without checking the line end.
+        """
+        false_positive = (
+            b"# Databricks notebook source code examples\n"
+            b"def hello(): return 1\n"
+        )
+        nodes, edges = self.parser.parse_bytes(Path("doc.py"), false_positive)
+        file_nodes = [n for n in nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert "notebook_format" not in file_nodes[0].extra, (
+            "a regular .py file whose first comment happens to start with "
+            "'# Databricks notebook source' must not trigger Databricks "
+            "parsing"
+        )
+
 
 class TestRKernelNotebook:
     def setup_method(self):

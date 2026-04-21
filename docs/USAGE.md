@@ -30,7 +30,11 @@ code-review-graph install --platform claude-code
 | **Windsurf** | `.windsurf/mcp.json` |
 | **Zed** | `.zed/settings.json` |
 | **Continue** | `.continue/config.json` |
-| **OpenCode** | `.opencode/config.json` |
+| **OpenCode** | `.opencode.json` |
+| **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
+| **Qwen Code** | `~/.qwen/settings.json` |
+| **Qoder** | `.qoder/mcp.json` |
+| **Kiro** | `.kiro/settings/mcp.json` |
 | **GitHub Copilot (VS Code)** | VS Code user `settings.json` (macOS: `~/Library/Application Support/Code/User/`; Windows: `%APPDATA%\Code\User\`; Linux: `~/.config/Code/User/`) |
 | **GitHub Copilot CLI** | `~/.config/github-copilot/mcp_servers.json` (also `~/.github-copilot` if present for detection) |
 

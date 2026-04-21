@@ -12,6 +12,7 @@ import logging
 import os
 import platform
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +183,9 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": lambda root: Path.home() / ".config" / "github-copilot" / "mcp_servers.json",
         "key": "servers",
         "detect": _copilot_cli_detected,
+        "format": "object",
+        "needs_type": True,
+    },
     "kiro": {
         "name": "Kiro",
         "config_path": lambda root: root / ".kiro" / "settings" / "mcp.json",
@@ -190,21 +194,102 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "qoder": {
+        "name": "Qoder",
+        "config_path": lambda root: root / ".qoder" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: True,
+        "format": "object",
+        "needs_type": True,
+    },
 }
+
+
+def _in_poetry_project() -> bool:
+    """Return True when the running interpreter is a Poetry-managed virtualenv.
+
+    Two signals are checked so that **both** ``poetry shell`` and ``poetry run``
+    are detected:
+
+    * ``POETRY_ACTIVE=1`` — set by ``poetry shell`` when the user activates the
+      virtual environment interactively.
+    * ``VIRTUAL_ENV`` containing ``"pypoetry"`` — set by **both** ``poetry shell``
+      and ``poetry run`` because Poetry stores its virtualenvs under a path that
+      includes the string ``pypoetry`` (e.g.
+      ``~/.cache/pypoetry/virtualenvs/<name>`` on Linux/macOS or
+      ``%LOCALAPPDATA%\\pypoetry\\Cache\\virtualenvs\\<name>`` on Windows).
+
+    Checking only ``POETRY_ACTIVE`` would miss the ``poetry run`` case, which is
+    the primary scenario described in issue #256.
+    """
+    if os.environ.get("POETRY_ACTIVE") == "1":
+        return True
+    virtual_env = os.environ.get("VIRTUAL_ENV", "")
+    return bool(virtual_env) and "pypoetry" in virtual_env.lower()
+
+
+def _in_uv_project() -> bool:
+    """Return True if ``sys.executable`` lives inside a uv-managed project.
+
+    A project is considered uv-managed when a ``uv.lock`` file exists in any
+    ancestor directory of the running Python interpreter (stopping at the home
+    directory to avoid false positives on system-wide installations).
+    """
+    exe = Path(sys.executable).resolve()
+    home = Path.home()
+    for parent in exe.parents:
+        if (parent / "uv.lock").exists():
+            return True
+        # Stop searching once we reach the home directory or filesystem root
+        if parent == home or parent == parent.parent:
+            break
+    return False
+
+
+def _detect_serve_command() -> tuple[str, list[str]]:
+    """Return ``(command, args)`` that correctly launches ``code-review-graph serve``.
+
+    Detection priority
+    ------------------
+    1. **Poetry** – ``POETRY_ACTIVE=1`` OR ``VIRTUAL_ENV`` contains ``"pypoetry"``
+       (covers both ``poetry shell`` and ``poetry run``) and ``poetry`` is on PATH
+       → ``poetry run code-review-graph serve``
+    2. **uv project** – ``UV_PROJECT_ENVIRONMENT`` is set, or a ``uv.lock``
+       ancestor is found alongside ``sys.executable``, and ``uv`` is on PATH
+       → ``uv run code-review-graph serve``
+    3. **uvx** – ``uvx`` is available on PATH (existing behaviour, unchanged)
+       → ``uvx code-review-graph serve``
+    4. **Fallback** – use the absolute path of the running Python interpreter
+       → ``sys.executable -m code_review_graph serve``
+
+    The fallback is always safe: ``sys.executable`` is the exact interpreter
+    that is currently running, so it resolves correctly inside any virtual
+    environment, conda env, or system installation.
+    """
+    # 1. Poetry (poetry shell or poetry run)
+    if _in_poetry_project():
+        poetry = shutil.which("poetry")
+        if poetry:
+            return ("poetry", ["run", "code-review-graph", "serve"])
+
+    # 2. uv managed project environment
+    if os.environ.get("UV_PROJECT_ENVIRONMENT") or _in_uv_project():
+        uv = shutil.which("uv")
+        if uv:
+            return ("uv", ["run", "code-review-graph", "serve"])
+
+    # 3. uvx global tool runner (existing behaviour, unchanged)
+    if shutil.which("uvx"):
+        return ("uvx", ["code-review-graph", "serve"])
+
+    # 4. Absolute-path fallback using the running interpreter
+    return (sys.executable, ["-m", "code_review_graph", "serve"])
 
 
 def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
-    if shutil.which("uvx"):
-        entry: dict[str, Any] = {
-            "command": "uvx",
-            "args": ["code-review-graph", "serve"],
-        }
-    else:
-        entry = {
-            "command": "code-review-graph",
-            "args": ["serve"],
-        }
+    command, args = _detect_serve_command()
+    entry: dict[str, Any] = {"command": command, "args": args}
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
@@ -311,7 +396,7 @@ def install_platform_configs(
         existing: Any = {}
         if config_path.exists():
             try:
-                existing = json.loads(config_path.read_text(encoding="utf-8"))
+                existing = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
             except (json.JSONDecodeError, OSError):
                 logger.warning("Invalid JSON in %s, will overwrite.", config_path)
                 existing = {}
@@ -503,13 +588,14 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
-def generate_hooks_config() -> dict[str, Any]:
-    """Return Claude Code hook definitions for .claude/settings.json.
+def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
+    """Generate Claude Code hooks configuration.
 
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
     """
+    repo_arg = json.dumps(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [
@@ -518,7 +604,12 @@ def generate_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "code-review-graph update --skip-flows",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph update --skip-flows"
+                                f" --repo {repo_arg}"
+                                " || true"
+                            ),
                             "timeout": 30,
                         },
                     ],
@@ -530,7 +621,11 @@ def generate_hooks_config() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": "code-review-graph status",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph status --repo {repo_arg}"
+                                " || echo 'Not a git repo, skipping'"
+                            ),
                             "timeout": 10,
                         },
                     ],
@@ -552,6 +647,7 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #!/bin/sh
 # Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
 if command -v code-review-graph >/dev/null 2>&1; then
+    code-review-graph update || true
     code-review-graph detect-changes --brief || true
 fi
 """
@@ -578,28 +674,52 @@ fi
     return hook_path
 
 
-def install_hooks(repo_root: Path) -> None:
-    """Write hooks config to .claude/settings.json.
+def install_hooks(repo_root: Path, platform: str = "claude") -> None:
+    """Write hooks config to platform-specific settings.json.
 
-    Merges with existing settings if present, preserving non-hook
-    configuration.
+    Merges new hook entries into existing settings, preserving both
+    non-hook configuration and user-defined hooks.  A backup of the
+    original file is created before any modifications.
 
     Args:
         repo_root: Repository root directory.
+        platform: Target platform ("claude" or "qoder").
     """
-    settings_dir = repo_root / ".claude"
+    if platform == "qoder":
+        settings_dir = repo_root / ".qoder"
+    else:
+        settings_dir = repo_root / ".claude"
     settings_dir.mkdir(parents=True, exist_ok=True)
     settings_path = settings_dir / "settings.json"
 
     existing: dict[str, Any] = {}
     if settings_path.exists():
         try:
-            existing = json.loads(settings_path.read_text(encoding="utf-8"))
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = settings_dir / "settings.json.bak"
+            shutil.copy2(settings_path, backup_path)
+            logger.info("Backed up existing settings to %s", backup_path)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not read existing %s: %s", settings_path, exc)
 
-    hooks_config = generate_hooks_config()
-    existing.update(hooks_config)
+    hooks_config = generate_hooks_config(repo_root)
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        logger.warning("Existing hooks config is not a dict; replacing with defaults")
+        existing_hooks = {}
+
+    merged_hooks = dict(existing_hooks)
+    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
+        if isinstance(merged_hooks.get(hook_name), list):
+            merged_list = list(merged_hooks[hook_name])
+            for entry in hook_entries:
+                if entry not in merged_list:
+                    merged_list.append(entry)
+            merged_hooks[hook_name] = merged_list
+        else:
+            merged_hooks[hook_name] = hook_entries
+
+    existing["hooks"] = merged_hooks
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
@@ -629,7 +749,7 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 ### Key Tools
 
 | Tool | Use when |
-|------|----------|
+| ------ | ---------- |
 | `detect_changes` | Reviewing code changes — gives risk-scored analysis |
 | `get_review_context` | Need source snippets for review — token-efficient |
 | `get_impact_radius` | Understanding blast radius of a change |
@@ -658,7 +778,7 @@ def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
     """
     existing = ""
     if file_path.exists():
-        existing = file_path.read_text(encoding="utf-8")
+        existing = file_path.read_text(encoding="utf-8", errors="replace")
 
     if marker in existing:
         logger.info("%s already contains instructions, skipping.", file_path.name)
@@ -689,6 +809,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "GEMINI.md": ("antigravity",),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
+    "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
 }
 
@@ -714,3 +835,43 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
         if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
             updated.append(filename)
     return updated
+
+
+def install_qoder_skills(repo_root: Path) -> Path | None:
+    """Install skills to Qoder's project-level skills directory.
+
+    Qoder expects skills in .qoder/skills/{skillName}/SKILL.md format within the project.
+    This function copies the project's skills/ directory contents to that location.
+
+    Args:
+        repo_root: Repository root directory (where the skills/ folder is located).
+
+    Returns:
+        Path to the Qoder skills directory, or None if installation failed.
+    """
+    # Qoder skills directory (project-level)
+    qoder_skills_dir = repo_root / ".qoder" / "skills"
+    qoder_skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Source skills directory in the project
+    source_skills_dir = repo_root / "skills"
+    if not source_skills_dir.exists():
+        logger.warning("No skills/ directory found in %s", repo_root)
+        return None
+
+    installed_count = 0
+    for skill_dir in source_skills_dir.iterdir():
+        if skill_dir.is_dir():
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.exists():
+                target_dir = qoder_skills_dir / skill_dir.name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_file = target_dir / "SKILL.md"
+                target_file.write_text(skill_file.read_text(encoding="utf-8"), encoding="utf-8")
+                logger.info("Installed Qoder skill: %s", skill_dir.name)
+                installed_count += 1
+
+    if installed_count > 0:
+        logger.info("Installed %d skill(s) to %s", installed_count, qoder_skills_dir)
+        return qoder_skills_dir
+    return None
