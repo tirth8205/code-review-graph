@@ -13,6 +13,83 @@ from ._common import _get_store
 logger = logging.getLogger(__name__)
 
 
+def _resolve_cross_file_class_methods(store: Any) -> int:
+    """Rewrite bare ``ClassName.method`` edge targets to qualified form.
+
+    The per-file resolver in parser.py qualifies ``ClassName.method`` only
+    when the class lives in the calling file's symbol table. For calls to
+    classes defined in another file the target stays bare. This pass
+    scans all Class nodes and builds a ``name -> [file::ClassName, ...]``
+    map. For each candidate edge we pick the class qn whose file path
+    shares the deepest directory prefix with the edge's file (same package
+    / same module tree), so same-directory duplicates still resolve.
+    Names with multiple candidates whose best match isn't unique remain
+    bare.
+    """
+    conn = store._conn
+
+    class_candidates: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT name, qualified_name FROM nodes WHERE kind = 'Class'"
+    ):
+        name, qn = row[0], row[1]
+        if "::" not in qn:
+            continue
+        class_candidates.setdefault(name, []).append(qn)
+
+    if not class_candidates:
+        return 0
+
+    def _dir_prefix_len(a: str, b: str) -> int:
+        a_parts = a.split("/")
+        b_parts = b.split("/")
+        n = 0
+        for x, y in zip(a_parts[:-1], b_parts[:-1]):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    candidates = conn.execute(
+        "SELECT id, target_qualified, file_path FROM edges "
+        "WHERE kind IN ('CALLS', 'REFERENCES') "
+        "AND instr(target_qualified, '.') > 0 "
+        "AND instr(target_qualified, '::') = 0 "
+        "AND substr(target_qualified, 1, 1) != '/'"
+    ).fetchall()
+
+    rewrites: list[tuple[str, int]] = []
+    for edge_id, target, edge_file in candidates:
+        cls_name, _, method = target.partition(".")
+        if not method or "." in method:
+            continue
+        qns = class_candidates.get(cls_name)
+        if not qns:
+            continue
+        if len(qns) == 1:
+            chosen = qns[0]
+        else:
+            scored = [(_dir_prefix_len(edge_file or "", qn), qn) for qn in qns]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_score = scored[0][0]
+            top_matches = [qn for score, qn in scored if score == top_score]
+            if len(top_matches) != 1 or top_score == 0:
+                continue
+            chosen = top_matches[0]
+        file_prefix = chosen.rsplit("::", 1)[0]
+        rewrites.append((f"{file_prefix}::{cls_name}.{method}", edge_id))
+
+    if not rewrites:
+        return 0
+
+    conn.executemany(
+        "UPDATE edges SET target_qualified = ? WHERE id = ?",
+        rewrites,
+    )
+    conn.commit()
+    return len(rewrites)
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
@@ -32,6 +109,21 @@ def _run_postprocess(
 
     if postprocess == "none":
         return warnings
+
+    # -- Cross-file class.method resolution --
+    t_xref = time.perf_counter()
+    try:
+        resolved_count = _resolve_cross_file_class_methods(store)
+        build_result["cross_file_resolved"] = resolved_count
+    except sqlite3.OperationalError as e:
+        logger.warning("Cross-file class.method resolution failed: %s", e)
+        warnings.append(
+            f"Cross-file class.method resolution failed: {type(e).__name__}: {e}"
+        )
+    logger.info(
+        "Postprocess: cross-file class.method took %.2fs",
+        time.perf_counter() - t_xref,
+    )
 
     # -- Signatures + FTS (fast, always run unless "none") --
     try:
