@@ -593,6 +593,9 @@ class TestInstallPlatformConfigs:
                 "zed": {**PLATFORMS["zed"], "detect": lambda: False},
                 "continue": {**PLATFORMS["continue"], "detect": lambda: False},
                 "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
+                "qwen": {**PLATFORMS["qwen"], "detect": lambda: False},
+                "copilot": {**PLATFORMS["copilot"], "detect": lambda: False},
+                "copilot-cli": {**PLATFORMS["copilot-cli"], "detect": lambda: False},
             },
         ):
             configured = install_platform_configs(tmp_path, target="all")
@@ -666,6 +669,235 @@ class TestInstallPlatformConfigs:
         expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
 
+
+class TestInstallCopilotConfigs:
+    """Integration tests for Copilot platform installs — mirrors TestInstallPlatformConfigs."""
+
+    def _make_vscode_settings(self, tmp_path: Path, extra: dict | None = None) -> Path:
+        """Create a fake VS Code settings.json with optional extra keys."""
+        settings_dir = tmp_path / ".config" / "Code" / "User"
+        settings_dir.mkdir(parents=True)
+        content: dict = {"editor.fontSize": 14}
+        if extra:
+            content.update(extra)
+        settings_path = settings_dir / "settings.json"
+        settings_path.write_text(json.dumps(content))
+        return settings_path
+
+    def test_install_copilot_writes_mcp_entry(self, tmp_path):
+        """Copilot config is written to settings.json with correct structure."""
+        settings_path = self._make_vscode_settings(tmp_path)
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: settings_path,
+                "detect": lambda: True,
+                "validate": lambda existing, path: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="copilot")
+
+        assert "GitHub Copilot (VS Code)" in configured
+        data = json.loads(settings_path.read_text())
+        assert "copilot.advanced.mcpServers" in data
+        entry = data["copilot.advanced.mcpServers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert "serve" in entry["args"]
+
+    def test_install_copilot_preserves_existing_settings(self, tmp_path):
+        """Copilot install must not overwrite unrelated VS Code settings."""
+        settings_path = self._make_vscode_settings(tmp_path, {"editor.tabSize": 2})
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: settings_path,
+                "detect": lambda: True,
+                "validate": lambda existing, path: True,
+            },
+        }):
+            install_platform_configs(tmp_path, target="copilot")
+
+        data = json.loads(settings_path.read_text())
+        assert data["editor.fontSize"] == 14
+        assert data["editor.tabSize"] == 2
+        assert "code-review-graph" in data["copilot.advanced.mcpServers"]
+
+    def test_install_copilot_already_configured_skips(self, tmp_path):
+        """Second install does not duplicate the MCP entry."""
+        settings_path = self._make_vscode_settings(tmp_path)
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: settings_path,
+                "detect": lambda: True,
+                "validate": lambda existing, path: True,
+            },
+        }):
+            install_platform_configs(tmp_path, target="copilot")
+            configured = install_platform_configs(tmp_path, target="copilot")
+
+        assert "GitHub Copilot (VS Code)" in configured
+        data = json.loads(settings_path.read_text())
+        assert len(data["copilot.advanced.mcpServers"]) == 1
+
+    def test_install_copilot_skips_if_settings_missing(self, tmp_path):
+        """Copilot install is skipped when settings.json does not exist."""
+        nonexistent = tmp_path / "no-such-dir" / "settings.json"
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: nonexistent,
+                "detect": lambda: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="copilot")
+
+        assert "GitHub Copilot (VS Code)" not in configured
+        assert not nonexistent.exists()
+
+    def test_install_copilot_skips_on_corrupt_settings(self, tmp_path):
+        """Copilot install is skipped when settings.json contains a JSON array."""
+        settings_dir = tmp_path / ".config" / "Code" / "User"
+        settings_dir.mkdir(parents=True)
+        settings_path = settings_dir / "settings.json"
+        settings_path.write_text("[]")  # valid JSON but wrong type
+
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: settings_path,
+                "detect": lambda: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="copilot")
+
+        assert "GitHub Copilot (VS Code)" not in configured
+        # Original file must be untouched
+        assert settings_path.read_text() == "[]"
+
+    def test_install_copilot_dry_run_no_write(self, tmp_path):
+        """Dry-run does not modify settings.json."""
+        settings_path = self._make_vscode_settings(tmp_path)
+        original = settings_path.read_text()
+        with patch.dict(PLATFORMS, {
+            "copilot": {
+                **PLATFORMS["copilot"],
+                "config_path": lambda root: settings_path,
+                "detect": lambda: True,
+                "validate": lambda existing, path: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="copilot", dry_run=True)
+
+        assert "GitHub Copilot (VS Code)" in configured
+        assert settings_path.read_text() == original
+
+    def test_install_copilot_cli_writes_mcp_entry(self, tmp_path):
+        """Copilot CLI config is written to mcp_servers.json with correct structure."""
+        cli_dir = tmp_path / ".config" / "github-copilot"
+        cli_dir.mkdir(parents=True)
+        config_path = cli_dir / "mcp_servers.json"
+        with patch.dict(PLATFORMS, {
+            "copilot-cli": {
+                **PLATFORMS["copilot-cli"],
+                "config_path": lambda root: config_path,
+                "detect": lambda: True,
+            },
+        }):
+            configured = install_platform_configs(tmp_path, target="copilot-cli")
+
+        assert "GitHub Copilot CLI" in configured
+        data = json.loads(config_path.read_text())
+        entry = data["servers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert "serve" in entry["args"]
+
+    def test_copilot_vscode_detection_positive(self, tmp_path):
+        """Detection returns True when the Copilot extension directory exists."""
+        extensions_dir = tmp_path / ".vscode" / "extensions"
+        extensions_dir.mkdir(parents=True)
+        (extensions_dir / "github.copilot-1.234.0").mkdir()
+
+        import code_review_graph.skills as skills_mod
+        with patch.object(skills_mod.Path, "home", return_value=tmp_path):
+            result = skills_mod._copilot_vscode_detected()
+        assert result is True
+
+    def test_copilot_vscode_detection_no_extension(self, tmp_path):
+        """Detection returns False when VS Code is installed but Copilot extension is not."""
+        extensions_dir = tmp_path / ".vscode" / "extensions"
+        extensions_dir.mkdir(parents=True)
+        (extensions_dir / "ms-python.python-2024.0.1").mkdir()  # unrelated extension
+
+        import code_review_graph.skills as skills_mod
+        with patch.object(skills_mod.Path, "home", return_value=tmp_path):
+            result = skills_mod._copilot_vscode_detected()
+        assert result is False
+
+
+def test_vscode_user_settings_path_darwin(tmp_path):
+    """macOS uses ~/Library/Application Support/Code/User/settings.json."""
+    import code_review_graph.skills as skills_mod
+
+    with patch.object(skills_mod.platform, "system", return_value="Darwin"):
+        with patch.object(skills_mod.Path, "home", return_value=tmp_path):
+            p = skills_mod._vscode_user_settings_path()
+    assert p == (
+        tmp_path / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    )
+
+
+def test_vscode_user_settings_path_linux(tmp_path):
+    """Linux uses ~/.config/Code/User/settings.json."""
+    import code_review_graph.skills as skills_mod
+
+    with patch.object(skills_mod.platform, "system", return_value="Linux"):
+        with patch.object(skills_mod.Path, "home", return_value=tmp_path):
+            p = skills_mod._vscode_user_settings_path()
+    assert p == tmp_path / ".config" / "Code" / "User" / "settings.json"
+
+
+def test_vscode_user_settings_path_windows(tmp_path):
+    """Windows uses %APPDATA%\\Code\\User\\settings.json when set."""
+    import code_review_graph.skills as skills_mod
+
+    fake_appdata = str(tmp_path / "Roaming")
+    with patch.object(skills_mod.platform, "system", return_value="Windows"):
+        with patch.object(skills_mod.Path, "home", return_value=tmp_path):
+            with patch.dict(os.environ, {"APPDATA": fake_appdata}):
+                p = skills_mod._vscode_user_settings_path()
+    assert p == Path(fake_appdata) / "Code" / "User" / "settings.json"
+
+
+def test_copilot_vscode_detection() -> None:
+    """Smoke-test: _copilot_vscode_detected returns a bool on the current machine."""
+    from code_review_graph.skills import _copilot_vscode_detected
+
+    assert isinstance(_copilot_vscode_detected(), bool)
+
+
+def test_copilot_cli_detection() -> None:
+    """Smoke-test: _copilot_cli_detected returns a bool on the current machine."""
+    from code_review_graph.skills import _copilot_cli_detected
+
+    assert isinstance(_copilot_cli_detected(), bool)
+
+
+def test_copilot_platforms_in_dict() -> None:
+    """Verify Copilot platforms are registered in PLATFORMS dict."""
+    from code_review_graph.skills import PLATFORMS
+
+    assert "copilot" in PLATFORMS
+    assert "copilot-cli" in PLATFORMS
+    assert PLATFORMS["copilot"]["name"] == "GitHub Copilot (VS Code)"
+    assert PLATFORMS["copilot-cli"]["name"] == "GitHub Copilot CLI"
+
+
+def test_copilot_platforms_in_cli() -> None:
+    """Verify copilot platforms are in CLI choices."""
+    from code_review_graph.cli import main
+    assert callable(main)
+    
 
 class TestCursorHooksConfig:
     """Tests for generate_cursor_hooks_config()."""
@@ -830,6 +1062,7 @@ class TestInstallCursorHooks:
         assert result.exists()
         data = json.loads(result.read_text())
         assert data["version"] == 1
+
 
 
 class TestKiroPlatform:

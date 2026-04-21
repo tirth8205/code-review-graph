@@ -34,6 +34,31 @@ code-review-graph install --platform claude-code
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |
 | **Qoder** | `.qoder/mcp.json` |
+| **Kiro** | `.kiro/settings/mcp.json` |
+| **GitHub Copilot (VS Code)** | VS Code user `settings.json` (macOS: `~/Library/Application Support/Code/User/`; Windows: `%APPDATA%\Code\User\`; Linux: `~/.config/Code/User/`) |
+| **GitHub Copilot CLI** | `~/.config/github-copilot/mcp_servers.json` (also `~/.github-copilot` if present for detection) |
+
+### GitHub Copilot Setup
+
+If you use GitHub Copilot, configure the MCP server for your variant:
+
+**VS Code Extension or Copilot Chat:**
+```bash
+code-review-graph install --platform copilot
+```
+
+**Copilot CLI:**
+```bash
+code-review-graph install --platform copilot-cli
+```
+
+**Both variants:**
+```bash
+code-review-graph install
+```
+The tool auto-detects both Copilot variants and installs MCP configuration for each.
+
+For the VS Code integration, `install` updates the global user `settings.json` only if that file already exists (for example after you have opened VS Code at least once). If the file is missing, run VS Code once or create an empty `{}` in the path above, then run `install` again.
 
 ## Core Workflow
 
