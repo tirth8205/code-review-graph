@@ -932,13 +932,13 @@ def main() -> None:
 
                     serve_dir = html_path.parent
                     port = 8765
-                    handler = functools.partial(
+                    http_handler = functools.partial(
                         http.server.SimpleHTTPRequestHandler,
                         directory=str(serve_dir),
                     )
                     print(f"Serving at http://localhost:{port}/graph.html")
                     print("Press Ctrl+C to stop.")
-                    with http.server.HTTPServer(("localhost", port), handler) as httpd:
+                    with http.server.HTTPServer(("localhost", port), http_handler) as httpd:
                         try:
                             httpd.serve_forever()
                         except KeyboardInterrupt:
