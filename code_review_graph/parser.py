@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -625,9 +626,11 @@ class CodeParser:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
         self._export_symbol_cache: dict[str, Optional[str]] = {}
+        self._star_export_cache: dict[str, set[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
+        self._lock = threading.Lock()
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
         if language not in self._parsers:
@@ -708,6 +711,12 @@ class CodeParser:
             tree.root_node, language, source,
         )
 
+        # Expand Python `from X import *` into individual import_map entries.
+        if language == "python":
+            self._resolve_star_imports(
+                tree.root_node, file_path_str, language, import_map,
+            )
+
         # Walk the tree
         self._extract_from_tree(
             tree.root_node, source, language, file_path_str, nodes, edges,
@@ -715,7 +724,7 @@ class CodeParser:
         )
 
         # Resolve bare call targets to qualified names using same-file definitions
-        edges = self._resolve_call_targets(nodes, edges, file_path_str)
+        edges = self._resolve_call_targets(nodes, edges, file_path_str, import_map)
 
         # Generate TESTED_BY edges: when a test function calls a production
         # function, create an edge from the production function back to the test.
@@ -1091,6 +1100,7 @@ class CodeParser:
         # so line numbers restart at 1 for each group.
         all_cell_offsets: list[tuple[int, int, int]] = []
         max_line = 1
+        merged_import_map: dict[str, str] = {}
 
         for lang, lang_group in lang_cells.items():
             if lang == "sql":
@@ -1139,11 +1149,17 @@ class CodeParser:
             import_map, defined_names = self._collect_file_scope(
                 tree.root_node, lang, concat_bytes,
             )
+            if lang == "python":
+                self._resolve_star_imports(
+                    tree.root_node, file_path_str, lang, import_map,
+                )
             self._extract_from_tree(
                 tree.root_node, concat_bytes, lang,
                 file_path_str, all_nodes, all_edges,
                 import_map=import_map, defined_names=defined_names,
             )
+            for k, v in import_map.items():
+                merged_import_map.setdefault(k, v)
 
             all_cell_offsets.extend(cell_offsets)
             max_line = max(max_line, current_line)
@@ -1162,7 +1178,7 @@ class CodeParser:
 
         # Resolve call targets
         all_edges = self._resolve_call_targets(
-            all_nodes, all_edges, file_path_str,
+            all_nodes, all_edges, file_path_str, merged_import_map,
         )
 
         # Tag nodes with cell_index
@@ -1680,6 +1696,7 @@ class CodeParser:
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         file_path: str,
+        import_map: Optional[dict[str, str]] = None,
     ) -> list[EdgeInfo]:
         """Resolve bare call targets to qualified names using same-file definitions.
 
@@ -1702,11 +1719,26 @@ class CodeParser:
         resolved: list[EdgeInfo] = []
         for edge in edges:
             if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
-                if edge.target in symbols:
+                target = edge.target
+                if target in symbols:
+                    target = symbols[target]
+                elif "." in target:
+                    # ClassName.method -- qualify via the class name so the
+                    # edge points at /path/file::ClassName.method.
+                    cls_name = target.split(".", 1)[0]
+                    if cls_name in symbols:
+                        target = (
+                            f"{symbols[cls_name].rsplit('::', 1)[0]}::{target}"
+                        )
+                    elif import_map and cls_name in import_map:
+                        target = f"{import_map[cls_name]}::{target}"
+                elif import_map and target in import_map:
+                    target = f"{import_map[target]}::{target}"
+                if target != edge.target:
                     edge = EdgeInfo(
                         kind=edge.kind,
                         source=edge.source,
-                        target=symbols[edge.target],
+                        target=target,
                         file_path=edge.file_path,
                         line=edge.line,
                         extra=edge.extra,
@@ -2757,6 +2789,27 @@ class CodeParser:
             elif child.type == "protocol_declaration":
                 extra["swift_kind"] = "protocol"
 
+        # Collect class-level decorators / annotations (same shape as
+        # functions so flows._has_framework_decorator can match).
+        deco_list: list[str] = []
+        for sub in child.children:
+            if sub.type == "modifiers":
+                for mod in sub.children:
+                    if mod.type in ("annotation", "marker_annotation"):
+                        deco_list.append(
+                            mod.text.decode("utf-8", errors="replace")
+                            .lstrip("@").strip()
+                        )
+        if child.parent and child.parent.type == "decorated_definition":
+            for sib in child.parent.children:
+                if sib.type == "decorator":
+                    deco_list.append(
+                        sib.text.decode("utf-8", errors="replace")
+                        .lstrip("@").strip()
+                    )
+        if deco_list:
+            extra["decorators"] = deco_list
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -2865,6 +2918,7 @@ class CodeParser:
             params=params,
             return_type=ret_type,
             is_test=is_test,
+            extra={"decorators": list(decorators)} if decorators else {},
         )
         nodes.append(node)
 
@@ -3493,6 +3547,99 @@ class CodeParser:
             return True
 
         return False
+
+    def _resolve_star_imports(
+        self,
+        root,
+        file_path: str,
+        language: str,
+        import_map: dict[str, str],
+        _resolving: Optional[frozenset[str]] = None,
+    ) -> None:
+        """Expand ``from X import *`` into individual import_map entries."""
+        if _resolving is None:
+            _resolving = frozenset()
+        for child in root.children:
+            if child.type != "import_from_statement":
+                continue
+            has_wildcard = False
+            module = None
+            for sub in child.children:
+                if sub.type == "wildcard_import":
+                    has_wildcard = True
+                elif sub.type == "dotted_name" and module is None:
+                    module = sub.text.decode("utf-8", errors="replace")
+            if not has_wildcard or not module:
+                continue
+            resolved = self._resolve_module_to_file(
+                module, file_path, language,
+            )
+            if not resolved or resolved in _resolving:
+                continue
+            exported = self._get_exported_names(
+                resolved, language, _resolving | {resolved},
+            )
+            for name in exported:
+                if name not in import_map:
+                    import_map[name] = module
+
+    def _get_exported_names(
+        self,
+        resolved_path: str,
+        language: str,
+        _resolving: frozenset[str] = frozenset(),
+    ) -> set[str]:
+        """Return the public names exported by a module file.
+
+        Double-check locking: check cache, do I/O outside lock, store under lock.
+        """
+        if resolved_path in self._star_export_cache:
+            return self._star_export_cache[resolved_path]
+        try:
+            source = Path(resolved_path).read_bytes()
+        except (OSError, PermissionError):
+            return set()
+        parser = self._get_parser(language)
+        if not parser:
+            return set()
+        tree = parser.parse(source)  # type: ignore[union-attr]
+        all_names = self._extract_dunder_all(tree.root_node)
+        if all_names is not None:
+            with self._lock:
+                self._star_export_cache[resolved_path] = all_names
+            return all_names
+        _, defined_names = self._collect_file_scope(
+            tree.root_node, language, source,
+        )
+        result = {n for n in defined_names if not n.startswith("_")}
+        with self._lock:
+            self._star_export_cache[resolved_path] = result
+        return result
+
+    @staticmethod
+    def _extract_dunder_all(root) -> Optional[set[str]]:
+        """Extract names from ``__all__ = [...]``. Returns None if absent."""
+        for child in root.children:
+            if child.type != "assignment":
+                continue
+            left = child.children[0] if child.children else None
+            if not left or left.type != "identifier" or left.text != b"__all__":
+                continue
+            for rhs in child.children:
+                if rhs.type == "list":
+                    names: set[str] = set()
+                    for elem in rhs.children:
+                        if elem.type == "string":
+                            for sc in elem.children:
+                                if sc.type == "string_content":
+                                    val = sc.text.decode(
+                                        "utf-8", errors="replace",
+                                    )
+                                    if val:
+                                        names.add(val)
+                    return names
+            return set()
+        return None
 
     def _collect_file_scope(
         self, root, language: str, source: bytes,
