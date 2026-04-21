@@ -13,6 +13,83 @@ from ._common import _get_store
 logger = logging.getLogger(__name__)
 
 
+def _resolve_cross_file_class_methods(store: Any) -> int:
+    """Rewrite bare ``ClassName.method`` edge targets to qualified form.
+
+    The per-file resolver in parser.py qualifies ``ClassName.method`` only
+    when the class lives in the calling file's symbol table. For calls to
+    classes defined in another file the target stays bare. This pass
+    scans all Class nodes and builds a ``name -> [file::ClassName, ...]``
+    map. For each candidate edge we pick the class qn whose file path
+    shares the deepest directory prefix with the edge's file (same package
+    / same module tree), so same-directory duplicates still resolve.
+    Names with multiple candidates whose best match isn't unique remain
+    bare.
+    """
+    conn = store._conn
+
+    class_candidates: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT name, qualified_name FROM nodes WHERE kind = 'Class'"
+    ):
+        name, qn = row[0], row[1]
+        if "::" not in qn:
+            continue
+        class_candidates.setdefault(name, []).append(qn)
+
+    if not class_candidates:
+        return 0
+
+    def _dir_prefix_len(a: str, b: str) -> int:
+        a_parts = a.split("/")
+        b_parts = b.split("/")
+        n = 0
+        for x, y in zip(a_parts[:-1], b_parts[:-1]):
+            if x != y:
+                break
+            n += 1
+        return n
+
+    candidates = conn.execute(
+        "SELECT id, target_qualified, file_path FROM edges "
+        "WHERE kind IN ('CALLS', 'REFERENCES') "
+        "AND instr(target_qualified, '.') > 0 "
+        "AND instr(target_qualified, '::') = 0 "
+        "AND substr(target_qualified, 1, 1) != '/'"
+    ).fetchall()
+
+    rewrites: list[tuple[str, int]] = []
+    for edge_id, target, edge_file in candidates:
+        cls_name, _, method = target.partition(".")
+        if not method or "." in method:
+            continue
+        qns = class_candidates.get(cls_name)
+        if not qns:
+            continue
+        if len(qns) == 1:
+            chosen = qns[0]
+        else:
+            scored = [(_dir_prefix_len(edge_file or "", qn), qn) for qn in qns]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_score = scored[0][0]
+            top_matches = [qn for score, qn in scored if score == top_score]
+            if len(top_matches) != 1 or top_score == 0:
+                continue
+            chosen = top_matches[0]
+        file_prefix = chosen.rsplit("::", 1)[0]
+        rewrites.append((f"{file_prefix}::{cls_name}.{method}", edge_id))
+
+    if not rewrites:
+        return 0
+
+    conn.executemany(
+        "UPDATE edges SET target_qualified = ? WHERE id = ?",
+        rewrites,
+    )
+    conn.commit()
+    return len(rewrites)
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
@@ -33,7 +110,23 @@ def _run_postprocess(
     if postprocess == "none":
         return warnings
 
+    # -- Cross-file class.method resolution --
+    t_xref = time.perf_counter()
+    try:
+        resolved_count = _resolve_cross_file_class_methods(store)
+        build_result["cross_file_resolved"] = resolved_count
+    except sqlite3.OperationalError as e:
+        logger.warning("Cross-file class.method resolution failed: %s", e)
+        warnings.append(
+            f"Cross-file class.method resolution failed: {type(e).__name__}: {e}"
+        )
+    logger.info(
+        "Postprocess: cross-file class.method took %.2fs",
+        time.perf_counter() - t_xref,
+    )
+
     # -- Signatures + FTS (fast, always run unless "none") --
+    t0 = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
         for row in rows:
@@ -58,6 +151,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
+    t_sig = time.perf_counter()
+    logger.info("Postprocess: signatures took %.2fs", t_sig - t0)
 
     try:
         from code_review_graph.search import rebuild_fts_index
@@ -68,6 +163,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("FTS index rebuild failed: %s", e)
         warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
+    t_fts = time.perf_counter()
+    logger.info("Postprocess: FTS rebuild took %.2fs", t_fts - t_sig)
 
     if postprocess == "minimal":
         return warnings
@@ -90,6 +187,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Flow detection failed: %s", e)
         warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
+    t_flows = time.perf_counter()
+    logger.info("Postprocess: flows took %.2fs", t_flows - t_fts)
 
     try:
         if use_incremental:
@@ -112,6 +211,8 @@ def _run_postprocess(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+    t_comm = time.perf_counter()
+    logger.info("Postprocess: communities took %.2fs", t_comm - t_flows)
 
     # -- Compute pre-computed summary tables --
     try:
@@ -120,6 +221,16 @@ def _run_postprocess(
     except (sqlite3.OperationalError, Exception) as e:
         logger.warning("Summary computation failed: %s", e)
         warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
+    t_sum = time.perf_counter()
+    logger.info("Postprocess: summaries took %.2fs", t_sum - t_comm)
+
+    build_result["postprocess_timing"] = {
+        "signatures_s": round(t_sig - t0, 2),
+        "fts_s": round(t_fts - t_sig, 2),
+        "flows_s": round(t_flows - t_fts, 2),
+        "communities_s": round(t_comm - t_flows, 2),
+        "summaries_s": round(t_sum - t_comm, 2),
+    }
 
     store.set_metadata(
         "last_postprocessed_at",
@@ -220,8 +331,9 @@ def _compute_summaries(store: Any) -> None:
                 (cid, cname, purpose, key_syms, csize, clang or ""),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()  # Table may not exist yet
+        logger.info("Skipping community_summaries (table may not exist): %s", e)
 
     # -- flow_snapshots --
     try:
@@ -286,8 +398,9 @@ def _compute_summaries(store: Any) -> None:
                 (fid, fname, ep_name, _json.dumps(critical_path), crit, ncount, fcount),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()
+        logger.info("Skipping flow_snapshots (table may not exist): %s", e)
 
     # -- risk_index --
     try:
@@ -354,8 +467,9 @@ def _compute_summaries(store: Any) -> None:
                 (nid, qn, risk, caller_count, coverage, sec_relevant),
             )
         conn.commit()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         conn.rollback()
+        logger.info("Skipping risk_index (table may not exist): %s", e)
 
 
 def build_or_update_graph(
