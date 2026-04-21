@@ -2,6 +2,16 @@
 
 ## Shipped
 
+### v2.2.0
+- Multi-repo watch daemon (`crg-daemon` / `code-review-graph daemon`)
+- TOML-based daemon configuration (`~/.code-review-graph/watch.toml`)
+- Child process management: one `code-review-graph watch` process per repo
+- Config file watching with automatic reconciliation of watcher processes
+- Daemonization with PID file management
+- Health checking with automatic restart of dead watchers
+- Standalone `crg-daemon` CLI entry point (7 subcommands)
+- Integrated `daemon` subcommand group in main CLI
+
 ### v2.0.0
 - 22 MCP tools (up from 9) and 5 MCP prompts
 - 18 languages (added Dart, R, Perl)

@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -17,15 +18,20 @@ from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
     _build_server_entry,
+    _cursor_hook_scripts,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
+    _opencode_plugin_content,
+    generate_cursor_hooks_config,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_cursor_hooks,
     install_git_hook,
     install_hooks,
+    install_opencode_plugin,
     install_platform_configs,
 )
 
@@ -892,6 +898,173 @@ def test_copilot_platforms_in_cli() -> None:
     from code_review_graph.cli import main
     assert callable(main)
     
+
+class TestCursorHooksConfig:
+    """Tests for generate_cursor_hooks_config()."""
+
+    def test_has_version_1(self):
+        config = generate_cursor_hooks_config()
+        assert config["version"] == 1
+
+    def test_has_after_file_edit(self):
+        config = generate_cursor_hooks_config()
+        hooks = config["hooks"]["afterFileEdit"]
+        assert len(hooks) >= 1
+        assert "crg-update.sh" in hooks[0]["command"]
+        assert hooks[0]["timeout"] == 5
+
+    def test_has_session_start(self):
+        config = generate_cursor_hooks_config()
+        hooks = config["hooks"]["sessionStart"]
+        assert len(hooks) >= 1
+        assert "crg-session-start.sh" in hooks[0]["command"]
+        assert hooks[0]["timeout"] == 5
+
+    def test_has_before_shell_execution(self):
+        config = generate_cursor_hooks_config()
+        hooks = config["hooks"]["beforeShellExecution"]
+        assert len(hooks) >= 1
+        assert "crg-pre-commit.sh" in hooks[0]["command"]
+        assert hooks[0]["timeout"] == 10
+        assert hooks[0]["matcher"] == "^git\\s+commit"
+
+    def test_has_all_three_hook_types(self):
+        config = generate_cursor_hooks_config()
+        hook_types = set(config["hooks"].keys())
+        assert hook_types == {"afterFileEdit", "sessionStart", "beforeShellExecution"}
+
+    def test_commands_point_to_home_cursor_hooks(self):
+        config = generate_cursor_hooks_config()
+        from pathlib import Path
+
+        hooks_dir = str(Path.home() / ".cursor" / "hooks")
+        for event, entries in config["hooks"].items():
+            for entry in entries:
+                assert entry["command"].startswith(hooks_dir), (
+                    f"{event} command does not start with {hooks_dir}"
+                )
+
+
+class TestCursorHookScripts:
+    """Tests for _cursor_hook_scripts()."""
+
+    def test_returns_three_scripts(self):
+        scripts = _cursor_hook_scripts()
+        assert set(scripts.keys()) == {
+            "crg-update.sh",
+            "crg-session-start.sh",
+            "crg-pre-commit.sh",
+        }
+
+    def test_scripts_start_with_shebang(self):
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert content.startswith("#!/usr/bin/env bash"), f"{name} missing shebang line"
+
+    def test_scripts_exit_zero(self):
+        """Each script must end with exit 0 for graceful failure."""
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "exit 0" in content, f"{name} missing 'exit 0'"
+
+    def test_scripts_consume_stdin(self):
+        """Each script must consume stdin (Cursor protocol)."""
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "cat > /dev/null" in content, f"{name} missing stdin consumption"
+
+    def test_update_script_runs_update(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph update --skip-flows" in scripts["crg-update.sh"]
+
+    def test_session_start_script_runs_status(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph status" in scripts["crg-session-start.sh"]
+
+    def test_pre_commit_script_runs_detect_changes(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph detect-changes --brief" in scripts["crg-pre-commit.sh"]
+
+
+class TestInstallCursorHooks:
+    """Tests for install_cursor_hooks()."""
+
+    def test_creates_hooks_json(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_cursor_hooks()
+        hooks_json = tmp_path / ".cursor" / "hooks.json"
+        assert hooks_json.exists()
+        assert result == hooks_json
+        data = json.loads(hooks_json.read_text())
+        assert data["version"] == 1
+        assert "afterFileEdit" in data["hooks"]
+
+    def test_creates_hook_scripts(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+        hooks_dir = tmp_path / ".cursor" / "hooks"
+        assert (hooks_dir / "crg-update.sh").exists()
+        assert (hooks_dir / "crg-session-start.sh").exists()
+        assert (hooks_dir / "crg-pre-commit.sh").exists()
+
+    def test_scripts_are_executable(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+        hooks_dir = tmp_path / ".cursor" / "hooks"
+        for script in hooks_dir.iterdir():
+            mode = script.stat().st_mode
+            assert mode & stat.S_IXUSR, f"{script.name} not executable by owner"
+            assert mode & stat.S_IXGRP, f"{script.name} not executable by group"
+
+    def test_merges_with_existing_hooks_json(self, tmp_path):
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        existing = {
+            "version": 1,
+            "hooks": {
+                "afterFileEdit": [{"command": "/some/other/hook.sh", "timeout": 3}],
+                "stop": [{"command": "/some/stop-hook.sh", "timeout": 2}],
+            },
+        }
+        (cursor_dir / "hooks.json").write_text(json.dumps(existing))
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+
+        data = json.loads((cursor_dir / "hooks.json").read_text())
+        # Original hook preserved
+        commands = [h["command"] for h in data["hooks"]["afterFileEdit"]]
+        assert "/some/other/hook.sh" in commands
+        # Our hook added
+        assert any("crg-update.sh" in c for c in commands)
+        # Unrelated hook type preserved
+        assert "stop" in data["hooks"]
+
+    def test_no_duplicate_on_reinstall(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+            install_cursor_hooks()
+
+        data = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
+        # Each event type should have exactly 1 crg hook
+        for event, entries in data["hooks"].items():
+            crg_hooks = [h for h in entries if "crg-" in h.get("command", "")]
+            assert len(crg_hooks) == 1, f"{event} has {len(crg_hooks)} crg hooks after reinstall"
+
+    def test_handles_corrupt_existing_json(self, tmp_path):
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        (cursor_dir / "hooks.json").write_text("not valid json{{{")
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_cursor_hooks()
+
+        assert result.exists()
+        data = json.loads(result.read_text())
+        assert data["version"] == 1
+
+
+
 class TestKiroPlatform:
     """Tests for Kiro platform support."""
 
@@ -1136,3 +1309,118 @@ class TestDetectServeCommand:
         monkeypatch.setattr("code_review_graph.skills.sys.executable", str(fake_python))
         monkeypatch.setattr("code_review_graph.skills.Path.home", staticmethod(lambda: tmp_path))
         assert _in_uv_project() is False
+
+
+class TestOpenCodePluginContent:
+    """Tests for _opencode_plugin_content()."""
+
+    def test_returns_non_empty_string(self):
+        content = _opencode_plugin_content()
+        assert isinstance(content, str)
+        assert len(content) > 100
+
+    def test_has_plugin_type_import(self):
+        content = _opencode_plugin_content()
+        assert "import type" in content
+        assert "@opencode-ai/plugin" in content
+
+    def test_has_default_export(self):
+        content = _opencode_plugin_content()
+        assert "export default" in content
+
+    def test_hooks_file_edited_event(self):
+        content = _opencode_plugin_content()
+        assert '"file.edited"' in content
+        assert "code-review-graph update --skip-flows" in content
+
+    def test_hooks_session_created_event(self):
+        content = _opencode_plugin_content()
+        assert '"session.created"' in content
+        assert "code-review-graph status" in content
+
+    def test_hooks_tool_execute_before_event(self):
+        content = _opencode_plugin_content()
+        assert '"tool.execute.before"' in content
+        assert "code-review-graph detect-changes --brief" in content
+
+    def test_has_git_commit_detection(self):
+        """Pre-commit hook should match git commit commands."""
+        content = _opencode_plugin_content()
+        assert "git" in content
+        assert "commit" in content
+
+    def test_all_handlers_have_try_catch(self):
+        """Every event handler must use try/catch for graceful failure."""
+        content = _opencode_plugin_content()
+        # Count the three event registrations and ensure catch blocks
+        assert content.count("} catch") >= 3
+
+
+class TestInstallOpenCodePlugin:
+    """Tests for install_opencode_plugin()."""
+
+    def test_creates_plugin_file(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        plugin_path = tmp_path / ".config" / "opencode" / "plugins" / "crg-plugin.ts"
+        assert plugin_path.exists()
+        assert result == plugin_path
+
+    def test_plugin_file_has_correct_content(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        content = result.read_text(encoding="utf-8")
+        assert "export default" in content
+        assert "file.edited" in content
+
+    def test_creates_parent_directories(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        assert plugins_dir.is_dir()
+
+    def test_overwrites_existing_plugin(self, tmp_path):
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        old_plugin = plugins_dir / "crg-plugin.ts"
+        old_plugin.write_text("// old version")
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+
+        content = old_plugin.read_text()
+        assert "// old version" not in content
+        assert "export default" in content
+
+    def test_idempotent(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+            result = install_opencode_plugin()
+        content = result.read_text()
+        assert "export default" in content
+        # Only one default export in the file
+        assert content.count("export default") == 1
+
+    def test_plugin_is_typescript(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        assert result.suffix == ".ts"
+
+    def test_preserves_other_plugins(self, tmp_path):
+        plugins_dir = tmp_path / ".config" / "opencode" / "plugins"
+        plugins_dir.mkdir(parents=True)
+        other_plugin = plugins_dir / "other-plugin.ts"
+        other_plugin.write_text("// other plugin")
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_opencode_plugin()
+
+        assert other_plugin.exists()
+        assert other_plugin.read_text() == "// other plugin"
+
+    def test_file_is_utf8(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        # Should be readable as UTF-8 without errors
+        content = result.read_text(encoding="utf-8")
+        assert len(content) > 0
