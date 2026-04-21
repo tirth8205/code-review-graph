@@ -14,23 +14,53 @@ logger = logging.getLogger(__name__)
 
 
 def _has_git_changes(root: Path, base: str) -> bool:
-    """Quick check for uncommitted or diffed changes."""
+    """Quick check for uncommitted or diffed changes.
+
+    Uses ``subprocess.Popen`` with manual ``.read()`` instead of
+    ``subprocess.run(capture_output=True)`` to avoid deadlocks when
+    this function is called from inside an anyio thread pool (which
+    is what FastMCP 3.x uses for sync tool handlers). On Windows,
+    ``subprocess.run`` internally calls ``.communicate()`` which can
+    deadlock when stdout is a pipe managed by anyio's event loop.
+    """
     try:
-        result = subprocess.run(
+        proc = subprocess.Popen(
             ["git", "diff", "--name-only", base, "--"],
-            capture_output=True, text=True,
-            cwd=str(root), timeout=10,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=str(root),
         )
-        if result.returncode == 0 and result.stdout.strip():
-            return True
-        # Also check staged/unstaged
-        result2 = subprocess.run(
+        try:
+            stdout = proc.stdout.read()
+            proc.wait(timeout=10)
+            if proc.returncode == 0 and stdout.strip():
+                return True
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+            return False
+        finally:
+            proc.stdout.close()
+
+        proc2 = subprocess.Popen(
             ["git", "status", "--porcelain"],
-            capture_output=True, text=True,
-            cwd=str(root), timeout=10,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=str(root),
         )
-        return bool(result2.stdout.strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        try:
+            stdout2 = proc2.stdout.read()
+            proc2.wait(timeout=10)
+            return bool(stdout2.strip())
+        except subprocess.TimeoutExpired:
+            proc2.kill()
+            proc2.wait(timeout=5)
+            return False
+        finally:
+            proc2.stdout.close()
+    except (FileNotFoundError, OSError):
         return False
 
 

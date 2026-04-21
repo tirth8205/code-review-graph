@@ -423,6 +423,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
     try:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             cwd=str(repo_root),
@@ -432,6 +433,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             # Fallback: try diff against empty tree (initial commit)
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 cwd=str(repo_root),
@@ -454,6 +456,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
         if rev_range:
             result = subprocess.run(
                 ["svn", "diff", "--summarize", "--non-interactive", "-r", rev_range],
+                stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
             )
@@ -470,6 +473,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
         else:
             result = subprocess.run(
                 ["svn", "status", "--non-interactive"],
+                stdin=subprocess.DEVNULL,
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
             )
@@ -495,6 +499,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             cwd=str(repo_root),
