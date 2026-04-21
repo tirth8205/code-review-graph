@@ -11,6 +11,7 @@ Supports multiple providers:
 from __future__ import annotations
 
 import hashlib
+import importlib
 import logging
 import os
 import sqlite3
@@ -19,7 +20,7 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from .graph import GraphNode, GraphStore, node_to_dict
@@ -99,8 +100,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 class GoogleEmbeddingProvider(EmbeddingProvider):
     def __init__(self, api_key: str, model: str = "gemini-embedding-001") -> None:
         try:
-            from google import genai
-            self._client = genai.Client(api_key=api_key)
+            genai = importlib.import_module("google.genai")
+            self._client = cast(Any, genai).Client(api_key=api_key)
             self.model = model
             self._dimension: int | None = None
         except ImportError:
