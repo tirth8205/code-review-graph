@@ -59,7 +59,7 @@ class TestServeMainTransport:
 
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
         crg_main.main(repo_root=None)
-        assert calls == [{"transport": "stdio"}]
+        assert calls == [{"transport": "stdio", "show_banner": False}]
 
     def test_http_calls_mcp_run_with_host_port(self, monkeypatch):
         calls: list[dict] = []
