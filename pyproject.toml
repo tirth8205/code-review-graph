@@ -34,6 +34,7 @@ dependencies = [
     "tree-sitter-language-pack>=0.3.0,<1",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<6",
+    "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
 [project.urls]
@@ -45,6 +46,7 @@ Issues = "https://github.com/tirth8205/code-review-graph/issues"
 
 [project.scripts]
 code-review-graph = "code_review_graph.cli:main"
+crg-daemon = "code_review_graph.daemon_cli:main"
 
 [project.optional-dependencies]
 embeddings = [
