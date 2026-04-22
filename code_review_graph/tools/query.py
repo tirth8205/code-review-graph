@@ -261,6 +261,33 @@ def query_graph(
                         "file": e.file_path,
                     })
                     edges_out.append(edge_to_dict(e))
+            # C# fallback: IMPORTS_FROM edges for `using X.Y.Z;` directives
+            # carry the namespace string as their target, not a file path.
+            # For .cs files, look up every namespace the target file
+            # declares and re-search edges by namespace.  See #310.
+            if node is not None and node.language == "csharp":
+                declared_ns: list[str] = []
+                # The File node is the one whose kind == "File" in the
+                # same file.  It carries the csharp_namespaces tag.
+                for n in store.get_nodes_by_file(node.file_path):
+                    if n.kind == "File":
+                        declared_ns = list(
+                            n.extra.get("csharp_namespaces", []) or []
+                        )
+                        break
+                seen_sources = {r.get("importer") for r in results}
+                for ns in declared_ns:
+                    for e in store.get_edges_by_target(ns):
+                        if e.kind != "IMPORTS_FROM":
+                            continue
+                        if e.source_qualified in seen_sources:
+                            continue
+                        results.append({
+                            "importer": e.source_qualified,
+                            "file": e.file_path,
+                        })
+                        edges_out.append(edge_to_dict(e))
+                        seen_sources.add(e.source_qualified)
 
         elif pattern == "children_of":
             for e in store.get_edges_by_source(qn):

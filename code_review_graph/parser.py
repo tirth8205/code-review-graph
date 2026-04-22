@@ -591,6 +591,69 @@ def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
 
 
+def _extract_csharp_namespaces(root_node) -> list[str]:
+    """Return the list of namespaces declared in a C# compilation unit.
+
+    C# supports two shapes:
+
+    * Block scoped:  ``namespace Foo.Bar { ... }``
+    * File scoped:   ``namespace Foo.Bar;``  (C# 10+)
+
+    A single file can declare multiple namespaces, so this returns a list
+    in source order.  Duplicates are preserved so the caller can reason
+    about multi-namespace files explicitly.  See #310.
+    """
+    namespaces: list[str] = []
+
+    def _walk(node) -> None:
+        # tree-sitter-c-sharp uses separate node types for the two shapes:
+        #  * ``namespace_declaration``              (block form)
+        #  * ``file_scoped_namespace_declaration``  (C# 10+ single-semicolon form)
+        if node.type in (
+            "namespace_declaration", "file_scoped_namespace_declaration",
+        ):
+            for child in node.children:
+                if child.type in ("qualified_name", "identifier"):
+                    text = child.text.decode("utf-8", errors="replace").strip()
+                    if text:
+                        namespaces.append(text)
+                    break
+        for child in node.children:
+            _walk(child)
+
+    _walk(root_node)
+    return namespaces
+
+
+def _extract_annotation_list(node) -> list[str]:
+    """Return the list of decorator / annotation names on *node*.
+
+    Walks:
+    * Java/Kotlin/C#: ``modifiers > annotation | marker_annotation`` child.
+    * Python: parent ``decorated_definition`` with ``decorator`` siblings.
+
+    Each entry has its leading ``@`` stripped.  Order follows source order so
+    the first annotation in the source is first in the returned list.  This
+    function replaces the inlined logic that previously extracted decorators
+    only for test detection and then discarded them (see #295).
+    """
+    deco_list: list[str] = []
+    for sub in node.children:
+        # Java/Kotlin/C#: annotations inside a ``modifiers`` child.
+        if sub.type == "modifiers":
+            for mod in sub.children:
+                if mod.type in ("annotation", "marker_annotation"):
+                    text = mod.text.decode("utf-8", errors="replace")
+                    deco_list.append(text.lstrip("@").strip())
+    # Python: check parent ``decorated_definition`` for decorator siblings.
+    if node.parent and node.parent.type == "decorated_definition":
+        for sib in node.parent.children:
+            if sib.type == "decorator":
+                text = sib.text.decode("utf-8", errors="replace")
+                deco_list.append(text.lstrip("@").strip())
+    return deco_list
+
+
 def _is_test_function(
     name: str, file_path: str, decorators: tuple[str, ...] = (),
 ) -> bool:
@@ -693,6 +756,14 @@ class CodeParser:
 
         # File node
         test_file = _is_test_file(file_path_str)
+        file_extra: dict = {}
+        # C#: capture every namespace this file declares so query-time
+        # fallbacks (importers_of, get_impact_radius) can resolve
+        # namespace-form IMPORTS_FROM targets back to file paths.  See #310.
+        if language == "csharp":
+            ns_list = _extract_csharp_namespaces(tree.root_node)
+            if ns_list:
+                file_extra["csharp_namespaces"] = ns_list
         nodes.append(NodeInfo(
             kind="File",
             name=file_path_str,
@@ -701,6 +772,7 @@ class CodeParser:
             line_end=source.count(b"\n") + 1,
             language=language,
             is_test=test_file,
+            extra=file_extra,
         ))
 
         # Pre-scan for import mappings and defined names
@@ -2741,11 +2813,22 @@ class CodeParser:
         if not name:
             return False
 
+        # Extract class-level annotations (Kotlin/Java/C#/Python).  Without
+        # this, Kotlin `@HiltViewModel`, `@AndroidEntryPoint`, `@Composable`
+        # classes, Java `@Entity`/`@Service` classes, etc. would lose their
+        # annotation metadata.  See #295.
+        class_decorators = _extract_annotation_list(child)
+        class_modifiers: Optional[str] = (
+            ",".join(class_decorators) if class_decorators else None
+        )
+
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
         # protocol uses its own protocol_declaration node type.
         extra: dict = {}
+        if class_decorators:
+            extra["decorators"] = list(class_decorators)
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -2765,6 +2848,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            modifiers=class_modifiers,
             extra=extra,
         )
         nodes.append(node)
@@ -2829,22 +2913,16 @@ class CodeParser:
             if receiver_type:
                 enclosing_class = receiver_type
 
-        # Extract annotations/decorators for test detection
+        # Extract annotations/decorators for test detection AND persistence.
+        # Previously ``deco_list`` was used only for test detection and
+        # discarded — see #295 for Kotlin (``@Composable``, ``@HiltViewModel``,
+        # ``@Inject``) and the same pattern affects Java (``@Test``,
+        # ``@Autowired``), C# (``[HttpGet]``), and Python (``@app.get``).  Now
+        # persisted into ``node.modifiers`` (comma-separated string) and
+        # ``node.extra["decorators"]`` (list) so consumers can filter by
+        # annotation (e.g. "show me all @Composable functions").
         decorators: tuple[str, ...] = ()
-        deco_list: list[str] = []
-        for sub in child.children:
-            # Java/Kotlin/C#: annotations inside a modifiers child
-            if sub.type == "modifiers":
-                for mod in sub.children:
-                    if mod.type in ("annotation", "marker_annotation"):
-                        text = mod.text.decode("utf-8", errors="replace")
-                        deco_list.append(text.lstrip("@").strip())
-        # Python: check parent decorated_definition for decorator siblings
-        if child.parent and child.parent.type == "decorated_definition":
-            for sib in child.parent.children:
-                if sib.type == "decorator":
-                    text = sib.text.decode("utf-8", errors="replace")
-                    deco_list.append(text.lstrip("@").strip())
+        deco_list: list[str] = _extract_annotation_list(child)
         if deco_list:
             decorators = tuple(deco_list)
 
@@ -2853,6 +2931,13 @@ class CodeParser:
         qualified = self._qualify(name, file_path, enclosing_class)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
+
+        modifiers_str: Optional[str] = (
+            ",".join(deco_list) if deco_list else None
+        )
+        extra: dict = {}
+        if deco_list:
+            extra["decorators"] = list(deco_list)
 
         node = NodeInfo(
             kind=kind,
@@ -2864,7 +2949,9 @@ class CodeParser:
             parent_name=enclosing_class,
             params=params,
             return_type=ret_type,
+            modifiers=modifiers_str,
             is_test=is_test,
+            extra=extra,
         )
         nodes.append(node)
 

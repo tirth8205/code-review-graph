@@ -346,6 +346,121 @@ class TestCSharpParsing:
         assert "FindById" in names or "Save" in names
 
 
+@pytest.mark.skipif(
+    not _has_csharp_parser(),
+    reason="csharp tree-sitter grammar not installed",
+)
+class TestCSharpNamespaceResolution:
+    """Regression tests for #310: C# ``using`` directives carry a namespace
+    string as their ``IMPORTS_FROM.target`` (e.g. ``ACME.Core``), not a
+    resolved file path.  ``importers_of`` previously returned ``[]`` for
+    every .cs file; this suite locks in the namespace-fallback path.
+    """
+
+    def _write(self, path: Path, source: str) -> None:
+        path.write_text(source, encoding="utf-8")
+
+    def test_file_scoped_namespace_tagged_on_file_node(self, tmp_path):
+        """File-scoped (C# 10+) ``namespace Foo.Bar;`` is captured."""
+        src = "namespace ACME.Core;\n\npublic class TaskBoard {}\n"
+        f = tmp_path / "Core.cs"
+        self._write(f, src)
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == ["ACME.Core"]
+
+    def test_block_namespace_tagged_on_file_node(self, tmp_path):
+        """Block-scoped ``namespace Foo.Bar { ... }`` is captured too."""
+        src = (
+            "namespace ACME.Core {\n"
+            "    public class TaskBoard {}\n"
+            "}\n"
+        )
+        f = tmp_path / "Core.cs"
+        self._write(f, src)
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == ["ACME.Core"]
+
+    def test_multiple_namespaces_in_one_file(self, tmp_path):
+        """A single file can declare multiple namespaces; all are kept."""
+        src = (
+            "namespace ACME.Core {\n"
+            "    public class A {}\n"
+            "}\n"
+            "namespace ACME.Utils {\n"
+            "    public class B {}\n"
+            "}\n"
+        )
+        f = tmp_path / "Multi.cs"
+        self._write(f, src)
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        ns_list = file_node.extra.get("csharp_namespaces", [])
+        assert "ACME.Core" in ns_list
+        assert "ACME.Utils" in ns_list
+
+    def test_non_csharp_file_has_no_namespace_tag(self, tmp_path):
+        """Non-C# files never carry a csharp_namespaces extra."""
+        f = tmp_path / "mod.py"
+        self._write(f, "def foo():\n    pass\n")
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert "csharp_namespaces" not in file_node.extra
+
+    def test_importers_of_resolves_namespace_to_file(self, tmp_path):
+        """Regression for the bug: ``importers_of <file.cs>`` must find
+        every .cs file that has ``using <namespace>;`` matching a
+        namespace declared by the target file."""
+        (tmp_path / ".git").mkdir()
+        data_dir = tmp_path / ".code-review-graph"
+        data_dir.mkdir()
+
+        core = tmp_path / "Core.cs"
+        self._write(core, (
+            "namespace ACME.Core;\n"
+            "public class TaskBoard {}\n"
+        ))
+        app = tmp_path / "App.cs"
+        self._write(app, (
+            "using ACME.Core;\n"
+            "namespace ACME.App;\n"
+            "public class App {}\n"
+        ))
+        unrelated = tmp_path / "Unrelated.cs"
+        self._write(unrelated, (
+            "using System.Linq;\n"
+            "namespace ACME.Other;\n"
+            "public class Other {}\n"
+        ))
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.tools.query import query_graph
+
+        store = GraphStore(data_dir / "graph.db")
+        parser = CodeParser()
+        for path in (core, app, unrelated):
+            nodes, edges = parser.parse_file(path)
+            for n in nodes:
+                store.upsert_node(n)
+            for e in edges:
+                store.upsert_edge(e)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {r["file"] for r in result.get("results", [])}
+        # App.cs imports ACME.Core, so it must be found.
+        assert str(app) in importers
+        # Unrelated.cs does NOT import ACME.Core.
+        assert str(unrelated) not in importers
+
+
 class TestRubyParsing:
     def setup_method(self):
         self.parser = CodeParser()
@@ -436,6 +551,101 @@ class TestKotlinParsing:
         assert "println" in targets
         # Method call: repo.save(user)
         assert any("save" in t for t in targets)
+
+
+class TestKotlinAnnotations:
+    """Regression tests for #295: Kotlin nodes must preserve annotation
+    metadata in both ``modifiers`` and ``extra['decorators']`` so consumers
+    can filter queries like "show me all @Composable functions".
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.kt"
+        p.write_text(source, encoding="utf-8")
+        parser = CodeParser()
+        return parser.parse_file(p)
+
+    def test_hilt_viewmodel_annotation_on_class(self, tmp_path):
+        src = (
+            "package com.example\n"
+            "@HiltViewModel\n"
+            "class MyViewModel {\n"
+            "    fun noop() {}\n"
+            "}\n"
+        )
+        nodes, _ = self._parse(src, tmp_path)
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        assert "MyViewModel" in classes
+        vm = classes["MyViewModel"]
+        assert vm.modifiers == "HiltViewModel"
+        assert vm.extra.get("decorators") == ["HiltViewModel"]
+
+    def test_composable_annotation_on_function(self, tmp_path):
+        src = (
+            "package com.example\n"
+            "@Composable\n"
+            "fun Greeting(name: String) {\n"
+            "    println(name)\n"
+            "}\n"
+        )
+        nodes, _ = self._parse(src, tmp_path)
+        funcs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert "Greeting" in funcs
+        greet = funcs["Greeting"]
+        assert greet.modifiers == "Composable"
+        assert greet.extra.get("decorators") == ["Composable"]
+
+    def test_multiple_annotations_on_function(self, tmp_path):
+        src = (
+            "package com.example\n"
+            "class Container {\n"
+            "    @Inject\n"
+            "    @field:JvmField\n"
+            "    fun install() {}\n"
+            "}\n"
+        )
+        nodes, _ = self._parse(src, tmp_path)
+        funcs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert "install" in funcs
+        install = funcs["install"]
+        assert install.extra.get("decorators") is not None
+        # Both annotations preserved.
+        decs = install.extra["decorators"]
+        assert any("Inject" in d for d in decs)
+        assert any("JvmField" in d for d in decs)
+
+    def test_unannotated_function_has_none_modifiers(self, tmp_path):
+        """Regression guard: adding annotation support must not leak a
+        default empty string — unannotated nodes must still have
+        ``modifiers=None`` and no ``decorators`` key."""
+        src = (
+            "package com.example\n"
+            "fun bare() { println(1) }\n"
+        )
+        nodes, _ = self._parse(src, tmp_path)
+        funcs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert "bare" in funcs
+        bare = funcs["bare"]
+        assert bare.modifiers is None
+        assert "decorators" not in bare.extra
+
+    def test_test_annotation_still_triggers_test_kind(self, tmp_path):
+        """Adding annotation persistence must not break the pre-existing
+        behavior of ``@Test`` promoting the node to kind='Test'."""
+        src = (
+            "package com.example\n"
+            "class MyTests {\n"
+            "    @Test\n"
+            "    fun testSomething() { println(42) }\n"
+            "}\n"
+        )
+        nodes, _ = self._parse(src, tmp_path)
+        tests = [n for n in nodes if n.kind == "Test"]
+        names = {t.name for t in tests}
+        assert "testSomething" in names
+        # And the annotation metadata is still preserved.
+        t = next(n for n in tests if n.name == "testSomething")
+        assert t.extra.get("decorators") == ["Test"]
 
 
 class TestSwiftParsing:
