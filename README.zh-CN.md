@@ -146,6 +146,7 @@ Build the code review graph for this project
 | **Token 基准测试** | 测量朴素全量 token 与图查询 token，附带逐题比率 |
 | **记忆循环** | 将问答结果持久化为 Markdown 以供重新摄入，使图从查询中不断成长 |
 | **社区自动分割** | 过大的社区（>图的 25%）通过 Leiden 算法递归分割 |
+| **框架感知解析** | Laravel Route→Controller 映射、Eloquent 关联边、Blade 模板引用、PSR-4 命名空间解析。支持 Flask/FastAPI/Django/Celery 的 Python 装饰器检测。 |
 | **执行流** | 从入口点追踪调用链，按加权关键度排序 |
 | **社区检测** | 通过 Leiden 算法聚类相关代码，大型图自动调节分辨率 |
 | **架构概览** | 自动生成架构图，附带耦合警告 |

@@ -107,7 +107,20 @@ _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
         r"^(componentDidMount|componentDidUpdate|componentWillUnmount"
         r"|shouldComponentUpdate|render)$"
     ),
+    # PHP magic invokable class entry point
+    re.compile(r"^__invoke$"),
 ]
+
+# Language-specific entry-point name patterns.  Checked only when the
+# node's language matches the key.  This avoids polluting all 19+
+# languages with framework-specific names like ``handle`` or ``boot``.
+_LANG_ENTRY_NAME_PATTERNS: dict[str, list[re.Pattern[str]]] = {
+    "php": [
+        re.compile(r"^(register|boot)$"),   # Service Provider
+        re.compile(r"^handle$"),             # Command / Middleware / Job
+        re.compile(r"^(up|down)$"),          # Migration
+    ],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +142,21 @@ def _has_framework_decorator(node: GraphNode) -> bool:
     return False
 
 
-def _matches_entry_name(node: GraphNode) -> bool:
-    """Return True if *node*'s name matches a conventional entry-point pattern."""
+def _matches_entry_name(
+    node: GraphNode, language: Optional[str] = None,
+) -> bool:
+    """Return True if *node*'s name matches a conventional entry-point pattern.
+
+    When *language* is provided, language-specific patterns from
+    ``_LANG_ENTRY_NAME_PATTERNS`` are also checked.
+    """
     for pat in _ENTRY_NAME_PATTERNS:
         if pat.search(node.name):
             return True
+    if language:
+        for pat in _LANG_ENTRY_NAME_PATTERNS.get(language, []):
+            if pat.search(node.name):
+                return True
     return False
 
 
@@ -188,7 +211,7 @@ def detect_entry_points(
             is_entry = True
 
         # Conventional name match.
-        if _matches_entry_name(node):
+        if _matches_entry_name(node, language=node.language):
             is_entry = True
 
         if is_entry and node.qualified_name not in seen_qn:

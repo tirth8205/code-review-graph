@@ -3,6 +3,26 @@
 namespace App\Models;
 
 use Exception;
+use App\Contracts\{Loggable, Cacheable};
+use App\Services\UserService as Service;
+
+trait Timestampable {
+    public function getCreatedAt(): string {
+        return $this->created_at;
+    }
+}
+
+enum Status: string {
+    case Active = 'active';
+    case Inactive = 'inactive';
+
+    public function label(): string {
+        return match($this) {
+            self::Active => 'Active',
+            self::Inactive => 'Inactive',
+        };
+    }
+}
 
 interface Repository {
     public function findById(int $id): ?User;
@@ -10,6 +30,8 @@ interface Repository {
 }
 
 class User {
+    use Timestampable;
+
     public int $id;
     public string $name;
 
@@ -20,6 +42,10 @@ class User {
 
     public function toString(): string {
         return "User({$this->id}, {$this->name})";
+    }
+
+    public static function find(int $id): ?self {
+        return null;
     }
 }
 
@@ -33,6 +59,15 @@ class InMemoryRepo implements Repository {
     public function save(User $user): void {
         $this->users[$user->id] = $user;
         echo "Saved " . $user->toString() . "\n";
+    }
+}
+
+class UserController extends Controller implements Loggable {
+    public function index(): array {
+        $users = User::find(1);
+        $repo = new InMemoryRepo();
+        $repo->save(new User(1, 'Alice'));
+        return [];
     }
 }
 

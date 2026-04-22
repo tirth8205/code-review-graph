@@ -109,6 +109,53 @@ class TestFlows:
         assert "handle_request" in ep_names
         assert "regular_func" not in ep_names
 
+    def test_php_entry_point_patterns(self):
+        """PHP-specific names (boot, register, up, down) are entry points only
+        when the node's language is 'php'.  Note: 'handle' is now a universal
+        entry-point pattern (added upstream) so it matches all languages."""
+        # PHP nodes — should be entry points
+        for name in ("handle", "boot", "register", "up", "down"):
+            node = NodeInfo(
+                kind="Function", name=name, file_path="app.php",
+                line_start=1, line_end=5, language="php",
+                extra={},
+            )
+            self.store.upsert_node(node, file_hash="ph")
+        # Same names but Python — boot/register/up should NOT be entry points
+        for name in ("boot", "register", "up"):
+            node = NodeInfo(
+                kind="Function", name=name, file_path="app.py",
+                line_start=1, line_end=5, language="python",
+                extra={},
+            )
+            self.store.upsert_node(node, file_hash="py")
+        self.store.commit()
+
+        # Make all nodes called so they aren't roots by default
+        for name in ("handle", "boot", "register", "up", "down"):
+            self._add_call("app.php::caller", f"app.php::{name}", "app.php")
+        for name in ("boot", "register", "up"):
+            self._add_call("app.py::caller", f"app.py::{name}")
+
+        eps = detect_entry_points(self.store)
+        ep_names_php = {
+            ep.name for ep in eps if ep.language == "php"
+        }
+        ep_names_py = {
+            ep.name for ep in eps
+            if ep.language == "python" and ep.name in ("boot", "register", "up")
+        }
+        # PHP names match via _LANG_ENTRY_NAME_PATTERNS (or universal patterns)
+        assert "handle" in ep_names_php
+        assert "boot" in ep_names_php
+        assert "register" in ep_names_php
+        assert "up" in ep_names_php
+        # Python versions should NOT match: boot/register/up are PHP-specific
+        # and these nodes are called (not roots), so they won't be entry points.
+        assert "boot" not in ep_names_py
+        assert "register" not in ep_names_py
+        assert "up" not in ep_names_py
+
     # ---------------------------------------------------------------
     # detect_entry_points -- expanded decorator patterns
     # ---------------------------------------------------------------
