@@ -195,7 +195,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **23 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI). Embeds the function body logic (signature + leading docstrings/header comments are stripped so the token budget goes to implementation, not documentation) — long-context models can rank by what code *does* |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
 | **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
 | **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
@@ -262,6 +262,8 @@ code-review-graph daemon start     # Start multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
+code-review-graph embed            # Compute / refresh embeddings (new repos auto-enable body)
+code-review-graph embed --include-body --confirm-reembed  # Existing DB: opt in to body enrichment
 code-review-graph serve            # Start MCP server
 ```
 
@@ -431,12 +433,16 @@ The cloud-egress warning is auto-skipped when the base URL points to localhost
 > `gemini-embedding-001` (via the native Gemini provider, which requires
 > `GOOGLE_API_KEY` instead of the OpenAI-compatible path).
 >
-> Also note: `code-review-graph` currently embeds **function signatures only**
-> (~10 tokens per node, e.g. `"parse_file function (path: str) returns Tree"`).
-> Models whose headline quality comes from long-context body understanding
-> (such as Gemini 2 or Qwen3-8B at their MTEB-code SOTA scores) will see a
-> much narrower quality gap against smaller models at this input length.
-> Body/docstring embedding is tracked as a follow-up enhancement.
+> `code-review-graph` also embeds a truncated **function body
+> implementation** snippet alongside the signature (signature + leading
+> docstrings / header comments are stripped so the snippet tokens go to
+> real logic; per-provider char budget: local 700 / google 3000 /
+> minimax 3000 / openai 6000). Long-context models (Gemini 2, Qwen3-8B)
+> can rank by what a function *does* and not just what it's named. New repositories pick this up automatically;
+> existing DBs keep the legacy signature-only behavior until you opt in
+> with `code-review-graph embed --include-body --confirm-reembed` (a
+> one-time re-embed that may spend API tokens on cloud providers — set
+> `CRG_EMBED_INCLUDE_BODY=0` to stay on signatures).
 
 #### Tool Filtering
 

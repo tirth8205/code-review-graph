@@ -1,0 +1,101 @@
+[
+  {
+    "query": "parse source code tree into nodes",
+    "expected_top3": [
+      "parser.py::parse_tree",
+      "parser.py::walk_nodes",
+      "parser.py::extract_functions"
+    ],
+    "type": "signature-searchable",
+    "notes": "node names contain parse/tree/nodes"
+  },
+  {
+    "query": "split string into tokens",
+    "expected_top3": [
+      "parser.py::tokenize",
+      "parser.py::parse_tree",
+      "parser.py::build_root"
+    ],
+    "type": "signature-searchable",
+    "notes": "tokenize name is the obvious hit"
+  },
+  {
+    "query": "cosine similarity between embedding vectors",
+    "expected_top3": [
+      "embeddings.py::cosine_similarity",
+      "embeddings.py::EmbeddingIndex.search",
+      "embeddings.py::embed_text"
+    ],
+    "type": "signature-searchable",
+    "notes": "cosine_similarity name is explicit"
+  },
+  {
+    "query": "escape HTML entities including quotes and backticks",
+    "expected_top3": [
+      "visualization.py::esc_h",
+      "visualization.py::render_html"
+    ],
+    "type": "body-dependent",
+    "notes": "esc_h name is cryptic; only body shows replace('&', '&amp;') / replace('\"', '&quot;') / replace('`', '&#96;')"
+  },
+  {
+    "query": "breadth first search with visited set and queue",
+    "expected_top3": [
+      "graph.py::Graph.impact_radius",
+      "graph.py::Graph.neighbors",
+      "graph.py::Graph.add_edge"
+    ],
+    "type": "body-dependent",
+    "notes": "impact_radius name does not say BFS; body has visited=set(), deque(), while queue"
+  },
+  {
+    "query": "read OPENAI_API_KEY from the environment",
+    "expected_top3": [
+      "api_client.py::OpenAIClient.__init__",
+      "api_client.py::GeminiClient.__init__",
+      "api_client.py::MinimaxClient.__init__"
+    ],
+    "type": "body-dependent",
+    "notes": "all three __init__ share the same signature; only body contains the env var name"
+  },
+  {
+    "query": "read GEMINI_API_KEY from the environment",
+    "expected_top3": [
+      "api_client.py::GeminiClient.__init__",
+      "api_client.py::OpenAIClient.__init__",
+      "api_client.py::MinimaxClient.__init__"
+    ],
+    "type": "body-dependent",
+    "notes": "requires body to distinguish the three __init__ siblings"
+  },
+  {
+    "query": "render graph nodes as html list",
+    "expected_top3": [
+      "visualization.py::render_html",
+      "visualization.py::esc_h",
+      "graph.py::Graph.neighbors"
+    ],
+    "type": "mixed",
+    "notes": "render_html name has semantic signal; esc_h relies on body"
+  },
+  {
+    "query": "detect git file changes since a ref",
+    "expected_top3": [
+      "incremental.py::detect_changes",
+      "incremental.py::get_changed_files",
+      "graph.py::Graph.add_edge"
+    ],
+    "type": "mixed",
+    "notes": "detect_changes is signature-searchable; get_changed_files needs body-ish context"
+  },
+  {
+    "query": "store embedding vector by qualified name",
+    "expected_top3": [
+      "embeddings.py::EmbeddingIndex.add",
+      "embeddings.py::EmbeddingIndex.search",
+      "embeddings.py::EmbeddingIndex.__init__"
+    ],
+    "type": "signature-searchable",
+    "notes": "EmbeddingIndex.add name matches"
+  }
+]
