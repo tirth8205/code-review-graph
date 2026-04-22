@@ -268,6 +268,107 @@ code-review-graph serve            # Start MCP server
 </details>
 
 <details>
+<summary><strong>Multi-user / multi-workstation workflow</strong></summary>
+<br>
+
+**Short version:** the graph is a **per-machine cache**. Don't commit it; let each
+contributor build their own once and let `update` keep it fresh from `git pull`.
+
+> Closes #357.
+
+### Why the graph isn't shared
+`code-review-graph` stores its database in `<repo>/.code-review-graph/graph.db` and
+the rows reference your source files by **absolute path** (e.g. `/Users/alice/work/myrepo/src/foo.ts`
+on macOS, `C:\Users\bob\repos\myrepo\src\foo.ts` on Windows). Sharing the file
+between machines would break every lookup the moment the path differs by one
+character. There is no portable on-disk format today — the SQLite file is a
+local cache, not a shipping artefact.
+
+The CLI knows this and does the right thing automatically:
+
+- `code-review-graph install` (and any first build) appends `.code-review-graph/`
+  to your repo's top-level `.gitignore`. If `.gitignore` doesn't exist yet, it
+  creates one. So a contributor running `git status` after their first build
+  sees no untracked graph files.
+- The `.code-review-graph/` directory itself contains an inner `.gitignore`
+  with `*` so any side-files (WAL / SHM, embeddings cache, wiki output) are
+  also ignored even if a future change moves the data dir.
+
+### Recommended workflow for a team
+For each contributor, on each workstation:
+
+1. Clone the repo and install once:
+   ```bash
+   git clone <repo>
+   cd <repo>
+   code-review-graph install   # writes MCP config + adds .code-review-graph/ to .gitignore
+   code-review-graph build     # one-time full parse — minutes, not seconds
+   ```
+2. Day-to-day, after `git pull`:
+   ```bash
+   code-review-graph update    # incremental: only re-parses files changed since the last build
+   ```
+   (or let your editor's hook do it — `install` configures one for Claude Code,
+   Cursor, etc. so most users never run `update` by hand.)
+3. After a force-push or major rebase, optionally do a full rebuild:
+   ```bash
+   code-review-graph build
+   ```
+
+### Pre-commit and CI
+For Claude Code / Qoder / `all` targets, `install` writes a **git pre-commit
+hook** at `.git/hooks/pre-commit` that runs `code-review-graph update` (so the
+graph stays current with the working tree) followed by
+`code-review-graph detect-changes --brief` (a quick risk summary so contributors
+see the blast-radius of their change before pushing). It is installed by default
+and respects any existing hook by **appending** rather than overwriting. Opt
+out with `code-review-graph install --no-hooks`.
+
+For **CI**, build the graph fresh in each job — it's fast on a warm cache
+because `update` only re-parses changed files. A common pattern:
+
+```yaml
+- run: pip install code-review-graph
+- run: code-review-graph build         # cold build on first CI run of the branch
+- run: code-review-graph detect-changes --base origin/main
+```
+
+If your CI re-uses a workspace cache between jobs (e.g. `actions/cache` keyed on
+the source-tree hash), pointing `CRG_DATA_DIR` at a stable location lets you
+warm-start `update` instead of rebuilding from scratch — see the next section.
+
+### Sharing a graph cache across builds (advanced)
+The `CRG_DATA_DIR` environment variable moves the graph directory anywhere
+outside the repo. Useful for:
+
+- **Shared CI cache** — point `CRG_DATA_DIR` at the cached path so the next CI
+  job does an `update` instead of a `build`. The DB is still per-machine, just
+  not per-job.
+- **Ephemeral worktrees / Docker volumes** — keep the graph on a host volume so
+  rebuilding the container doesn't throw away the cache.
+- **One graph per checkout of the same repo** — set `CRG_DATA_DIR` to a path
+  that includes the worktree name (e.g. `~/.cache/code-review-graph/<branch>`).
+
+```bash
+export CRG_DATA_DIR=~/.cache/code-review-graph/myrepo
+code-review-graph build   # graph.db now lives at $CRG_DATA_DIR/graph.db
+```
+
+The matching `CRG_REPO_ROOT` env var lets you point the CLI at a project root
+without having to `cd` first — handy for scripts and daemons that work across
+multiple repos.
+
+### What about contributors using different editors?
+Each editor's MCP config lives in different files (`.cursor/mcp.json`,
+`~/.codex/config.toml`, `~/.config/zed/settings.json`, etc.) and is generally
+**not shared across the team** — every contributor runs
+`code-review-graph install --platform <theirs>` on their own machine after
+cloning. The repo only needs to track the source code; everything else is
+local environment.
+
+</details>
+
+<details>
 <summary><strong>Multi-repo daemon</strong></summary>
 <br>
 
