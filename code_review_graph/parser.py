@@ -3978,6 +3978,45 @@ class CodeParser:
                     result = self._get_name(child, language, kind)
                     if result:
                         return result
+            # C++: inside function_declarator, the name appears as
+            # qualified_identifier (Class::method), destructor_name (~Class),
+            # operator_name (operator==), or field_identifier. The generic
+            # loop below only recognizes 'identifier'/'type_identifier',
+            # so scoped method definitions would otherwise fall through and
+            # match the outer return-type type_identifier as the function name.
+            # Nested scopes (Outer::Inner::method) produce nested
+            # qualified_identifier nodes — peel until we find the leaf name.
+            if language == "cpp" and node.type == "function_declarator":
+                def _leaf_name(qi):
+                    # Walk right-to-left: the rightmost identifier/
+                    # destructor_name/operator_name is the method name.
+                    # If the rightmost child is itself a qualified_identifier
+                    # (nested scope), recurse into it.
+                    for sub in reversed(qi.children):
+                        if sub.type in (
+                            "identifier",
+                            "destructor_name",
+                            "operator_name",
+                        ):
+                            return sub.text.decode(
+                                "utf-8", errors="replace")
+                        if sub.type == "qualified_identifier":
+                            inner = _leaf_name(sub)
+                            if inner:
+                                return inner
+                    return None
+                for child in node.children:
+                    if child.type == "qualified_identifier":
+                        name = _leaf_name(child)
+                        if name:
+                            return name
+                    if child.type in (
+                        "field_identifier",
+                        "destructor_name",
+                        "operator_name",
+                    ):
+                        return child.text.decode(
+                            "utf-8", errors="replace")
 
         # Objective-C method_definition: the method name is the first
         # ``identifier`` child (first part of the selector). Multi-part

@@ -1209,3 +1209,44 @@ class TestModuleScopeCalls:
             and e.target.endswith("puts")
         ]
         assert len(top_level) == 1
+
+    def test_cpp_scoped_method_names(self, tmp_path):
+        """C++ scoped method definitions must extract the leaf method name,
+        not the return-type identifier.
+
+        Regression: previously ``Ret Class::method()`` indexed as ``Ret``
+        (return type) and ``void Class::method()`` was silently dropped
+        because _get_name() fell through to the generic identifier loop,
+        which did not recognise qualified_identifier, destructor_name, or
+        operator_name nodes inside function_declarator.
+        """
+        src = b"""
+void PlaybackExtension::resetStateForPool() {}
+quint64 PlaybackExtension::startTimestamp() const { return 0; }
+PlaybackExtension::~PlaybackExtension() {}
+~PlaybackExtension() {}
+bool operator==(const A& a, const B& b) { return true; }
+bool MyClass::operator<(const MyClass& o) const { return true; }
+void foo() {}
+int SnapshotController::getHandleIndex() { return 0; }
+bool PlaybackWidget::AllocateResourceStrategy::allocateExtensionResource(int i) { return true; }
+void A::B::C::deep() {}
+ExtensionID PlaybackExtension::ID() const { return {}; }
+"""
+        p = tmp_path / "x.cpp"
+        p.write_bytes(src)
+        nodes, _ = self.parser.parse_file(p)
+        names = [n.name for n in nodes if n.kind == "Function"]
+        assert names == [
+            "resetStateForPool",
+            "startTimestamp",
+            "~PlaybackExtension",
+            "~PlaybackExtension",
+            "operator==",
+            "operator<",
+            "foo",
+            "getHandleIndex",
+            "allocateExtensionResource",
+            "deep",
+            "ID",
+        ]
