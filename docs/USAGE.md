@@ -10,7 +10,7 @@ code-review-graph install    # auto-detects and configures all supported platfor
 code-review-graph build      # parse your codebase
 ```
 
-`install` detects which AI coding tools you have and writes the correct MCP configuration for each one. Restart your editor/tool after installing.
+`install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and installs platform-native hooks where supported. Restart your editor/tool after installing.
 
 To target a specific platform instead of auto-detecting all:
 
@@ -24,8 +24,8 @@ code-review-graph install --platform claude-code
 
 | Platform | Config file |
 |----------|-------------|
-| **Codex** | `~/.codex/config.toml` |
-| **Claude Code** | `.mcp.json` |
+| **Codex** | `~/.codex/config.toml` + `~/.codex/hooks.json` |
+| **Claude Code** | `.mcp.json` + `.claude/settings.json` |
 | **Cursor** | `.cursor/mcp.json` |
 | **Windsurf** | `.windsurf/mcp.json` |
 | **Zed** | `.zed/settings.json` |

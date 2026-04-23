@@ -17,28 +17,24 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
-    _build_server_entry,
     _cursor_hook_scripts,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
     _opencode_plugin_content,
+    generate_codex_hooks_config,
     generate_cursor_hooks_config,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_codex_hooks,
     install_cursor_hooks,
     install_git_hook,
     install_hooks,
     install_opencode_plugin,
     install_platform_configs,
 )
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    tomllib = None  # type: ignore[assignment]
 
 _needs_tomllib = pytest.mark.skipif(
     tomllib is None, reason="tomllib requires Python 3.11+",
@@ -261,6 +257,97 @@ class TestInstallHooks:
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
 
+
+class TestGenerateCodexHooksConfig:
+    def test_returns_dict_with_hooks(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "hooks" in config
+
+    def test_has_post_tool_use(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "PostToolUse" in config["hooks"]
+        entry = config["hooks"]["PostToolUse"][0]
+        assert entry["matcher"] == "Write|Edit|Bash"
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "update" in inner["command"]
+        assert inner["statusMessage"] == "Updating code-review-graph"
+
+    def test_has_session_start(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "SessionStart" in config["hooks"]
+        entry = config["hooks"]["SessionStart"][0]
+        assert entry["matcher"] == "startup|resume"
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "status" in inner["command"]
+        assert inner["statusMessage"] == "Checking code-review-graph status"
+
+    def test_commands_do_not_pin_a_specific_repo_path(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path / "repo with spaces")
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "--repo" not in post_cmd
+        assert "--repo" not in session_cmd
+        assert "code-review-graph update --skip-flows" in post_cmd
+        assert "code-review-graph status" in session_cmd
+
+
+class TestInstallCodexHooks:
+    def test_creates_hooks_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hooks_path = install_codex_hooks(tmp_path / "repo")
+        assert hooks_path == tmp_path / ".codex" / "hooks.json"
+        assert hooks_path.exists()
+        data = json.loads(hooks_path.read_text())
+        assert "hooks" in data
+        assert "PostToolUse" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
+
+    def test_merges_with_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir(parents=True)
+        existing = {
+            "customSetting": True,
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}],
+            },
+        }
+        (codex_dir / "hooks.json").write_text(json.dumps(existing), encoding="utf-8")
+
+        install_codex_hooks(tmp_path / "repo")
+
+        data = json.loads((codex_dir / "hooks.json").read_text())
+        assert data["customSetting"] is True
+        assert "Stop" in data["hooks"]
+        assert "PostToolUse" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
+
+    def test_creates_hooks_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir(parents=True)
+        existing = {"hooks": {"Stop": []}}
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps(existing), encoding="utf-8")
+
+        install_codex_hooks(tmp_path / "repo")
+
+        backup_path = codex_dir / "hooks.json.bak"
+        assert backup_path.exists()
+        backup = json.loads(backup_path.read_text())
+        assert backup == existing
+
+    def test_idempotent_by_command(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo_root = tmp_path / "repo"
+        install_codex_hooks(repo_root)
+        install_codex_hooks(repo_root)
+        data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+        assert len(data["hooks"]["PostToolUse"]) == 1
+        assert len(data["hooks"]["SessionStart"]) == 1
+
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")
         settings_path = tmp_path / ".qoder" / "settings.json"
@@ -329,11 +416,25 @@ class TestInjectClaudeMd:
 class TestInjectPlatformInstructionsFiltering:
     def test_all_writes_every_file(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="all")
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {
+            "AGENTS.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            "QODER.md",
+            ".kiro/steering/code-review-graph.md",
+        }
 
     def test_default_is_all(self, tmp_path):
         updated = inject_platform_instructions(tmp_path)
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {
+            "AGENTS.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            "QODER.md",
+            ".kiro/steering/code-review-graph.md",
+        }
 
     def test_claude_writes_nothing(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="claude")

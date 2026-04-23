@@ -217,9 +217,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     else:
         print(".gitignore already contains .code-review-graph/.")
 
-    # Skills and hooks are installed by default so Claude actually uses the
-    # graph tools proactively.  Use --no-skills / --no-hooks / --no-instructions
-    # to opt out.
+    # Platform-native skills and hooks are installed by default where supported
+    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
+    # --no-instructions to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
@@ -229,6 +229,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_codex_hooks,
         install_cursor_hooks,
         install_git_hook,
         install_hooks,
@@ -236,7 +237,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_qoder_skills,
     )
 
-    if not skip_skills:
+    if not skip_skills and target in ("claude", "all"):
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
 
@@ -266,6 +267,12 @@ def _handle_init(args: argparse.Namespace) -> None:
         qoder_skills_dir = install_qoder_skills(repo_root)
         if qoder_skills_dir:
             print(f"Installed Qoder skills to {qoder_skills_dir}")
+    if not skip_hooks and target in ("codex", "all"):
+        hooks_path = install_codex_hooks(repo_root)
+        print(f"Installed Codex hooks in {hooks_path}")
+        git_hook = install_git_hook(repo_root)
+        if git_hook:
+            print(f"Installed git pre-commit hook in {git_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
@@ -275,13 +282,13 @@ def _handle_init(args: argparse.Namespace) -> None:
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
 
-        # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
-        if target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
-            try:
-                hooks_path = install_cursor_hooks()
-                print(f"Installed Cursor hooks in {hooks_path}")
-            except Exception as exc:
-                logger.warning("Could not install Cursor hooks: %s", exc)
+    # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
+    if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
+        try:
+            hooks_path = install_cursor_hooks()
+            print(f"Installed Cursor hooks in {hooks_path}")
+        except Exception as exc:
+            logger.warning("Could not install Cursor hooks: %s", exc)
 
     # OpenCode plugin (user-level, gated by same detect() as MCP config)
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
@@ -332,12 +339,12 @@ def main() -> None:
     install_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform-native skill files",
     )
     install_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform-native hooks",
     )
     install_cmd.add_argument(
         "--no-instructions",
@@ -373,12 +380,12 @@ def main() -> None:
     init_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform-native skill files",
     )
     init_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform-native hooks",
     )
     init_cmd.add_argument(
         "--no-instructions",

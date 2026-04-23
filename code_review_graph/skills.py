@@ -549,6 +549,48 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
+    """Generate native Codex hooks configuration for ~/.codex/hooks.json."""
+    return {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "Write|Edit|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                " && code-review-graph update --skip-flows"
+                                " || true"
+                            ),
+                            "timeout": 30,
+                            "statusMessage": "Updating code-review-graph",
+                        },
+                    ],
+                },
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "startup|resume",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                " && code-review-graph status"
+                                " || echo 'Not a git repo, skipping'"
+                            ),
+                            "timeout": 10,
+                            "statusMessage": "Checking code-review-graph status",
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
@@ -637,6 +679,62 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
+
+
+def install_codex_hooks(repo_root: Path) -> Path:
+    """Write native Codex hooks config to ~/.codex/hooks.json.
+
+    Merges code-review-graph hook entries into any existing hooks.json,
+    preserving user-defined hook entries and other top-level settings.
+    A backup of the original file is created before modifications.
+    """
+    codex_dir = Path.home() / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    hooks_path = codex_dir / "hooks.json"
+
+    existing: dict[str, Any] = {}
+    if hooks_path.exists():
+        try:
+            existing = json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = codex_dir / "hooks.json.bak"
+            shutil.copy2(hooks_path, backup_path)
+            logger.info("Backed up existing Codex hooks to %s", backup_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", hooks_path, exc)
+
+    hooks_config = generate_codex_hooks_config(repo_root)
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        logger.warning("Existing Codex hooks config is not a dict; replacing with defaults")
+        existing_hooks = {}
+
+    merged_hooks = dict(existing_hooks)
+    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
+        if isinstance(merged_hooks.get(hook_name), list):
+            merged_list = list(merged_hooks[hook_name])
+            existing_commands = {
+                hook.get("command", "")
+                for entry in merged_list
+                if isinstance(entry, dict)
+                for hook in entry.get("hooks", [])
+                if isinstance(hook, dict)
+            }
+            for entry in hook_entries:
+                entry_commands = [
+                    hook.get("command", "")
+                    for hook in entry.get("hooks", [])
+                    if isinstance(hook, dict)
+                ]
+                if not any(command in existing_commands for command in entry_commands):
+                    merged_list.append(entry)
+            merged_hooks[hook_name] = merged_list
+        else:
+            merged_hooks[hook_name] = hook_entries
+
+    existing["hooks"] = merged_hooks
+    hooks_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote Codex hooks config: %s", hooks_path)
+    return hooks_path
 
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
