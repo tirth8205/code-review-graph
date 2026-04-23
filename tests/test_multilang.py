@@ -316,6 +316,30 @@ class TestCppParsing:
         assert len(inherits) >= 1
 
 
+class TestHhParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.hh")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("types.hh")) == "cpp"
+
+    def test_finds_classes(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "Shape" in names
+        assert "Circle" in names
+
+    def test_finds_functions(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "perimeter" in names
+
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        assert len(inherits) >= 1
+
+
 def _has_csharp_parser():
     try:
         import tree_sitter_language_pack as tslp
