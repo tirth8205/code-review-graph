@@ -88,6 +88,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".c": "c",
     ".h": "c",
     ".hpp": "cpp",
+    ".hh": "cpp",
     ".kt": "kotlin",
     ".swift": "swift",
     ".php": "php",
