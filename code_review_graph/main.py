@@ -68,9 +68,9 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
        (captured in ``_default_repo_root``).
     3. None — the underlying impl will fall back to the server's cwd.
 
-    Previously, only ``get_docs_section_tool`` consulted ``_default_repo_root``,
-    so ``serve --repo <X>`` had no effect for the other 21 tools. See: #222
-    follow-up.
+    All MCP tools that accept ``repo_root`` should use this helper so
+    ``serve --repo <X>`` applies consistently, including
+    ``get_docs_section_tool``. See: #222.
     """
     return repo_root if repo_root else _default_repo_root
 
@@ -378,7 +378,10 @@ def get_docs_section_tool(
         section_name: The section to retrieve (e.g. "review-delta", "usage").
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_docs_section(section_name=section_name, repo_root=repo_root)
+    return get_docs_section(
+        section_name=section_name,
+        repo_root=_resolve_repo_root(repo_root),
+    )
 
 
 @mcp.tool()
