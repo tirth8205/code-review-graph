@@ -55,7 +55,8 @@ code-review-graph install --platform codex       # configure only Codex
 code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
 code-review-graph install --platform kiro         # configure only Kiro
-code-review-graph install --platform copilot      # configure only GitHub Copilot
+code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
+code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
 ```
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
@@ -512,5 +513,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, Kiro, and GitHub Copilot</sub>
+<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI</sub>
 </p>

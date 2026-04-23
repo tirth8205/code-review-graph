@@ -128,6 +128,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "copilot-cli": {
+        "name": "GitHub Copilot CLI",
+        "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
+        "key": "servers",
+        "detect": lambda: (Path.home() / ".copilot").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
 }
 
 
@@ -733,7 +741,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
-    ".github/copilot-instructions.md": ("copilot",),
+    ".github/copilot-instructions.md": ("copilot", "copilot-cli"),
 }
 
 
