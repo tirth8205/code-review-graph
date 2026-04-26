@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # Shared platform choices for install and init commands
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-    "continue", "opencode", "antigravity", "qwen", "kiro", "qoder", "all",
+    "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder", "all",
 ]
 
 
@@ -227,6 +227,8 @@ def _handle_init(args: argparse.Namespace) -> None:
     from .skills import (
         PLATFORMS,
         generate_skills,
+        install_gemini_cli_hooks,
+        install_gemini_cli_skills,
         inject_claude_md,
         inject_platform_instructions,
         install_cursor_hooks,
@@ -239,6 +241,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_skills:
         skills_dir = generate_skills(repo_root)
         print(f"Generated skills in {skills_dir}")
+        if target in ("gemini-cli", "all"):
+            gemini_skills_dir = install_gemini_cli_skills(repo_root)
+            print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -282,6 +287,13 @@ def _handle_init(args: argparse.Namespace) -> None:
                 print(f"Installed Cursor hooks in {hooks_path}")
             except Exception as exc:
                 logger.warning("Could not install Cursor hooks: %s", exc)
+
+    if not skip_hooks and target in ("gemini-cli", "all"):
+        try:
+            gemini_settings = install_gemini_cli_hooks(repo_root)
+            print(f"Installed Gemini CLI hooks in {gemini_settings}")
+        except Exception as exc:
+            logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
     # OpenCode plugin (user-level, gated by same detect() as MCP config)
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
@@ -332,12 +344,12 @@ def main() -> None:
     install_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform skill files",
     )
     install_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform hooks",
     )
     install_cmd.add_argument(
         "--no-instructions",
@@ -373,12 +385,12 @@ def main() -> None:
     init_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform skill files",
     )
     init_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform hooks",
     )
     init_cmd.add_argument(
         "--no-instructions",

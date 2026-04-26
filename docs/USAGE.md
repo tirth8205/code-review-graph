@@ -32,6 +32,7 @@ code-review-graph install --platform claude-code
 | **Continue** | `.continue/config.json` |
 | **OpenCode** | `.opencode.json` |
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
+| **Gemini CLI** | `.gemini/settings.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |
 | **Qoder** | `.qoder/mcp.json` |
 
