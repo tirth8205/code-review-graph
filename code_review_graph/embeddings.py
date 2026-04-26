@@ -22,9 +22,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from . import __version__ as _crg_version
 from .graph import GraphNode, GraphStore, node_to_dict
 
 logger = logging.getLogger(__name__)
+
+# Sent on every cloud-provider HTTP request. Some providers (e.g. Fireworks)
+# sit behind Cloudflare and reject the urllib default ``Python-urllib/X.Y``
+# UA with HTTP 403 / error 1010 ("browser signature banned"). A real UA gets
+# us through and gives upstream a way to identify CRG-driven traffic.
+_USER_AGENT = (
+    f"code-review-graph/{_crg_version} "
+    "(+https://github.com/tirth8205/code-review-graph)"
+)
 
 # ---------------------------------------------------------------------------
 # Provider Interface and Implementations
@@ -198,6 +208,8 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
             },
         )
 
@@ -353,6 +365,8 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
             },
         )
 
