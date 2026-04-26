@@ -28,6 +28,8 @@ from code_review_graph.skills import (
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_gemini_cli_hooks,
+    install_gemini_cli_skills,
     install_cursor_hooks,
     install_git_hook,
     install_hooks,
@@ -359,6 +361,14 @@ class TestInjectPlatformInstructionsFiltering:
         updated = inject_platform_instructions(tmp_path, target="antigravity")
         assert set(updated) == {"AGENTS.md", "GEMINI.md"}
 
+    def test_gemini_cli_writes_only_gemini_md(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="gemini-cli")
+        assert updated == ["GEMINI.md"]
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
+
     def test_opencode_writes_only_agents(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="opencode")
         assert updated == ["AGENTS.md"]
@@ -532,6 +542,25 @@ class TestInstallPlatformConfigs:
         assert entry["type"] == "stdio"
         assert entry["env"] == []
 
+    def test_install_gemini_cli_config(self, tmp_path):
+        gemini_config = tmp_path / ".gemini" / "settings.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "gemini-cli": {
+                    **PLATFORMS["gemini-cli"],
+                    "config_path": lambda root: gemini_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="gemini-cli")
+        assert "Gemini CLI" in configured
+        data = json.loads(gemini_config.read_text())
+        entry = data["mcpServers"]["code-review-graph"]
+        assert "type" not in entry
+        assert entry["args"][-1] == "serve"
+
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
         qwen_config = tmp_path / ".qwen" / "settings.json"
@@ -593,6 +622,7 @@ class TestInstallPlatformConfigs:
                 "zed": {**PLATFORMS["zed"], "detect": lambda: False},
                 "continue": {**PLATFORMS["continue"], "detect": lambda: False},
                 "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
+                "gemini-cli": {**PLATFORMS["gemini-cli"], "detect": lambda: False},
             },
         ):
             configured = install_platform_configs(tmp_path, target="all")
@@ -665,6 +695,41 @@ class TestInstallPlatformConfigs:
         import shutil
         expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
+
+
+class TestGeminiCLIInstall:
+    def test_install_gemini_cli_hooks_creates_settings_and_scripts(self, tmp_path):
+        settings_dir = tmp_path / ".gemini"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = settings_dir / "settings.json"
+        settings_path.write_text(json.dumps({"customSetting": True}) + "\n", encoding="utf-8")
+
+        out_path = install_gemini_cli_hooks(tmp_path)
+        assert out_path == settings_path
+        assert (settings_dir / "settings.json.bak").exists()
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert data["customSetting"] is True
+        assert "hooks" in data
+        assert "SessionStart" in data["hooks"]
+        assert "AfterTool" in data["hooks"]
+
+        session_start = settings_dir / "hooks" / "crg-session-start.sh"
+        update = settings_dir / "hooks" / "crg-update.sh"
+        assert session_start.exists()
+        assert update.exists()
+        assert os.access(session_start, os.X_OK)
+        assert os.access(update, os.X_OK)
+
+    def test_install_gemini_cli_skills_writes_skill_dirs(self, tmp_path):
+        skills_root = install_gemini_cli_skills(tmp_path)
+        assert skills_root == tmp_path / ".gemini" / "skills"
+        skill_path = skills_root / "explore-codebase" / "SKILL.md"
+        assert skill_path.exists()
+        text = skill_path.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert "name: explore-codebase" in text
+        assert "description:" in text
 
 
 class TestCursorHooksConfig:

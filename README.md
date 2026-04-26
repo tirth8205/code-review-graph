@@ -54,6 +54,7 @@ To target a specific platform:
 code-review-graph install --platform codex       # configure only Codex
 code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
+code-review-graph install --platform gemini-cli   # configure only Gemini CLI
 code-review-graph install --platform kiro         # configure only Kiro
 ```
 
@@ -511,5 +512,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, and Kiro</sub>
+<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, and Kiro</sub>
 </p>
