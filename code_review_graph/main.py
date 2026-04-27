@@ -942,10 +942,14 @@ def _apply_tool_filter(tools: str | None = None) -> None:
     allowed = {t.strip() for t in raw.split(",") if t.strip()}
     if not allowed:
         return
-    registered = list(mcp._tool_manager._tools.keys())
+    registered = [
+        k.split(":")[1].split("@")[0]
+        for k in mcp.local_provider._components
+        if k.startswith("tool:")
+    ]
     for name in registered:
         if name not in allowed:
-            mcp.remove_tool(name)
+            mcp.local_provider.remove_tool(name)
 
 
 
