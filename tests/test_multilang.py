@@ -1916,3 +1916,88 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+
+class TestZigParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.fixture = FIXTURES / "sample_zig.zig"
+        self.nodes, self.edges = self.parser.parse_file(self.fixture)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("main.zig")) == "zig"
+
+    def test_finds_top_level_functions(self):
+        funcs = {
+            n.name for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        }
+        assert {"main", "helper"} <= funcs
+
+    def test_finds_struct_methods(self):
+        methods = {
+            n.name for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Point"
+        }
+        assert {"init", "distance"} <= methods
+
+    def test_finds_struct_enum_union_classes(self):
+        classes = {
+            n.name: n.extra.get("zig_kind") for n in self.nodes
+            if n.kind == "Class"
+        }
+        assert classes.get("Point") == "struct"
+        assert classes.get("Color") == "enum"
+        assert classes.get("Shape") == "union"
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        # std stays unresolved (no relative .zig path); util resolves to
+        # the absolute fixture path.
+        assert "std" in targets
+        assert any(
+            t.endswith("sample_zig_util.zig") and t != "./sample_zig_util.zig"
+            for t in targets
+        )
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        # Bare callees (std.debug.print, expect, util.noop) keep their final
+        # identifier as the target; same-file helper resolves to the
+        # qualified name via _resolve_call_targets.
+        bare_targets = {e.target.split("::")[-1] for e in calls}
+        assert "print" in bare_targets
+        assert "expect" in bare_targets
+        assert "helper" in bare_targets
+
+    def test_builtin_calls_emitted(self):
+        # @intCast inside Point.distance should produce a CALLS edge
+        # whose target is the builtin name (with the leading @).
+        targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "@intCast" in targets
+
+    def test_at_import_is_not_a_call(self):
+        # @import is modelled as IMPORTS_FROM only — never as CALLS, so
+        # it doesn't pollute the call graph.
+        targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "@import" not in targets
+
+    def test_test_block_creates_test_node(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        assert len(tests) == 1
+        assert tests[0].name.startswith("test:helper increments@L")
+        assert tests[0].is_test is True
+
+    def test_calls_inside_methods_have_qualified_source(self):
+        # Point.distance calls helper(...) — the source should be the
+        # qualified Point.distance name, not the bare file path.
+        sources = {
+            e.source.split("::")[-1] for e in self.edges
+            if e.kind == "CALLS"
+        }
+        assert "Point.distance" in sources
+
+    def test_nodes_have_zig_language(self):
+        for node in self.nodes:
+            assert node.language == "zig"
