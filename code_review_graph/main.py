@@ -43,7 +43,6 @@ from .tools import (
     get_suggested_questions_func,
     get_surprising_connections_func,
     get_wiki_page_func,
-    traverse_graph_func,
     list_communities_func,
     list_flows,
     list_graph_stats,
@@ -52,6 +51,7 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
+    traverse_graph_func,
 )
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
@@ -155,7 +155,7 @@ async def run_postprocess_tool(
 
 
 @mcp.tool()
-def get_minimal_context_tool(
+async def get_minimal_context_tool(
     task: str = "",
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
@@ -167,15 +167,21 @@ def get_minimal_context_tool(
     next tools in a single compact response. Use this as the entry point
     before any other graph tool to minimize token usage.
 
+    Offloaded to a thread via ``asyncio.to_thread`` so git diff / analyze_changes
+    don't block the stdio event loop. See: #46, #136.
+
     Args:
         task: What you are doing (e.g. "review PR #42", "debug login timeout").
         changed_files: Explicit list of changed files. Auto-detected if omitted.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for diff comparison. Default: HEAD~1.
     """
-    return get_minimal_context(
-        task=task, changed_files=changed_files,
-        repo_root=_resolve_repo_root(repo_root), base=base,
+    return await asyncio.to_thread(
+        get_minimal_context,
+        task=task,
+        changed_files=changed_files,
+        repo_root=_resolve_repo_root(repo_root),
+        base=base,
     )
 
 
