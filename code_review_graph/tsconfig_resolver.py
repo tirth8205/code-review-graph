@@ -108,7 +108,7 @@ class TsconfigResolver:
         seen = seen | {canonical}
 
         try:
-            raw = tsconfig_path.read_text(encoding="utf-8")
+            raw = tsconfig_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             logger.debug("TsconfigResolver: cannot read %s", tsconfig_path)
             return {}

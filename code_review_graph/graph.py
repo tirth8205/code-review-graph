@@ -110,6 +110,20 @@ class GraphEdge:
 
 
 @dataclass
+class FlowAdjacency:
+    """In-memory adjacency structure for flow tracing.
+
+    Loaded once via :meth:`GraphStore.load_flow_adjacency` and passed to
+    ``trace_flows`` / ``compute_criticality`` to avoid per-edge SQLite
+    point queries on large graphs.
+    """
+    calls_out: dict[str, list[str]]
+    has_tested_by: set[str]
+    nodes_by_qn: dict[str, "GraphNode"]
+    nodes_by_id: dict[int, "GraphNode"]
+
+
+@dataclass
 class GraphStats:
     total_nodes: int
     total_edges: int
@@ -249,16 +263,9 @@ class GraphStore:
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
         """Atomically replace all data for a file."""
-        # Defense-in-depth: flush any pending transaction before BEGIN
-        # IMMEDIATE.  The root cause (implicit transactions from legacy
-        # isolation_level="") is fixed by setting isolation_level=None in
-        # __init__, but external code accessing _conn directly (e.g.
-        # _compute_summaries, flows.py, communities.py) could still leave
-        # a transaction open.
-        # See: https://github.com/tirth8205/code-review-graph/issues/135
         if self._conn.in_transaction:
-            logger.warning("Flushing unexpected open transaction before BEGIN IMMEDIATE")
-            self._conn.commit()
+            logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+            self._conn.rollback()
         self._conn.execute("BEGIN IMMEDIATE")
         try:
             self.remove_file_data(file_path)
@@ -304,6 +311,7 @@ class GraphStore:
         self._conn.commit()
 
     def rollback(self) -> None:
+        """Rollback the current transaction."""
         self._conn.rollback()
 
     # --- Read operations ---
@@ -1075,12 +1083,33 @@ class GraphStore:
         ).fetchone()
         return row["kind"] if row else None
 
-    def get_all_call_targets(self) -> set[str]:
-        """Return the set of all CALLS-edge target qualified names."""
-        rows = self._conn.execute(
-            "SELECT DISTINCT target_qualified FROM edges "
-            "WHERE kind = 'CALLS'"
-        ).fetchall()
+    def get_all_call_targets(self, include_file_sources: bool = True) -> set[str]:
+        """Return the set of all CALLS-edge target qualified names.
+
+        When ``include_file_sources`` is False, CALLS edges whose source is a
+        File node (module-scope calls from top-level script glue, CLI
+        entrypoints, or notebook cells) are excluded. Callers that treat "has
+        an incoming call" as "is not a root" (e.g. entry-point detection)
+        should pass ``include_file_sources=False`` — otherwise a script-only
+        callee looks called and is hidden from flow analysis.
+
+        The File-node filter joins against ``nodes.kind`` rather than pattern-
+        matching ``source_qualified`` so that file paths containing ``::`` or
+        any future change to the File-node naming convention cannot silently
+        miscategorize edges.
+        """
+        if include_file_sources:
+            rows = self._conn.execute(
+                "SELECT DISTINCT target_qualified FROM edges "
+                "WHERE kind = 'CALLS'"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT DISTINCT e.target_qualified FROM edges e "
+                "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+                "WHERE e.kind = 'CALLS' "
+                "AND (n.kind IS NULL OR n.kind != 'File')"
+            ).fetchall()
         return {r["target_qualified"] for r in rows}
 
     def get_communities_list(
@@ -1198,6 +1227,42 @@ class GraphStore:
             ).fetchall()
             results.extend(self._row_to_node(r) for r in rows)
         return results
+
+    def load_flow_adjacency(self) -> "FlowAdjacency":
+        """Load all nodes and CALLS/TESTED_BY edges into memory for fast traversal.
+
+        Reads the entire ``nodes`` and ``edges`` tables in two streaming
+        queries and returns an in-memory adjacency structure suitable for
+        flow tracing and criticality scoring.  At ~500k nodes / 3M edges
+        this fits in a few hundred MB and eliminates tens of millions of
+        single-row SQLite point queries that otherwise dominate
+        ``trace_flows`` / ``compute_criticality`` runtime.
+        """
+        nodes_by_qn: dict[str, GraphNode] = {}
+        nodes_by_id: dict[int, GraphNode] = {}
+        for row in self._conn.execute("SELECT * FROM nodes"):
+            node = self._row_to_node(row)
+            nodes_by_qn[node.qualified_name] = node
+            nodes_by_id[node.id] = node
+
+        calls_out: dict[str, list[str]] = {}
+        has_tested_by: set[str] = set()
+        for row in self._conn.execute(
+            "SELECT kind, source_qualified, target_qualified FROM edges "
+            "WHERE kind IN ('CALLS', 'TESTED_BY')"
+        ):
+            kind, src, tgt = row["kind"], row["source_qualified"], row["target_qualified"]
+            if kind == "CALLS":
+                calls_out.setdefault(src, []).append(tgt)
+            else:  # TESTED_BY
+                has_tested_by.add(tgt)
+
+        return FlowAdjacency(
+            calls_out=calls_out,
+            has_tested_by=has_tested_by,
+            nodes_by_qn=nodes_by_qn,
+            nodes_by_id=nodes_by_id,
+        )
 
     # --- Internal helpers ---
 

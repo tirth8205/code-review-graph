@@ -221,7 +221,7 @@ def generate_wiki(
         content = _generate_community_page(store, comm)
 
         if filepath.exists() and not force:
-            existing = filepath.read_text(encoding="utf-8")
+            existing = filepath.read_text(encoding="utf-8", errors="replace")
             if existing == content:
                 pages_unchanged += 1
                 page_entries.append((slug, name, comm["size"]))
@@ -257,7 +257,7 @@ def generate_wiki(
     index_path = wiki_path / "index.md"
 
     if index_path.exists() and not force:
-        existing_index = index_path.read_text(encoding="utf-8")
+        existing_index = index_path.read_text(encoding="utf-8", errors="replace")
         if existing_index == index_content:
             pages_unchanged += 1
         else:
@@ -289,17 +289,17 @@ def get_wiki_page(wiki_dir: str | Path, page_name: str) -> str | None:
     filepath = wiki_path / f"{slug}.md"
 
     if filepath.is_file():
-        return filepath.read_text(encoding="utf-8")
+        return filepath.read_text(encoding="utf-8", errors="replace")
 
     # Fallback: try exact filename match — with path traversal protection
     exact_path = (wiki_path / page_name).resolve()
     if exact_path.is_file() and exact_path.is_relative_to(wiki_path.resolve()):
-        return exact_path.read_text(encoding="utf-8")
+        return exact_path.read_text(encoding="utf-8", errors="replace")
 
     # Fallback: search for partial match
     if wiki_path.is_dir():
         for p in wiki_path.iterdir():
             if p.suffix == ".md" and slug in p.stem:
-                return p.read_text(encoding="utf-8")
+                return p.read_text(encoding="utf-8", errors="replace")
 
     return None

@@ -38,7 +38,11 @@ def _run_postprocess(
         rows = store.get_nodes_without_signature()
         for row in rows:
             node_id, name, kind, params, ret = (
-                row[0], row[1], row[2], row[3], row[4],
+                row[0],
+                row[1],
+                row[2],
+                row[3],
+                row[4],
             )
             if kind in ("Function", "Test"):
                 sig = f"def {name}({params or ''})"
@@ -118,7 +122,8 @@ def _run_postprocess(
         warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
 
     store.set_metadata(
-        "last_postprocessed_at", time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "last_postprocessed_at",
+        time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
     store.set_metadata("postprocess_level", postprocess)
 
@@ -156,13 +161,11 @@ def _compute_summaries(store: Any) -> None:
         # thousands of communities was the second-biggest hang.
         edge_counts: dict[str, int] = defaultdict(int)
         for row in conn.execute(
-            "SELECT source_qualified, COUNT(*) FROM edges "
-            "GROUP BY source_qualified"
+            "SELECT source_qualified, COUNT(*) FROM edges GROUP BY source_qualified"
         ):
             edge_counts[row[0]] += row[1]
         for row in conn.execute(
-            "SELECT target_qualified, COUNT(*) FROM edges "
-            "GROUP BY target_qualified"
+            "SELECT target_qualified, COUNT(*) FROM edges GROUP BY target_qualified"
         ):
             edge_counts[row[0]] += row[1]
 
@@ -180,8 +183,7 @@ def _compute_summaries(store: Any) -> None:
         files_by_comm: dict[int, list[str]] = defaultdict(list)
         seen_files: dict[int, set[str]] = defaultdict(set)
         for row in conn.execute(
-            "SELECT community_id, file_path FROM nodes "
-            "WHERE community_id IS NOT NULL"
+            "SELECT community_id, file_path FROM nodes WHERE community_id IS NOT NULL"
         ):
             cid, fp = row[0], row[1]
             if fp not in seen_files[cid]:
@@ -209,10 +211,7 @@ def _compute_summaries(store: Any) -> None:
             if paths:
                 prefix = commonprefix(paths)
                 if "/" in prefix:
-                    purpose = (
-                        prefix.rsplit("/", 1)[0].split("/")[-1]
-                        if "/" in prefix else ""
-                    )
+                    purpose = prefix.rsplit("/", 1)[0].split("/")[-1] if "/" in prefix else ""
 
             conn.execute(
                 "INSERT OR REPLACE INTO community_summaries "
@@ -255,11 +254,10 @@ def _compute_summaries(store: Any) -> None:
             # GraphStore.get_edges_among.
             id_list = list(needed_ids)
             for i in range(0, len(id_list), 450):
-                batch = id_list[i:i + 450]
+                batch = id_list[i : i + 450]
                 placeholders = ",".join("?" for _ in batch)
                 node_rows = conn.execute(
-                    "SELECT id, qualified_name FROM nodes "
-                    f"WHERE id IN ({placeholders})",  # nosec B608
+                    f"SELECT id, qualified_name FROM nodes WHERE id IN ({placeholders})",  # nosec B608
                     batch,
                 ).fetchall()
                 for nr in node_rows:
@@ -285,8 +283,7 @@ def _compute_summaries(store: Any) -> None:
                 "INSERT OR REPLACE INTO flow_snapshots "
                 "(flow_id, name, entry_point, critical_path, criticality, "
                 "node_count, file_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fid, fname, ep_name, _json.dumps(critical_path),
-                 crit, ncount, fcount),
+                (fid, fname, ep_name, _json.dumps(critical_path), crit, ncount, fcount),
             )
         conn.commit()
     except sqlite3.OperationalError:
@@ -317,12 +314,20 @@ def _compute_summaries(store: Any) -> None:
             tested_counts[row[0]] = row[1]
 
         risk_nodes = conn.execute(
-            "SELECT id, qualified_name, name FROM nodes "
-            "WHERE kind IN ('Function', 'Class', 'Test')"
+            "SELECT id, qualified_name, name FROM nodes WHERE kind IN ('Function', 'Class', 'Test')"
         ).fetchall()
         security_kw = {
-            "auth", "login", "password", "token", "session", "crypt",
-            "secret", "credential", "permission", "sql", "execute",
+            "auth",
+            "login",
+            "password",
+            "token",
+            "session",
+            "crypt",
+            "secret",
+            "credential",
+            "permission",
+            "sql",
+            "execute",
         }
         for n in risk_nodes:
             nid, qn, name = n[0], n[1], n[2]
@@ -330,9 +335,7 @@ def _compute_summaries(store: Any) -> None:
             tested = tested_counts.get(qn, 0)
             coverage = "tested" if tested > 0 else "untested"
             name_lower = name.lower()
-            sec_relevant = (
-                1 if any(kw in name_lower for kw in security_kw) else 0
-            )
+            sec_relevant = 1 if any(kw in name_lower for kw in security_kw) else 0
             risk = 0.0
             if caller_count > 10:
                 risk += 0.3
@@ -421,8 +424,11 @@ def build_or_update_graph(
         # Pass changed_files for incremental flow/community detection
         changed = result.get("changed_files") if not full_rebuild else None
         warnings = _run_postprocess(
-            store, build_result, postprocess,
-            full_rebuild=full_rebuild, changed_files=changed,
+            store,
+            build_result,
+            postprocess,
+            full_rebuild=full_rebuild,
+            changed_files=changed,
         )
         if warnings:
             build_result["warnings"] = warnings
@@ -457,12 +463,15 @@ def run_postprocess(
     warnings: list[str] = []
 
     try:
-        # Signatures are always fast — run them
         try:
             rows = store.get_nodes_without_signature()
             for row in rows:
                 node_id, name, kind, params, ret = (
-                    row[0], row[1], row[2], row[3], row[4],
+                    row[0],
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
                 )
                 if kind in ("Function", "Test"):
                     sig = f"def {name}({params or ''})"
@@ -486,6 +495,7 @@ def run_postprocess(
                 fts_count = rebuild_fts_index(store)
                 result["fts_indexed"] = fts_count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("FTS index rebuild failed: %s", e)
                 warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
 
@@ -498,6 +508,7 @@ def run_postprocess(
                 count = _store_flows(store, traced)
                 result["flows_detected"] = count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("Flow detection failed: %s", e)
                 warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
 
@@ -514,11 +525,13 @@ def run_postprocess(
                 count = _store_communities(store, comms)
                 result["communities_detected"] = count
             except (sqlite3.OperationalError, ImportError) as e:
+                store.rollback()
                 logger.warning("Community detection failed: %s", e)
                 warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 
         store.set_metadata(
-            "last_postprocessed_at", time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "last_postprocessed_at",
+            time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
         result["summary"] = "Post-processing complete."
         if warnings:

@@ -38,7 +38,7 @@ class Registry:
         """Load registry from disk."""
         if self._path.exists():
             try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
+                data = json.loads(self._path.read_text(encoding="utf-8", errors="replace"))
                 self._repos = data.get("repos", [])
             except (json.JSONDecodeError, KeyError, TypeError):
                 logger.warning("Invalid registry file, starting fresh: %s", self._path)

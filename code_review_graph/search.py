@@ -35,23 +35,32 @@ def rebuild_fts_index(store: GraphStore) -> int:
     # the FTS5 virtual table DDL, which is tightly coupled to SQLite internals.
     conn = store._conn
 
-    # Drop and recreate the FTS table to avoid content-sync mismatch issues
-    conn.execute("DROP TABLE IF EXISTS nodes_fts")
-    conn.execute("""
-        CREATE VIRTUAL TABLE nodes_fts USING fts5(
-            name, qualified_name, file_path, signature,
-            tokenize='porter unicode61'
-        )
-    """)
-    conn.commit()
+    # Wrap the full DROP + CREATE + INSERT sequence in an explicit transaction
+    # so a crash mid-rebuild cannot leave the DB without an FTS table at all
+    # (DROP succeeded but CREATE/INSERT didn't).  See #259.
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Drop and recreate the FTS table with content sync to match migration v5
+        conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        conn.execute("""
+            CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                name, qualified_name, file_path, signature,
+                content='nodes', content_rowid='rowid',
+                tokenize='porter unicode61'
+            )
+        """)
 
-    # Populate from nodes table
-    conn.execute("""
-        INSERT INTO nodes_fts(rowid, name, qualified_name, file_path, signature)
-        SELECT id, name, qualified_name, file_path, COALESCE(signature, '')
-        FROM nodes
-    """)
-    conn.commit()
+        # Rebuild from the content table (nodes) using the FTS5 rebuild command
+        conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+
+
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
     count = conn.execute("SELECT count(*) FROM nodes_fts").fetchone()[0]
     logger.info("FTS index rebuilt: %d rows indexed", count)
@@ -169,6 +178,7 @@ def _embedding_search(
     query: str,
     limit: int = 50,
     model: str | None = None,
+    provider: str | None = None,
 ) -> list[tuple[int, float]]:
     """Run a vector similarity search using the embedding store.
 
@@ -181,7 +191,7 @@ def _embedding_search(
         return []
 
     try:
-        emb_store = EmbeddingStore(store.db_path, model=model)
+        emb_store = EmbeddingStore(store.db_path, provider=provider, model=model)
         try:
             if not emb_store.available or emb_store.count() == 0:
                 return []
@@ -266,6 +276,7 @@ def hybrid_search(
     limit: int = 20,
     context_files: Optional[list[str]] = None,
     model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -303,7 +314,9 @@ def hybrid_search(
         logger.warning("FTS5 unavailable, will use fallback: %s", e)
 
     # Try embedding search
-    emb_results = _embedding_search(store, query, limit=fetch_limit, model=model)
+    emb_results = _embedding_search(
+        store, query, limit=fetch_limit, model=model, provider=provider,
+    )
 
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:

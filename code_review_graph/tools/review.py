@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..changes import analyze_changes, parse_git_diff_ranges
+from ..changes import analyze_changes, parse_diff_ranges, parse_git_diff_ranges
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
@@ -401,7 +401,7 @@ def detect_changes_func(
         abs_files = [str(root / f) for f in changed_files]
 
         # Parse diff ranges for line-level mapping.
-        diff_ranges = parse_git_diff_ranges(str(root), base)
+        diff_ranges = parse_diff_ranges(str(root), base)
         # Remap to absolute paths so they match graph file_paths.
         abs_ranges: dict[str, list[tuple[int, int]]] = {}
         for rel_path, ranges in diff_ranges.items():

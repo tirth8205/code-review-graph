@@ -4,6 +4,8 @@ Supports multiple providers:
 1. Local (sentence-transformers) - Private, fast, offline.
 2. Google Gemini - High-quality, cloud-based. Requires explicit opt-in.
 3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
+4. OpenAI-compatible - Any endpoint speaking OpenAI /v1/embeddings (real OpenAI,
+   Azure OpenAI, self-hosted gateways like new-api / LiteLLM / vLLM / LocalAI / Ollama).
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .graph import GraphNode, GraphStore, node_to_dict
 
@@ -247,7 +250,285 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
         return f"minimax:{self._MODEL}"
 
 
-CLOUD_PROVIDERS = {"google", "minimax"}
+class OpenAIEmbeddingProvider(EmbeddingProvider):
+    """OpenAI-compatible embedding provider.
+
+    Works with any endpoint that speaks the OpenAI ``/v1/embeddings`` schema:
+    - Real OpenAI API (``https://api.openai.com/v1``)
+    - Azure OpenAI
+    - Self-hosted gateways: new-api, LiteLLM, vLLM, LocalAI, Ollama (openai mode)
+
+    Provider identity in ``name`` includes both the model and the endpoint
+    host (``openai:{model}@{host}``), so switching base URL while keeping the
+    same model ID re-partitions the embeddings table and forces a clean
+    re-embed. This is the only defense against silently mixing vector spaces
+    from different backends (e.g. real OpenAI vs. an OpenAI-compatible
+    gateway that ships different weights under the same model name).
+
+    Dimension is detected from the first response and frozen; switching the
+    ``model`` in the environment also changes ``provider.name`` and triggers
+    re-embed via the same isolation key.
+    """
+
+    _DEFAULT_BATCH_SIZE = 100
+
+    # Default ports by scheme; stripped from the host_key so the user can't
+    # accidentally force a re-embed by toggling an explicit default port.
+    _DEFAULT_PORTS = {"http": 80, "https": 443}
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        dimension: int | None = None,
+        timeout: int = 120,
+        batch_size: int | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._dimension = dimension
+        self._timeout = timeout
+        self._batch_size = batch_size or self._DEFAULT_BATCH_SIZE
+        self._host_key = self._make_host_key(self._base_url)
+
+    @classmethod
+    def _make_host_key(cls, base_url: str) -> str:
+        """Normalize the identity key used in ``provider.name``.
+
+        Codex review pushed this well past naive ``netloc`` because that
+        alone has three leaks:
+
+        1. ``netloc`` preserves ``userinfo`` (``user:pass@host``) — we'd
+           persist credentials into the DB's ``embeddings.provider`` column.
+           Use ``hostname`` instead.
+        2. Default ports (``:80`` for http, ``:443`` for https) are
+           semantically identical to omitting the port; keeping them would
+           cause spurious re-embeds when the user just spelled the URL
+           differently.
+        3. Path is part of the backend identity for path-routed gateways:
+           ``https://gw/openai/v1`` and ``https://gw/vendor-b/v1`` front
+           different models and must not share cached vectors.
+        """
+        parsed = urlparse(base_url)
+        hostname = (parsed.hostname or "").lower()
+        scheme = (parsed.scheme or "").lower()
+        port = parsed.port
+        if port and port != cls._DEFAULT_PORTS.get(scheme):
+            # Bracket IPv6 literals when appending a port.
+            host_part = f"[{hostname}]:{port}" if ":" in hostname else f"{hostname}:{port}"
+        else:
+            host_part = hostname
+        # Preserve path routing. Trim any trailing slash and any
+        # ``/embeddings`` suffix that callers may have included — we append
+        # that ourselves when building the request URL.
+        path = (parsed.path or "").rstrip("/")
+        if path.endswith("/embeddings"):
+            path = path[: -len("/embeddings")].rstrip("/")
+        # Include scheme: http and https to the same host+path front
+        # different endpoints in practice (plaintext vs TLS, dev vs prod
+        # gateway), and sharing cached vectors across them is the same
+        # silent-mixing failure mode as switching base URL entirely.
+        return f"{scheme}://{host_part}{path}" if path else f"{scheme}://{host_part}"
+
+    def _call_api(self, texts: list[str]) -> list[list[float]]:
+        import http.client
+        import json as _json
+        import socket
+        import ssl
+        import urllib.error
+        import urllib.request
+
+        body: dict[str, Any] = {"model": self._model, "input": texts}
+        # OpenAI v3 models (text-embedding-3-*) support dimension reduction;
+        # only forward the param when the user explicitly pinned one.
+        if self._dimension is not None:
+            body["dimensions"] = self._dimension
+
+        payload = _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self._base_url}/embeddings",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            },
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                _ssl_ctx = ssl.create_default_context()
+                try:
+                    with urllib.request.urlopen(  # nosec B310
+                        req, timeout=self._timeout, context=_ssl_ctx,
+                    ) as resp:
+                        raw = resp.read().decode("utf-8")
+                except urllib.error.HTTPError as http_err:
+                    # 429 / 5xx: re-raise and let the outer retry loop handle it.
+                    # (We must not convert to RuntimeError here or retry below
+                    # can't tell it was a transient HTTP failure.)
+                    if http_err.code == 429 or 500 <= http_err.code < 600:
+                        raise
+                    # Other 4xx: surface the API error body instead of a bare
+                    # "400 Bad Request" — gateways like new-api return JSON
+                    # with the real reason (batch size limits, invalid model,
+                    # etc.) which is far more actionable.
+                    try:
+                        err_body = http_err.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        err_body = ""
+                    err_msg = err_body or str(http_err)
+                    try:
+                        parsed = _json.loads(err_body)
+                        if isinstance(parsed, dict) and "error" in parsed:
+                            err_obj = parsed["error"]
+                            err_msg = (
+                                err_obj.get("message", err_msg)
+                                if isinstance(err_obj, dict) else str(err_obj)
+                            )
+                    except Exception:  # nosec B110
+                        # Non-JSON error body is fine: we already seeded
+                        # err_msg with the raw body above, so fall through.
+                        pass
+                    raise RuntimeError(
+                        f"OpenAI API HTTP {http_err.code}: {err_msg}"
+                    ) from http_err
+
+                response = _json.loads(raw)
+
+                if "error" in response:
+                    err = response["error"]
+                    msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"OpenAI API error: {msg}")
+
+                data = response.get("data", [])
+                if not data:
+                    raise RuntimeError("OpenAI API returned empty data")
+                # OpenAI spec: data[i].index maps to input[i], but some
+                # compatible gateways re-order results or drop entries on
+                # partial failure, and others omit `index` entirely. Three
+                # disjoint cases:
+                #   1. All items have a valid int ``index``: must form a
+                #      permutation of 0..N-1, then sort and use.
+                #   2. NO item carries an ``index`` field: trust server
+                #      order, only verify count matches.
+                #   3. Anything in between (partial indices, str indices,
+                #      missing on some): refuse. Zipping server order in
+                #      that case would happily misalign the indexed items.
+                any_has_index = any("index" in item for item in data)
+                all_int_index = all(
+                    isinstance(item.get("index"), int) for item in data
+                )
+                if all_int_index:
+                    expected = set(range(len(texts)))
+                    indices = [int(item["index"]) for item in data]
+                    if len(set(indices)) != len(indices) or set(indices) != expected:
+                        raise RuntimeError(
+                            "OpenAI API returned malformed indices "
+                            f"(got {indices}, expected permutation of "
+                            f"0..{len(texts) - 1}) — refusing to misalign vectors."
+                        )
+                    data = sorted(data, key=lambda item: int(item["index"]))
+                elif not any_has_index:
+                    if len(data) != len(texts):
+                        raise RuntimeError(
+                            f"OpenAI API returned {len(data)} embeddings for "
+                            f"{len(texts)} inputs with no index field — "
+                            "refusing to misalign vectors."
+                        )
+                else:
+                    # Mixed: some items have index, others don't (or carry
+                    # non-int index). Server order would silently misplace
+                    # the indexed items, so we refuse.
+                    raise RuntimeError(
+                        "OpenAI API returned mixed indexed/unindexed data — "
+                        "refusing to misalign vectors."
+                    )
+
+                vectors = [item["embedding"] for item in data]
+                if vectors and self._dimension is None:
+                    self._dimension = len(vectors[0])
+                return vectors
+
+            except Exception as e:
+                # Retryable = HTTP 429/5xx, network/timeout/TLS issues.
+                # Non-retryable = HTTP 4xx (other), malformed responses,
+                # misaligned data length — those are caller-side bugs that
+                # will keep failing on retry.
+                is_retryable = False
+                if isinstance(e, urllib.error.HTTPError):
+                    is_retryable = e.code == 429 or 500 <= e.code < 600
+                elif isinstance(e, (
+                    urllib.error.URLError,
+                    socket.timeout,
+                    TimeoutError,
+                    ConnectionError,
+                    ssl.SSLError,
+                    # Reverse proxies and edge gateways surface transient
+                    # disconnects as these stdlib classes. Real incidents
+                    # have been observed on Cloudflare-fronted endpoints
+                    # and on LiteLLM when upstream providers hiccup.
+                    http.client.IncompleteRead,
+                    http.client.BadStatusLine,
+                    http.client.RemoteDisconnected,
+                )):
+                    is_retryable = True
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(
+                    "OpenAI embeddings API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+
+        return []  # unreachable
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        results: list[list[float]] = []
+        for i in range(0, len(texts), self._batch_size):
+            results.extend(self._call_api(texts[i:i + self._batch_size]))
+        return results
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._call_api([text])[0]
+
+    @property
+    def dimension(self) -> int:
+        if self._dimension is not None:
+            return self._dimension
+        # Default for text-embedding-3-small; updated after first call.
+        return 1536
+
+    @property
+    def name(self) -> str:
+        # Endpoint-aware identity: model alone is NOT enough — two backends
+        # can serve the same model ID with different weights or dimensions,
+        # and re-using cached embeddings across them silently corrupts
+        # semantic ranking. Including the host partitions the embeddings
+        # table so switching CRG_OPENAI_BASE_URL triggers a safe re-embed.
+        return f"openai:{self._model}@{self._host_key}"
+
+
+CLOUD_PROVIDERS = {"google", "minimax", "openai"}
+
+
+def _is_localhost_url(url: str) -> bool:
+    """Return True if url points to a localhost host (never treat as cloud egress).
+
+    Uses urlparse.hostname so we compare the actual host, not a substring
+    match that could be fooled by e.g. ``https://my-openai.127.0.0.1.nip.io``.
+    """
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    # nosec B104: we're *matching* a URL hostname, not binding a listener.
+    return host in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}  # nosec B104
 
 
 def _warn_cloud_egress(provider_name: str) -> None:
@@ -283,16 +564,51 @@ def get_provider(
     """Get an embedding provider by name.
 
     Args:
-        provider: Provider name. One of "local", "google", "minimax", or None for local.
+        provider: Provider name. One of "local", "google", "minimax", "openai",
+                  or None for local.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
+                  OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
+                  CRG_OPENAI_MODEL env vars (or the ``model`` arg). The egress
+                  warning is skipped when the base URL points to localhost.
                   Cloud providers emit a one-time stderr warning before use
                   unless ``CRG_ACCEPT_CLOUD_EMBEDDINGS=1`` is set. See: #174
         model: Model name/path to use. For local provider this is any
                sentence-transformers compatible model. Falls back to
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
                For Google provider this is a Gemini model ID.
+               For OpenAI provider this overrides CRG_OPENAI_MODEL.
     """
+    if provider == "openai":
+        api_key = os.environ.get("CRG_OPENAI_API_KEY")
+        base_url = os.environ.get("CRG_OPENAI_BASE_URL")
+        resolved_model = model or os.environ.get("CRG_OPENAI_MODEL")
+        if not api_key or not base_url or not resolved_model:
+            missing = [
+                name for name, val in [
+                    ("CRG_OPENAI_API_KEY", api_key),
+                    ("CRG_OPENAI_BASE_URL", base_url),
+                    ("CRG_OPENAI_MODEL", resolved_model),
+                ] if not val
+            ]
+            raise ValueError(
+                "Missing required environment variable(s) for the OpenAI "
+                f"embedding provider: {', '.join(missing)}."
+            )
+        dim_env = os.environ.get("CRG_OPENAI_DIMENSION")
+        dimension = int(dim_env) if dim_env else None
+        batch_env = os.environ.get("CRG_OPENAI_BATCH_SIZE")
+        batch_size = int(batch_env) if batch_env else None
+        if not _is_localhost_url(base_url):
+            _warn_cloud_egress("openai")
+        return OpenAIEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=resolved_model,
+            dimension=dimension,
+            batch_size=batch_size,
+        )
+
     if provider == "minimax":
         api_key = os.environ.get("MINIMAX_API_KEY")
         if not api_key:
@@ -417,6 +733,12 @@ class EmbeddingStore:
             )
 
         self._conn.commit()
+
+    def __enter__(self) -> "EmbeddingStore":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+        self.close()
 
     def close(self) -> None:
         self._conn.close()

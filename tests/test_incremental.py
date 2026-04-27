@@ -35,9 +35,48 @@ class TestFindRepoRoot:
         assert find_repo_root(sub) == tmp_path
 
     def test_returns_none_without_git(self, tmp_path):
+        """No .git between ``sub`` and ``tmp_path`` -> None.
+
+        Bounded with ``stop_at=tmp_path`` so the walk does not climb into
+        ancestors outside the test sandbox.  On Windows in particular,
+        ``tmp_path`` lives under ``C:/Users/<user>/AppData/Local/Temp/...``
+        and if the user has ``git init`` anywhere under their home (dotfiles,
+        chezmoi, etc.) the unbounded walk would find that ancestor .git and
+        the test would fail for reasons unrelated to the product.  See #241.
+        """
         sub = tmp_path / "no_git"
         sub.mkdir()
-        assert find_repo_root(sub) is None
+        assert find_repo_root(sub, stop_at=tmp_path) is None
+
+    def test_stop_at_prevents_escape_to_outer_git(self, tmp_path):
+        """Positive regression test for #241: ``stop_at`` must halt the
+        walk even when an ancestor *does* contain ``.git``.
+
+        Without ``stop_at`` the walk correctly finds the outer .git; with
+        ``stop_at=inner`` the walk is bounded and returns None.
+        """
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        # Unbounded walk finds the ancestor .git (existing behavior).
+        assert find_repo_root(inner) == outer
+
+        # Bounded walk stops at ``inner`` and never climbs to ``outer``.
+        assert find_repo_root(inner, stop_at=inner) is None
+
+    def test_stop_at_finds_git_at_boundary(self, tmp_path):
+        """stop_at does not suppress a .git that lives *at* the boundary."""
+        boundary = tmp_path / "boundary"
+        boundary.mkdir()
+        (boundary / ".git").mkdir()
+        inner = boundary / "inner"
+        inner.mkdir()
+
+        # The walk examines ``boundary`` and finds the .git before stopping.
+        assert find_repo_root(inner, stop_at=boundary) == boundary
 
 
 class TestFindProjectRoot:
@@ -45,10 +84,34 @@ class TestFindProjectRoot:
         (tmp_path / ".git").mkdir()
         assert find_project_root(tmp_path) == tmp_path
 
-    def test_falls_back_to_start(self, tmp_path):
+    def test_falls_back_to_start(self, tmp_path, monkeypatch):
+        """With no .git and no env override, find_project_root returns ``sub``.
+
+        Bounded with ``stop_at=tmp_path`` to prevent the ancestor walk from
+        escaping the test sandbox (see #241), and ``CRG_REPO_ROOT`` is
+        cleared so a developer env var cannot shadow the test expectation.
+        """
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
         sub = tmp_path / "no_git"
         sub.mkdir()
-        assert find_project_root(sub) == sub
+        assert find_project_root(sub, stop_at=tmp_path) == sub
+
+    def test_stop_at_forwarded_to_find_repo_root(self, tmp_path, monkeypatch):
+        """Positive regression test for #241: find_project_root must forward
+        stop_at to find_repo_root, not silently drop it."""
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        # Without stop_at, find_project_root climbs to outer (existing behavior).
+        assert find_project_root(inner) == outer
+
+        # With stop_at=inner, the walk is bounded and find_project_root falls
+        # back to its third resolution rule (the start path itself).
+        assert find_project_root(inner, stop_at=inner) == inner
 
 
 class TestGetDbPath:
@@ -193,6 +256,38 @@ class TestDataDir:
         assert (result / ".gitignore").is_file()
         content = (result / ".gitignore").read_text(encoding="utf-8")
         assert content.strip().endswith("*")
+
+    def test_auto_gitignore_is_valid_utf8(self, tmp_path, monkeypatch):
+        """Regression guard for #239 bug 1: the auto-generated .gitignore
+        must be written as UTF-8 on every platform.
+
+        Before the fix, ``write_text()`` was called without an encoding
+        argument.  The header contains an em-dash (U+2014) which Python
+        writes using the system default codepage on Windows (cp1252 →
+        byte 0x97), producing a file that cannot be decoded as UTF-8.
+        """
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        from code_review_graph.incremental import get_data_dir
+        data_dir = get_data_dir(tmp_path)
+        gi = data_dir / ".gitignore"
+        assert gi.is_file()
+
+        # The file must be valid UTF-8 — this is what actually broke.
+        raw = gi.read_bytes()
+        # The em-dash must be stored as the proper UTF-8 sequence (0xE2 0x80 0x94),
+        # not as the cp1252 single byte 0x97.
+        assert b"\xe2\x80\x94" in raw, (
+            "auto-generated .gitignore is missing the UTF-8 em-dash; it was "
+            "probably written using the platform default codepage"
+        )
+        assert b"\x97" not in raw, (
+            "auto-generated .gitignore contains cp1252 byte 0x97 — indicates "
+            "write_text was called without encoding='utf-8'"
+        )
+
+        # And it must round-trip cleanly under strict UTF-8 decoding.
+        decoded = raw.decode("utf-8", errors="strict")
+        assert "—" in decoded, "em-dash missing from decoded gitignore"
 
     def test_env_override_replaces_repo_subdir(self, tmp_path, monkeypatch):
         """CRG_DATA_DIR replaces the default <repo>/.code-review-graph."""
@@ -590,5 +685,60 @@ class TestMultiHopDependents:
             # Even with high max_hops, cap should limit results
             deps = find_dependents(store, "/hub.py", max_hops=5)
             assert len(deps) <= 500
+        finally:
+            store.close()
+
+    def test_truncated_flag_set_when_capped(self, tmp_path):
+        """Regression test for #261: find_dependents must set
+        DependentList.truncated = True when the result is capped."""
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        db_path = tmp_path / "trunc.db"
+        store = GraphStore(db_path)
+        try:
+            store.upsert_node(NodeInfo(
+                kind="File", name="/hub.py", file_path="/hub.py",
+                line_start=1, line_end=10, language="python",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="hub_func", file_path="/hub.py",
+                line_start=2, line_end=8, language="python",
+            ))
+            for i in range(600):
+                path = f"/dep{i}.py"
+                store.upsert_node(NodeInfo(
+                    kind="File", name=path, file_path=path,
+                    line_start=1, line_end=10, language="python",
+                ))
+                store.upsert_node(NodeInfo(
+                    kind="Function", name=f"func_{i}", file_path=path,
+                    line_start=2, line_end=8, language="python",
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="IMPORTS_FROM", source=f"{path}::func_{i}",
+                    target="/hub.py::hub_func", file_path=path, line=1,
+                ))
+            store.commit()
+
+            deps = find_dependents(store, "/hub.py", max_hops=5)
+            assert len(deps) <= 500
+            # The key assertion: truncated flag must be set.
+            assert deps.truncated is True, (
+                "DependentList.truncated should be True when capped at "
+                "_MAX_DEPENDENT_FILES, but it was False"
+            )
+        finally:
+            store.close()
+
+    def test_truncated_flag_false_when_not_capped(self, tmp_path):
+        """Regression test for #261: find_dependents must set
+        DependentList.truncated = False when the result is complete."""
+        store = self._make_chain_store(tmp_path)
+        try:
+            deps = find_dependents(store, "/c.py", max_hops=2)
+            assert deps.truncated is False, (
+                "DependentList.truncated should be False when the "
+                "expansion completed without hitting the cap"
+            )
         finally:
             store.close()

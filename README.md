@@ -45,7 +45,7 @@ code-review-graph build            # parse your codebase
 One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and Kiro" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, and Kiro" width="85%" />
 </p>
 
 To target a specific platform:
@@ -67,7 +67,6 @@ Build the code review graph for this project
 
 The initial build takes ~10 seconds for a 500-file project. After that, the graph updates automatically on every file edit and git commit.
 
----
 
 ## How It Works
 
@@ -196,7 +195,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **23 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, or MiniMax |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
 | **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
 | **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
@@ -216,6 +215,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
 | **Wiki generation** | Auto-generate markdown wiki from community structure |
 | **Multi-repo registry** | Register multiple repos, search across all of them |
+| **Multi-repo daemon** | `crg-daemon` watches multiple repos as child processes, with health checks and auto-restart |
 | **MCP prompts** | 5 workflow templates: review, architecture, debug, onboard, pre-merge |
 | **Full-text search** | FTS5-powered hybrid search combining keyword and vector similarity |
 | **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
@@ -258,9 +258,63 @@ code-review-graph detect-changes   # Risk-scored change impact analysis
 code-review-graph register <path>  # Register repo in multi-repo registry
 code-review-graph unregister <id>  # Remove repo from registry
 code-review-graph repos            # List registered repositories
+code-review-graph daemon start     # Start multi-repo watch daemon
+code-review-graph daemon stop      # Stop the daemon
+code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start MCP server
 ```
+
+</details>
+
+<details>
+<summary><strong>Multi-repo daemon</strong></summary>
+<br>
+
+If your editor doesn't support hooks (e.g. Cursor, OpenCode), or you just want your
+graph to stay fresh in the background without any editor integration, the daemon is
+for you. It watches your repos for file changes and automatically rebuilds the graph
+— no manual `build` or `update` commands needed.
+
+The daemon is included with `code-review-graph` — no separate install required.
+
+**Quick setup:**
+
+```bash
+# 1. Register the repos you want to watch
+crg-daemon add ~/project-a --alias proj-a
+crg-daemon add ~/project-b
+
+# 2. Start the daemon (runs in the background)
+crg-daemon start
+
+# 3. That's it — graphs stay up to date automatically
+crg-daemon status                 # check daemon and per-repo watcher status
+crg-daemon logs --repo proj-a -f  # tail logs for a specific repo
+crg-daemon stop                   # stop daemon and all watcher processes
+```
+
+Also available as `code-review-graph daemon start|stop|status|...`.
+
+Under the hood, `crg-daemon add` writes to a TOML config file at
+`~/.code-review-graph/watch.toml`. You can also edit this file directly:
+
+```toml
+[[repos]]
+path = "/home/user/project-a"
+alias = "proj-a"
+
+[[repos]]
+path = "/home/user/project-b"
+alias = "project-b"
+```
+
+The daemon monitors this config file for changes and automatically starts/stops
+watcher processes as repos are added or removed. Health checks every 30 seconds
+restart dead watchers. No external dependencies required.
+
+See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for the
+full config reference and all available options.
 
 </details>
 
@@ -333,9 +387,103 @@ pip install code-review-graph[wiki]                # Wiki generation with LLM su
 pip install code-review-graph[all]                 # All optional dependencies
 ```
 
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations | `30` |
+| `CRG_EMBEDDING_MODEL` | Default model for vector embeddings | `all-MiniLM-L6-v2` |
+| `CRG_MAX_IMPACT_NODES` | Maximum nodes to include in impact analysis | `500` |
+| `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
+| `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
+| `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
+| `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
+| `CRG_OPENAI_BASE_URL` | OpenAI-compatible embeddings endpoint | - |
+| `CRG_OPENAI_API_KEY` | API key for OpenAI-compatible embeddings | - |
+| `CRG_OPENAI_MODEL` | Model name for OpenAI-compatible embeddings | - |
+| `CRG_OPENAI_DIMENSION` | Pin embedding dimension (v3 models support reduction) | - |
+| `NO_COLOR` | If set, disables ANSI colors in terminal | - |
+| `CRG_SERIAL_PARSE` | If `1`, disables parallel parsing (use for debugging) | - |
+
+OpenAI-compatible embeddings (real OpenAI, Azure, or any self-hosted gateway like
+new-api / LiteLLM / vLLM / LocalAI / Ollama in openai mode) need no extra install —
+just set the environment variables and pass `provider="openai"` to `embed_graph`:
+
+```bash
+export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
+export CRG_OPENAI_API_KEY=sk-...
+export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway serves
+# optional:
+export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
+export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
+                                                        # (e.g. Qwen text-embedding-v4 caps at 10)
+```
+
+The cloud-egress warning is auto-skipped when the base URL points to localhost
+(`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
+
+> **Model selection tip.** Avoid `-preview` / `-beta` / `-exp` model IDs
+> (e.g. `google/gemini-embedding-2-preview`) for anything you plan to keep
+> long-term — preview models can change weights (different dimension → full
+> re-embed required) or be deprecated without notice. Prefer stable GA
+> releases such as `text-embedding-3-small` / `text-embedding-3-large` (OpenAI),
+> `Qwen/Qwen3-Embedding-8B` (via self-hosted vLLM / LocalAI), or
+> `gemini-embedding-001` (via the native Gemini provider, which requires
+> `GOOGLE_API_KEY` instead of the OpenAI-compatible path).
+>
+> Also note: `code-review-graph` currently embeds **function signatures only**
+> (~10 tokens per node, e.g. `"parse_file function (path: str) returns Tree"`).
+> Models whose headline quality comes from long-context body understanding
+> (such as Gemini 2 or Qwen3-8B at their MTEB-code SOTA scores) will see a
+> much narrower quality gap against smaller models at this input length.
+> Body/docstring embedding is tracked as a follow-up enhancement.
+
+#### Tool Filtering
+
+CRG exposes 28 MCP tools by default. In token-constrained environments, you can
+limit the server to a subset of tools using `--tools` or the `CRG_TOOLS`
+environment variable:
+
+```bash
+# Via CLI flag
+code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool,detect_changes_tool
+
+# Via environment variable
+CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
+```
+
+The CLI flag takes precedence over the environment variable. When neither is set,
+all tools are available. This is especially useful for MCP client configurations:
+
+```json
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "code-review-graph",
+      "args": ["serve", "--tools", "query_graph_tool,semantic_search_nodes_tool,detect_changes_tool,get_review_context_tool"]
+    }
+  }
+}
+```
+
 </details>
 
 ---
+
+## Troubleshooting
+
+### Windows Configuration Issues (Invalid JSON / Connection Closed)
+If you are using Windows and encounter `Invalid JSON: EOF while parsing` or `MCP error -32000: Connection closed` when connecting via Claude Code, do not use the `cmd /c` wrapper in your config.
+
+Ensure `fastmcp` is updated to at least `3.2.4+`. Then, configure your `~/.claude.json` to execute the `.exe` directly and pass the UTF-8 environment variable via the config:
+
+```json
+"code-review-graph": {
+  "command": "C:\\path\\to\\your\\venv\\Scripts\\code-review-graph.exe",
+  "args": ["serve", "--repo", "C:\\path\\to\\your\\project"],
+  "env": { "PYTHONUTF8": "1" }
+}
+```
 
 ## Contributing
 
@@ -363,5 +511,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and Kiro</sub>
+<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, and Kiro</sub>
 </p>

@@ -70,7 +70,34 @@ source ~/.zshrc
 
 **TL;DR**: install the tool **once**, then run `code-review-graph install && code-review-graph build` inside **each** project you want graph-aware reviews in.
 
-### 4. "I built the graph but Claude Code doesn't see it in a new session"
+### 4. Using a venv? You must update `settings.json` manually
+
+Claude Code hooks and MCP tool paths in `.claude/settings.json` are **hardcoded at install time**. If you switch to (or create) a virtual environment after running `code-review-graph install`, the paths will still point to the old interpreter and the server will silently fail or use the wrong Python.
+
+**Fix — update the `command`/`args` in `.mcp.json` and any hook commands in `.claude/settings.json` to match your venv:**
+
+```json
+// .mcp.json — point to your venv's Python or uvx inside the venv
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "/path/to/your/venv/bin/uvx",
+      "args": ["code-review-graph", "serve"]
+    }
+  }
+}
+```
+
+Or simply re-run `code-review-graph install` **from within the activated venv** so the paths are regenerated correctly:
+
+```bash
+source .venv/bin/activate          # activate your venv first
+code-review-graph install          # rewrites .mcp.json and hook paths
+```
+
+Then fully quit and reopen Claude Code so it picks up the new config.
+
+### 5. "I built the graph but Claude Code doesn't see it in a new session"
 
 Most likely causes, ranked:
 
@@ -117,7 +144,7 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 ## Graph seems stale
 - Hooks auto-update on edit/commit
 - If stale, run `/code-review-graph:build-graph` manually
-- Check that hooks are configured in `hooks/hooks.json` (see [hooks documentation](../hooks/hooks.json))
+- Check that hooks are configured in `.claude/settings.json` (re-run `code-review-graph install` to regenerate)
 
 ## Embeddings not working
 - Install with: `pip install code-review-graph[embeddings]`

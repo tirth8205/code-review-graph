@@ -133,7 +133,7 @@ Build the code review graph for this project
 | **23 भाषाएं + नोटबुक** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
 | **ब्लास्ट-रेडियस विश्लेषण** | दिखाता है कि किसी भी बदलाव से कौन से फ़ंक्शन, क्लासेज़, और फ़ाइलें प्रभावित होती हैं |
 | **ऑटो-अपडेट हुक्स** | बिना मैन्युअल हस्तक्षेप के हर फ़ाइल एडिट और git कमिट पर ग्राफ अपडेट होता है |
-| **सिमेंटिक सर्च** | sentence-transformers, Google Gemini, या MiniMax के ज़रिए वैकल्पिक वेक्टर एम्बेडिंग |
+| **सिमेंटिक सर्च** | sentence-transformers, Google Gemini, MiniMax, या किसी भी OpenAI-compatible एंडपॉइंट (असली OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) के ज़रिए वैकल्पिक वेक्टर एम्बेडिंग |
 | **इंटरैक्टिव विज़ुअलाइज़ेशन** | सर्च, कम्युनिटी लीजेंड टॉगल, और डिग्री-स्केल्ड नोड्स के साथ D3.js फ़ोर्स-डायरेक्टेड ग्राफ |
 | **हब और ब्रिज डिटेक्शन** | betweenness centrality के ज़रिए सबसे ज़्यादा कनेक्टेड नोड्स और आर्किटेक्चरल चोकपॉइंट्स खोजें |
 | **सरप्राइज़ स्कोरिंग** | अप्रत्याशित कपलिंग का पता लगाएं: क्रॉस-कम्युनिटी, क्रॉस-लैंग्वेज, पेरीफ़ेरल-टू-हब एज़ेज़ |
@@ -269,6 +269,24 @@ pip install code-review-graph[eval]                # मूल्यांकन
 pip install code-review-graph[wiki]                # LLM सारांश के साथ विकी जनरेशन (ollama)
 pip install code-review-graph[all]                 # सभी वैकल्पिक डिपेंडेंसीज़
 ```
+
+OpenAI-compatible एम्बेडिंग्स (असली OpenAI, Azure, या सेल्फ-होस्टेड गेटवे जैसे new-api / LiteLLM / vLLM / LocalAI / Ollama openai मोड) के लिए कोई अतिरिक्त इंस्टॉल की ज़रूरत नहीं — बस एनवायरनमेंट वेरिएबल्स सेट करें और `embed_graph` को `provider="openai"` पास करें:
+
+```bash
+export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # या https://api.openai.com/v1
+export CRG_OPENAI_API_KEY=sk-...
+export CRG_OPENAI_MODEL=text-embedding-3-small          # आपके गेटवे पर उपलब्ध मॉडल
+# वैकल्पिक:
+export CRG_OPENAI_DIMENSION=1536                        # डाइमेंशन पिन करें (v3 मॉडल्स डाइमेंशन रिडक्शन सपोर्ट करते हैं)
+export CRG_OPENAI_BATCH_SIZE=100                        # टाइट बैच लिमिट वाले गेटवे के लिए कम करें
+                                                        # (जैसे Qwen text-embedding-v4 की लिमिट 10 है)
+```
+
+जब base URL localhost (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`) की ओर इशारा करता है, तो क्लाउड-egress चेतावनी अपने आप स्किप हो जाती है।
+
+> **मॉडल चुनने की सलाह।** लंबे समय के उपयोग के लिए `-preview` / `-beta` / `-exp` वाले model ID (जैसे `google/gemini-embedding-2-preview`) से बचें — preview मॉडल्स के वज़न बदल सकते हैं (डाइमेंशन बदलने पर पूरा re-embed करना पड़ेगा) या बिना नोटिस deprecate हो सकते हैं। स्टेबल GA मॉडल्स की सलाह दी जाती है: `text-embedding-3-small` / `text-embedding-3-large` (OpenAI), `Qwen/Qwen3-Embedding-8B` (vLLM / LocalAI सेल्फ-होस्टेड के ज़रिए), या `gemini-embedding-001` (नेटिव Gemini provider के ज़रिए, `GOOGLE_API_KEY` चाहिए).
+>
+> साथ ही ध्यान दें: वर्तमान में `code-review-graph` केवल **फ़ंक्शन सिग्नेचर** एम्बेड करता है (प्रति नोड ~10 tokens, जैसे `"parse_file function (path: str) returns Tree"`). जिन मॉडल्स की क्वालिटी का मुख्य source लंबे context में function body को समझना है (जैसे Gemini 2 या Qwen3-8B के MTEB-code SOTA स्कोर्स), वे इस इनपुट लंबाई पर छोटे मॉडल्स से कम अंतर दिखाएंगे। Body / docstring एम्बेडिंग को फ़ॉलो-अप एन्हांसमेंट के रूप में ट्रैक किया जा रहा है।
 
 </details>
 

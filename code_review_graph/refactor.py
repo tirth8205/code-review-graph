@@ -750,7 +750,7 @@ def apply_refactor(
             logger.warning("apply_refactor: file not found: %s", file_path)
             continue
         try:
-            original = file_path.read_text(encoding="utf-8")
+            original = file_path.read_text(encoding="utf-8", errors="replace")
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("apply_refactor: could not read %s: %s", file_path, exc)
             continue
