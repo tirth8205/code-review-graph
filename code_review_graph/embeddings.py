@@ -66,10 +66,12 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
+                # Check environment variable, default to False to prevent RCE
+                allow_remote_code = os.environ.get("CRG_ALLOW_REMOTE_CODE", "0").lower() in ("1", "true", "yes")
+
                 self._model = SentenceTransformer(
                     self._model_name,
-                    trust_remote_code=True,
-                    model_kwargs={"trust_remote_code": True},
+                    trust_remote_code=allow_remote_code,
                 )
             except ImportError:
                 raise ImportError(
