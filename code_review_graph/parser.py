@@ -32,6 +32,15 @@ _SQL_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# SQL keywords that can appear after FROM/JOIN but are NOT table names.
+_SQL_KEYWORDS: frozenset[str] = frozenset({
+    "SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
+    "UNION", "INTERSECT", "EXCEPT", "AS", "ON", "USING", "SET",
+    "VALUES", "DEFAULT", "NULL", "TRUE", "FALSE",
+    "INNER", "OUTER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
+    "LATERAL", "RECURSIVE", "ONLY", "WITH",
+})
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -125,6 +134,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".res": "rescript",
     ".resi": "rescript",
     ".gd": "gdscript",
+    ".sql": "sql",
 }
 
 # Tree-sitter node type mappings per language
@@ -172,6 +182,8 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "zig": ["container_declaration"],
     "powershell": ["class_statement"],
     "julia": ["struct_definition", "abstract_definition"],
+    # SQL: CREATE TABLE / CREATE VIEW are handled via _parse_sql dispatch.
+    "sql": [],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -222,6 +234,8 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_definition",
         "short_function_definition",
     ],
+    # SQL: CREATE FUNCTION / CREATE PROCEDURE handled via _parse_sql dispatch.
+    "sql": [],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -262,6 +276,8 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "powershell": [],
     # Julia: import/using are import_statement nodes.
     "julia": ["import_statement", "using_statement"],
+    # SQL: table references extracted as IMPORTS_FROM via _parse_sql dispatch.
+    "sql": [],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -300,6 +316,8 @@ _CALL_TYPES: dict[str, list[str]] = {
     "zig": ["call_expression", "builtin_call_expr"],
     "powershell": ["command_expression"],
     "julia": ["call_expression"],
+    # SQL: no call edges extracted (grammar too unreliable for procedure calls).
+    "sql": [],
 }
 
 # Patterns that indicate a test function
@@ -681,6 +699,11 @@ class CodeParser:
         # ReScript: regex-based parser (no tree-sitter grammar bundled).
         if language == "rescript":
             return self._parse_rescript(path, source)
+
+        # SQL: dedicated parser — tree-sitter for tables/views/functions +
+        # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
+        if language == "sql":
+            return self._parse_sql(path, source)
 
         parser = self._get_parser(language)
         if not parser:
@@ -1674,6 +1697,184 @@ class CodeParser:
                     ))
 
         return nodes, edges
+
+    # ------------------------------------------------------------------
+    # SQL parser
+    # ------------------------------------------------------------------
+
+    # Regex for CREATE PROCEDURE — tree-sitter SQL grammar emits an ERROR node
+    # for this statement, so we fall back to a regex scan.
+    _SQL_PROC_RE = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\w+(?:\.\w+)*)",
+        re.IGNORECASE,
+    )
+
+    # Named DDL statements supported by tree-sitter-sql.
+    _SQL_DDL_NODE_TYPES = frozenset({
+        "create_table",
+        "create_view",
+        "create_function",
+    })
+
+    def _parse_sql(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a `.sql` file.
+
+        Extracts:
+        - Tables (CREATE TABLE) → Class nodes with extra["sql_kind"]="table"
+        - Views  (CREATE VIEW)  → Class nodes with extra["sql_kind"]="view"
+        - Functions (CREATE FUNCTION) → Function nodes with extra["sql_kind"]="function"
+        - Procedures (CREATE PROCEDURE, regex fallback) → Function nodes with
+          extra["sql_kind"]="procedure"
+
+        Data dependencies (FROM/JOIN table references) are recorded as
+        IMPORTS_FROM edges so the impact-radius query can follow them.
+        """
+        text = source.decode("utf-8", errors="replace")
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+
+        nodes: list[NodeInfo] = []
+        edges: list[EdgeInfo] = []
+
+        nodes.append(NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=text.count("\n") + 1,
+            language="sql",
+            is_test=test_file,
+        ))
+
+        # --- tree-sitter pass ---
+        parser = self._get_parser("sql")
+        if parser:
+            tree = parser.parse(source)
+            self._walk_sql_tree(
+                tree.root_node, source, file_path_str, nodes, edges,
+            )
+
+        # --- regex fallback for CREATE PROCEDURE ---
+        for m in self._SQL_PROC_RE.finditer(text):
+            raw_name = m.group(1)
+            name = raw_name.split(".")[-1]  # strip schema prefix
+            line = text[: m.start()].count("\n") + 1
+            qualified = f"{file_path_str}::{name}"
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=name,
+                file_path=file_path_str,
+                line_start=line,
+                line_end=line,
+                language="sql",
+                extra={"sql_kind": "procedure"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=qualified,
+                file_path=file_path_str,
+                line=line,
+            ))
+
+        # --- table-reference pass (FROM / JOIN targets) ---
+        seen_refs: set[str] = set()
+        for m in _SQL_TABLE_RE.finditer(text):
+            raw_ref = m.group(1).strip("`")
+            ref = raw_ref.split(".")[-1]  # strip schema/db prefix
+            if ref and ref.upper() not in _SQL_KEYWORDS and ref not in seen_refs:
+                seen_refs.add(ref)
+                line = text[: m.start()].count("\n") + 1
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source=file_path_str,
+                    target=ref,
+                    file_path=file_path_str,
+                    line=line,
+                ))
+
+        return nodes, edges
+
+    def _walk_sql_tree(
+        self,
+        node,
+        source: bytes,
+        file_path_str: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Recursively walk a tree-sitter SQL AST and extract DDL entities."""
+        if node.type in self._SQL_DDL_NODE_TYPES:
+            self._extract_sql_ddl(node, source, file_path_str, nodes, edges)
+            return  # don't recurse into the DDL body — no nested DDL expected
+        for child in node.children:
+            self._walk_sql_tree(child, source, file_path_str, nodes, edges)
+
+    def _extract_sql_ddl(
+        self,
+        node,
+        source: bytes,
+        file_path_str: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Extract a single CREATE TABLE / VIEW / FUNCTION DDL node."""
+        node_type = node.type
+        line_start = node.start_point[0] + 1
+        line_end = node.end_point[0] + 1
+
+        # Locate the identifier / object_reference child that holds the name.
+        name: Optional[str] = None
+        for child in node.children:
+            if child.type in ("identifier", "object_reference", "dotted_name"):
+                raw = source[child.start_byte: child.end_byte].decode("utf-8", errors="replace")
+                # Strip schema prefix (schema.name → name)
+                name = raw.strip("`\"").split(".")[-1]
+                break
+            # Some grammars nest: relation > object_reference > identifier
+            if child.type == "relation":
+                for gc in child.children:
+                    if gc.type in ("object_reference", "identifier"):
+                        raw = source[gc.start_byte: gc.end_byte].decode(
+                            "utf-8", errors="replace",
+                        )
+                        name = raw.strip("`\"").split(".")[-1]
+                        break
+                if name:
+                    break
+
+        if not name:
+            return
+
+        if node_type == "create_table":
+            kind = "Class"
+            sql_kind = "table"
+        elif node_type == "create_view":
+            kind = "Class"
+            sql_kind = "view"
+        else:  # create_function
+            kind = "Function"
+            sql_kind = "function"
+
+        qualified = f"{file_path_str}::{name}"
+        nodes.append(NodeInfo(
+            kind=kind,
+            name=name,
+            file_path=file_path_str,
+            line_start=line_start,
+            line_end=line_end,
+            language="sql",
+            extra={"sql_kind": sql_kind},
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=file_path_str,
+            target=qualified,
+            file_path=file_path_str,
+            line=line_start,
+        ))
 
     def _resolve_call_targets(
         self,
