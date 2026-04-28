@@ -43,7 +43,6 @@ from .tools import (
     get_suggested_questions_func,
     get_surprising_connections_func,
     get_wiki_page_func,
-    traverse_graph_func,
     list_communities_func,
     list_flows,
     list_graph_stats,
@@ -52,6 +51,7 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
+    traverse_graph_func,
 )
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
@@ -942,7 +942,22 @@ def _apply_tool_filter(tools: str | None = None) -> None:
     allowed = {t.strip() for t in raw.split(",") if t.strip()}
     if not allowed:
         return
-    registered = list(mcp._tool_manager._tools.keys())
+    import asyncio as _asyncio
+    import concurrent.futures as _futures
+
+    async def _get_names() -> list[str]:
+        return [t.name for t in await mcp.list_tools()]
+
+    try:
+        # Inside a running event loop (e.g. pytest-asyncio) – use a thread
+        # to avoid the "loop already running" error from asyncio.run().
+        _asyncio.get_running_loop()
+        with _futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            registered = _pool.submit(_asyncio.run, _get_names()).result()
+    except RuntimeError:
+        # No running event loop; safe to use asyncio.run() directly.
+        registered = _asyncio.run(_get_names())
+
     for name in registered:
         if name not in allowed:
             mcp.remove_tool(name)

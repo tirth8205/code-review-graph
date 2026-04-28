@@ -639,8 +639,75 @@ class CodeParser:
                 return None
         return self._parsers[language]
 
+    # Map shebang interpreter name → language label.
+    _SHEBANG_LANGUAGE: dict[str, str] = {
+        "bash": "bash",
+        "sh": "bash",
+        "python": "python",
+        "python2": "python",
+        "python3": "python",
+        "node": "javascript",
+        "nodejs": "javascript",
+        "ruby": "ruby",
+        "perl": "perl",
+        "php": "php",
+        "lua": "lua",
+        "Rscript": "r",
+    }
+
     def detect_language(self, path: Path) -> Optional[str]:
-        return EXTENSION_TO_LANGUAGE.get(path.suffix.lower())
+        lang = EXTENSION_TO_LANGUAGE.get(path.suffix.lower())
+        if lang is not None:
+            return lang
+        # For extension-less files (or unknown extensions), try shebang.
+        if not path.suffix:
+            return self._detect_language_from_shebang(path)
+        return None
+
+    def _detect_language_from_shebang(self, path: Path) -> Optional[str]:
+        """Read the first line of *path* and map the shebang interpreter to a language.
+
+        Handles ``#!/bin/bash``, ``#!/usr/bin/env python3``,
+        ``#!/usr/bin/env -S node --flags``, and similar forms.
+        Binary/non-UTF-8 content is ignored safely.
+        """
+        try:
+            with path.open("rb") as fh:
+                first_line = fh.readline(512)
+        except (OSError, PermissionError):
+            return None
+
+        if not first_line.startswith(b"#!"):
+            return None
+
+        try:
+            line = first_line[2:].decode("utf-8", errors="replace").strip()
+        except Exception:
+            return None
+
+        # Split on whitespace; e.g. "/usr/bin/env -S python3 --flag" → tokens
+        tokens = line.split()
+        if not tokens:
+            return None
+
+        interp_path = tokens[0]
+
+        # /usr/bin/env [opts] interpreter [flags]
+        if interp_path.endswith("env"):
+            # Skip flags like "-S", "-u", etc.
+            interpreter = next(
+                (t for t in tokens[1:] if not t.startswith("-")),
+                None,
+            )
+        else:
+            # /bin/bash, /usr/bin/python3 — basename only, strip version suffix
+            interpreter = interp_path.rsplit("/", 1)[-1]
+
+        if not interpreter:
+            return None
+
+        # Strip trailing version digits: "python3.11" → "python3", "node20" → "node"
+        return self._SHEBANG_LANGUAGE.get(interpreter)
 
     def parse_file(self, path: Path) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse a single file and return extracted nodes and edges."""
@@ -672,9 +739,10 @@ class CodeParser:
         if language == "notebook":
             return self._parse_notebook(path, source)
 
-        # Databricks .py notebook exports
-        if language == "python" and source.startswith(
-            b"# Databricks notebook source\n",
+        # Databricks .py notebook exports (handle both LF and CRLF line endings)
+        if language == "python" and (
+            source.startswith(b"# Databricks notebook source\n")
+            or source.startswith(b"# Databricks notebook source\r\n")
         ):
             return self._parse_databricks_py_notebook(path, source)
 
@@ -2095,26 +2163,27 @@ class CodeParser:
             return True
 
         # ---- Everything else = a regular function/method call ----------
-        # Emit a CALLS edge when we're inside a function (same rule as
-        # the generic _extract_calls path).
-        if enclosing_func:
-            # For dotted calls like `IO.puts(msg)`, prefer the dotted
-            # identifier; for bare calls use the first identifier.
-            call_name = ident
-            caller = self._qualify(
-                enclosing_func, file_path, enclosing_class,
-            )
-            target = self._resolve_call_target(
-                call_name, file_path, language,
-                import_map or {}, defined_names or set(),
-            )
-            edges.append(EdgeInfo(
-                kind="CALLS",
-                source=caller,
-                target=target,
-                file_path=file_path,
-                line=node.start_point[0] + 1,
-            ))
+        # Emit a CALLS edge from the enclosing function or, at module
+        # scope (enclosing_func is None), from the file path.  This
+        # mirrors the generic _extract_calls path so that top-level
+        # Elixir scripts (IO.puts, etc.) are attributed to the file.
+        call_name = ident
+        caller = (
+            self._qualify(enclosing_func, file_path, enclosing_class)
+            if enclosing_func
+            else file_path
+        )
+        target = self._resolve_call_target(
+            call_name, file_path, language,
+            import_map or {}, defined_names or set(),
+        )
+        edges.append(EdgeInfo(
+            kind="CALLS",
+            source=caller,
+            target=target,
+            file_path=file_path,
+            line=node.start_point[0] + 1,
+        ))
         # Recurse into arguments + do_block so nested calls are caught.
         for sub in node.children:
             if sub.type in ("arguments", "do_block"):
@@ -2882,6 +2951,18 @@ class CodeParser:
             line=child.start_point[0] + 1,
         ))
 
+        # Julia: function Base.show(...) → REFERENCES edge to "Base"
+        if language == "julia":
+            julia_module = self._get_julia_module_qualifier(child)
+            if julia_module:
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=qualified,
+                    target=julia_module,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                ))
+
         # Solidity: modifier invocations on functions -> CALLS edges
         if language == "solidity":
             for sub in child.children:
@@ -3021,10 +3102,17 @@ class CodeParser:
             )
             return True
 
-        if call_name and enclosing_func:
-            caller = self._qualify(
-                enclosing_func, file_path, enclosing_class,
-            )
+        if call_name:
+            # Emit CALLS even at module scope (enclosing_func is None).
+            # Module-scope calls use the file path as the source so that
+            # CLI entrypoints / notebook-helper functions are not flagged
+            # as dead code. See: TestModuleScopeCalls.
+            if enclosing_func:
+                caller = self._qualify(
+                    enclosing_func, file_path, enclosing_class,
+                )
+            else:
+                caller = file_path
             target = self._resolve_call_target(
                 call_name, file_path, language,
                 import_map or {}, defined_names or set(),
@@ -3057,16 +3145,19 @@ class CodeParser:
         edges so caller/impact queries can cross the JSX boundary. Intrinsic DOM
         tags (``<div>``) are ignored.
         """
-        if not enclosing_func:
-            return
-
         target = self._resolve_jsx_component_target(
             child, language, file_path, import_map or {}, defined_names or set(),
         )
         if not target:
             return
 
-        caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        # At module scope (no enclosing function) attribute to the file,
+        # e.g. top-level <App /> in an index.tsx entry point.
+        caller = (
+            self._qualify(enclosing_func, file_path, enclosing_class)
+            if enclosing_func
+            else file_path
+        )
         edges.append(EdgeInfo(
             kind="CALLS",
             source=caller,
@@ -3995,6 +4086,17 @@ class CodeParser:
             for child in node.children:
                 if child.type == "word":
                     return child.text.decode("utf-8", errors="replace")
+        # Julia: function Base.show(io, d) — qualified name via field_expression.
+        # Extract only the final identifier ("show") as the function name; the
+        # module qualifier ("Base") is emitted as a REFERENCES edge separately.
+        if language == "julia" and node.type in (
+            "function_definition", "short_function_definition",
+        ):
+            for child in node.children:
+                if child.type == "field_expression":
+                    for sub in reversed(list(child.children)):
+                        if sub.type == "identifier":
+                            return sub.text.decode("utf-8", errors="replace")
         # Go methods: tree-sitter-go uses field_identifier for the name
         # (e.g. func (s *T) MethodName(...) { }). Must run before the generic
         # loop, which would match the result type's type_identifier (e.g. int64).
@@ -4022,6 +4124,20 @@ class CodeParser:
             for child in node.children:
                 if child.type == "type_spec":
                     return self._get_name(child, language, kind)
+        return None
+
+    def _get_julia_module_qualifier(self, node) -> Optional[str]:
+        """Return the module name for a Julia qualified function definition.
+
+        For ``function Base.show(io::IO, d::Dog)`` the ``function_definition``
+        node contains a ``field_expression`` whose first ``identifier`` child
+        is the module name (``"Base"``).  Returns ``None`` for plain functions.
+        """
+        for child in node.children:
+            if child.type == "field_expression":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        return sub.text.decode("utf-8", errors="replace")
         return None
 
     def _get_go_receiver_type(self, node) -> Optional[str]:
@@ -4644,21 +4760,26 @@ class CodeParser:
                 import_map, defined_names,
             )
 
-        if enclosing_func:
-            call_name = self._get_call_name(node, language, source)
-            if call_name:
-                caller = self._qualify(enclosing_func, file_path, enclosing_class)
-                target = self._resolve_call_target(
-                    call_name, file_path, language,
-                    import_map or {}, defined_names or set(),
-                )
-                edges.append(EdgeInfo(
-                    kind="CALLS",
-                    source=caller,
-                    target=target,
-                    file_path=file_path,
-                    line=node.start_point[0] + 1,
-                ))
+        call_name = self._get_call_name(node, language, source)
+        if call_name:
+            # Emit CALLS even at module scope; R scripts overwhelmingly
+            # use top-level calls (worker(), plot(), etc.).
+            caller = (
+                self._qualify(enclosing_func, file_path, enclosing_class)
+                if enclosing_func
+                else file_path
+            )
+            target = self._resolve_call_target(
+                call_name, file_path, language,
+                import_map or {}, defined_names or set(),
+            )
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=caller,
+                target=target,
+                file_path=file_path,
+                line=node.start_point[0] + 1,
+            ))
 
         self._extract_from_tree(
             node, source, language, file_path, nodes, edges,
