@@ -1916,3 +1916,59 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+
+class TestSQLParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.sql")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("schema.sql")) == "sql"
+
+    def test_file_node(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "sql"
+
+    def test_finds_tables(self):
+        tables = [n for n in self.nodes if n.kind == "Class" and n.extra.get("sql_kind") == "table"]
+        names = {t.name for t in tables}
+        assert "users" in names
+        assert "orders" in names
+
+    def test_finds_view(self):
+        views = [n for n in self.nodes if n.kind == "Class" and n.extra.get("sql_kind") == "view"]
+        names = {v.name for v in views}
+        assert "active_orders" in names
+
+    def test_finds_function(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "function"
+        ]
+        names = {f.name for f in funcs}
+        assert "get_user_total" in names
+
+    def test_finds_procedure(self):
+        procs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "procedure"
+        ]
+        names = {p.name for p in procs}
+        assert "archive_old_orders" in names
+
+    def test_contains_edges(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split("::")[-1] for e in contains}
+        assert "users" in targets
+        assert "orders" in targets
+        assert "active_orders" in targets
+        assert "get_user_total" in targets
+        assert "archive_old_orders" in targets
+
+    def test_table_reference_edges(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        # active_orders view and archive procedure both reference orders/users
+        assert "orders" in targets or "users" in targets
