@@ -2,7 +2,8 @@
 
 Generates Claude Code agent skill files, hooks configuration, and
 CLAUDE.md integration for seamless code-review-graph usage.
-Also supports multi-platform MCP server installation.
+Also supports multi-platform MCP server installation and
+Cursor hooks / OpenCode plugin generation.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ import logging
 import os
 import platform
 import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -757,6 +759,198 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     return updated
 
 
+# --- Cursor hooks ---
+
+
+def generate_cursor_hooks_config() -> dict[str, Any]:
+    """Generate Cursor hooks.json configuration.
+
+    Returns a dict conforming to the Cursor hooks schema (version 1) with
+    hooks for afterFileEdit, sessionStart, and beforeShellExecution.
+    Each hook points to a shell script in ~/.cursor/hooks/.
+
+    Returns:
+        Dict suitable for writing as ~/.cursor/hooks.json.
+    """
+    hooks_dir = str(Path.home() / ".cursor" / "hooks")
+    return {
+        "version": 1,
+        "hooks": {
+            "afterFileEdit": [
+                {
+                    "command": f"{hooks_dir}/crg-update.sh",
+                    "timeout": 5,
+                },
+            ],
+            "sessionStart": [
+                {
+                    "command": f"{hooks_dir}/crg-session-start.sh",
+                    "timeout": 5,
+                },
+            ],
+            "beforeShellExecution": [
+                {
+                    "matcher": "^git\\s+commit",
+                    "command": f"{hooks_dir}/crg-pre-commit.sh",
+                    "timeout": 10,
+                },
+            ],
+        },
+    }
+
+
+def _cursor_hook_scripts() -> dict[str, str]:
+    """Return a mapping of filename -> shell script content for Cursor hooks.
+
+    Three scripts are generated:
+    - crg-update.sh: runs ``code-review-graph update --skip-flows`` after file edits
+    - crg-session-start.sh: runs ``code-review-graph status`` on session start
+    - crg-pre-commit.sh: runs ``code-review-graph detect-changes --brief`` before
+      git commit commands
+
+    All scripts:
+    - Read stdin (Cursor passes JSON context) and discard it
+    - Fail gracefully (exit 0) so they never block the editor
+    - Emit valid JSON on stdout per the Cursor hooks protocol
+    """
+    update_script = """\
+#!/usr/bin/env bash
+# code-review-graph: auto-update graph after file edits (Cursor hook)
+# Fails gracefully — never blocks the editor.
+set -euo pipefail
+
+# Consume stdin (Cursor sends JSON context)
+cat > /dev/null
+
+# Run update; swallow errors so the hook always succeeds.
+output=$(code-review-graph update --skip-flows 2>&1) || true
+
+# Emit valid JSON on stdout per Cursor hooks protocol.
+python3 -c "
+import json, sys
+print(json.dumps({'message': 'graph updated', 'passed': True}))
+" 2>/dev/null || echo '{"passed":true}'
+
+exit 0
+"""
+
+    session_start_script = """\
+#!/usr/bin/env bash
+# code-review-graph: show graph status on session start (Cursor hook)
+# Fails gracefully — never blocks the editor.
+set -euo pipefail
+
+# Consume stdin
+cat > /dev/null
+
+# Capture status output
+output=$(code-review-graph status 2>&1) || output="graph not built yet"
+
+# Emit valid JSON on stdout
+python3 -c "
+import json, sys
+msg = sys.stdin.read()
+print(json.dumps({'message': msg, 'passed': True}))
+" <<< "$output" 2>/dev/null || echo '{"passed":true}'
+
+exit 0
+"""
+
+    pre_commit_script = """\
+#!/usr/bin/env bash
+# code-review-graph: detect changes before git commit (Cursor hook)
+# Fails gracefully — never blocks the editor.
+set -euo pipefail
+
+# Consume stdin
+cat > /dev/null
+
+# Run detect-changes; swallow errors
+output=$(code-review-graph detect-changes --brief 2>&1) || output=""
+
+# Emit valid JSON on stdout
+python3 -c "
+import json, sys
+msg = sys.stdin.read()
+print(json.dumps({'message': msg, 'passed': True}))
+" <<< "$output" 2>/dev/null || echo '{"passed":true}'
+
+exit 0
+"""
+
+    return {
+        "crg-update.sh": update_script,
+        "crg-session-start.sh": session_start_script,
+        "crg-pre-commit.sh": pre_commit_script,
+    }
+
+
+def install_cursor_hooks() -> Path:
+    """Install Cursor hooks configuration and scripts at user level.
+
+    Writes ``~/.cursor/hooks.json`` (merging code-review-graph hooks
+    into any existing configuration) and creates executable shell scripts
+    in ``~/.cursor/hooks/``.
+
+    Returns:
+        Path to the hooks.json file that was written.
+    """
+    cursor_dir = Path.home() / ".cursor"
+    hooks_json_path = cursor_dir / "hooks.json"
+    hooks_script_dir = cursor_dir / "hooks"
+
+    # --- Merge hooks.json ---
+    existing: dict[str, Any] = {}
+    if hooks_json_path.exists():
+        try:
+            existing = json.loads(hooks_json_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", hooks_json_path, exc)
+
+    new_config = generate_cursor_hooks_config()
+
+    # Preserve version (use ours if absent)
+    existing.setdefault("version", new_config["version"])
+
+    # Merge hook arrays per event type
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        existing_hooks = {}
+
+    for event, entries in new_config["hooks"].items():
+        event_hooks = existing_hooks.get(event, [])
+        if not isinstance(event_hooks, list):
+            event_hooks = []
+        # De-duplicate: skip if a hook with the same command already exists
+        existing_commands = {h.get("command", "") for h in event_hooks if isinstance(h, dict)}
+        for entry in entries:
+            if entry["command"] not in existing_commands:
+                event_hooks.append(entry)
+        existing_hooks[event] = event_hooks
+
+    existing["hooks"] = existing_hooks
+
+    cursor_dir.mkdir(parents=True, exist_ok=True)
+    hooks_json_path.write_text(
+        json.dumps(existing, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    logger.info("Wrote Cursor hooks config: %s", hooks_json_path)
+
+    # --- Write hook scripts ---
+    hooks_script_dir.mkdir(parents=True, exist_ok=True)
+    scripts = _cursor_hook_scripts()
+
+    for filename, content in scripts.items():
+        script_path = hooks_script_dir / filename
+        script_path.write_text(content, encoding="utf-8")
+        # Make executable (owner rwx, group rx, other rx)
+        script_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        logger.info("Wrote Cursor hook script: %s", script_path)
+
+    return hooks_json_path
+
+
 def install_qoder_skills(repo_root: Path) -> Path | None:
     """Install skills to Qoder's project-level skills directory.
 
@@ -795,3 +989,108 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
         logger.info("Installed %d skill(s) to %s", installed_count, qoder_skills_dir)
         return qoder_skills_dir
     return None
+
+
+# --- OpenCode plugin ---
+
+
+def _opencode_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode user-level plugin.
+
+    The plugin hooks into three OpenCode events to mirror the Claude Code
+    hook behaviors:
+
+    1. ``file.edited`` — runs ``code-review-graph update --skip-flows``
+    2. ``session.created`` — runs ``code-review-graph status``
+    3. ``tool.execute.before`` — when the tool is a shell command starting
+       with ``git commit``, runs ``code-review-graph detect-changes --brief``
+
+    All handlers use try/catch so errors never break the editor session.
+    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
+    context) for subprocess execution.
+    """
+    return """\
+import type { Plugin } from "@opencode-ai/plugin"
+
+/**
+ * code-review-graph plugin for OpenCode.
+ *
+ * Keeps the knowledge graph up-to-date and surfaces status
+ * information automatically during coding sessions.
+ *
+ * Installed by: code-review-graph install --platform opencode
+ */
+
+// Helper: run a shell command quietly, swallowing errors.
+async function run($: any, cmd: string): Promise<string> {
+  try {
+    const result = await $`${cmd}`.quiet()
+    return result.stdout?.toString().trim() ?? ""
+  } catch {
+    return ""
+  }
+}
+
+export default (app: any) => {
+  // 1. Auto-update graph after file edits
+  app.on("file.edited", async ({ $ }: { $: any }) => {
+    try {
+      await $`code-review-graph update --skip-flows`.quiet()
+    } catch {
+      // Swallow — graph may not be built yet for this project.
+    }
+  })
+
+  // 2. Show graph status when a new session starts
+  app.on("session.created", async ({ $ }: { $: any }) => {
+    try {
+      const result = await $`code-review-graph status`.quiet()
+      const output = result.stdout?.toString().trim()
+      if (output) {
+        console.log("[code-review-graph]", output)
+      }
+    } catch {
+      // Swallow — not every project has a graph.
+    }
+  })
+
+  // 3. Detect changes before git commit commands
+  app.on("tool.execute.before", async (ctx: any) => {
+    try {
+      const input = ctx?.input ?? ctx?.params ?? {}
+      const cmd =
+        input.command ?? input.cmd ?? input.content ?? ""
+      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
+        const result =
+          await ctx.$`code-review-graph detect-changes --brief`.quiet()
+        const output = result.stdout?.toString().trim()
+        if (output) {
+          console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
+        }
+      }
+    } catch {
+      // Swallow — never block a commit.
+    }
+  })
+}
+"""
+
+
+def install_opencode_plugin() -> Path:
+    """Install the OpenCode user-level plugin for code-review-graph.
+
+    Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
+    directories if they don't exist.  If the file already exists it is
+    overwritten (the plugin is self-contained and idempotent).
+
+    Returns:
+        Path to the plugin file that was written.
+    """
+    plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
+    plugin_path = plugins_dir / "crg-plugin.ts"
+
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    plugin_path.write_text(_opencode_plugin_content(), encoding="utf-8")
+    logger.info("Wrote OpenCode plugin: %s", plugin_path)
+
+    return plugin_path

@@ -14,6 +14,13 @@ Usage:
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
+    code-review-graph daemon start [--foreground]
+    code-review-graph daemon stop
+    code-review-graph daemon restart [--foreground]
+    code-review-graph daemon status
+    code-review-graph daemon logs [--repo ALIAS] [-f] [-n N]
+    code-review-graph daemon add <path> [--alias NAME]
+    code-review-graph daemon remove <path_or_alias>
 """
 
 from __future__ import annotations
@@ -101,6 +108,7 @@ def _print_banner() -> None:
     {g}unregister{r}  Remove a repository from the registry
     {g}repos{r}       List registered repositories
     {g}postprocess{r} Run post-processing {d}(flows, communities, FTS){r}
+    {g}daemon{r}      Multi-repo watch daemon management
     {g}eval{r}        Run evaluation benchmarks
     {g}serve{r}       Start MCP server {d}(stdio, or {g}--http{r} on localhost:5555){r}
 
@@ -217,11 +225,14 @@ def _handle_init(args: argparse.Namespace) -> None:
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
+        PLATFORMS,
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_cursor_hooks,
         install_git_hook,
         install_hooks,
+        install_opencode_plugin,
         install_qoder_skills,
     )
 
@@ -263,6 +274,22 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+
+        # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
+        if target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
+            try:
+                hooks_path = install_cursor_hooks()
+                print(f"Installed Cursor hooks in {hooks_path}")
+            except Exception as exc:
+                logger.warning("Could not install Cursor hooks: %s", exc)
+
+    # OpenCode plugin (user-level, gated by same detect() as MCP config)
+    if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
+        try:
+            plugin_path = install_opencode_plugin()
+            print(f"Installed OpenCode plugin in {plugin_path}")
+        except Exception as exc:
+            logger.warning("Could not install OpenCode plugin: %s", exc)
 
     print()
     print("Next steps:")
@@ -520,6 +547,81 @@ def main() -> None:
         help="Port for --http (default: 5555)",
     )
 
+    # daemon
+    daemon_cmd = sub.add_parser(
+        "daemon",
+        help="Multi-repo watch daemon (start/stop/status/add/remove)",
+    )
+    daemon_sub = daemon_cmd.add_subparsers(dest="daemon_command")
+
+    daemon_start = daemon_sub.add_parser(
+        "start",
+        help="Start the watch daemon",
+    )
+    daemon_start.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in foreground instead of daemonizing",
+    )
+
+    daemon_sub.add_parser(
+        "stop",
+        help="Stop the watch daemon",
+    )
+
+    daemon_restart = daemon_sub.add_parser(
+        "restart",
+        help="Restart the watch daemon",
+    )
+    daemon_restart.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run in foreground instead of daemonizing",
+    )
+
+    daemon_sub.add_parser("status", help="Show daemon and watcher status")
+
+    daemon_logs = daemon_sub.add_parser(
+        "logs",
+        help="View daemon or watcher logs",
+    )
+    daemon_logs.add_argument(
+        "--repo",
+        default=None,
+        help="Show logs for a specific repo alias",
+    )
+    daemon_logs.add_argument(
+        "--follow",
+        action="store_true",
+        help="Follow log output (tail -f)",
+    )
+    daemon_logs.add_argument(
+        "--lines",
+        type=int,
+        default=50,
+        help="Number of lines to show (default: 50)",
+    )
+
+    daemon_add = daemon_sub.add_parser(
+        "add",
+        help="Add a repo to the watch config",
+    )
+    daemon_add.add_argument("path", help="Path to the repository")
+    daemon_add.add_argument(
+        "--alias",
+        default=None,
+        help="Short alias for the repo",
+    )
+
+    daemon_remove = daemon_sub.add_parser(
+        "remove",
+        help="Remove a repo from the watch config",
+    )
+    daemon_remove.add_argument(
+        "path_or_alias",
+        help="Repository path or alias to remove",
+    )
+
     args = ap.parse_args()
 
     if args.version:
@@ -549,6 +651,34 @@ def main() -> None:
             )
         else:
             serve_main(repo_root=args.repo, tools=args.tools)
+        return
+
+    if args.command == "daemon":
+        if not args.daemon_command:
+            daemon_cmd.print_help()
+            return
+        from .daemon_cli import (
+            _handle_add,
+            _handle_logs,
+            _handle_remove,
+            _handle_restart,
+            _handle_start,
+            _handle_status,
+            _handle_stop,
+        )
+
+        handlers = {
+            "start": _handle_start,
+            "stop": _handle_stop,
+            "restart": _handle_restart,
+            "status": _handle_status,
+            "logs": _handle_logs,
+            "add": _handle_add,
+            "remove": _handle_remove,
+        }
+        handler = handlers.get(args.daemon_command)
+        if handler:
+            handler(args)
         return
 
     if args.command == "eval":

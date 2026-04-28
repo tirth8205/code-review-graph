@@ -85,3 +85,7 @@ design-system-audit.md
 research-synthesis.md
 code-review-graph-analysis.md
 SCALING_AND_TOKEN_EFFICIENCY_PLAN.md
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+.beads-credential-key
