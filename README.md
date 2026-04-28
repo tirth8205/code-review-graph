@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/tirth8205-code-review-graph-badge.png)](https://mseep.ai/app/tirth8205-code-review-graph)
+
 <h1 align="center">code-review-graph</h1>
 
 <p align="center">
