@@ -312,6 +312,20 @@ def _cli_post_process(store: GraphStore) -> None:
         print(f"Communities: {pp['communities_detected']}")
 
 
+def _handle_data_dir_option(args, repo_root: Path) -> None:
+    """Handle --data-dir option by updating registry if specified."""
+    if hasattr(args, "data_dir") and args.data_dir:
+        try:
+            from .registry import Registry
+            data_dir_path = Path(args.data_dir).expanduser().resolve()
+            data_dir_path.mkdir(parents=True, exist_ok=True)
+            Registry().set_data_dir(str(repo_root), str(data_dir_path))
+            logging.info(f"Graph database will be stored at: {data_dir_path}")
+        except Exception as exc:
+            logging.error(f"Failed to set data directory: {exc}")
+            sys.exit(1)
+
+
 def main() -> None:
     """Main CLI entry point."""
     ap = argparse.ArgumentParser(
@@ -414,6 +428,11 @@ def main() -> None:
         action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
+    build_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -429,6 +448,11 @@ def main() -> None:
         action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
+    update_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -439,14 +463,29 @@ def main() -> None:
     pp_cmd.add_argument("--no-flows", action="store_true", help="Skip flow detection")
     pp_cmd.add_argument("--no-communities", action="store_true", help="Skip community detection")
     pp_cmd.add_argument("--no-fts", action="store_true", help="Skip FTS rebuild")
+    pp_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # watch
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
     watch_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    watch_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    status_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
@@ -468,6 +507,11 @@ def main() -> None:
         default="html",
         help="Export format (default: html)",
     )
+    vis_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # wiki
     wiki_cmd = sub.add_parser("wiki", help="Generate markdown wiki from community structure")
@@ -476,6 +520,11 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Regenerate all pages even if content unchanged",
+    )
+    wiki_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
     )
 
     # register
@@ -766,6 +815,7 @@ def main() -> None:
 
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
+        _handle_data_dir_option(args, repo_root)
         db_path = get_db_path(repo_root)
         store = GraphStore(db_path)
         try:
@@ -801,6 +851,10 @@ def main() -> None:
             sys.exit(1)
     else:
         repo_root = Path(args.repo) if args.repo else find_project_root()
+
+    # Handle --data-dir for commands that support it
+    if args.command in ("build", "update", "detect-changes", "status", "watch", "visualize", "wiki"):
+        _handle_data_dir_option(args, repo_root)
 
     db_path = get_db_path(repo_root)
     store = GraphStore(db_path)

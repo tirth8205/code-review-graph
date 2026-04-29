@@ -174,26 +174,11 @@ def find_project_root(
     return start or Path.cwd()
 
 
-def get_data_dir(repo_root: Path) -> Path:
-    """Return the directory where this project's graph data lives.
-
-    By default, ``<repo_root>/.code-review-graph``. If the
-    ``CRG_DATA_DIR`` environment variable is set, it is used verbatim
-    instead — letting you keep graphs outside the working tree (useful
-    for ephemeral workspaces, Docker volumes, or shared caches). See: #155
-
-    The directory is created if it does not already exist; an inner
-    ``.gitignore`` (with ``*``) is written so any accidentally-nested
-    files never get committed. Both are idempotent.
+def _write_data_dir_gitignore(data_dir: Path) -> None:
+    """Write .gitignore file in data directory if it doesn't exist.
+    
+    The gitignore contains a single '*' to prevent accidental commits.
     """
-    env_override = os.environ.get("CRG_DATA_DIR", "").strip()
-    if env_override:
-        data_dir = Path(env_override).expanduser().resolve()
-    else:
-        data_dir = repo_root / ".code-review-graph"
-
-    data_dir.mkdir(parents=True, exist_ok=True)
-
     inner_gitignore = data_dir / ".gitignore"
     if not inner_gitignore.exists():
         try:
@@ -211,6 +196,47 @@ def get_data_dir(repo_root: Path) -> Path:
         except OSError:
             # Data dir might be read-only (rare); that's OK, it's a best-effort guard.
             pass
+
+
+def get_data_dir(repo_root: Path) -> Path:
+    """Return the directory where this project's graph data lives.
+
+    Resolution priority:
+    1. Registry entry for this repo (set via --data-dir)
+    2. CRG_DATA_DIR environment variable (global override)
+    3. Default: <repo>/.code-review-graph/
+
+    By default, ``<repo_root>/.code-review-graph``. If the
+    ``CRG_DATA_DIR`` environment variable is set, it is used verbatim
+    instead — letting you keep graphs outside the working tree (useful
+    for ephemeral workspaces, Docker volumes, or shared caches). See: #155
+
+    The directory is created if it does not already exist; an inner
+    ``.gitignore`` (with ``*``) is written so any accidentally-nested
+    files never get committed. Both are idempotent.
+    """
+    # Check registry first
+    try:
+        from .registry import Registry
+        registry_data_dir = Registry().get_data_dir_for_repo(str(repo_root))
+        if registry_data_dir:
+            data_dir = Path(registry_data_dir).resolve()
+            data_dir.mkdir(parents=True, exist_ok=True)
+            _write_data_dir_gitignore(data_dir)
+            return data_dir
+    except Exception as exc:
+        # If registry lookup fails, log and fall through to other methods
+        logger.debug("Registry lookup failed for %s: %s", repo_root, exc)
+
+    # Check environment variable
+    env_override = os.environ.get("CRG_DATA_DIR", "").strip()
+    if env_override:
+        data_dir = Path(env_override).expanduser().resolve()
+    else:
+        data_dir = repo_root / ".code-review-graph"
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    _write_data_dir_gitignore(data_dir)
 
     return data_dir
 

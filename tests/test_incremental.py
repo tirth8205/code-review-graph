@@ -337,6 +337,101 @@ class TestDataDir:
         assert result != tmp_path / "does-not-exist-123"
 
 
+class TestDataDirRegistry:
+    """Tests for registry-based data_dir resolution."""
+
+    def test_registry_data_dir_overrides_default(self, tmp_path, monkeypatch):
+        """Registry data_dir should override default .code-review-graph."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        external = tmp_path / "external"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        # Set in registry
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(external))
+
+        result = get_data_dir(repo)
+        assert result == external.resolve()
+        assert result.is_dir()
+        assert not (repo / ".code-review-graph").exists()
+
+    def test_registry_data_dir_overrides_env_var(self, tmp_path, monkeypatch):
+        """Registry data_dir should override CRG_DATA_DIR."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        registry_dir = tmp_path / "registry-data"
+        env_dir = tmp_path / "env-data"
+
+        monkeypatch.setenv("CRG_DATA_DIR", str(env_dir))
+
+        # Set in registry
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(registry_dir))
+
+        result = get_data_dir(repo)
+        # Registry should win over env var
+        assert result == registry_dir.resolve()
+        assert not env_dir.exists()
+
+    def test_registry_fallback_to_env_var(self, tmp_path, monkeypatch):
+        """Fall back to CRG_DATA_DIR when registry has no entry."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        env_dir = tmp_path / "env-data"
+
+        monkeypatch.setenv("CRG_DATA_DIR", str(env_dir))
+
+        # Don't set in registry
+        result = get_data_dir(repo)
+        assert result == env_dir.resolve()
+        assert result.is_dir()
+
+    def test_registry_fallback_to_default(self, tmp_path, monkeypatch):
+        """Fall back to default when neither registry nor env var is set."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        # Don't set in registry
+        result = get_data_dir(repo)
+        assert result == repo / ".code-review-graph"
+        assert result.is_dir()
+
+    def test_data_dir_auto_creates_directory(self, tmp_path, monkeypatch):
+        """get_data_dir should auto-create the data directory."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        data_dir = tmp_path / "nonexistent" / "nested" / "path"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(data_dir))
+
+        result = get_data_dir(repo)
+        assert result.exists()
+        assert result.is_dir()
+        assert result == data_dir.resolve()
+
+
 class TestIsBinary:
     def test_text_file_is_not_binary(self, tmp_path):
         f = tmp_path / "text.py"

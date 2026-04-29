@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..graph import GraphStore
+from ..incremental import get_db_path
 from ..search import hybrid_search
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ def cross_repo_search_func(
 
         for repo_entry in repos:
             repo_path = Path(repo_entry["path"])
-            db_path = repo_path / ".code-review-graph" / "graph.db"
+            db_path = get_db_path(repo_path)
             if not db_path.exists():
                 continue
 
