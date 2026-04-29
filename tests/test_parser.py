@@ -1209,3 +1209,80 @@ class TestModuleScopeCalls:
             and e.target.endswith("puts")
         ]
         assert len(top_level) == 1
+
+class TestCppScopedFunctionName:
+    """Regression tests for C++ scoped function name extraction.
+
+    See: https://github.com/tirth8205/code-review-graph/issues/395
+    """
+
+    def test_scoped_function_with_type_identifier_return(self, tmp_path):
+        """bufferlist OSDService::get_inc_map(...) should extract 'get_inc_map'."""
+        src = tmp_path / "osd_service.cpp"
+        src.write_text(
+            "bufferlist OSDService::get_inc_map(epoch_t e) {\n"
+            "  bufferlist bl;\n"
+            "  return bl;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_inc_map"
+
+    def test_scoped_function_with_qualified_return(self, tmp_path):
+        """std::string OSDMap::get_pool_name(...) should extract 'get_pool_name'."""
+        src = tmp_path / "osd_map.cpp"
+        src.write_text(
+            "std::string OSDMap::get_pool_name(int64_t pool_id) const {\n"
+            '  return "";\n'
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_pool_name"
+
+    def test_scoped_function_with_primitive_return_still_works(self, tmp_path):
+        """int OSD::handle_osd_map(...) was already correct; verify no regression."""
+        src = tmp_path / "osd.cpp"
+        src.write_text(
+            "int OSD::handle_osd_map(MOSDMap *m) {\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "handle_osd_map"
+
+    def test_unscoped_function_with_type_identifier_return(self, tmp_path):
+        """static std::string _make_key(...) should extract '_make_key'."""
+        src = tmp_path / "util.cpp"
+        src.write_text(
+            "static std::string _make_key(const std::string& prefix) {\n"
+            "  return prefix;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "_make_key"
+
+    def test_scoped_function_string_return(self, tmp_path):
+        """string RGWDedupProcessor::get_obj_fingerprint(...) should extract the method name."""
+        src = tmp_path / "rgw_dedup.cpp"
+        src.write_text(
+            "string RGWDedupProcessor::get_obj_fingerprint(const rgw_obj& obj) {\n"
+            '  return "";\n'
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_obj_fingerprint"

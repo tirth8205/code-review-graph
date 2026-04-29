@@ -3975,6 +3975,13 @@ class CodeParser:
         if language in ("c", "cpp", "objc") and kind == "function":
             for child in node.children:
                 if child.type in ("function_declarator", "pointer_declarator"):
+                    # Scoped names like Foo::bar use qualified_identifier; take
+                    # the rightmost identifier/field_identifier after the last ::.
+                    for sub in child.children:
+                        if sub.type == "qualified_identifier":
+                            for qsub in reversed(sub.children):
+                                if qsub.type in ("identifier", "field_identifier"):
+                                    return qsub.text.decode("utf-8", errors="replace")
                     result = self._get_name(child, language, kind)
                     if result:
                         return result
@@ -4010,11 +4017,13 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type == "type_identifier":
                             return sub.text.decode("utf-8", errors="replace")
-        # Most languages use a 'name' child
+        # Most languages use a 'name' child.
+        # field_identifier covers C++ class member function names inside
+        # function_declarator (e.g. virtual std::string get_name() = 0).
         for child in node.children:
             if child.type in (
                 "identifier", "name", "type_identifier", "property_identifier",
-                "simple_identifier", "constant",
+                "simple_identifier", "constant", "field_identifier",
             ):
                 return child.text.decode("utf-8", errors="replace")
         # For Go type declarations, look for type_spec
