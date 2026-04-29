@@ -238,3 +238,99 @@ class TestCrossRepoSearch:
 
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+class TestSetDataDir:
+    """Tests for set_data_dir and get_data_dir_for_repo methods."""
+
+    def setup_method(self):
+        """Set up isolated test registry."""
+        self.tmp_dir = tempfile.mkdtemp()
+        self.registry_path = Path(self.tmp_dir) / "registry.json"
+        self.registry = Registry(path=self.registry_path)
+
+    def teardown_method(self):
+        """Clean up temporary directory."""
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_set_data_dir_new_repo(self):
+        """set_data_dir should create new registry entry if repo not registered."""
+        repo = Path(self.tmp_dir) / "project"
+        repo.mkdir()
+        data_dir = Path(self.tmp_dir) / "data"
+
+        entry = self.registry.set_data_dir(str(repo), str(data_dir))
+
+        assert entry["path"] == str(repo.resolve())
+        assert entry["data_dir"] == str(data_dir.resolve())
+
+        # Verify it can be retrieved
+        retrieved = self.registry.get_data_dir_for_repo(str(repo))
+        assert retrieved == str(data_dir.resolve())
+
+        # Verify entry is in list
+        repos = self.registry.list_repos()
+        assert len(repos) == 1
+        assert repos[0]["path"] == str(repo.resolve())
+
+    def test_set_data_dir_existing_repo(self):
+        """set_data_dir should update data_dir for already registered repo."""
+        repo = Path(self.tmp_dir) / "project"
+        repo.mkdir()
+        data_dir1 = Path(self.tmp_dir) / "data1"
+        data_dir2 = Path(self.tmp_dir) / "data2"
+
+        # Initial registration
+        entry1 = self.registry.set_data_dir(str(repo), str(data_dir1))
+        assert entry1["data_dir"] == str(data_dir1.resolve())
+
+        # Update with new data_dir
+        entry2 = self.registry.set_data_dir(str(repo), str(data_dir2))
+        assert entry2["data_dir"] == str(data_dir2.resolve())
+
+        # Verify only one entry exists
+        repos = self.registry.list_repos()
+        assert len(repos) == 1
+
+    def test_get_data_dir_for_repo_unknown(self):
+        """get_data_dir_for_repo should return None for unknown repo."""
+        unknown_repo = Path(self.tmp_dir) / "unknown"
+
+        result = self.registry.get_data_dir_for_repo(str(unknown_repo))
+        assert result is None
+
+    def test_set_data_dir_with_alias(self):
+        """register() with data_dir should store both."""
+        repo = Path(self.tmp_dir) / "project"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        data_dir = Path(self.tmp_dir) / "data"
+        alias = "my-project"
+
+        entry = self.registry.register(str(repo), alias=alias, data_dir=str(data_dir))
+
+        assert entry["path"] == str(repo.resolve())
+        assert entry["alias"] == alias
+        assert entry["data_dir"] == str(data_dir.resolve())
+
+    def test_backward_compatibility(self):
+        """Old registry entries without data_dir should work."""
+        repo = Path(self.tmp_dir) / "project"
+        repo.mkdir()
+
+        # Create entry without data_dir (old format)
+        self.registry._repos.append({
+            "path": str(repo.resolve()),
+            "alias": "old-project"
+        })
+        self.registry._save()
+
+        # Should not crash
+        result = self.registry.get_data_dir_for_repo(str(repo))
+        assert result is None
+
+        # Should be able to add data_dir
+        data_dir = Path(self.tmp_dir) / "data"
+        entry = self.registry.set_data_dir(str(repo), str(data_dir))
+        assert entry["data_dir"] == str(data_dir.resolve())

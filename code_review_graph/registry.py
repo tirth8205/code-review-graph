@@ -54,7 +54,7 @@ class Registry:
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
         )
 
-    def register(self, path: str, alias: str | None = None) -> dict[str, str]:
+    def register(self, path: str, alias: str | None = None, data_dir: str | None = None) -> dict[str, str]:
         """Register a repository path.
 
         Validates that the path contains a ``.git`` or ``.code-review-graph``
@@ -63,6 +63,7 @@ class Registry:
         Args:
             path: Absolute or relative path to the repository root.
             alias: Optional short alias for the repository.
+            data_dir: Optional external directory for graph database.
 
         Returns:
             The registered entry dict.
@@ -84,15 +85,19 @@ class Registry:
             str_path = str(resolved)
             for entry in self._repos:
                 if entry["path"] == str_path:
-                    # Update alias if provided
+                    # Update alias and/or data_dir if provided
                     if alias:
                         entry["alias"] = alias
-                        self._save()
+                    if data_dir:
+                        entry["data_dir"] = str(Path(data_dir).resolve())
+                    self._save()
                     return entry
 
             new_entry: dict[str, str] = {"path": str_path}
             if alias:
                 new_entry["alias"] = alias
+            if data_dir:
+                new_entry["data_dir"] = str(Path(data_dir).resolve())
             self._repos.append(new_entry)
             self._save()
             return new_entry
@@ -157,6 +162,52 @@ class Registry:
             for entry in self._repos:
                 if entry["path"] == resolved:
                     return dict(entry)
+            return None
+
+    def set_data_dir(self, path: str, data_dir: str) -> dict[str, str]:
+        """Set the external data directory for a repository.
+
+        Args:
+            path: Repository path (absolute or relative).
+            data_dir: External directory path to store graph database.
+
+        Returns:
+            The updated or created registry entry.
+        """
+        resolved = str(Path(path).resolve())
+        data_resolved = str(Path(data_dir).resolve())
+
+        with self._lock:
+            # Check for existing entry
+            for entry in self._repos:
+                if entry["path"] == resolved:
+                    entry["data_dir"] = data_resolved
+                    self._save()
+                    return dict(entry)
+
+            # Create new entry if not found
+            new_entry = {
+                "path": resolved,
+                "data_dir": data_resolved
+            }
+            self._repos.append(new_entry)
+            self._save()
+            return new_entry
+
+    def get_data_dir_for_repo(self, path: str) -> str | None:
+        """Get the stored data directory for a repository.
+
+        Args:
+            path: Repository path (absolute or relative).
+
+        Returns:
+            The stored data_dir path, or None if not set.
+        """
+        resolved = str(Path(path).resolve())
+        with self._lock:
+            for entry in self._repos:
+                if entry["path"] == resolved:
+                    return entry.get("data_dir")
             return None
 
 
