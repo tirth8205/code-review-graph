@@ -15,7 +15,7 @@ When using code-review-graph MCP tools, follow these rules:
 ## Architecture
 
 - **Core Package**: `code_review_graph/` (Python 3.10+)
-  - `parser.py` — Tree-sitter multi-language AST parser (19 languages including Vue SFC, Solidity, Dart, R, Perl, Lua + Jupyter/Databricks notebooks)
+  - `parser.py` — Tree-sitter multi-language AST parser (20 languages including Vue SFC, Solidity, Dart, R, Perl, Lua, Nix + Jupyter/Databricks notebooks)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
   - `tools.py` — 22 MCP tool implementations
   - `main.py` — FastMCP server entry point (stdio transport), registers 22 tools + 5 prompts

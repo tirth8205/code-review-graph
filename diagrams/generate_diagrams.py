@@ -641,7 +641,7 @@ def d8():
 # ════════════════════════════════════════════
 def d9():
     els = []
-    els.append(TC(550, 15, "19 Languages + Notebook Support", 34))
+    els.append(TC(550, 15, "20 Languages + Notebook Support", 34))
 
     # Group languages by ecosystem
     groups = [
@@ -650,7 +650,8 @@ def d9():
         ("Systems",   ["C", "C++", "C#"],                                          ORG, ORG_BG),
         ("Mobile",    ["Kotlin", "Swift", "Dart"],                                 PRP, PRP_BG),
         ("Scripting", ["Ruby", "PHP", "Perl", "Lua", "R"],                         YLW, YLW_BG),
-        ("Other",     ["Solidity", "Jupyter/.ipynb"],                               GRY, GRY_BG),
+        ("Config",    ["Nix"],                                                     GRY, GRY_BG),
+        ("Other",     ["Solidity", "Jupyter/.ipynb"],                              GRY, GRY_BG),
     ]
 
     gw = 155  # group width
