@@ -333,7 +333,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
         )
@@ -345,7 +345,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
         )
@@ -424,7 +424,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
         )
@@ -433,7 +433,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8',
                 cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
             )
@@ -496,7 +496,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
         )
@@ -541,7 +541,7 @@ def get_all_tracked_files(
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
         )
