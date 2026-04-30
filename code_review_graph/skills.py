@@ -120,6 +120,22 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "copilot": {
+        "name": "GitHub Copilot",
+        "config_path": lambda root: root / ".vscode" / "mcp.json",
+        "key": "servers",
+        "detect": lambda: (Path.home() / ".vscode").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
+    "copilot-cli": {
+        "name": "GitHub Copilot CLI",
+        "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
+        "key": "servers",
+        "detect": lambda: (Path.home() / ".copilot").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
 }
 
 
@@ -681,6 +697,59 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 4. Use `query_graph` pattern=\"tests_for\" to check coverage.
 """
 
+# Copilot-specific instruction file content: uses VS Code tool references and
+# includes YAML front matter so Copilot Chat applies it across the workspace.
+_COPILOT_SECTION = f"""---
+applyTo: '**'
+description: Use code-review-graph MCP tools for token-efficient codebase exploration and code review instead of built-in file/search tools.
+---
+
+{_CLAUDE_MD_SECTION_MARKER}
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using #tool:read/readFile #tool:search/fileSearch #tool:search/textSearch to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of #tool:search/fileSearch
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+Fall back to #tool:read/readFile, #tool:search/fileSearch, or #tool:search/textSearch **only** when the graph doesn't cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Finding functions/classes by name or keyword |
+| `get_architecture_overview` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes` for code review.
+3. Use `get_affected_flows` to understand impact.
+4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+"""
+
+# Maps instruction file path → (marker, section) for files that need content
+# different from the default _CLAUDE_MD_SECTION.
+_PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
+    ".github/code-review-graph.instruction.md": (_CLAUDE_MD_SECTION_MARKER, _COPILOT_SECTION),
+}
+
 
 def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
     """Append an instruction section to a file if not already present.
@@ -725,6 +794,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
+    ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
 }
 
 
@@ -746,7 +816,10 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
         if target != "all" and target not in owners:
             continue
         path = repo_root / filename
-        if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
+        marker, section = _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS.get(
+            filename, (_CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION)
+        )
+        if _inject_instructions(path, marker, section):
             updated.append(filename)
     return updated
 
