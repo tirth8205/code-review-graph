@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
@@ -21,6 +22,37 @@ from .graph import GraphStore
 from .parser import CodeParser
 
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
+
+
+def _select_executor_kind() -> str:
+    """Return 'process' or 'thread' for parallel parsing.
+
+    Defaults to ``process`` (the original behavior, fastest on Linux/macOS).
+    Auto-switches to ``thread`` when running on Windows with stdin not
+    attached to a TTY — that combination indicates an MCP/stdio host, where
+    ``ProcessPoolExecutor`` workers inherit the parent's pipe handles and
+    leak as zombies after the pool closes (issues #46, #136).
+
+    Override explicitly with ``CRG_PARSE_EXECUTOR={process,thread}``.
+
+    Tree-sitter parsing in the worker releases the GIL during native
+    parsing, so the speedup loss for falling back to threads is small
+    (typically <30% on the full-build path) and the trade is worth it
+    to avoid the deadlock + zombie process accumulation.
+    """
+    explicit = os.environ.get("CRG_PARSE_EXECUTOR", "").strip().lower()
+    if explicit in ("process", "thread"):
+        return explicit
+    if sys.platform == "win32" and not sys.stdin.isatty():
+        return "thread"
+    return "process"
+
+
+def _make_executor(max_workers: int):
+    """Construct the parallel-parse executor selected by [_select_executor_kind]."""
+    if _select_executor_kind() == "thread":
+        return concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    return concurrent.futures.ProcessPoolExecutor(max_workers=max_workers)
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +365,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -345,6 +378,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -424,6 +458,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -433,6 +468,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
@@ -496,6 +532,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -541,6 +578,7 @@ def get_all_tracked_files(
         result = subprocess.run(
             cmd,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -774,11 +812,12 @@ def full_build(
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
-        # Parallel parsing — store calls remain serial (SQLite single-writer)
+        # Parallel parsing — store calls remain serial (SQLite single-writer).
+        # Executor kind auto-selected: process on Linux/macOS/Windows-TTY,
+        # thread on Windows-MCP-stdio to avoid pipe-handle inheritance
+        # deadlock (issues #46, #136). Override via CRG_PARSE_EXECUTOR env.
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=_MAX_PARSE_WORKERS,
-        ) as executor:
+        with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
                 executor.map(_parse_single_file, args_list, chunksize=20),
                 1,
@@ -904,10 +943,9 @@ def incremental_update(
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
     else:
+        # See full-build comment above for executor kind rationale.
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
-        with concurrent.futures.ProcessPoolExecutor(
-            max_workers=_MAX_PARSE_WORKERS,
-        ) as executor:
+        with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for rel_path, nodes, edges, error, fhash in executor.map(
                 _parse_single_file,
                 args_list,
