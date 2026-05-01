@@ -2002,3 +2002,102 @@ class TestSpringDIParsing:
         # OrderService: 2 lombok (orderRepository + notificationService)
         # AuditLogger: 1 constructor
         assert len(injects) >= 4
+
+    def test_field_name_stored_in_injects_extra(self):
+        """INJECTS edges must carry extra.field_name for the resolver."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        names = {e.extra.get("field_name") for e in injects}
+        # @Autowired field in NotificationService
+        assert "orderRepository" in names
+        # @RequiredArgsConstructor final fields in OrderService
+        assert "orderRepository" in names
+        assert "notificationService" in names
+        # @Autowired constructor param in AuditLogger
+        assert "orderRepository" in names
+
+    def test_java_method_call_target_is_method_not_receiver(self):
+        """Java receiver.method() must emit CALLS with method as target, not receiver."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # placeOrder calls orderRepository.save() — target must end in "save"
+        # (possibly qualified to "::OrderRepository.save" if same-file resolution kicks in)
+        assert any("save" in t for t in targets), f"expected 'save' in targets, got {targets}"
+        # receiver variable names must NOT appear as CALLS targets
+        assert "orderRepository" not in targets
+        assert "notificationService" not in targets
+
+    def test_java_receiver_stored_in_calls_extra(self):
+        """CALLS edges for Java method calls must carry extra.receiver."""
+        calls = [e for e in self.edges if e.kind == "CALLS" and e.extra.get("receiver")]
+        receivers = {e.extra["receiver"] for e in calls}
+        assert "orderRepository" in receivers or "notificationService" in receivers
+
+
+class TestSpringDIResolver:
+    """Integration tests for the Spring DI post-build resolver."""
+
+    def _build(self, tmp_path):
+        """Build a mini Spring repo and run the resolver."""
+        pkg = tmp_path / "src/main/java/com/example"
+        pkg.mkdir(parents=True)
+
+        (pkg / "OrderRepository.java").write_text(
+            "package com.example;\n"
+            "public interface OrderRepository {\n"
+            "    void save(Order o);\n"
+            "}\n"
+        )
+        (pkg / "JpaOrderRepository.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.stereotype.Repository;\n"
+            "@Repository\n"
+            "public class JpaOrderRepository implements OrderRepository {\n"
+            "    public void save(Order o) {}\n"
+            "}\n"
+        )
+        (pkg / "OrderService.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "import lombok.RequiredArgsConstructor;\n"
+            "@Service\n"
+            "@RequiredArgsConstructor\n"
+            "public class OrderService {\n"
+            "    private final OrderRepository orderRepository;\n"
+            "    public void place(Order o) {\n"
+            "        orderRepository.save(o);\n"
+            "    }\n"
+            "}\n"
+        )
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.postprocessing import run_post_processing
+
+        store = GraphStore(str(tmp_path / "graph.db"))
+        result = full_build(tmp_path, store)
+        run_post_processing(store)
+        return store, result
+
+    def test_resolver_runs_and_reports(self, tmp_path):
+        _, result = self._build(tmp_path)
+        stats = result.get("spring_resolution")
+        assert stats is not None
+        assert stats["files_indexed"] > 0
+
+    def test_calls_resolved_through_field(self, tmp_path):
+        store, result = self._build(tmp_path)
+        stats = result.get("spring_resolution", {})
+        assert stats.get("calls_resolved", 0) >= 1
+
+    def test_resolved_target_includes_method_name(self, tmp_path):
+        store, _ = self._build(tmp_path)
+        cur = store._conn.cursor()
+        rows = cur.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%spring_resolved%'"
+        ).fetchall()
+        assert rows, "Expected at least one spring-resolved CALLS edge"
+        for (target,) in rows:
+            assert "." in target or "::" in target, (
+                f"Resolved target should contain type.method or ::, got: {target!r}"
+            )

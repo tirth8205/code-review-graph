@@ -2804,6 +2804,7 @@ class CodeParser:
         has_final = False
         has_static = False
         field_type: Optional[str] = None
+        field_name: Optional[str] = None
 
         for child in field_node.children:
             if child.type == "modifiers":
@@ -2834,6 +2835,11 @@ class CodeParser:
                         if sub.type == "type_identifier":
                             field_type = sub.text.decode("utf-8", errors="replace")
                             break
+            elif child.type == "variable_declarator":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        field_name = sub.text.decode("utf-8", errors="replace")
+                        break
 
         if not field_type or has_static:
             return
@@ -2845,13 +2851,16 @@ class CodeParser:
             return
 
         injection_type = "field" if has_inject_annotation else "constructor_lombok"
+        extra: dict = {"injection_type": injection_type}
+        if field_name:
+            extra["field_name"] = field_name
         edges.append(EdgeInfo(
             kind="INJECTS",
             source=qualified_source,
             target=field_type,
             file_path=file_path,
             line=field_node.start_point[0] + 1,
-            extra={"injection_type": injection_type},
+            extra=extra,
         ))
 
     def _emit_spring_constructor_injection(
@@ -2872,18 +2881,25 @@ class CodeParser:
             for param in child.children:
                 if param.type != "formal_parameter":
                     continue
+                param_type: Optional[str] = None
+                param_name: Optional[str] = None
                 for sub in param.children:
-                    if sub.type == "type_identifier":
+                    if sub.type == "type_identifier" and param_type is None:
                         param_type = sub.text.decode("utf-8", errors="replace")
-                        edges.append(EdgeInfo(
-                            kind="INJECTS",
-                            source=qualified_source,
-                            target=param_type,
-                            file_path=file_path,
-                            line=param.start_point[0] + 1,
-                            extra={"injection_type": "constructor"},
-                        ))
-                        break
+                    elif sub.type == "identifier":
+                        param_name = sub.text.decode("utf-8", errors="replace")
+                if param_type:
+                    extra: dict = {"injection_type": "constructor"}
+                    if param_name:
+                        extra["field_name"] = param_name
+                    edges.append(EdgeInfo(
+                        kind="INJECTS",
+                        source=qualified_source,
+                        target=param_type,
+                        file_path=file_path,
+                        line=param.start_point[0] + 1,
+                        extra=extra,
+                    ))
 
     def _extract_classes(
         self,
@@ -3208,19 +3224,79 @@ class CodeParser:
             caller = self._qualify(
                 enclosing_func, file_path, enclosing_class,
             )
-            target = self._resolve_call_target(
-                call_name, file_path, language,
-                import_map or {}, defined_names or set(),
-            )
+
+            # Java method_invocation: extract actual method name and receiver
+            # separately so the Spring DI resolver can rewrite the target.
+            call_extra: dict = {}
+            if language == "java" and child.type == "method_invocation":
+                method_name, receiver = self._get_java_method_and_receiver(child)
+                if method_name:
+                    call_name = method_name
+                if receiver:
+                    call_extra["receiver"] = receiver
+
+            # When a receiver is present, skip scope-based resolution: the method
+            # lives on the receiver's type, not in the current file's scope.
+            # The spring_resolver post-pass will do the correct cross-type lookup.
+            if call_extra.get("receiver"):
+                target = call_name
+            else:
+                target = self._resolve_call_target(
+                    call_name, file_path, language,
+                    import_map or {}, defined_names or set(),
+                )
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=caller,
                 target=target,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=call_extra,
             ))
 
         return False
+
+    @staticmethod
+    def _get_java_method_and_receiver(node) -> tuple[Optional[str], Optional[str]]:
+        """For a Java method_invocation node, return (method_name, receiver_name).
+
+        Pattern: [receiver_identifier, '.', method_identifier, argument_list]
+        Chained: [inner_method_invocation, '.', method_identifier, argument_list]
+
+        Returns (None, None) for unrecognised shapes.
+        """
+        children = node.children
+        if len(children) < 3:
+            return None, None
+
+        # method_identifier is always the last identifier before argument_list
+        method_name: Optional[str] = None
+        receiver_name: Optional[str] = None
+
+        # Scan backwards for the method identifier
+        for i in range(len(children) - 1, -1, -1):
+            ch = children[i]
+            if ch.type == "argument_list":
+                continue
+            if ch.type == "identifier":
+                if method_name is None:
+                    method_name = ch.text.decode("utf-8", errors="replace")
+                else:
+                    # Second identifier scanning backwards = receiver
+                    receiver_name = ch.text.decode("utf-8", errors="replace")
+                break
+            if ch.type == "." :
+                continue
+            # Chained call or complex expression as receiver — no simple receiver
+            break
+
+        # Receiver is the first child if it's a plain identifier
+        if method_name and children[0].type == "identifier":
+            first_text = children[0].text.decode("utf-8", errors="replace")
+            if first_text != method_name:
+                receiver_name = first_text
+
+        return method_name, receiver_name
 
     def _extract_jsx_component_call(
         self,
