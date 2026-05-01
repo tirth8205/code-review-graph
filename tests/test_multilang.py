@@ -1916,3 +1916,89 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+
+class TestSpringDIParsing:
+    """Tests for Spring DI annotation detection and INJECTS edge generation."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "SpringDI.java")
+
+    def test_detects_spring_stereotype_on_repository(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "JpaOrderRepository" in classes
+        assert classes["JpaOrderRepository"].extra.get("spring_stereotype") == "Repository"
+
+    def test_detects_spring_stereotype_on_service(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "NotificationService" in classes
+        assert classes["NotificationService"].extra.get("spring_stereotype") == "Service"
+        assert "OrderService" in classes
+        assert classes["OrderService"].extra.get("spring_stereotype") == "Service"
+
+    def test_detects_spring_stereotype_on_configuration(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "AppConfig" in classes
+        assert classes["AppConfig"].extra.get("spring_stereotype") == "Configuration"
+
+    def test_no_stereotype_on_plain_interface(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "OrderRepository" in classes
+        assert "spring_stereotype" not in classes["OrderRepository"].extra
+
+    def test_spring_annotations_list_stored(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        annotations = classes["OrderService"].extra.get("spring_annotations", [])
+        assert "Service" in annotations
+        assert "RequiredArgsConstructor" in annotations
+
+    def test_autowired_field_injection_edge(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        # NotificationService has @Autowired OrderRepository field
+        field_edges = [e for e in injects if e.extra.get("injection_type") == "field"]
+        targets = {e.target for e in field_edges}
+        assert "OrderRepository" in targets
+
+    def test_autowired_field_source_is_class(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"
+                   and e.extra.get("injection_type") == "field"]
+        sources = {e.source for e in injects}
+        assert any("NotificationService" in s for s in sources)
+
+    def test_lombok_required_args_constructor_injection(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        lombok_edges = [e for e in injects
+                        if e.extra.get("injection_type") == "constructor_lombok"]
+        targets = {e.target for e in lombok_edges}
+        # OrderService has two final injected fields
+        assert "OrderRepository" in targets
+        assert "NotificationService" in targets
+
+    def test_static_final_field_not_injected(self):
+        """static final String TAG should NOT produce an INJECTS edge."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        targets = {e.target for e in injects}
+        assert "String" not in targets
+
+    def test_explicit_autowired_constructor_injection(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        ctor_edges = [e for e in injects
+                      if e.extra.get("injection_type") == "constructor"]
+        targets = {e.target for e in ctor_edges}
+        # AuditLogger has @Autowired constructor with OrderRepository param
+        assert "OrderRepository" in targets
+
+    def test_autowired_constructor_source_is_class(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"
+                   and e.extra.get("injection_type") == "constructor"]
+        sources = {e.source for e in injects}
+        assert any("AuditLogger" in s for s in sources)
+
+    def test_total_injects_edge_count(self):
+        """Sanity check: total INJECTS edges matches known injection points."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        # NotificationService: 1 field
+        # OrderService: 2 lombok (orderRepository + notificationService)
+        # AuditLogger: 1 constructor
+        assert len(injects) >= 4

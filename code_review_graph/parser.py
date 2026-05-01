@@ -339,6 +339,23 @@ _TEST_ANNOTATIONS = frozenset({
     "org.junit.Test", "org.junit.jupiter.api.Test",
 })
 
+# Spring stereotype annotations that mark classes as managed beans
+_SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
+    "Component", "Service", "Repository", "Controller", "RestController",
+    "Configuration", "Indexed", "ControllerAdvice", "RestControllerAdvice",
+    "EventListener",
+})
+
+# Spring DI injection annotations (field/setter/constructor-level)
+_SPRING_INJECT_ANNOTATIONS = frozenset({
+    "Autowired", "Inject", "Resource",
+})
+
+# Lombok annotations that trigger constructor injection of final fields
+_LOMBOK_CONSTRUCTOR_ANNOTATIONS = frozenset({
+    "RequiredArgsConstructor", "AllArgsConstructor",
+})
+
 
 # ---------------------------------------------------------------------------
 # ReScript regex patterns and helpers (no tree-sitter grammar bundled)
@@ -2720,6 +2737,154 @@ class CodeParser:
         )
         return True
 
+    @staticmethod
+    def _get_java_annotations(class_node) -> list[str]:
+        """Return annotation names from the modifiers child of a Java class/method node."""
+        names: list[str] = []
+        for child in class_node.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type in ("marker_annotation", "annotation"):
+                    for sub in mod.children:
+                        if sub.type == "identifier":
+                            names.append(sub.text.decode("utf-8", errors="replace"))
+                            break
+        return names
+
+    def _emit_spring_injections(
+        self,
+        class_node,
+        class_name: str,
+        class_annotations: list[str],
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit INJECTS edges for Spring DI injection points in a Java class.
+
+        Handles three patterns:
+        - @Autowired / @Inject / @Resource field injection
+        - @Autowired constructor injection
+        - Lombok @RequiredArgsConstructor / @AllArgsConstructor with final fields
+        """
+        if language != "java":
+            return
+
+        has_lombok_constructor = any(
+            a in _LOMBOK_CONSTRUCTOR_ANNOTATIONS for a in class_annotations
+        )
+        qualified_source = self._qualify(class_name, file_path, None)
+
+        # Find the class body
+        for node in class_node.children:
+            if node.type != "class_body":
+                continue
+            for member in node.children:
+                if member.type == "field_declaration":
+                    self._emit_spring_field_injection(
+                        member, qualified_source, file_path,
+                        edges, has_lombok_constructor,
+                    )
+                elif member.type == "constructor_declaration":
+                    self._emit_spring_constructor_injection(
+                        member, qualified_source, file_path, edges,
+                    )
+
+    def _emit_spring_field_injection(
+        self,
+        field_node,
+        qualified_source: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        has_lombok_constructor: bool,
+    ) -> None:
+        """Emit an INJECTS edge for a single field_declaration if injection applies."""
+        field_annotations: list[str] = []
+        has_final = False
+        has_static = False
+        field_type: Optional[str] = None
+
+        for child in field_node.children:
+            if child.type == "modifiers":
+                for mod in child.children:
+                    text = mod.text.decode("utf-8", errors="replace")
+                    if text == "final":
+                        has_final = True
+                    elif text == "static":
+                        has_static = True
+                    elif mod.type in ("marker_annotation", "annotation"):
+                        for sub in mod.children:
+                            if sub.type == "identifier":
+                                field_annotations.append(
+                                    sub.text.decode("utf-8", errors="replace")
+                                )
+                                break
+            elif child.type in ("type_identifier", "generic_type", "array_type"):
+                # Use outermost type name for generic types like List<Foo>
+                if child.type == "type_identifier":
+                    field_type = child.text.decode("utf-8", errors="replace")
+                elif child.type == "generic_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            field_type = sub.text.decode("utf-8", errors="replace")
+                            break
+                elif child.type == "array_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            field_type = sub.text.decode("utf-8", errors="replace")
+                            break
+
+        if not field_type or has_static:
+            return
+
+        has_inject_annotation = any(a in _SPRING_INJECT_ANNOTATIONS for a in field_annotations)
+        is_lombok_injected = has_lombok_constructor and has_final
+
+        if not has_inject_annotation and not is_lombok_injected:
+            return
+
+        injection_type = "field" if has_inject_annotation else "constructor_lombok"
+        edges.append(EdgeInfo(
+            kind="INJECTS",
+            source=qualified_source,
+            target=field_type,
+            file_path=file_path,
+            line=field_node.start_point[0] + 1,
+            extra={"injection_type": injection_type},
+        ))
+
+    def _emit_spring_constructor_injection(
+        self,
+        ctor_node,
+        qualified_source: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit INJECTS edges for @Autowired constructor parameters."""
+        ctor_annotations = self._get_java_annotations(ctor_node)
+        if not any(a in _SPRING_INJECT_ANNOTATIONS for a in ctor_annotations):
+            return
+
+        for child in ctor_node.children:
+            if child.type != "formal_parameters":
+                continue
+            for param in child.children:
+                if param.type != "formal_parameter":
+                    continue
+                for sub in param.children:
+                    if sub.type == "type_identifier":
+                        param_type = sub.text.decode("utf-8", errors="replace")
+                        edges.append(EdgeInfo(
+                            kind="INJECTS",
+                            source=qualified_source,
+                            target=param_type,
+                            file_path=file_path,
+                            line=param.start_point[0] + 1,
+                            extra={"injection_type": "constructor"},
+                        ))
+                        break
+
     def _extract_classes(
         self,
         child,
@@ -2757,6 +2922,18 @@ class CodeParser:
             elif child.type == "protocol_declaration":
                 extra["swift_kind"] = "protocol"
 
+        # Java: detect Spring stereotype annotations and store as metadata
+        class_annotations: list[str] = []
+        if language == "java":
+            class_annotations = self._get_java_annotations(child)
+            spring_stereotypes = [
+                a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
+            ]
+            if spring_stereotypes:
+                extra["spring_stereotype"] = spring_stereotypes[0]
+            if class_annotations:
+                extra["spring_annotations"] = class_annotations
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -2790,6 +2967,12 @@ class CodeParser:
                 file_path=file_path,
                 line=child.start_point[0] + 1,
             ))
+
+        # Spring DI: emit INJECTS edges for injected dependencies
+        if language == "java":
+            self._emit_spring_injections(
+                child, name, class_annotations, language, file_path, edges,
+            )
 
         # Recurse into class body
         self._extract_from_tree(
