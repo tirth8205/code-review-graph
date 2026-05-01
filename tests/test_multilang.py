@@ -1916,3 +1916,380 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+
+class TestSpringDIParsing:
+    """Tests for Spring DI annotation detection and INJECTS edge generation."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "SpringDI.java")
+
+    def test_detects_spring_stereotype_on_repository(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "JpaOrderRepository" in classes
+        assert classes["JpaOrderRepository"].extra.get("spring_stereotype") == "Repository"
+
+    def test_detects_spring_stereotype_on_service(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "NotificationService" in classes
+        assert classes["NotificationService"].extra.get("spring_stereotype") == "Service"
+        assert "OrderService" in classes
+        assert classes["OrderService"].extra.get("spring_stereotype") == "Service"
+
+    def test_detects_spring_stereotype_on_configuration(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "AppConfig" in classes
+        assert classes["AppConfig"].extra.get("spring_stereotype") == "Configuration"
+
+    def test_no_stereotype_on_plain_interface(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "OrderRepository" in classes
+        assert "spring_stereotype" not in classes["OrderRepository"].extra
+
+    def test_spring_annotations_list_stored(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        annotations = classes["OrderService"].extra.get("spring_annotations", [])
+        assert "Service" in annotations
+        assert "RequiredArgsConstructor" in annotations
+
+    def test_autowired_field_injection_edge(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        # NotificationService has @Autowired OrderRepository field
+        field_edges = [e for e in injects if e.extra.get("injection_type") == "field"]
+        targets = {e.target for e in field_edges}
+        assert "OrderRepository" in targets
+
+    def test_autowired_field_source_is_class(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"
+                   and e.extra.get("injection_type") == "field"]
+        sources = {e.source for e in injects}
+        assert any("NotificationService" in s for s in sources)
+
+    def test_lombok_required_args_constructor_injection(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        lombok_edges = [e for e in injects
+                        if e.extra.get("injection_type") == "constructor_lombok"]
+        targets = {e.target for e in lombok_edges}
+        # OrderService has two final injected fields
+        assert "OrderRepository" in targets
+        assert "NotificationService" in targets
+
+    def test_static_final_field_not_injected(self):
+        """static final String TAG should NOT produce an INJECTS edge."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        targets = {e.target for e in injects}
+        assert "String" not in targets
+
+    def test_explicit_autowired_constructor_injection(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        ctor_edges = [e for e in injects
+                      if e.extra.get("injection_type") == "constructor"]
+        targets = {e.target for e in ctor_edges}
+        # AuditLogger has @Autowired constructor with OrderRepository param
+        assert "OrderRepository" in targets
+
+    def test_autowired_constructor_source_is_class(self):
+        injects = [e for e in self.edges if e.kind == "INJECTS"
+                   and e.extra.get("injection_type") == "constructor"]
+        sources = {e.source for e in injects}
+        assert any("AuditLogger" in s for s in sources)
+
+    def test_total_injects_edge_count(self):
+        """Sanity check: total INJECTS edges matches known injection points."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        # NotificationService: 1 field
+        # OrderService: 2 lombok (orderRepository + notificationService)
+        # AuditLogger: 1 constructor
+        assert len(injects) >= 4
+
+    def test_field_name_stored_in_injects_extra(self):
+        """INJECTS edges must carry extra.field_name for the resolver."""
+        injects = [e for e in self.edges if e.kind == "INJECTS"]
+        names = {e.extra.get("field_name") for e in injects}
+        # @Autowired field in NotificationService
+        assert "orderRepository" in names
+        # @RequiredArgsConstructor final fields in OrderService
+        assert "orderRepository" in names
+        assert "notificationService" in names
+        # @Autowired constructor param in AuditLogger
+        assert "orderRepository" in names
+
+    def test_java_method_call_target_is_method_not_receiver(self):
+        """Java receiver.method() must emit CALLS with method as target, not receiver."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # placeOrder calls orderRepository.save() — target must end in "save"
+        # (possibly qualified to "::OrderRepository.save" if same-file resolution kicks in)
+        assert any("save" in t for t in targets), f"expected 'save' in targets, got {targets}"
+        # receiver variable names must NOT appear as CALLS targets
+        assert "orderRepository" not in targets
+        assert "notificationService" not in targets
+
+    def test_java_receiver_stored_in_calls_extra(self):
+        """CALLS edges for Java method calls must carry extra.receiver."""
+        calls = [e for e in self.edges if e.kind == "CALLS" and e.extra.get("receiver")]
+        receivers = {e.extra["receiver"] for e in calls}
+        assert "orderRepository" in receivers or "notificationService" in receivers
+
+
+class TestSpringDIResolver:
+    """Integration tests for the Spring DI post-build resolver."""
+
+    def _build(self, tmp_path):
+        """Build a mini Spring repo and run the resolver."""
+        pkg = tmp_path / "src/main/java/com/example"
+        pkg.mkdir(parents=True)
+
+        (pkg / "OrderRepository.java").write_text(
+            "package com.example;\n"
+            "public interface OrderRepository {\n"
+            "    void save(Order o);\n"
+            "}\n"
+        )
+        (pkg / "JpaOrderRepository.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.stereotype.Repository;\n"
+            "@Repository\n"
+            "public class JpaOrderRepository implements OrderRepository {\n"
+            "    public void save(Order o) {}\n"
+            "}\n"
+        )
+        (pkg / "OrderService.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "import lombok.RequiredArgsConstructor;\n"
+            "@Service\n"
+            "@RequiredArgsConstructor\n"
+            "public class OrderService {\n"
+            "    private final OrderRepository orderRepository;\n"
+            "    public void place(Order o) {\n"
+            "        orderRepository.save(o);\n"
+            "    }\n"
+            "}\n"
+        )
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.postprocessing import run_post_processing
+
+        store = GraphStore(str(tmp_path / "graph.db"))
+        result = full_build(tmp_path, store)
+        run_post_processing(store)
+        return store, result
+
+    def test_resolver_runs_and_reports(self, tmp_path):
+        _, result = self._build(tmp_path)
+        stats = result.get("spring_resolution")
+        assert stats is not None
+        assert stats["files_indexed"] > 0
+
+    def test_calls_resolved_through_field(self, tmp_path):
+        store, result = self._build(tmp_path)
+        stats = result.get("spring_resolution", {})
+        assert stats.get("calls_resolved", 0) >= 1
+
+    def test_resolved_target_includes_method_name(self, tmp_path):
+        store, _ = self._build(tmp_path)
+        cur = store._conn.cursor()
+        rows = cur.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%spring_resolved%'"
+        ).fetchall()
+        assert rows, "Expected at least one spring-resolved CALLS edge"
+        for (target,) in rows:
+            assert "." in target or "::" in target, (
+                f"Resolved target should contain type.method or ::, got: {target!r}"
+            )
+
+
+class TestTemporalParsing:
+    """Tests for Temporal @WorkflowInterface / @ActivityInterface detection."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "TemporalWorkflow.java")
+
+    def test_workflow_interface_gets_temporal_role(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "OrderWorkflow" in classes
+        assert classes["OrderWorkflow"].extra.get("temporal_role") == "workflow_interface"
+
+    def test_activity_interface_gets_temporal_role(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "PaymentActivity" in classes
+        assert classes["PaymentActivity"].extra.get("temporal_role") == "activity_interface"
+        assert "ShippingActivity" in classes
+        assert classes["ShippingActivity"].extra.get("temporal_role") == "activity_interface"
+
+    def test_impl_class_has_no_temporal_role(self):
+        classes = {n.name: n for n in self.nodes if n.kind == "Class"}
+        assert "OrderWorkflowImpl" in classes
+        assert "temporal_role" not in classes["OrderWorkflowImpl"].extra
+
+    def test_temporal_stub_edges_emitted_for_activity_fields(self):
+        stubs = [e for e in self.edges if e.kind == "TEMPORAL_STUB"]
+        targets = {e.target for e in stubs}
+        assert "PaymentActivity" in targets
+        assert "ShippingActivity" in targets
+
+    def test_temporal_stub_field_name_stored(self):
+        stubs = [e for e in self.edges if e.kind == "TEMPORAL_STUB"]
+        field_names = {e.extra.get("field_name") for e in stubs}
+        assert "paymentActivity" in field_names
+        assert "shippingActivity" in field_names
+
+    def test_static_field_not_in_temporal_stubs(self):
+        stubs = [e for e in self.edges if e.kind == "TEMPORAL_STUB"]
+        field_names = {e.extra.get("field_name") for e in stubs}
+        assert "TAG" not in field_names
+
+    def test_temporal_stub_source_is_workflow_impl(self):
+        stubs = [e for e in self.edges if e.kind == "TEMPORAL_STUB"]
+        sources = {e.source for e in stubs}
+        assert any("OrderWorkflowImpl" in s for s in sources)
+
+    def test_workflow_method_annotation_stored_on_method(self):
+        interface_methods = [
+            n for n in self.nodes if n.kind == "Function" and n.parent_name == "OrderWorkflow"
+        ]
+        names = {n.name: n for n in interface_methods}
+        assert "processOrder" in names
+        assert names["processOrder"].extra.get("temporal_role") == "workflowmethod"
+
+    def test_signal_method_annotation_stored(self):
+        interface_methods = [
+            n for n in self.nodes if n.kind == "Function" and n.parent_name == "OrderWorkflow"
+        ]
+        names = {n.name: n for n in interface_methods}
+        assert "cancelOrder" in names
+        assert names["cancelOrder"].extra.get("temporal_role") == "signalmethod"
+
+    def test_activity_method_annotation_stored(self):
+        activity_methods = [
+            n for n in self.nodes if n.kind == "Function" and n.parent_name == "PaymentActivity"
+        ]
+        names = {n.name: n for n in activity_methods}
+        assert "chargeCard" in names
+        assert names["chargeCard"].extra.get("temporal_role") == "activitymethod"
+
+
+class TestTemporalResolver:
+    """Integration tests for the Temporal post-build call resolver."""
+
+    def _build(self, tmp_path):
+        pkg = tmp_path / "src/main/java/com/example"
+        pkg.mkdir(parents=True)
+
+        (pkg / "PaymentActivity.java").write_text(
+            "package com.example;\n"
+            "import io.temporal.activity.ActivityInterface;\n"
+            "import io.temporal.activity.ActivityMethod;\n"
+            "@ActivityInterface\n"
+            "public interface PaymentActivity {\n"
+            "    @ActivityMethod\n"
+            "    boolean charge(String orderId);\n"
+            "}\n"
+        )
+        (pkg / "PaymentActivityImpl.java").write_text(
+            "package com.example;\n"
+            "public class PaymentActivityImpl implements PaymentActivity {\n"
+            "    public boolean charge(String orderId) { return true; }\n"
+            "}\n"
+        )
+        (pkg / "OrderWorkflowImpl.java").write_text(
+            "package com.example;\n"
+            "public class OrderWorkflowImpl {\n"
+            "    private PaymentActivity paymentActivity;\n"
+            "    public String process(String id) {\n"
+            "        return paymentActivity.charge(id) ? \"OK\" : \"FAIL\";\n"
+            "    }\n"
+            "}\n"
+        )
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+
+        store = GraphStore(str(tmp_path / "graph.db"))
+        result = full_build(tmp_path, store)
+        return store, result
+
+    def test_temporal_resolver_runs_and_reports(self, tmp_path):
+        _, result = self._build(tmp_path)
+        stats = result.get("temporal_resolution")
+        assert stats is not None
+        assert stats["files_indexed"] > 0
+
+    def test_calls_resolved_through_activity_stub(self, tmp_path):
+        _, result = self._build(tmp_path)
+        stats = result.get("temporal_resolution", {})
+        assert stats.get("calls_resolved", 0) >= 1
+
+    def test_resolved_target_is_fully_qualified(self, tmp_path):
+        store, _ = self._build(tmp_path)
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%temporal_resolved%'"
+        ).fetchall()
+        assert rows, "Expected at least one temporal-resolved CALLS edge"
+        for (target,) in rows:
+            assert "." in target or "::" in target, (
+                f"Resolved target should be qualified, got: {target!r}"
+            )
+
+
+class TestKafkaParsing:
+    """Tests for Kafka CONSUMES / PRODUCES edge detection."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "KafkaPatterns.java")
+
+    def test_kafka_listener_annotation_emits_consumes_edge(self):
+        consumes = [e for e in self.edges if e.kind == "CONSUMES"]
+        targets = {e.target for e in consumes}
+        assert "kafka:order-events" in targets
+
+    def test_kafka_listener_multiple_topics(self):
+        consumes = [e for e in self.edges if e.kind == "CONSUMES"]
+        targets = {e.target for e in consumes}
+        assert "kafka:order-dlq" in targets
+        assert "kafka:order-retry" in targets
+
+    def test_kafka_listener_topic_in_extra(self):
+        consumes = [e for e in self.edges if e.kind == "CONSUMES"
+                    and e.target == "kafka:order-events"]
+        assert consumes
+        assert consumes[0].extra.get("topic") == "order-events"
+
+    def test_kafka_template_field_emits_produces_edge(self):
+        produces = [e for e in self.edges if e.kind == "PRODUCES"]
+        sources = {e.source for e in produces}
+        assert any("NotificationProducer" in s for s in sources)
+
+    def test_kafka_receiver_field_emits_consumes_edge(self):
+        consumes = [e for e in self.edges if e.kind == "CONSUMES"]
+        sources = {e.source for e in consumes}
+        assert any("ReactiveOrderConsumer" in s for s in sources)
+
+    def test_kafka_receiver_message_type_stored(self):
+        consumes = [e for e in self.edges if e.kind == "CONSUMES"
+                    and "ReactiveOrderConsumer" in e.source]
+        assert consumes
+        assert consumes[0].extra.get("message_type") == "OrderEvent"
+
+    def test_kafka_operations_field_emits_produces_edge(self):
+        produces = [e for e in self.edges if e.kind == "PRODUCES"]
+        sources = {e.source for e in produces}
+        assert any("ReactiveOrderConsumer" in s for s in sources)
+
+    def test_static_field_not_in_kafka_edges(self):
+        all_kafka = [e for e in self.edges if e.kind in ("CONSUMES", "PRODUCES")]
+        field_names = {e.extra.get("field_name") for e in all_kafka}
+        assert "TOPIC" not in field_names
+
+    def test_no_kafka_edges_for_plain_class(self):
+        # OrderEvent (plain class, no Kafka) should not appear as a source
+        kafka = [e for e in self.edges if e.kind in ("CONSUMES", "PRODUCES")]
+        bare_sources = {e.source.split("::")[-1].split(".")[0] for e in kafka}
+        assert "OrderEvent" not in bare_sources

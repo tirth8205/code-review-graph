@@ -339,6 +339,52 @@ _TEST_ANNOTATIONS = frozenset({
     "org.junit.Test", "org.junit.jupiter.api.Test",
 })
 
+# Spring stereotype annotations that mark classes as managed beans
+_SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
+    "Component", "Service", "Repository", "Controller", "RestController",
+    "Configuration", "Indexed", "ControllerAdvice", "RestControllerAdvice",
+    "EventListener",
+})
+
+# Spring DI injection annotations (field/setter/constructor-level)
+_SPRING_INJECT_ANNOTATIONS = frozenset({
+    "Autowired", "Inject", "Resource",
+})
+
+# Lombok annotations that trigger constructor injection of final fields
+_LOMBOK_CONSTRUCTOR_ANNOTATIONS = frozenset({
+    "RequiredArgsConstructor", "AllArgsConstructor",
+})
+
+# Temporal workflow/activity interface markers
+_TEMPORAL_INTERFACE_ANNOTATIONS = frozenset({
+    "WorkflowInterface", "ActivityInterface",
+})
+
+# Temporal method-level markers
+_TEMPORAL_METHOD_ANNOTATIONS = frozenset({
+    "WorkflowMethod", "ActivityMethod", "SignalMethod", "QueryMethod",
+})
+
+# Kafka consumer annotations (annotation-based pattern)
+_KAFKA_LISTENER_ANNOTATIONS = frozenset({"KafkaListener", "KafkaHandler"})
+
+# Kafka consumer field types (reactive / imperative)
+_KAFKA_CONSUMER_TYPES = frozenset({
+    "KafkaReceiver",
+    "ReactiveKafkaConsumerTemplate",
+    "MessageListenerContainer",
+    "ConcurrentMessageListenerContainer",
+})
+
+# Kafka producer field types
+_KAFKA_PRODUCER_TYPES = frozenset({
+    "KafkaTemplate",
+    "KafkaOperations",
+    "ReactiveKafkaProducerTemplate",
+    "KafkaSender",
+})
+
 
 # ---------------------------------------------------------------------------
 # ReScript regex patterns and helpers (no tree-sitter grammar bundled)
@@ -2720,6 +2766,386 @@ class CodeParser:
         )
         return True
 
+    @staticmethod
+    def _get_java_annotations(class_node) -> list[str]:
+        """Return annotation names from the modifiers child of a Java class/method node."""
+        names: list[str] = []
+        for child in class_node.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type in ("marker_annotation", "annotation"):
+                    for sub in mod.children:
+                        if sub.type == "identifier":
+                            names.append(sub.text.decode("utf-8", errors="replace"))
+                            break
+        return names
+
+    def _emit_spring_injections(
+        self,
+        class_node,
+        class_name: str,
+        class_annotations: list[str],
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit INJECTS edges for Spring DI injection points in a Java class.
+
+        Handles three patterns:
+        - @Autowired / @Inject / @Resource field injection
+        - @Autowired constructor injection
+        - Lombok @RequiredArgsConstructor / @AllArgsConstructor with final fields
+        """
+        if language != "java":
+            return
+
+        has_lombok_constructor = any(
+            a in _LOMBOK_CONSTRUCTOR_ANNOTATIONS for a in class_annotations
+        )
+        qualified_source = self._qualify(class_name, file_path, None)
+
+        # Find the class body
+        for node in class_node.children:
+            if node.type != "class_body":
+                continue
+            for member in node.children:
+                if member.type == "field_declaration":
+                    self._emit_spring_field_injection(
+                        member, qualified_source, file_path,
+                        edges, has_lombok_constructor,
+                    )
+                elif member.type == "constructor_declaration":
+                    self._emit_spring_constructor_injection(
+                        member, qualified_source, file_path, edges,
+                    )
+
+    def _emit_spring_field_injection(
+        self,
+        field_node,
+        qualified_source: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        has_lombok_constructor: bool,
+    ) -> None:
+        """Emit an INJECTS edge for a single field_declaration if injection applies."""
+        field_annotations: list[str] = []
+        has_final = False
+        has_static = False
+        field_type: Optional[str] = None
+        field_name: Optional[str] = None
+
+        for child in field_node.children:
+            if child.type == "modifiers":
+                for mod in child.children:
+                    text = mod.text.decode("utf-8", errors="replace")
+                    if text == "final":
+                        has_final = True
+                    elif text == "static":
+                        has_static = True
+                    elif mod.type in ("marker_annotation", "annotation"):
+                        for sub in mod.children:
+                            if sub.type == "identifier":
+                                field_annotations.append(
+                                    sub.text.decode("utf-8", errors="replace")
+                                )
+                                break
+            elif child.type in ("type_identifier", "generic_type", "array_type"):
+                # Use outermost type name for generic types like List<Foo>
+                if child.type == "type_identifier":
+                    field_type = child.text.decode("utf-8", errors="replace")
+                elif child.type == "generic_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            field_type = sub.text.decode("utf-8", errors="replace")
+                            break
+                elif child.type == "array_type":
+                    for sub in child.children:
+                        if sub.type == "type_identifier":
+                            field_type = sub.text.decode("utf-8", errors="replace")
+                            break
+            elif child.type == "variable_declarator":
+                for sub in child.children:
+                    if sub.type == "identifier":
+                        field_name = sub.text.decode("utf-8", errors="replace")
+                        break
+
+        if not field_type or has_static:
+            return
+
+        has_inject_annotation = any(a in _SPRING_INJECT_ANNOTATIONS for a in field_annotations)
+        is_lombok_injected = has_lombok_constructor and has_final
+
+        if not has_inject_annotation and not is_lombok_injected:
+            return
+
+        injection_type = "field" if has_inject_annotation else "constructor_lombok"
+        extra: dict = {"injection_type": injection_type}
+        if field_name:
+            extra["field_name"] = field_name
+        edges.append(EdgeInfo(
+            kind="INJECTS",
+            source=qualified_source,
+            target=field_type,
+            file_path=file_path,
+            line=field_node.start_point[0] + 1,
+            extra=extra,
+        ))
+
+    def _emit_spring_constructor_injection(
+        self,
+        ctor_node,
+        qualified_source: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit INJECTS edges for @Autowired constructor parameters."""
+        ctor_annotations = self._get_java_annotations(ctor_node)
+        if not any(a in _SPRING_INJECT_ANNOTATIONS for a in ctor_annotations):
+            return
+
+        for child in ctor_node.children:
+            if child.type != "formal_parameters":
+                continue
+            for param in child.children:
+                if param.type != "formal_parameter":
+                    continue
+                param_type: Optional[str] = None
+                param_name: Optional[str] = None
+                for sub in param.children:
+                    if sub.type == "type_identifier" and param_type is None:
+                        param_type = sub.text.decode("utf-8", errors="replace")
+                    elif sub.type == "identifier":
+                        param_name = sub.text.decode("utf-8", errors="replace")
+                if param_type:
+                    extra: dict = {"injection_type": "constructor"}
+                    if param_name:
+                        extra["field_name"] = param_name
+                    edges.append(EdgeInfo(
+                        kind="INJECTS",
+                        source=qualified_source,
+                        target=param_type,
+                        file_path=file_path,
+                        line=param.start_point[0] + 1,
+                        extra=extra,
+                    ))
+
+    def _emit_temporal_stub_fields(
+        self,
+        class_node,
+        class_name: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit TEMPORAL_STUB edges for Temporal activity/workflow stub fields.
+
+        Detects fields whose type name ends with 'Activity' or 'Workflow' —
+        the universal naming convention for Temporal interfaces. The temporal
+        resolver validates these against nodes that have temporal_role in extra.
+        Static fields are skipped (e.g. logger, constants).
+        """
+        qualified_source = self._qualify(class_name, file_path, None)
+
+        for node in class_node.children:
+            if node.type != "class_body":
+                continue
+            for member in node.children:
+                if member.type != "field_declaration":
+                    continue
+                has_static = False
+                field_type: Optional[str] = None
+                field_name: Optional[str] = None
+
+                for ch in member.children:
+                    if ch.type == "modifiers":
+                        for mod in ch.children:
+                            if mod.text and mod.text.decode("utf-8", errors="replace") == "static":
+                                has_static = True
+                    elif ch.type == "type_identifier":
+                        field_type = ch.text.decode("utf-8", errors="replace")
+                    elif ch.type == "variable_declarator":
+                        for sub in ch.children:
+                            if sub.type == "identifier":
+                                field_name = sub.text.decode("utf-8", errors="replace")
+                                break
+
+                if has_static or not field_type or not field_name:
+                    continue
+
+                # Only emit for types following the Temporal naming convention
+                if not (field_type.endswith("Activity") or field_type.endswith("Workflow")):
+                    continue
+
+                edges.append(EdgeInfo(
+                    kind="TEMPORAL_STUB",
+                    source=qualified_source,
+                    target=field_type,
+                    file_path=file_path,
+                    line=member.start_point[0] + 1,
+                    extra={"field_name": field_name, "stub_type": (
+                        "activity" if field_type.endswith("Activity") else "workflow"
+                    )},
+                ))
+
+    @staticmethod
+    def _get_kafka_annotation_topics(annotation_node) -> list[str]:
+        """Extract topic strings from @KafkaListener(topics = "...") or topics = {"a","b"}."""
+        topics: list[str] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for pair in child.children:
+                if pair.type != "element_value_pair":
+                    continue
+                key_node = next((c for c in pair.children if c.type == "identifier"), None)
+                if key_node is None:
+                    continue
+                key = key_node.text.decode("utf-8", errors="replace")
+                if key not in ("topics", "topicPattern", "value"):
+                    continue
+                # value can be string_literal or element_value_array_initializer
+                for val in pair.children:
+                    if val.type == "string_literal":
+                        raw = val.text.decode("utf-8", errors="replace").strip('"').strip("'")
+                        if raw:
+                            topics.append(raw)
+                    elif val.type in ("array_initializer", "element_value_array_initializer"):
+                        for item in val.children:
+                            if item.type == "string_literal":
+                                raw = item.text.decode("utf-8", errors="replace").strip('"').strip("'")
+                                if raw:
+                                    topics.append(raw)
+        return topics
+
+    def _emit_kafka_edges_from_class(
+        self,
+        class_node,
+        class_name: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit CONSUMES/PRODUCES edges for Kafka field declarations.
+
+        Handles:
+        - KafkaReceiver / ReactiveKafkaConsumerTemplate → CONSUMES
+        - KafkaTemplate / KafkaOperations / ReactiveKafkaProducerTemplate → PRODUCES
+        Generic value type (e.g. KafkaReceiver<String, EquipmentMove>) is
+        stored in extra.message_type for traceability.
+        """
+        qualified_source = self._qualify(class_name, file_path, None)
+
+        for node in class_node.children:
+            if node.type != "class_body":
+                continue
+            for member in node.children:
+                if member.type != "field_declaration":
+                    continue
+                has_static = False
+                outer_type: Optional[str] = None
+                value_type: Optional[str] = None   # second generic param
+                field_name: Optional[str] = None
+
+                for ch in member.children:
+                    if ch.type == "modifiers":
+                        for mod in ch.children:
+                            if mod.text and mod.text.decode("utf-8", errors="replace") == "static":
+                                has_static = True
+                    elif ch.type == "type_identifier":
+                        outer_type = ch.text.decode("utf-8", errors="replace")
+                    elif ch.type == "generic_type":
+                        # KafkaReceiver<String, EquipmentMove>
+                        type_args: list[str] = []
+                        for sub in ch.children:
+                            if sub.type == "type_identifier":
+                                if outer_type is None:
+                                    outer_type = sub.text.decode("utf-8", errors="replace")
+                            elif sub.type == "type_arguments":
+                                for arg in sub.children:
+                                    if arg.type == "type_identifier":
+                                        type_args.append(arg.text.decode("utf-8", errors="replace"))
+                        if len(type_args) >= 2:
+                            value_type = type_args[-1]  # last param is the value/message type
+                    elif ch.type == "variable_declarator":
+                        for sub in ch.children:
+                            if sub.type == "identifier":
+                                field_name = sub.text.decode("utf-8", errors="replace")
+                                break
+
+                if has_static or not outer_type or not field_name:
+                    continue
+
+                extra: dict = {"field_name": field_name}
+                if value_type:
+                    extra["message_type"] = value_type
+
+                if outer_type in _KAFKA_CONSUMER_TYPES:
+                    extra["kafka_type"] = outer_type
+                    edges.append(EdgeInfo(
+                        kind="CONSUMES",
+                        source=qualified_source,
+                        target=f"kafka:config",
+                        file_path=file_path,
+                        line=member.start_point[0] + 1,
+                        extra=extra,
+                    ))
+                elif outer_type in _KAFKA_PRODUCER_TYPES:
+                    extra["kafka_type"] = outer_type
+                    edges.append(EdgeInfo(
+                        kind="PRODUCES",
+                        source=qualified_source,
+                        target=f"kafka:config",
+                        file_path=file_path,
+                        line=member.start_point[0] + 1,
+                        extra=extra,
+                    ))
+
+    def _emit_kafka_edges_from_method(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit CONSUMES edges for @KafkaListener / @KafkaHandler annotated methods."""
+        qualified_source = self._qualify(method_name, file_path, class_name)
+
+        for child in method_node.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type not in ("annotation", "marker_annotation"):
+                    continue
+                ann_name: Optional[str] = None
+                for sub in mod.children:
+                    if sub.type == "identifier":
+                        ann_name = sub.text.decode("utf-8", errors="replace")
+                        break
+                if ann_name not in _KAFKA_LISTENER_ANNOTATIONS:
+                    continue
+                # Extract topics from annotation arguments
+                topics = self._get_kafka_annotation_topics(mod)
+                if topics:
+                    for topic in topics:
+                        edges.append(EdgeInfo(
+                            kind="CONSUMES",
+                            source=qualified_source,
+                            target=f"kafka:{topic}",
+                            file_path=file_path,
+                            line=method_node.start_point[0] + 1,
+                            extra={"topic": topic, "kafka_type": "KafkaListener"},
+                        ))
+                else:
+                    # @KafkaListener without resolvable topic (config placeholder)
+                    edges.append(EdgeInfo(
+                        kind="CONSUMES",
+                        source=qualified_source,
+                        target="kafka:config",
+                        file_path=file_path,
+                        line=method_node.start_point[0] + 1,
+                        extra={"kafka_type": ann_name},
+                    ))
+
     def _extract_classes(
         self,
         child,
@@ -2757,6 +3183,24 @@ class CodeParser:
             elif child.type == "protocol_declaration":
                 extra["swift_kind"] = "protocol"
 
+        # Java: detect Spring stereotype annotations and store as metadata
+        class_annotations: list[str] = []
+        if language == "java":
+            class_annotations = self._get_java_annotations(child)
+            spring_stereotypes = [
+                a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
+            ]
+            if spring_stereotypes:
+                extra["spring_stereotype"] = spring_stereotypes[0]
+            if class_annotations:
+                extra["spring_annotations"] = class_annotations
+            temporal_roles = [
+                a for a in class_annotations if a in _TEMPORAL_INTERFACE_ANNOTATIONS
+            ]
+            if temporal_roles:
+                role = "workflow_interface" if "WorkflowInterface" in temporal_roles else "activity_interface"
+                extra["temporal_role"] = role
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -2790,6 +3234,16 @@ class CodeParser:
                 file_path=file_path,
                 line=child.start_point[0] + 1,
             ))
+
+        # Spring DI: emit INJECTS edges for injected dependencies
+        if language == "java":
+            self._emit_spring_injections(
+                child, name, class_annotations, language, file_path, edges,
+            )
+            # Temporal: emit TEMPORAL_STUB edges for activity/workflow stub fields
+            self._emit_temporal_stub_fields(child, name, file_path, edges)
+            # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
+            self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
         # Recurse into class body
         self._extract_from_tree(
@@ -2854,6 +3308,20 @@ class CodeParser:
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 
+        # Java: detect Temporal method-level annotations and Kafka listeners
+        method_extra: dict = {}
+        if language == "java" and deco_list:
+            temporal_method_annots = [
+                a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
+            ]
+            if temporal_method_annots:
+                method_extra["temporal_role"] = temporal_method_annots[0].lower()
+            if any(a.split("(")[0] in _KAFKA_LISTENER_ANNOTATIONS for a in deco_list):
+                method_extra["kafka_listener"] = True
+                self._emit_kafka_edges_from_method(
+                    child, name, enclosing_class, file_path, edges,
+                )
+
         node = NodeInfo(
             kind=kind,
             name=name,
@@ -2865,6 +3333,7 @@ class CodeParser:
             params=params,
             return_type=ret_type,
             is_test=is_test,
+            extra=method_extra,
         )
         nodes.append(node)
 
@@ -3025,19 +3494,79 @@ class CodeParser:
             caller = self._qualify(
                 enclosing_func, file_path, enclosing_class,
             )
-            target = self._resolve_call_target(
-                call_name, file_path, language,
-                import_map or {}, defined_names or set(),
-            )
+
+            # Java method_invocation: extract actual method name and receiver
+            # separately so the Spring DI resolver can rewrite the target.
+            call_extra: dict = {}
+            if language == "java" and child.type == "method_invocation":
+                method_name, receiver = self._get_java_method_and_receiver(child)
+                if method_name:
+                    call_name = method_name
+                if receiver:
+                    call_extra["receiver"] = receiver
+
+            # When a receiver is present, skip scope-based resolution: the method
+            # lives on the receiver's type, not in the current file's scope.
+            # The spring_resolver post-pass will do the correct cross-type lookup.
+            if call_extra.get("receiver"):
+                target = call_name
+            else:
+                target = self._resolve_call_target(
+                    call_name, file_path, language,
+                    import_map or {}, defined_names or set(),
+                )
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=caller,
                 target=target,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=call_extra,
             ))
 
         return False
+
+    @staticmethod
+    def _get_java_method_and_receiver(node) -> tuple[Optional[str], Optional[str]]:
+        """For a Java method_invocation node, return (method_name, receiver_name).
+
+        Pattern: [receiver_identifier, '.', method_identifier, argument_list]
+        Chained: [inner_method_invocation, '.', method_identifier, argument_list]
+
+        Returns (None, None) for unrecognised shapes.
+        """
+        children = node.children
+        if len(children) < 3:
+            return None, None
+
+        # method_identifier is always the last identifier before argument_list
+        method_name: Optional[str] = None
+        receiver_name: Optional[str] = None
+
+        # Scan backwards for the method identifier
+        for i in range(len(children) - 1, -1, -1):
+            ch = children[i]
+            if ch.type == "argument_list":
+                continue
+            if ch.type == "identifier":
+                if method_name is None:
+                    method_name = ch.text.decode("utf-8", errors="replace")
+                else:
+                    # Second identifier scanning backwards = receiver
+                    receiver_name = ch.text.decode("utf-8", errors="replace")
+                break
+            if ch.type == "." :
+                continue
+            # Chained call or complex expression as receiver — no simple receiver
+            break
+
+        # Receiver is the first child if it's a plain identifier
+        if method_name and children[0].type == "identifier":
+            first_text = children[0].text.decode("utf-8", errors="replace")
+            if first_text != method_name:
+                receiver_name = first_text
+
+        return method_name, receiver_name
 
     def _extract_jsx_component_call(
         self,
@@ -3969,6 +4498,17 @@ class CodeParser:
                     return child.text.decode("utf-8", errors="replace")
                 if child.type == "package" and child.text != b"package":
                     return child.text.decode("utf-8", errors="replace")
+        # Java: method_declaration has return type_identifier before the method
+        # identifier — skip straight to the first plain identifier child to
+        # avoid returning the return type as the function name.
+        if language == "java" and kind == "function" and node.type in (
+            "method_declaration", "constructor_declaration",
+        ):
+            for child in node.children:
+                if child.type == "identifier":
+                    return child.text.decode("utf-8", errors="replace")
+            return None
+
         # For C/C++/Objective-C: function names are inside
         # function_declarator / pointer_declarator. Check these first to
         # avoid matching the return type_identifier as the function name.
