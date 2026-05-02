@@ -32,6 +32,7 @@ dependencies = [
     "fastmcp>=3.2.4,<4",
     "tree-sitter>=0.23.0,<1",
     "tree-sitter-language-pack>=0.3.0,<1",
+    "pyyaml>=6.0,<7",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<7",
     "tomli>=2.0.0,<3; python_version < '3.11'",

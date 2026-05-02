@@ -1,0 +1,92 @@
+---
+# Sanitized fixture for Ansible parser tests
+
+- import_playbook: base-setup.yml
+
+- name: Configure web servers
+  hosts: webservers
+  become: true
+  gather_facts: true
+  vars_files:
+    - vars/common.yml
+    - vars/web.yml
+  pre_tasks:
+    - name: Verify connectivity
+      ansible.builtin.wait_for_connection:
+        timeout: 30
+  roles:
+    - common
+    - role: nginx
+      tags: [nginx]
+  tasks:
+    - name: Install packages
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      loop: [curl, rsync]
+
+    - name: Deploy config
+      template:
+        src: app.conf.j2
+        dest: /etc/app/app.conf
+      notify: restart app
+
+    - name: Run deploy tasks
+      ansible.builtin.include_tasks: deploy.yml
+
+    - name: Apply hardening role
+      ansible.builtin.import_role:
+        name: security
+
+    - name: Handle migration
+      block:
+        - name: Run migration script
+          command: /opt/app/migrate.sh
+        - name: Verify migration
+          ansible.builtin.stat:
+            path: /opt/app/.migrated
+          register: migration_stat
+      rescue:
+        - name: Log migration failure
+          debug:
+            msg: "Migration failed, check logs"
+
+    - name: Restart service if needed
+      service:
+        name: app
+        state: restarted
+      when: migration_stat.stat.exists | default(false)
+
+  post_tasks:
+    - name: Smoke test
+      uri:
+        url: http://localhost/health
+        status_code: 200
+
+  handlers:
+    - name: restart app
+      service:
+        name: app
+        state: restarted
+      listen: app restarted
+
+- name: Configure database servers
+  hosts: dbservers
+  become: true
+  tasks:
+    - name: Install database
+      package:
+        name: postgresql
+        state: present
+      notify:
+        - restart db
+        - run migrations
+
+  handlers:
+    - name: restart db
+      service:
+        name: postgresql
+        state: restarted
+
+    - name: run migrations
+      command: /opt/db/migrate.sh
