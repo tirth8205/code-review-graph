@@ -1,0 +1,44 @@
+---
+# Sanitized standalone task file fixture
+
+- name: Create app user
+  user:
+    name: appuser
+    shell: /bin/bash
+
+- name: Clone repository
+  git:
+    repo: https://github.com/example/app.git
+    dest: /opt/app
+  register: clone_result
+
+- ansible.builtin.package:
+    name: python3-pip
+    state: present
+
+- name: Install requirements
+  pip:
+    requirements: /opt/app/requirements.txt
+  changed_when: false
+
+- name: Apply role configuration
+  ansible.builtin.include_role:
+    name: shared_config
+
+- name: Run deployment steps
+  ansible.builtin.import_tasks: deploy_steps.yml
+
+- name: Load environment vars
+  include_vars:
+    file: env_vars.yml
+
+- name: Create directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /opt/app/logs
+    - /opt/app/tmp
+  loop_control:
+    label: "{{ item }}"
