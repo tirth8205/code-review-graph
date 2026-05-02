@@ -1916,3 +1916,219 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Ansible YAML parsing tests
+# ---------------------------------------------------------------------------
+
+try:
+    import yaml as _yaml_check  # noqa: F401
+    _YAML_AVAILABLE = True
+except ImportError:
+    _YAML_AVAILABLE = False
+
+_ANSIBLE_SKIP = pytest.mark.skipif(not _YAML_AVAILABLE, reason="pyyaml not installed")
+
+_PLAYBOOK = FIXTURES / "playbooks" / "sample_ansible_playbook.yml"
+_TASKS_FILE = FIXTURES / "tasks" / "sample_ansible_tasks.yml"
+_META_FILE = FIXTURES / "roles" / "myrole" / "meta" / "main.yml"
+
+
+@_ANSIBLE_SKIP
+class TestAnsiblePlaybookParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(_PLAYBOOK)
+
+    def test_detects_language_ansible_paths(self):
+        p = self.parser
+        assert p.detect_language(Path("playbooks/site.yml")) == "ansible"
+        assert p.detect_language(Path("roles/web/tasks/main.yml")) == "ansible"
+        assert p.detect_language(Path("handlers/main.yml")) == "ansible"
+        assert p.detect_language(Path("config/settings.yml")) == "yaml"
+
+    def test_file_node_created(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "ansible"
+
+    def test_finds_plays_as_class_nodes(self):
+        play_names = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Configure web servers" in play_names
+        assert "Configure database servers" in play_names
+
+    def test_plays_have_ansible_kind_extra(self):
+        plays = [n for n in self.nodes if n.kind == "Class"]
+        assert plays, "expected at least one play"
+        for p in plays:
+            assert p.extra.get("ansible_kind") == "play"
+
+    def test_import_playbook_produces_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "base-setup.yml" in targets
+
+    def test_pre_task_extracted(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Verify connectivity" in func_names
+
+    def test_post_task_extracted(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Smoke test" in func_names
+
+    def test_finds_tasks_as_function_nodes(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Install packages" in func_names
+        assert "Deploy config" in func_names
+        assert "Run deploy tasks" in func_names
+
+    def test_fqcn_module_stored_in_extra(self):
+        task = next(
+            n for n in self.nodes
+            if n.kind == "Function" and n.name == "Verify connectivity"
+        )
+        assert task.extra.get("ansible_module") == "ansible.builtin.wait_for_connection"
+
+    def test_finds_handlers(self):
+        handlers = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("ansible_kind") == "handler"
+        ]
+        handler_names = {h.name for h in handlers}
+        assert "restart app" in handler_names
+        assert "restart db" in handler_names
+
+    def test_handler_listen_stored(self):
+        handler = next(
+            n for n in self.nodes
+            if n.kind == "Function" and n.name == "restart app"
+        )
+        assert handler.extra.get("ansible_listen") == "app restarted"
+
+    def test_notify_scalar_produces_calls(self):
+        calls = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "restart app" in calls
+
+    def test_notify_list_produces_multiple_calls(self):
+        calls = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "restart db" in calls
+        assert "run migrations" in calls
+
+    def test_include_tasks_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "deploy.yml" in targets
+
+    def test_import_role_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "security" in targets
+
+    def test_roles_list_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "common" in targets
+        assert "nginx" in targets
+
+    def test_vars_files_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "vars/common.yml" in targets
+
+    def test_block_tasks_extracted(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Run migration script" in func_names
+        assert "Verify migration" in func_names
+
+    def test_rescue_tasks_extracted(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Log migration failure" in func_names
+
+    def test_block_tasks_parented_to_play(self):
+        block_task = next(
+            n for n in self.nodes
+            if n.kind == "Function" and n.name == "Run migration script"
+        )
+        assert block_task.parent_name == "Configure web servers"
+
+    def test_file_contains_plays(self):
+        file_path_str = str(_PLAYBOOK)
+        file_contains = {e.target for e in self.edges
+                         if e.kind == "CONTAINS" and e.source == file_path_str}
+        assert any("Configure web servers" in t for t in file_contains)
+
+    def test_line_numbers_positive(self):
+        for n in self.nodes:
+            assert n.line_start > 0, f"{n.name} has line_start={n.line_start}"
+            assert n.line_end >= n.line_start, f"{n.name} has bad line range"
+
+    def test_all_nodes_language_ansible(self):
+        for n in self.nodes:
+            assert n.language == "ansible", f"{n.name} has language={n.language!r}"
+
+
+@_ANSIBLE_SKIP
+class TestAnsibleTasksParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(_TASKS_FILE)
+
+    def test_file_language_ansible(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert file_nodes[0].language == "ansible"
+
+    def test_named_tasks_found(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "Create app user" in func_names
+        assert "Clone repository" in func_names
+        assert "Install requirements" in func_names
+
+    def test_nameless_task_fallback_name(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        fallbacks = [n for n in func_names if "@line" in n and "package" in n.lower()]
+        assert fallbacks, "expected a fallback-named task for the nameless package task"
+
+    def test_loop_key_not_misidentified_as_module(self):
+        func_names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert not any(n.startswith("loop@") or n.startswith("with_") for n in func_names)
+
+    def test_fqcn_include_role_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "shared_config" in targets
+
+    def test_import_tasks_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "deploy_steps.yml" in targets
+
+    def test_include_vars_imports_from(self):
+        targets = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "env_vars.yml" in targets
+
+    def test_file_contains_tasks(self):
+        file_path_str = str(_TASKS_FILE)
+        sources = {e.source for e in self.edges if e.kind == "CONTAINS"}
+        assert file_path_str in sources
+
+    def test_tasks_have_no_parent_play(self):
+        for n in self.nodes:
+            if n.kind == "Function":
+                assert n.parent_name is None, f"{n.name} should have no parent_play"
+
+
+@_ANSIBLE_SKIP
+class TestAnsibleMetaParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(_META_FILE)
+
+    def test_file_language_ansible(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert file_nodes[0].language == "ansible"
+
+    def test_depends_on_bare_string(self):
+        dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
+        assert "common" in dep_targets
+
+    def test_depends_on_role_key(self):
+        dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
+        assert "nginx" in dep_targets
+
+    def test_depends_on_name_key_collections(self):
+        dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
+        assert "security.hardening" in dep_targets
