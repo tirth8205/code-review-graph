@@ -648,6 +648,40 @@ class TestCodeParser:
             f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
         )
 
+    # --- __tests__/ directory recognition (Jest convention) ---
+    # Consistency fix: flows.py and refactor.py already recognize __tests__/
+    # but parser.py did not, so files there did not produce Test nodes.
+
+    def test_jest_tests_dir_detected_as_test_file(self):
+        """A file under __tests__/ should be classified as a test file even
+        when the filename itself has no .test./.spec. marker."""
+        from code_review_graph.parser import _is_test_file
+        assert _is_test_file("src/__tests__/UserService.ts")
+        assert _is_test_file("src\\__tests__\\UserService.ts")
+        # Negative: __tests__ as a substring without path separators must not match
+        assert not _is_test_file("my__tests__notdir.ts")
+
+    def test_jest_tests_dir_produces_test_nodes(self):
+        """A vitest-style file under __tests__/ should yield Test nodes
+        and TESTED_BY edges, the same as a *.test.ts file."""
+        fixture_path = FIXTURES / "__tests__" / "UserService.ts"
+        fixture_code = fixture_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "src" / "__tests__" / "UserService.ts"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(fixture_code, encoding="utf-8")
+            nodes, edges = self.parser.parse_file(path)
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
+            f"Expected describe Test node, got: {test_names}"
+        )
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges from __tests__/ file, got none. "
+            f"Edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
         import tempfile
