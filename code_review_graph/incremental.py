@@ -336,6 +336,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
@@ -348,6 +349,7 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             sha = result.stdout.strip()
@@ -365,6 +367,7 @@ def _svn_revision_info(repo_root: Path) -> tuple[str, str]:
             ["svn", "info", "--non-interactive"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -427,6 +430,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             # Fallback: try diff against empty tree (initial commit)
@@ -436,6 +440,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
                 text=True,
                 cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
         files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
         return files
@@ -456,6 +461,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                 ["svn", "diff", "--summarize", "--non-interactive", "-r", rev_range],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
             if result.returncode != 0:
                 logger.warning("svn diff --summarize failed (rc=%d): %s",
@@ -472,6 +478,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                 ["svn", "status", "--non-interactive"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+                stdin=subprocess.DEVNULL,
             )
             files = []
             for line in result.stdout.splitlines():
@@ -499,6 +506,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         files = []
         for line in result.stdout.splitlines():
@@ -544,6 +552,7 @@ def get_all_tracked_files(
             text=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -561,6 +570,7 @@ def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
             ["svn", "list", "--recursive", "--non-interactive"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(repo_root), timeout=60,  # svn list queries the server
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             # svn list returns paths relative to the WC URL; directories end with "/"
