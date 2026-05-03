@@ -664,8 +664,13 @@ class TestCodeParser:
     def test_jest_tests_dir_produces_test_nodes(self):
         """A vitest-style file under __tests__/ should yield Test nodes
         and TESTED_BY edges, the same as a *.test.ts file."""
-        path = FIXTURES / "__tests__" / "UserService.ts"
-        nodes, edges = self.parser.parse_file(path)
+        fixture_path = FIXTURES / "__tests__" / "UserService.ts"
+        fixture_code = fixture_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "src" / "__tests__" / "UserService.ts"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(fixture_code, encoding="utf-8")
+            nodes, edges = self.parser.parse_file(path)
         tests = [n for n in nodes if n.kind == "Test"]
         test_names = {t.name for t in tests}
         assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
