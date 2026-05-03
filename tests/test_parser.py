@@ -648,6 +648,28 @@ class TestCodeParser:
             f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
         )
 
+    # --- Mocha TDD interface (suite/test) ---
+    # Mocha's TDD UI uses `suite()` instead of `describe()`. The `test()`
+    # function is already recognized; this verifies `suite()` is too.
+
+    def test_mocha_tdd_suite_produces_test_nodes(self):
+        """A *.test.ts file using `suite()` should produce Test nodes
+        and TESTED_BY edges, the same as a describe()-based file."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_mocha.test.ts")
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("suite") or n.startswith("suite:") for n in test_names), (
+            f"Expected suite Test node, got: {test_names}"
+        )
+        assert any(n.startswith("test:") for n in test_names), (
+            f"Expected test Test node, got: {test_names}"
+        )
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges, got none. "
+            f"Edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
         import tempfile
