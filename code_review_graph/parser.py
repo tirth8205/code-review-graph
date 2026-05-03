@@ -3113,6 +3113,11 @@ class CodeParser:
     # AST node types for array/list containers.
     _ARRAY_TYPES = frozenset({"array", "list"})
 
+    # AST node types for call argument containers. JS/TS uses ``arguments``;
+    # Python uses ``argument_list``. Both share the same identifier-child shape
+    # for bare-identifier callbacks like ``executor.submit(my_handler)``.
+    _ARGUMENTS_TYPES = frozenset({"arguments", "argument_list"})
+
     # Names that are almost certainly not function references (constants,
     # common primitives).  All-uppercase identifiers and very short names
     # are excluded by a length/casing heuristic in the method itself.
@@ -3185,7 +3190,7 @@ class CodeParser:
             return
 
         # --- Callback arguments (identifier args inside call_expression) ---
-        if node_type == "arguments":
+        if node_type in self._ARGUMENTS_TYPES:
             self._ref_from_arguments(
                 child, source, language, file_path, caller, edges, imap, dnames,
             )
