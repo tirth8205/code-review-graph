@@ -331,6 +331,9 @@ _TEST_FILE_PATTERNS = [
 _TEST_RUNNER_NAMES = frozenset({
     "describe", "it", "test", "beforeEach", "afterEach",
     "beforeAll", "afterAll",
+    # Mocha TDD interface: `suite` is the describe-equivalent.
+    # `test`, the it-equivalent, is already covered above.
+    "suite",
 })
 
 # Annotations/decorators that mark test methods (JUnit, TestNG, etc.)
