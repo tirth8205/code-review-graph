@@ -648,6 +648,29 @@ class TestCodeParser:
             f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
         )
 
+    # --- Bun test detection (regression: bun:test uses identical runner names) ---
+
+    def test_bun_test_detection(self):
+        """A .test.ts file importing from 'bun:test' should produce Test nodes."""
+        nodes, _ = self.parser.parse_file(FIXTURES / "sample_bun.test.ts")
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
+            f"Expected describe Test node, got: {test_names}"
+        )
+        assert any(n.startswith("it:") or n.startswith("test:") for n in test_names), (
+            f"Expected it/test Test node, got: {test_names}"
+        )
+
+    def test_bun_tested_by_edges(self):
+        """TESTED_BY edges should be generated from bun tests to production code."""
+        _, edges = self.parser.parse_file(FIXTURES / "sample_bun.test.ts")
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges, got none. "
+            f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
         import tempfile
