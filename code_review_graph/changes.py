@@ -56,6 +56,7 @@ def parse_git_diff_ranges(
             errors="replace",
             cwd=repo_root,
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             logger.warning("git diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
@@ -97,6 +98,7 @@ def parse_svn_diff_ranges(
             errors="replace",
             cwd=repo_root,
             timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             logger.warning("svn diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
