@@ -319,6 +319,7 @@ _TEST_FILE_PATTERNS = [
     re.compile(r".*\.spec\.[jt]sx?$"),
     re.compile(r".*_test\.go$"),
     re.compile(r"tests?/"),
+    re.compile(r"[\\/]__tests__[\\/]"),
     re.compile(r".*_test\.dart$"),
     re.compile(r"test[_-].*\.[rR]$"),
     re.compile(r"tests/testthat/"),
