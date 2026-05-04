@@ -33,6 +33,24 @@ def _run_postprocess(
     if postprocess == "none":
         return warnings
 
+    # -- Global bare-name CALLS resolution (cheap, runs before FTS so
+    # any rewritten edges are visible to subsequent passes). Fixes
+    # cross-file call-graph edges in C/C++ codebases where the parser
+    # only resolves same-file references — see
+    # ``code_review_graph.bare_call_resolution`` for context. --
+    try:
+        from code_review_graph.bare_call_resolution import (
+            resolve_bare_call_targets,
+        )
+
+        bare_stats = resolve_bare_call_targets(store)
+        build_result["bare_calls_resolved"] = bare_stats
+    except (sqlite3.OperationalError, ImportError) as e:
+        logger.warning("Bare-call resolution failed: %s", e)
+        warnings.append(
+            f"Bare-call resolution failed: {type(e).__name__}: {e}",
+        )
+
     # -- Signatures + FTS (fast, always run unless "none") --
     try:
         rows = store.get_nodes_without_signature()

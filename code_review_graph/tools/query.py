@@ -19,6 +19,47 @@ logger = logging.getLogger(__name__)
 # Tool 2: get_impact_radius
 # ---------------------------------------------------------------------------
 
+def _resolve_edge_endpoint(store, qualified: str) -> dict:
+    """Resolve an edge's source/target_qualified into a node-shaped dict.
+
+    Edges in the graph sometimes store **bare** names (e.g. cross-file C
+    ``CALLS`` edges where same-file scope resolution didn't catch the
+    callee). When that happens, ``store.get_node(qualified)`` fails because
+    ``nodes.qualified_name`` is ``<file>::<name>``. Without a fallback the
+    query result row gets dropped on the floor even though the edge itself
+    is correct — that's the "0 results / N edges" inconsistency users see.
+
+    Strategy:
+      1. Try the qualified-name lookup first (fast path).
+      2. If it misses **and** the input is bare, look up by exact name.
+         When exactly one Function/Test node matches, use it.
+      3. Otherwise synthesize an external/unresolved row so the caller
+         still has a name to display.
+    """
+    node = store.get_node(qualified)
+    if node is not None:
+        return node_to_dict(node)
+    if "::" not in qualified:
+        candidates = store.get_nodes_by_name(qualified, kinds=("Function", "Test"))
+        if len(candidates) == 1:
+            return node_to_dict(candidates[0])
+        if len(candidates) > 1:
+            return {
+                "name": qualified,
+                "qualified_name": qualified,
+                "kind": "Function",
+                "file_path": None,
+                "ambiguous_match_count": len(candidates),
+            }
+    return {
+        "name": qualified.rsplit("::", 1)[-1],
+        "qualified_name": qualified,
+        "kind": "External",
+        "file_path": None,
+        "external": True,
+    }
+
+
 _QUERY_PATTERNS = {
     "callers_of": "Find all functions that call a given function",
     "callees_of": "Find all functions called by a given function",
@@ -218,26 +259,20 @@ def query_graph(
         if pattern == "callers_of":
             for e in store.get_edges_by_target(qn):
                 if e.kind == "CALLS":
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
+                    results.append(_resolve_edge_endpoint(store, e.source_qualified))
                     edges_out.append(edge_to_dict(e))
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
             if not results and node:
                 for e in store.search_edges_by_target_name(node.name):
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
+                    results.append(_resolve_edge_endpoint(store, e.source_qualified))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "CALLS":
-                    callee = store.get_node(e.target_qualified)
-                    if callee:
-                        results.append(node_to_dict(callee))
+                    results.append(_resolve_edge_endpoint(store, e.target_qualified))
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "imports_of":

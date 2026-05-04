@@ -342,6 +342,29 @@ class GraphStore:
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def get_nodes_by_name(
+        self, name: str, kinds: tuple[str, ...] | None = None,
+    ) -> list[GraphNode]:
+        """Return all nodes whose ``name`` (unqualified) matches exactly.
+
+        Useful when an edge stores a bare target (e.g. cross-file C ``CALLS``
+        edges that the same-file resolver couldn't qualify) and we need to
+        locate the underlying node row to populate query results.
+
+        Pass ``kinds`` to restrict (e.g. ``("Function", "Test")``).
+        """
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            rows = self._conn.execute(
+                f"SELECT * FROM nodes WHERE name = ? AND kind IN ({placeholders})",
+                (name, *kinds),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE name = ?", (name,),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     def search_edges_by_target_name(self, name: str, kind: str = "CALLS") -> list[GraphEdge]:
         """Search for edges where target_qualified matches an unqualified name.
 
