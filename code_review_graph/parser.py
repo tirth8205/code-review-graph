@@ -125,6 +125,11 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".res": "rescript",
     ".resi": "rescript",
     ".gd": "gdscript",
+    # SystemVerilog/Verilog
+    ".sv": "verilog",
+    ".svh": "verilog",
+    ".v": "verilog",
+    ".vh": "verilog",
 }
 
 # Tree-sitter node type mappings per language
@@ -172,6 +177,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "zig": ["container_declaration"],
     "powershell": ["class_statement"],
     "julia": ["struct_definition", "abstract_definition"],
+    "verilog": ["module_declaration", "interface_declaration", "class_declaration"],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -222,6 +228,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_definition",
         "short_function_definition",
     ],
+    "verilog": ["task_declaration", "function_declaration", "always_construct"],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -262,6 +269,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "powershell": [],
     # Julia: import/using are import_statement nodes.
     "julia": ["import_statement", "using_statement"],
+    "verilog": ["package_import_declaration"],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -300,6 +308,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "zig": ["call_expression", "builtin_call_expr"],
     "powershell": ["command_expression"],
     "julia": ["call_expression"],
+    "verilog": ["module_instantiation", "function_subroutine_call", "subroutine_call", "system_tf_call"],
 }
 
 # Patterns that indicate a test function
@@ -3021,21 +3030,31 @@ class CodeParser:
             )
             return True
 
-        if call_name and enclosing_func:
-            caller = self._qualify(
-                enclosing_func, file_path, enclosing_class,
-            )
-            target = self._resolve_call_target(
-                call_name, file_path, language,
-                import_map or {}, defined_names or set(),
-            )
-            edges.append(EdgeInfo(
-                kind="CALLS",
-                source=caller,
-                target=target,
-                file_path=file_path,
-                line=child.start_point[0] + 1,
-            ))
+        # For Verilog module instantiations, create CALLS edges from the enclosing module
+        # (enclosing_class), not just from functions
+        if call_name:
+            caller = None
+            if enclosing_func:
+                caller = self._qualify(
+                    enclosing_func, file_path, enclosing_class,
+                )
+            elif language == "verilog" and enclosing_class:
+                # Verilog module instantiation happen at module level
+                caller = self._qualify(
+                    enclosing_class, file_path, None
+                )
+            if caller:
+                target = self._resolve_call_target(
+                    call_name, file_path, language,
+                    import_map or {}, defined_names or set(),
+                )
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=caller,
+                    target=target,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                ))
 
         return False
 
@@ -4010,6 +4029,13 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type == "type_identifier":
                             return sub.text.decode("utf-8", errors="replace")
+        # Verilog/SystemVerilog: module/interface names are nested under module_header
+        if language == "verilog" and node.type in ("module_declaration", "interface_declaration"):
+            for child in node.children:
+                if child.type in ("module_header", "interface_header"):
+                    for sub in child.children:
+                        if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
@@ -4295,6 +4321,14 @@ class CodeParser:
             val = _find_string_literal(node)
             if val:
                 imports.append(val)
+        elif language == "verilog":
+            # import pkg::*; or import pkg::item;
+            # Node structure: package_import_declaration > package_import_item > package_identifier
+            for child in node.children:
+                if child.type == "package_import_item":
+                    for subchild in child.children:
+                        if subchild.type == "package_identifier":
+                            imports.append(subchild.text.decode("utf-8", errors="replace"))
         else:
             # Fallback: just record the text
             imports.append(text)
@@ -4340,6 +4374,12 @@ class CodeParser:
                     # command_name wraps a word — get its text
                     txt = child.text.decode("utf-8", errors="replace").strip()
                     return txt or None
+            return None
+
+        # Verilog/SystemVerilog: module_instantiation's first child is the module name
+        if language == "verilog" and node.type == "module_instantiation":
+            if first.type == "simple_identifier":
+                return first.text.decode("utf-8", errors="replace")
             return None
 
         # Solidity wraps call targets in an 'expression' node – unwrap it
