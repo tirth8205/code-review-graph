@@ -308,7 +308,9 @@ _CALL_TYPES: dict[str, list[str]] = {
     "zig": ["call_expression", "builtin_call_expr"],
     "powershell": ["command_expression"],
     "julia": ["call_expression"],
-    "verilog": ["module_instantiation", "function_subroutine_call", "subroutine_call", "system_tf_call"],
+    "verilog": [
+        "module_instantiation", "function_subroutine_call", "subroutine_call", "system_tf_call"
+        ],
 }
 
 # Patterns that indicate a test function
