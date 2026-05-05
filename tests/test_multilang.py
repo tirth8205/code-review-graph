@@ -1916,3 +1916,79 @@ class TestRescriptCrossModuleResolver:
         # Second run should find nothing new — all already resolved.
         assert second["calls_resolved"] == 0
         assert second["imports_resolved"] == 0
+
+# ---------------------------------------------------------------------------
+# Verilog / SystemVerilog
+# ---------------------------------------------------------------------------
+
+
+def _has_verilog_parser():
+    try:
+        import tree_sitter_language_pack as tslp
+        tslp.get_parser("verilog")
+        return True
+    except (LookupError, ImportError):
+        return False
+
+
+@pytest.mark.skipif(not _has_verilog_parser(), reason="verilog tree-sitter grammar not installed")
+class TestVerilogParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.sv")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("top.sv")) == "verilog"
+        assert self.parser.detect_language(Path("pkg.svh")) == "verilog"
+        assert self.parser.detect_language(Path("cpu.v")) == "verilog"
+        assert self.parser.detect_language(Path("header.vh")) == "verilog"
+
+    def test_finds_modules(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "FIFOController" in names
+        assert "Adder" in names
+
+    def test_finds_interfaces(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "BusIf" in names
+
+    def test_finds_tasks(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "do_write" in names
+
+    def test_finds_functions_in_module(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "is_full" in names
+
+    def test_task_and_function_parent_is_module(self):
+        funcs = {f.name: f for f in self.nodes if f.kind == "Function"}
+        assert funcs["do_write"].parent_name == "FIFOController"
+        assert funcs["is_full"].parent_name == "FIFOController"
+
+    def test_finds_package_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "utils_pkg" in targets
+        assert "arith_pkg" in targets
+
+    def test_module_instantiation_creates_call_edge(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("Adder" in t for t in targets)
+
+    def test_module_instantiation_caller_is_enclosing_module(self):
+        # module_instantiation CALLS must be attributed to the containing
+        # module, not a function — Verilog-specific fallback in _extract_calls.
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        adder_calls = [e for e in calls if "Adder" in e.target]
+        assert adder_calls, "Expected a CALLS edge for Adder instantiation"
+        assert any("FIFOController" in e.source for e in adder_calls)
+
+    def test_file_node_language(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "verilog"
