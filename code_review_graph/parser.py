@@ -4031,13 +4031,41 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type == "type_identifier":
                             return sub.text.decode("utf-8", errors="replace")
-        # Verilog/SystemVerilog: module/interface names are nested under module_header
-        if language == "verilog" and node.type in ("module_declaration", "interface_declaration"):
-            for child in node.children:
-                if child.type in ("module_header", "interface_header"):
-                    for sub in child.children:
-                        if sub.type == "simple_identifier":
-                            return sub.text.decode("utf-8", errors="replace")
+        # Verilog/SystemVerilog: names are nested differently per construct type.
+        if language == "verilog":
+            # module_declaration: name is in module_header > simple_identifier
+            if node.type == "module_declaration":
+                for child in node.children:
+                    if child.type == "module_header":
+                        for sub in child.children:
+                            if sub.type == "simple_identifier":
+                                return sub.text.decode("utf-8", errors="replace")
+            # interface_declaration: name is in interface_ansi_header > interface_identifier
+            if node.type == "interface_declaration":
+                for child in node.children:
+                    if child.type in ("interface_header", "interface_ansi_header"):
+                        for sub in child.children:
+                            if sub.type == "simple_identifier":
+                                return sub.text.decode("utf-8", errors="replace")
+                            if sub.type == "interface_identifier":
+                                for ss in sub.children:
+                                    if ss.type == "simple_identifier":
+                                        return ss.text.decode("utf-8", errors="replace")
+                                return sub.text.decode("utf-8", errors="replace")
+            # task_declaration: name is in task_body_declaration > task_identifier
+            if node.type == "task_declaration":
+                for child in node.children:
+                    if child.type == "task_body_declaration":
+                        for sub in child.children:
+                            if sub.type == "task_identifier":
+                                return sub.text.decode("utf-8", errors="replace")
+            # function_declaration: name is in function_body_declaration > function_identifier
+            if node.type == "function_declaration":
+                for child in node.children:
+                    if child.type == "function_body_declaration":
+                        for sub in child.children:
+                            if sub.type == "function_identifier":
+                                return sub.text.decode("utf-8", errors="replace")
         # Most languages use a 'name' child
         for child in node.children:
             if child.type in (
