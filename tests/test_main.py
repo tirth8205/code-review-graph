@@ -16,6 +16,17 @@ import pytest
 from code_review_graph import main as crg_main
 
 
+@pytest.fixture(autouse=True)
+def _isolate_crg_tools_env(monkeypatch):
+    """Always strip CRG_TOOLS so that any test invoking ``crg_main.main``
+    does not accidentally permanently shrink the global tool registry
+    when the suite runs under a developer environment that exports
+    ``CRG_TOOLS``.  Without this the snapshot/restore in
+    ``TestApplyToolFilter._restore_tools`` only sees the already-filtered
+    set and cannot restore the dropped tools."""
+    monkeypatch.delenv("CRG_TOOLS", raising=False)
+
+
 class TestResolveRepoRoot:
     """Precedence rules for _resolve_repo_root (see #222 follow-up)."""
 
@@ -59,7 +70,7 @@ class TestServeMainTransport:
 
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
         crg_main.main(repo_root=None)
-        assert calls == [{"transport": "stdio"}]
+        assert calls == [{"transport": "stdio", "show_banner": False}]
 
     def test_http_calls_mcp_run_with_host_port(self, monkeypatch):
         calls: list[dict] = []
@@ -225,25 +236,37 @@ class TestApplyToolFilter:
     def _restore_tools(self):
         """Snapshot registered tools before test, restore after.
 
-        _apply_tool_filter calls ``mcp.remove_tool()`` which is
-        permanent.  We restore by re-adding from the saved snapshot.
+        ``_apply_tool_filter`` calls ``mcp.remove_tool()`` which is
+        permanent.  We snapshot the list of Tool objects via the public
+        ``list_tools()`` async API (FastMCP >=3) and re-register them
+        after the test body runs.
         """
-        original = dict(crg_main.mcp._tool_manager._tools)
+        import asyncio
+
+        original = asyncio.run(crg_main.mcp.list_tools())
         yield
-        crg_main.mcp._tool_manager._tools.clear()
-        crg_main.mcp._tool_manager._tools.update(original)
+        current_names = {
+            t.name for t in asyncio.run(crg_main.mcp.list_tools())
+        }
+        for tool in original:
+            if tool.name not in current_names:
+                crg_main.mcp.add_tool(tool)
 
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch):
         """Ensure CRG_TOOLS is not set from the outer environment."""
         monkeypatch.delenv("CRG_TOOLS", raising=False)
 
+    @staticmethod
+    async def _tool_names() -> set[str]:
+        return {t.name for t in await crg_main.mcp.list_tools()}
+
     @pytest.mark.asyncio
     async def test_no_filter_keeps_all_tools(self):
         """When neither --tools nor CRG_TOOLS is set, all tools remain."""
-        before = set((await crg_main.mcp.get_tools()).keys())
+        before = await self._tool_names()
         crg_main._apply_tool_filter(None)
-        after = set((await crg_main.mcp.get_tools()).keys())
+        after = await self._tool_names()
         assert before == after
 
     @pytest.mark.asyncio
@@ -251,7 +274,7 @@ class TestApplyToolFilter:
         """The ``tools`` argument keeps only the listed tools."""
         keep = "query_graph_tool,semantic_search_nodes_tool"
         crg_main._apply_tool_filter(keep)
-        remaining = set((await crg_main.mcp.get_tools()).keys())
+        remaining = await self._tool_names()
         assert remaining == {"query_graph_tool", "semantic_search_nodes_tool"}
 
     @pytest.mark.asyncio
@@ -259,7 +282,7 @@ class TestApplyToolFilter:
         """The ``CRG_TOOLS`` env var works as fallback."""
         monkeypatch.setenv("CRG_TOOLS", "query_graph_tool")
         crg_main._apply_tool_filter(None)
-        remaining = set((await crg_main.mcp.get_tools()).keys())
+        remaining = await self._tool_names()
         assert remaining == {"query_graph_tool"}
 
     @pytest.mark.asyncio
@@ -267,21 +290,21 @@ class TestApplyToolFilter:
         """CLI --tools wins over CRG_TOOLS env var."""
         monkeypatch.setenv("CRG_TOOLS", "list_repos_tool")
         crg_main._apply_tool_filter("query_graph_tool")
-        remaining = set((await crg_main.mcp.get_tools()).keys())
+        remaining = await self._tool_names()
         assert remaining == {"query_graph_tool"}
 
     @pytest.mark.asyncio
     async def test_empty_string_is_noop(self):
         """An empty string should not remove all tools."""
-        before = set((await crg_main.mcp.get_tools()).keys())
+        before = await self._tool_names()
         crg_main._apply_tool_filter("")
-        after = set((await crg_main.mcp.get_tools()).keys())
+        after = await self._tool_names()
         assert before == after
 
     @pytest.mark.asyncio
     async def test_whitespace_handling(self):
         """Spaces around tool names are stripped."""
         crg_main._apply_tool_filter(" query_graph_tool , semantic_search_nodes_tool ")
-        remaining = set((await crg_main.mcp.get_tools()).keys())
+        remaining = await self._tool_names()
         assert remaining == {"query_graph_tool", "semantic_search_nodes_tool"}
 

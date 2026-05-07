@@ -944,6 +944,7 @@ def _apply_tool_filter(tools: str | None = None) -> None:
         # via env var
         CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool
     """
+    import asyncio
     import os
 
     raw = tools or os.environ.get("CRG_TOOLS")
@@ -952,10 +953,31 @@ def _apply_tool_filter(tools: str | None = None) -> None:
     allowed = {t.strip() for t in raw.split(",") if t.strip()}
     if not allowed:
         return
-    registered = list(mcp._tool_manager._tools.keys())
-    for name in registered:
+    # FastMCP >=3 exposes tool enumeration via the async ``list_tools``
+    # method.  ``_apply_tool_filter`` is typically called from
+    # ``main()`` before the MCP event loop starts, but tests may invoke
+    # it from within a running event loop — in that case ``asyncio.run``
+    # raises ``RuntimeError``.  Fall back to running the coroutine on a
+    # dedicated short-lived loop in a worker thread.  Earlier code path
+    # relied on ``mcp._tool_manager._tools`` which is a private
+    # attribute that was removed in fastmcp>=3.0.
+    def _list_tool_names() -> list[str]:
+        coro_factory = mcp.list_tools
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return [t.name for t in asyncio.run(coro_factory())]
+        import concurrent.futures
+
+        def _runner() -> list[str]:
+            return [t.name for t in asyncio.run(coro_factory())]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_runner).result()
+
+    for name in _list_tool_names():
         if name not in allowed:
-            mcp.remove_tool(name)
+            mcp.local_provider.remove_tool(name)
 
 
 
