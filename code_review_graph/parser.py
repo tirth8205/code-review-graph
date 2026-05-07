@@ -2809,6 +2809,11 @@ class CodeParser:
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )
+        if language == "verilog" and child.type in ("module_declaration", "interface_declaration"):
+            self._extract_verilog_module_members(
+                child, name, self._qualify(name, file_path, enclosing_class),
+                file_path, nodes, edges,
+            )
         return True
 
     def _extract_functions(
@@ -3057,6 +3062,8 @@ class CodeParser:
                     file_path=file_path,
                     line=child.start_point[0] + 1,
                 ))
+                if language == "verilog" and child.type == "module_instantiation":
+                    self._verilog_emit_connects(child, caller, target, file_path, edges)
 
         return False
 
@@ -4079,6 +4086,352 @@ class CodeParser:
                 if child.type == "type_spec":
                     return self._get_name(child, language, kind)
         return None
+
+    # --- Verilog/SystemVerilog member extraction helpers ---
+
+    def _verilog_text(self, node) -> str:
+        return node.text.decode("utf-8", errors="replace")
+
+    def _verilog_find_child(self, node, *types):
+        for child in node.children:
+            if child.type in types:
+                return child
+        return None
+
+    def _verilog_find_descendant(self, node, *types):
+        for child in node.children:
+            if child.type in types:
+                return child
+            found = self._verilog_find_descendant(child, *types)
+            if found:
+                return found
+        return None
+
+    def _verilog_modport_ports(self, modport_item) -> list:
+        """Return [{name, direction}] for all ports in a modport_item node."""
+        ports: list = []
+        current_dir = ""
+
+        def _collect(node):
+            nonlocal current_dir
+            for child in node.children:
+                t = child.type
+                if t == "port_direction":
+                    current_dir = self._verilog_text(child).strip()
+                elif t == "modport_simple_port":
+                    id_node = self._verilog_find_descendant(child, "simple_identifier")
+                    if id_node:
+                        ports.append({
+                            "name": self._verilog_text(id_node),
+                            "direction": current_dir,
+                        })
+                elif t in (
+                    "modport_ports_declaration",
+                    "modport_simple_ports_declaration",
+                    "modport_tf_ports_declaration",
+                ):
+                    _collect(child)
+
+        _collect(modport_item)
+        return ports
+
+    def _verilog_extract_header(
+        self,
+        header_node,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract Parameter and Port nodes from module_ansi_header/interface_ansi_header."""
+        args = (module_name, qualified_module, file_path, nodes, edges)
+        for child in header_node.children:
+            if child.type == "parameter_port_list":
+                self._verilog_extract_params(child, *args)
+            elif child.type == "list_of_port_declarations":
+                for port in child.children:
+                    if port.type == "ansi_port_declaration":
+                        self._verilog_extract_port(port, *args)
+
+    def _verilog_extract_params(
+        self,
+        param_list,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract Parameter nodes from a parameter_port_list node."""
+        for ppd in param_list.children:
+            if ppd.type != "parameter_port_declaration":
+                continue
+            for pd in ppd.children:
+                if pd.type != "parameter_declaration":
+                    continue
+                type_text = ""
+                for sub in pd.children:
+                    if sub.type == "data_type_or_implicit1":
+                        dt = self._verilog_find_descendant(sub, "data_type") or sub
+                        type_text = self._verilog_text(dt).strip()
+                        break
+                for lpa in pd.children:
+                    if lpa.type != "list_of_param_assignments":
+                        continue
+                    for pa in lpa.children:
+                        if pa.type != "param_assignment":
+                            continue
+                        name = None
+                        default = ""
+                        for part in pa.children:
+                            if part.type == "parameter_identifier":
+                                id_node = (
+                                    self._verilog_find_descendant(part, "simple_identifier") or part
+                                )
+                                name = self._verilog_text(id_node).strip()
+                            elif part.type == "constant_param_expression":
+                                default = self._verilog_text(part).strip()
+                        if not name:
+                            continue
+                        nodes.append(NodeInfo(
+                            kind="Parameter",
+                            name=name,
+                            file_path=file_path,
+                            line_start=pa.start_point[0] + 1,
+                            line_end=pa.end_point[0] + 1,
+                            language="verilog",
+                            parent_name=module_name,
+                            extra={"param_type": type_text, "default_value": default},
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS",
+                            source=qualified_module,
+                            target=f"{qualified_module}.{name}",
+                            file_path=file_path,
+                            line=pa.start_point[0] + 1,
+                        ))
+
+    def _verilog_extract_port(
+        self,
+        port_node,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract a Port node from an ansi_port_declaration."""
+        direction = ""
+        data_type = ""
+        for child in port_node.children:
+            if child.type in ("variable_port_header", "net_port_header", "interface_port_header"):
+                for sub in child.children:
+                    if sub.type == "port_direction":
+                        direction = self._verilog_text(sub).strip()
+                    elif sub.type in (
+                        "data_type", "data_type_or_implicit1",
+                        "net_port_type", "variable_port_type", "implicit_data_type",
+                    ):
+                        data_type = self._verilog_text(sub).strip()
+        for child in port_node.children:
+            if child.type == "port_identifier":
+                id_node = self._verilog_find_descendant(child, "simple_identifier") or child
+                name = self._verilog_text(id_node).strip()
+                nodes.append(NodeInfo(
+                    kind="Port",
+                    name=name,
+                    file_path=file_path,
+                    line_start=port_node.start_point[0] + 1,
+                    line_end=port_node.end_point[0] + 1,
+                    language="verilog",
+                    parent_name=module_name,
+                    extra={"direction": direction, "data_type": data_type},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=qualified_module,
+                    target=f"{qualified_module}.{name}",
+                    file_path=file_path,
+                    line=port_node.start_point[0] + 1,
+                ))
+                break
+
+    def _verilog_extract_signals(
+        self,
+        data_decl,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract Signal nodes from a data_declaration node (handles multiple names)."""
+        type_text = ""
+        for child in data_decl.children:
+            if child.type == "data_type_or_implicit1":
+                dt = self._verilog_find_descendant(child, "data_type") or child
+                type_text = self._verilog_text(dt).strip()
+                break
+        for child in data_decl.children:
+            if child.type == "list_of_variable_decl_assignments":
+                for vda in child.children:
+                    if vda.type == "variable_decl_assignment":
+                        id_node = self._verilog_find_child(vda, "simple_identifier")
+                        if id_node:
+                            name = self._verilog_text(id_node).strip()
+                            nodes.append(NodeInfo(
+                                kind="Signal",
+                                name=name,
+                                file_path=file_path,
+                                line_start=vda.start_point[0] + 1,
+                                line_end=vda.end_point[0] + 1,
+                                language="verilog",
+                                parent_name=module_name,
+                                extra={"data_type": type_text},
+                            ))
+                            edges.append(EdgeInfo(
+                                kind="CONTAINS",
+                                source=qualified_module,
+                                target=f"{qualified_module}.{name}",
+                                file_path=file_path,
+                                line=vda.start_point[0] + 1,
+                            ))
+
+    def _verilog_extract_modport(
+        self,
+        modport_item,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract a Modport node from a modport_item node."""
+        name_node = None
+        for child in modport_item.children:
+            if child.type == "modport_identifier":
+                name_node = self._verilog_find_descendant(child, "simple_identifier") or child
+                break
+        if not name_node:
+            for child in modport_item.children:
+                if child.type == "simple_identifier":
+                    name_node = child
+                    break
+        if not name_node:
+            return
+        name = self._verilog_text(name_node).strip()
+        ports = self._verilog_modport_ports(modport_item)
+        nodes.append(NodeInfo(
+            kind="Modport",
+            name=name,
+            file_path=file_path,
+            line_start=modport_item.start_point[0] + 1,
+            line_end=modport_item.end_point[0] + 1,
+            language="verilog",
+            parent_name=module_name,
+            extra={"ports": ports},
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=qualified_module,
+            target=f"{qualified_module}.{name}",
+            file_path=file_path,
+            line=modport_item.start_point[0] + 1,
+        ))
+
+    def _extract_verilog_module_members(
+        self,
+        module_node,
+        module_name: str,
+        qualified_module: str,
+        file_path: str,
+        nodes: list,
+        edges: list,
+    ) -> None:
+        """Extract Port, Signal, Parameter, Modport nodes from a module/interface declaration."""
+        _skip = frozenset({
+            "task_declaration", "function_declaration", "always_construct",
+            "module_instantiation", "module_header", "interface_header",
+        })
+        _args = (module_name, qualified_module, file_path, nodes, edges)
+
+        def _walk(node) -> None:
+            t = node.type
+            if t in _skip:
+                return
+            if t in ("module_ansi_header", "interface_ansi_header"):
+                self._verilog_extract_header(node, *_args)
+                return
+            if t == "data_declaration":
+                self._verilog_extract_signals(node, *_args)
+                return
+            if t == "modport_declaration":
+                for child in node.children:
+                    if child.type == "modport_item":
+                        self._verilog_extract_modport(
+                            child, module_name, qualified_module, file_path, nodes, edges,
+                        )
+                return
+            for child in node.children:
+                _walk(child)
+
+        for child in module_node.children:
+            _walk(child)
+
+    def _verilog_emit_connects(
+        self,
+        module_inst_node,
+        source: str,
+        module_type_target: str,
+        file_path: str,
+        edges: list,
+    ) -> None:
+        """Emit CONNECTS edges for each named_port_connection in a module instantiation."""
+        for inst in module_inst_node.children:
+            if inst.type != "hierarchical_instance":
+                continue
+            instance_name = ""
+            for n in inst.children:
+                if n.type == "name_of_instance":
+                    for sub in n.children:
+                        if sub.type == "instance_identifier":
+                            for ss in sub.children:
+                                if ss.type == "simple_identifier":
+                                    instance_name = self._verilog_text(ss)
+                        elif sub.type == "simple_identifier":
+                            instance_name = self._verilog_text(sub)
+                    break
+            for n in inst.children:
+                if n.type != "list_of_port_connections":
+                    continue
+                for conn in n.children:
+                    if conn.type != "named_port_connection":
+                        continue
+                    port_name = ""
+                    signal_expr = ""
+                    for part in conn.children:
+                        if part.type == "port_identifier":
+                            id_node = self._verilog_find_descendant(part, "simple_identifier")
+                            port_name = (
+                                self._verilog_text(id_node) if id_node
+                                else self._verilog_text(part).strip()
+                            )
+                        elif part.type == "expression":
+                            signal_expr = self._verilog_text(part)
+                    if port_name:
+                        edges.append(EdgeInfo(
+                            kind="CONNECTS",
+                            source=source,
+                            target=f"{module_type_target}.{port_name}",
+                            file_path=file_path,
+                            line=conn.start_point[0] + 1,
+                            extra={
+                                "instance": instance_name,
+                                "port": port_name,
+                                "signal_expr": signal_expr,
+                            },
+                        ))
 
     def _get_go_receiver_type(self, node) -> Optional[str]:
         """Extract the receiver type from a Go method_declaration.
