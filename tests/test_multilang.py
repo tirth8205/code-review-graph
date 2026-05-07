@@ -1992,3 +1992,101 @@ class TestVerilogParsing:
         file_nodes = [n for n in self.nodes if n.kind == "File"]
         assert len(file_nodes) == 1
         assert file_nodes[0].language == "verilog"
+
+    # --- Ports ---
+
+    def test_finds_module_ports(self):
+        ports = [n for n in self.nodes if n.kind == "Port"]
+        fifo_ports = {p.name for p in ports if p.parent_name == "FIFOController"}
+        assert {"clk", "rst_n", "data_in", "wr_en", "rd_en", "data_out", "full", "empty"} <= fifo_ports
+
+    def test_port_directions(self):
+        by_name = {p.name: p for p in self.nodes
+                   if p.kind == "Port" and p.parent_name == "FIFOController"}
+        assert by_name["clk"].extra["direction"] == "input"
+        assert by_name["rst_n"].extra["direction"] == "input"
+        assert by_name["data_out"].extra["direction"] == "output"
+        assert by_name["full"].extra["direction"] == "output"
+
+    def test_port_data_type_recorded(self):
+        by_name = {p.name: p for p in self.nodes
+                   if p.kind == "Port" and p.parent_name == "FIFOController"}
+        assert "WIDTH-1:0" in by_name["data_in"].extra["data_type"]
+        assert "logic" in by_name["clk"].extra["data_type"]
+
+    def test_adder_ports_recognized(self):
+        ports = {p.name for p in self.nodes if p.kind == "Port" and p.parent_name == "Adder"}
+        assert {"a", "b", "sum"} <= ports
+
+    # --- Signals ---
+
+    def test_finds_internal_signals(self):
+        sigs = {s.name for s in self.nodes
+                if s.kind == "Signal" and s.parent_name == "FIFOController"}
+        assert {"mem", "wr_ptr", "rd_ptr", "count"} <= sigs
+
+    def test_signal_data_type_recorded(self):
+        by_name = {s.name: s for s in self.nodes
+                   if s.kind == "Signal" and s.parent_name == "FIFOController"}
+        assert "logic" in by_name["mem"].extra["data_type"]
+
+    def test_multi_signal_declaration_split_into_separate_nodes(self):
+        sigs = [s for s in self.nodes
+                if s.kind == "Signal" and s.parent_name == "FIFOController"
+                and s.name in {"wr_ptr", "rd_ptr", "count"}]
+        assert len(sigs) == 3
+
+    def test_interface_signals_recognized(self):
+        sigs = {s.name for s in self.nodes if s.kind == "Signal" and s.parent_name == "BusIf"}
+        assert {"data", "valid", "ready"} <= sigs
+
+    # --- Parameters ---
+
+    def test_finds_module_parameters(self):
+        params = {p.name: p for p in self.nodes
+                  if p.kind == "Parameter" and p.parent_name == "FIFOController"}
+        assert "DEPTH" in params
+        assert "WIDTH" in params
+        assert params["DEPTH"].extra["default_value"].strip() == "16"
+        assert params["WIDTH"].extra["default_value"].strip() == "8"
+
+    # --- Modports ---
+
+    def test_finds_modports(self):
+        modports = {m.name for m in self.nodes if m.kind == "Modport" and m.parent_name == "BusIf"}
+        assert {"master", "slave"} == modports
+
+    def test_modport_port_directions(self):
+        master = next(m for m in self.nodes if m.kind == "Modport" and m.name == "master")
+        by_name = {p["name"]: p for p in master.extra["ports"]}
+        assert by_name["data"]["direction"] == "output"
+        assert by_name["ready"]["direction"] == "input"
+
+    # --- CONTAINS edges ---
+
+    def test_module_contains_its_ports_and_signals(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        fifo_contained = {e.target.split(".")[-1] for e in contains if "FIFOController" in e.source}
+        assert "clk" in fifo_contained
+        assert "wr_ptr" in fifo_contained
+        assert "DEPTH" in fifo_contained
+
+    # --- Port connections ---
+
+    def test_module_instantiation_emits_connects_edges(self):
+        conn = [e for e in self.edges if e.kind == "CONNECTS"]
+        by_port = {e.extra["port"]: e for e in conn if e.extra.get("instance") == "ptr_adder"}
+        assert set(by_port) == {"a", "b", "sum"}
+        assert "wr_ptr" in by_port["a"].extra["signal_expr"]
+        assert "rd_ptr" in by_port["b"].extra["signal_expr"]
+
+    def test_connects_target_points_at_child_port(self):
+        conn = [e for e in self.edges if e.kind == "CONNECTS"]
+        a_edge = next(e for e in conn
+                      if e.extra.get("instance") == "ptr_adder" and e.extra["port"] == "a")
+        assert a_edge.target.endswith("Adder.a") or a_edge.target == "Adder.a"
+
+    def test_connects_source_is_enclosing_module(self):
+        conn = [e for e in self.edges if e.kind == "CONNECTS"]
+        assert conn, "expected CONNECTS edges from FIFOController"
+        assert all("FIFOController" in e.source for e in conn)
