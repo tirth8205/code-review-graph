@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def _handle_start(args: argparse.Namespace) -> None:
     """Start the daemon process."""
-    from .daemon import WatchDaemon, is_daemon_running, load_config
+    from .daemon import WatchDaemon, is_daemon_running, load_config, write_pid
 
     if is_daemon_running():
         print("Error: Daemon is already running.")
@@ -42,6 +42,9 @@ def _handle_start(args: argparse.Namespace) -> None:
 
     if not args.foreground:
         daemon.daemonize()
+    else:
+        write_pid()
+        daemon._setup_signal_handlers()
 
     daemon.run_forever()
 
