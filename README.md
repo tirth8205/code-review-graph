@@ -37,7 +37,12 @@ AI coding tools re-read your entire codebase on every task. `code-review-graph` 
 ## Quick Start
 
 ```bash
+# Using Python (recommended)
 pip install code-review-graph                     # or: pipx install code-review-graph
+
+# Using Node.js
+npm install -g code-review-graph
+
 code-review-graph install          # auto-detects and configures all supported platforms
 code-review-graph build            # parse your codebase
 ```
@@ -531,6 +536,6 @@ MIT. See [LICENSE](LICENSE).
 <p align="center">
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
-<code>pip install code-review-graph && code-review-graph install</code><br>
+<code>pip install code-review-graph # or: npm install -g code-review-graph<br>code-review-graph install</code><br>
 <sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI</sub>
 </p>

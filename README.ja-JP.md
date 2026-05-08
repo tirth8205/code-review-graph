@@ -37,7 +37,12 @@ AIコーディングツールはタスクのたびにコードベース全体を
 ## クイックスタート
 
 ```bash
+# Pythonを使用 (推奨)
 pip install code-review-graph                     # または: pipx install code-review-graph
+
+# Node.jsを使用
+npm install -g code-review-graph
+
 code-review-graph install          # 対応プラットフォームを自動検出して設定
 code-review-graph build            # コードベースを解析
 ```
@@ -319,6 +324,6 @@ MIT。詳細は [LICENSE](LICENSE) を参照してください。
 <p align="center">
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
-<code>pip install code-review-graph && code-review-graph install</code><br>
+<code>pip install code-review-graph # または: npm install -g code-review-graph<br>code-review-graph install</code><br>
 <sub>Codex、Claude Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Kiroに対応</sub>
 </p>

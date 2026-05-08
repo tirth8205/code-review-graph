@@ -37,7 +37,12 @@ AI कोडिंग टूल्स हर टास्क पर आपका
 ## त्वरित शुरुआत
 
 ```bash
+# Python का उपयोग करके (अनुशंसित)
 pip install code-review-graph                     # या: pipx install code-review-graph
+
+# Node.js का उपयोग करके
+npm install -g code-review-graph
+
 code-review-graph install          # सभी समर्थित प्लेटफ़ॉर्म को स्वचालित रूप से पहचानता और कॉन्फ़िगर करता है
 code-review-graph build            # अपना कोडबेस पार्स करें
 ```
@@ -317,6 +322,6 @@ MIT। [LICENSE](LICENSE) देखें।
 <p align="center">
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
-<code>pip install code-review-graph && code-review-graph install</code><br>
+<code>pip install code-review-graph # या: npm install -g code-review-graph<br>code-review-graph install</code><br>
 <sub>Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, और Kiro के साथ काम करता है</sub>
 </p>

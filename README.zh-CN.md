@@ -37,7 +37,12 @@ AI 编码工具在每次任务中都会重新读取整个代码库。`code-revie
 ## 快速开始
 
 ```bash
+# 使用 Python (推荐)
 pip install code-review-graph                     # 或: pipx install code-review-graph
+
+# 使用 Node.js
+npm install -g code-review-graph
+
 code-review-graph install          # 自动检测并配置所有支持的平台
 code-review-graph build            # 解析代码库
 ```
@@ -317,6 +322,6 @@ MIT。详见 [LICENSE](LICENSE)。
 <p align="center">
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
-<code>pip install code-review-graph && code-review-graph install</code><br>
+<code>pip install code-review-graph # 或: npm install -g code-review-graph<br>code-review-graph install</code><br>
 <sub>支持 Codex、Claude Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity 和 Kiro</sub>
 </p>
