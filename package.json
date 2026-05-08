@@ -1,0 +1,46 @@
+{
+  "name": "code-review-graph",
+  "version": "2.3.3",
+  "description": "Persistent incremental knowledge graph for token-efficient, context-aware code reviews. Node.js wrapper for the Python CLI.",
+  "main": "bin/cli.js",
+  "bin": {
+    "code-review-graph": "bin/cli.js",
+    "crg": "bin/cli.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/npm-postinstall.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tirth8205/code-review-graph.git"
+  },
+  "keywords": [
+    "code-review",
+    "knowledge-graph",
+    "tree-sitter",
+    "mcp",
+    "ai-agent",
+    "static-analysis"
+  ],
+  "author": "Tirth",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tirth8205/code-review-graph/issues"
+  },
+  "homepage": "https://github.com/tirth8205/code-review-graph#readme",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "code_review_graph",
+    "pyproject.toml",
+    "README.md",
+    "LICENSE",
+    "uv.lock",
+    "skills",
+    "hooks"
+  ]
+}

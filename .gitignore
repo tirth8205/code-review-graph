@@ -8,6 +8,7 @@ dist/
 build/
 *.egg
 .eggs/
+.gemini/
 
 # Virtual environments
 .venv/
