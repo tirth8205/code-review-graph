@@ -4,7 +4,8 @@ Wraps :func:`code_review_graph.visualization.export_graph_data` with the
 metadata block looptech-ai/understand-quickly expects, writes the result to
 ``<data_dir>/graph.json``, and optionally fires a ``repository_dispatch`` so
 the registry resyncs the entry. Gated on ``UNDERSTAND_QUICKLY_TOKEN`` — without
-it, the JSON is still written and the dispatch is skipped silently.
+it, the JSON is still written and the dispatch is skipped (an informational
+message is printed to stdout pointing at the nightly sync fallback).
 
 Protocol: https://github.com/looptech-ai/understand-quickly/blob/main/docs/integrations/protocol.md
 """
@@ -96,7 +97,7 @@ def build_publish_payload(store: GraphStore, repo_root: Path) -> dict:
 def write_publish_json(store: GraphStore, repo_root: Path, output_path: Path) -> Path:
     payload = build_publish_payload(store, repo_root)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, default=str))
+    output_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return output_path
 
 

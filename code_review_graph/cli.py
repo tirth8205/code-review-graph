@@ -1008,8 +1008,16 @@ def main() -> None:
             fmt = getattr(args, "format", "html") or "html"
             publish_to_uq = getattr(args, "publish_to_uq", False)
             # --publish-to-uq implies --format json, since the registry only
-            # consumes the JSON shape.
-            if publish_to_uq and fmt == "html":
+            # consumes the JSON shape. Force the override for any non-json
+            # format and warn when the user explicitly asked for something
+            # else (html is the default, so don't warn for it).
+            if publish_to_uq and fmt != "json":
+                if fmt != "html":
+                    print(
+                        f"warning: --publish-to-uq requires --format json; "
+                        f"ignoring --format {fmt}",
+                        file=sys.stderr,
+                    )
                 fmt = "json"
 
             if fmt == "json" or publish_to_uq:
