@@ -528,9 +528,19 @@ def main() -> None:
     )
     vis_cmd.add_argument(
         "--format",
-        choices=["html", "graphml", "cypher", "obsidian", "svg"],
+        choices=["html", "graphml", "cypher", "obsidian", "svg", "json"],
         default="html",
         help="Export format (default: html)",
+    )
+    vis_cmd.add_argument(
+        "--publish-to-uq",
+        action="store_true",
+        help=(
+            "After writing the graph, fire a repository_dispatch at "
+            "looptech-ai/understand-quickly so the registry resyncs this entry. "
+            "Implies --format json. Requires UNDERSTAND_QUICKLY_TOKEN; without "
+            "the token the JSON is still written and the dispatch is skipped."
+        ),
     )
     vis_cmd.add_argument(
         "--data-dir",
@@ -996,8 +1006,18 @@ def main() -> None:
 
             data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
+            publish_to_uq = getattr(args, "publish_to_uq", False)
+            # --publish-to-uq implies --format json, since the registry only
+            # consumes the JSON shape.
+            if publish_to_uq and fmt == "html":
+                fmt = "json"
 
-            if fmt == "graphml":
+            if fmt == "json" or publish_to_uq:
+                from .publish import publish as _publish_to_uq
+
+                out = data_dir / "graph.json"
+                _publish_to_uq(store, repo_root, out, publish_to_uq=publish_to_uq)
+            elif fmt == "graphml":
                 from .exports import export_graphml
 
                 out = data_dir / "graph.graphml"

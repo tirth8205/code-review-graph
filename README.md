@@ -256,6 +256,8 @@ code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
+code-review-graph visualize --format json      # Export as understand-quickly-compatible JSON
+code-review-graph visualize --publish-to-uq    # Publish to looptech-ai/understand-quickly registry
 code-review-graph wiki             # Generate markdown wiki from communities
 code-review-graph detect-changes   # Risk-scored change impact analysis
 code-review-graph register <path>  # Register repo in multi-repo registry
