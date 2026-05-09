@@ -11,7 +11,7 @@ from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
 from ..search import hybrid_search
-from ._common import _BUILTIN_CALL_NAMES, _get_store
+from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,8 @@ def get_impact_radius(
                 "total_impacted": 0,
             }
 
-        # Convert to absolute paths for graph lookup
-        abs_files = [str(root / f) for f in changed_files]
+        # Resolve user-facing paths to the file paths stored in the graph.
+        abs_files = _resolve_graph_file_paths(store, root, changed_files)
         result = store.get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results
         )
@@ -186,26 +186,29 @@ def query_graph(
                 "results": [], "edges": [],
             }
 
-        # Resolve target - try as-is, then as absolute path, then search
-        node = store.get_node(target)
-        if not node:
-            abs_target = str(root / target)
-            node = store.get_node(abs_target)
-        if not node:
-            # Search by name
-            candidates = store.search_nodes(target, limit=5)
-            if len(candidates) == 1:
-                node = candidates[0]
-                target = node.qualified_name
-            elif len(candidates) > 1:
-                return {
-                    "status": "ambiguous",
-                    "summary": (
-                        f"Multiple matches for '{target}'. "
-                        "Please use a qualified name."
-                    ),
-                    "candidates": [node_to_dict(c) for c in candidates],
-                }
+        # Resolve target - try as-is, then as absolute path, then search.
+        # file_summary targets are paths, so skip broad node search.
+        node = None
+        if pattern != "file_summary":
+            node = store.get_node(target)
+            if not node:
+                abs_target = str(root / target)
+                node = store.get_node(abs_target)
+            if not node:
+                # Search by name
+                candidates = store.search_nodes(target, limit=5)
+                if len(candidates) == 1:
+                    node = candidates[0]
+                    target = node.qualified_name
+                elif len(candidates) > 1:
+                    return {
+                        "status": "ambiguous",
+                        "summary": (
+                            f"Multiple matches for '{target}'. "
+                            "Please use a qualified name."
+                        ),
+                        "candidates": [node_to_dict(c) for c in candidates],
+                    }
 
         if not node and pattern != "file_summary":
             return {
@@ -303,10 +306,10 @@ def query_graph(
                         edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
-            abs_path = str(root / target)
-            file_nodes = store.get_nodes_by_file(abs_path)
-            for n in file_nodes:
-                results.append(node_to_dict(n))
+            graph_paths = _resolve_graph_file_paths(store, root, [target])
+            for graph_path in graph_paths:
+                for n in store.get_nodes_by_file(graph_path):
+                    results.append(node_to_dict(n))
 
         summary = (
             f"Found {len(results)} result(s) "

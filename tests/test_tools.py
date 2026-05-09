@@ -13,8 +13,11 @@ from code_review_graph.tools import (
     get_community_func,
     get_docs_section,
     get_flow,
+    get_impact_radius,
+    get_review_context,
     list_communities_func,
     list_flows,
+    query_graph,
 )
 
 
@@ -149,6 +152,93 @@ class TestTools:
         edges = self.store.search_edges_by_target_name("helper")
         assert len(edges) == 1
         assert edges[0].source_qualified == "/repo/main.py::process"
+
+
+def _seed_repo_relative_graph(root: Path) -> None:
+    """Seed graph data with cwd-relative paths, as eval repos currently do."""
+    graph_dir = root / ".code-review-graph"
+    graph_dir.mkdir()
+    store = GraphStore(graph_dir / "graph.db")
+    stored_path = "fixtures/sample_repo/src/app.py"
+    try:
+        store.upsert_node(NodeInfo(
+            kind="File",
+            name=stored_path,
+            file_path=stored_path,
+            line_start=1,
+            line_end=6,
+            language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function",
+            name="handle",
+            file_path=stored_path,
+            line_start=1,
+            line_end=3,
+            language="python",
+        ))
+        store.commit()
+    finally:
+        store.close()
+
+
+class TestGraphPathResolution:
+    def test_get_review_context_resolves_repo_relative_changed_file(self, tmp_path):
+        repo = tmp_path / "fixtures" / "sample_repo"
+        repo.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "src").mkdir()
+        (repo / "src" / "app.py").write_text(
+            "def handle():\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        _seed_repo_relative_graph(repo)
+
+        result = get_review_context(
+            changed_files=["src/app.py"],
+            repo_root=str(repo),
+            include_source=False,
+        )
+
+        changed = result["context"]["graph"]["changed_nodes"]
+        assert any(n["name"] == "handle" for n in changed)
+
+    def test_get_impact_radius_resolves_repo_relative_changed_file(self, tmp_path):
+        repo = tmp_path / "fixtures" / "sample_repo"
+        repo.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "src").mkdir()
+        (repo / "src" / "app.py").write_text(
+            "def handle():\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        _seed_repo_relative_graph(repo)
+
+        result = get_impact_radius(
+            changed_files=["src/app.py"],
+            repo_root=str(repo),
+        )
+
+        assert any(n["name"] == "handle" for n in result["changed_nodes"])
+
+    def test_file_summary_resolves_repo_relative_target(self, tmp_path):
+        repo = tmp_path / "fixtures" / "sample_repo"
+        repo.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "src").mkdir()
+        (repo / "src" / "app.py").write_text(
+            "def handle():\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        _seed_repo_relative_graph(repo)
+
+        result = query_graph(
+            pattern="file_summary",
+            target="src/app.py",
+            repo_root=str(repo),
+        )
+
+        assert any(n["name"] == "handle" for n in result["results"])
 
 
 class TestGetDocsSection:

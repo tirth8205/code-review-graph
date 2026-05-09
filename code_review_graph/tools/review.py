@@ -11,7 +11,7 @@ from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_staged_and_unstaged
-from ._common import _get_store
+from ._common import _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +65,8 @@ def get_review_context(
                 "context": {},
             }
 
-        abs_files = [str(root / f) for f in changed_files]
-        impact = store.get_impact_radius(abs_files, max_depth=max_depth)
+        graph_files = _resolve_graph_file_paths(store, root, changed_files)
+        impact = store.get_impact_radius(graph_files, max_depth=max_depth)
 
         if detail_level == "minimal":
             impacted_count = len(impact["impacted_nodes"])
