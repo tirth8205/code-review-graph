@@ -61,19 +61,25 @@ _BUILTIN_CALL_NAMES: set[str] = {
 def _validate_repo_root(path: "Path | str") -> Path:
     """Validate that a path is a plausible project root.
 
-    Ensures the path is an existing directory that contains a ``.git``
-    or ``.code-review-graph`` directory, preventing arbitrary file-system
-    traversal via the ``repo_root`` parameter.
+    Ensures the path is an existing directory that contains a ``.git``,
+    ``.svn``, or ``.code-review-graph`` directory, preventing arbitrary
+    file-system traversal via the ``repo_root`` parameter.
     """
     resolved = Path(path).resolve()
     if not resolved.is_dir():
         raise ValueError(
             f"repo_root is not an existing directory: {resolved}"
         )
-    if not (resolved / ".git").exists() and not (resolved / ".code-review-graph").exists():
+    has_vcs = (
+        (resolved / ".git").exists()
+        or (resolved / ".svn").exists()
+        or (resolved / ".code-review-graph").exists()
+    )
+    if not has_vcs:
         raise ValueError(
-            f"repo_root does not look like a project root (no .git or "
-            f".code-review-graph directory found): {resolved}"
+            f"repo_root does not look like a project root "
+            f"(no .git, .svn, or .code-review-graph directory found): "
+            f"{resolved}"
         )
     return resolved
 
