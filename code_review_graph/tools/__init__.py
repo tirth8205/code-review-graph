@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 27 tools:
+Exposes 29 tools:
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -29,6 +29,7 @@ Exposes 27 tools:
 26. get_surprising_connections - find unexpected architectural coupling
 27. get_suggested_questions - auto-generated review questions from graph analysis
 28. traverse_graph        - BFS/DFS traversal from best-matching node
+29. get_review_bundle     - single-round-trip complete review package
 """
 
 from __future__ import annotations
@@ -99,6 +100,7 @@ from .registry_tools import cross_repo_search_func, list_repos_func
 from .review import (
     detect_changes_func,
     get_affected_flows_func,
+    get_review_bundle,
     get_review_context,
 )
 
@@ -140,6 +142,7 @@ __all__ = [
     # review
     "detect_changes_func",
     "get_affected_flows_func",
+    "get_review_bundle",
     "get_review_context",
     # analysis_tools
     "get_bridge_nodes_func",

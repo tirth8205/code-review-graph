@@ -655,6 +655,55 @@ def get_flow_by_id(store: GraphStore, flow_id: int) -> Optional[dict]:
     }
 
 
+def summarize_flow(flow: dict) -> dict:
+    """Return a compact summary of a flow for token-efficient output.
+
+    Produces a narrative paragraph and structured bullet fields from a full
+    flow dict (as returned by :func:`get_flow_by_id`). Agents can use this
+    instead of the raw step list when they only need to know which flows are
+    affected and how critical they are.
+
+    Returns a dict with:
+    - ``flow_id``: database ID
+    - ``name``: entry point name
+    - ``entry_point``: qualified name of the entry point
+    - ``criticality``: float score (0.0-1.0)
+    - ``depth``: BFS depth of the flow
+    - ``node_count``: number of nodes in the path
+    - ``file_count``: number of distinct files touched
+    - ``summary``: one-paragraph narrative description
+    """
+    flow_id = flow.get("id")
+    name = flow.get("name", "unknown")
+    entry_point = flow.get("entry_point", "")
+    criticality = flow.get("criticality", 0.0)
+    depth = flow.get("depth", 0)
+    node_count = flow.get("node_count", 0)
+    file_count = flow.get("file_count", 0)
+
+    risk_label = (
+        "high" if criticality >= 0.7
+        else "medium" if criticality >= 0.4
+        else "low"
+    )
+    summary = (
+        f"Flow '{name}' (entry: {entry_point}) has {risk_label} criticality "
+        f"({criticality:.2f}): {node_count} nodes across {file_count} file(s) "
+        f"at depth {depth}."
+    )
+
+    return {
+        "flow_id": flow_id,
+        "name": name,
+        "entry_point": entry_point,
+        "criticality": criticality,
+        "depth": depth,
+        "node_count": node_count,
+        "file_count": file_count,
+        "summary": summary,
+    }
+
+
 def get_affected_flows(
     store: GraphStore,
     changed_files: list[str],

@@ -18,11 +18,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def list_repos_func() -> dict[str, Any]:
+def list_repos_func(detail_level: str = "standard") -> dict[str, Any]:
     """List all registered repositories.
 
     [REGISTRY] Returns the list of repositories registered in the global
     multi-repo registry at ``~/.code-review-graph/registry.json``.
+
+    Args:
+        detail_level: "standard" returns full repo metadata; "minimal"
+            returns only alias and path per repo.
 
     Returns:
         List of registered repos with paths and aliases.
@@ -32,6 +36,11 @@ def list_repos_func() -> dict[str, Any]:
     try:
         registry = Registry()
         repos = registry.list_repos()
+        if detail_level == "minimal":
+            repos = [
+                {k: r[k] for k in ("alias", "path") if k in r}
+                for r in repos
+            ]
         return {
             "status": "ok",
             "summary": f"{len(repos)} registered repository(ies)",
@@ -50,6 +59,7 @@ def cross_repo_search_func(
     query: str,
     kind: str | None = None,
     limit: int = 20,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Search across all registered repositories.
 
@@ -60,6 +70,8 @@ def cross_repo_search_func(
         query: Search query string.
         kind: Optional node kind filter (e.g. "Function", "Class").
         limit: Maximum results per repo (default: 20).
+        detail_level: "standard" returns full node data; "minimal" returns
+            only name, kind, repo, and file_path per result.
 
     Returns:
         Combined search results from all registered repos.
@@ -112,13 +124,20 @@ def cross_repo_search_func(
             key=lambda r: r.get("score", 0), reverse=True
         )
 
+        trimmed = all_results[:limit]
+        if detail_level == "minimal":
+            trimmed = [
+                {k: r[k] for k in ("name", "kind", "repo", "file_path") if k in r}
+                for r in trimmed
+            ]
+
         return {
             "status": "ok",
             "summary": (
                 f"Found {len(all_results)} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
             ),
-            "results": all_results[:limit],
+            "results": trimmed,
             "repos_searched": searched_repos,
         }
     except Exception as exc:

@@ -8,6 +8,7 @@ from typing import Any
 
 from ..changes import analyze_changes, parse_diff_ranges, parse_git_diff_ranges  # noqa: F401
 from ..flows import get_affected_flows as _get_affected_flows
+from ..flows import summarize_flow
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_staged_and_unstaged
@@ -286,6 +287,7 @@ def get_affected_flows_func(
     changed_files: list[str] | None = None,
     base: str = "HEAD~1",
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Find execution flows affected by changed files.
 
@@ -298,6 +300,9 @@ def get_affected_flows_func(
                        Auto-detected from git diff if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns full flow step data; "minimal" returns
+            a narrative summary paragraph and bullet IDs per flow, with the raw
+            step list moved to a ``detail`` key that agents can ignore.
 
     Returns:
         Affected flows sorted by criticality, with step details.
@@ -317,21 +322,42 @@ def get_affected_flows_func(
                 "total": 0,
             }
 
-        # Convert to absolute paths for graph lookup
         abs_files = [str(root / f) for f in changed_files]
         result = _get_affected_flows(store, abs_files)
 
         total = result["total"]
-        out = {
-            "status": "ok",
-            "summary": (
-                f"{total} flow(s) affected by changes "
-                f"in {len(changed_files)} file(s)"
-            ),
-            "changed_files": changed_files,
-            "affected_flows": result["affected_flows"],
-            "total": total,
-        }
+        flows = result["affected_flows"]
+
+        if detail_level == "minimal":
+            summaries = [summarize_flow(f) for f in flows]
+            high = sum(1 for s in summaries if s["criticality"] >= 0.7)
+            medium = sum(1 for s in summaries if 0.4 <= s["criticality"] < 0.7)
+            low = total - high - medium
+
+            narrative = (
+                f"{total} flow(s) affected by changes in {len(changed_files)} file(s): "
+                f"{high} high-criticality, {medium} medium, {low} low."
+            )
+            out: dict[str, Any] = {
+                "status": "ok",
+                "summary": narrative,
+                "changed_files": changed_files,
+                "total": total,
+                "affected_flows": summaries,
+                "detail": flows,
+            }
+        else:
+            out = {
+                "status": "ok",
+                "summary": (
+                    f"{total} flow(s) affected by changes "
+                    f"in {len(changed_files)} file(s)"
+                ),
+                "changed_files": changed_files,
+                "affected_flows": flows,
+                "total": total,
+            }
+
         out["_hints"] = generate_hints(
             "get_affected_flows", out, get_session()
         )
@@ -461,6 +487,197 @@ def detect_changes_func(
         result["_hints"] = generate_hints(
             "detect_changes", result, get_session()
         )
+        return result
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Tool (new): get_review_bundle  [REVIEW]
+# ---------------------------------------------------------------------------
+
+
+def get_review_bundle(
+    base: str = "HEAD~1",
+    changed_files: list[str] | None = None,
+    max_nodes: int = 20,
+    include_snippets: bool = True,
+    repo_root: str | None = None,
+) -> dict[str, Any]:
+    """Return a complete review package in a single round-trip.
+
+    [REVIEW] Collapses the typical 2-4 tool call review workflow into one
+    response by combining: risk-scored change analysis, one-hop caller/callee
+    subgraph for changed symbols, affected flow summaries, and a structured
+    review checklist.
+
+    Args:
+        base: Git ref to diff against (default: HEAD~1).
+        changed_files: Explicit list of changed file paths (relative to repo
+            root). Auto-detected from git diff if omitted.
+        max_nodes: Maximum neighbour nodes to include in the caller/callee
+            subgraph (default: 20). Higher values give more context at the
+            cost of tokens.
+        include_snippets: If True, include source snippets for changed
+            functions (default: True).
+        repo_root: Repository root path. Auto-detected if omitted.
+
+    Returns:
+        Bundle containing:
+        - ``risk_score`` / ``risk`` (high/medium/low)
+        - ``changed_functions`` list (with optional source snippets)
+        - ``subgraph`` — one-hop caller and callee names for each changed symbol
+        - ``affected_flows`` — compact flow summaries
+        - ``test_gaps`` — list of untested changed functions
+        - ``review_checklist`` — structured list of actionable items
+        - ``review_priorities`` — top 5 priority items
+    """
+    store, root = _get_store(repo_root)
+    try:
+        if changed_files is None:
+            changed_files = get_changed_files(root, base)
+            if not changed_files:
+                changed_files = get_staged_and_unstaged(root)
+
+        if not changed_files:
+            return {
+                "status": "ok",
+                "summary": "No changed files detected. Nothing to review.",
+                "risk_score": 0.0,
+                "risk": "none",
+                "changed_functions": [],
+                "subgraph": {},
+                "affected_flows": [],
+                "test_gaps": [],
+                "review_checklist": [],
+                "review_priorities": [],
+            }
+
+        abs_files = [str(root / f) for f in changed_files]
+
+        # 1. Risk-scored change analysis
+        diff_ranges = parse_diff_ranges(str(root), base)
+        abs_ranges: dict[str, list[tuple[int, int]]] = {
+            str(root / rel): ranges for rel, ranges in diff_ranges.items()
+        }
+        analysis = analyze_changes(
+            store,
+            changed_files=abs_files,
+            changed_ranges=abs_ranges if abs_ranges else None,
+            repo_root=str(root),
+            base=base,
+        )
+
+        risk_score: float = analysis.get("risk_score", 0.0)
+        risk = (
+            "high" if risk_score >= 0.7
+            else "medium" if risk_score >= 0.4
+            else "low"
+        )
+
+        changed_funcs: list[dict] = analysis.get("changed_functions", [])
+
+        # 2. Source snippets for changed functions
+        if include_snippets:
+            for func in changed_funcs:
+                fp = func.get("file_path")
+                ls = func.get("line_start")
+                le = func.get("line_end")
+                if fp and ls and le:
+                    file_path = Path(fp)
+                    if file_path.is_file():
+                        try:
+                            lines = file_path.read_text(errors="replace").splitlines()
+                            start = max(0, ls - 1)
+                            end = min(len(lines), le)
+                            func["source"] = "\n".join(
+                                f"{i + 1}: {lines[i]}" for i in range(start, end)
+                            )
+                        except (OSError, UnicodeDecodeError):
+                            func["source"] = "(could not read file)"
+
+        # 3. One-hop caller/callee subgraph for changed symbols
+        subgraph: dict[str, dict[str, list[str]]] = {}
+        nodes_added = 0
+        for func in changed_funcs:
+            if nodes_added >= max_nodes:
+                break
+            qn: str | None = func.get("qualified_name")
+            if not qn:
+                continue
+            callers: list[str] = []
+            callees: list[str] = []
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "CALLS":
+                    callers.append(e.source_qualified)
+                    nodes_added += 1
+                    if nodes_added >= max_nodes:
+                        break
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "CALLS":
+                    callees.append(e.target_qualified)
+                    nodes_added += 1
+                    if nodes_added >= max_nodes:
+                        break
+            if callers or callees:
+                subgraph[qn] = {"callers": callers, "callees": callees}
+
+        # 4. Affected flow summaries
+        flow_result = _get_affected_flows(store, abs_files)
+        flow_summaries = [summarize_flow(f) for f in flow_result["affected_flows"]]
+
+        # 5. Test gaps
+        test_gaps: list[dict] = analysis.get("test_gaps", [])
+
+        # 6. Review checklist
+        checklist: list[str] = []
+        if test_gaps:
+            checklist.append(
+                f"[ ] Add tests for {len(test_gaps)} untested changed function(s): "
+                + ", ".join(g.get("name", "") for g in test_gaps[:3])
+                + ("..." if len(test_gaps) > 3 else "")
+            )
+        if risk == "high":
+            checklist.append(
+                "[ ] High blast radius — verify all callers listed in subgraph "
+                "handle the new behaviour correctly."
+            )
+        if flow_summaries:
+            high_flows = [s for s in flow_summaries if s["criticality"] >= 0.7]
+            if high_flows:
+                checklist.append(
+                    f"[ ] {len(high_flows)} high-criticality flow(s) affected — "
+                    "perform end-to-end testing: "
+                    + ", ".join(s["name"] for s in high_flows[:3])
+                )
+        if not checklist:
+            checklist.append("[ ] Changes appear well-contained — standard review applies.")
+
+        priorities = analysis.get("review_priorities", [])[:5]
+
+        summary = (
+            f"Review bundle: {len(changed_files)} file(s) changed, "
+            f"risk={risk} ({risk_score:.2f}), "
+            f"{len(flow_summaries)} flow(s) affected, "
+            f"{len(test_gaps)} test gap(s)."
+        )
+
+        result: dict[str, Any] = {
+            "status": "ok",
+            "summary": summary,
+            "risk_score": risk_score,
+            "risk": risk,
+            "changed_files": changed_files,
+            "changed_functions": changed_funcs,
+            "subgraph": subgraph,
+            "affected_flows": flow_summaries,
+            "test_gaps": test_gaps,
+            "review_checklist": checklist,
+            "review_priorities": priorities,
+        }
+        result["_hints"] = generate_hints("detect_changes", result, get_session())
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

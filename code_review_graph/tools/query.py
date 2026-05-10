@@ -430,11 +430,17 @@ def semantic_search_nodes(
 # ---------------------------------------------------------------------------
 
 
-def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
+def list_graph_stats(
+    repo_root: str | None = None,
+    detail_level: str = "standard",
+) -> dict[str, Any]:
     """Get aggregate statistics about the knowledge graph.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns full breakdown by kind; "minimal"
+            returns only total_nodes, total_edges, files_count, and
+            last_updated.
 
     Returns:
         Total nodes, edges, breakdown by kind, languages, and last update time.
@@ -442,6 +448,28 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
     store, root = _get_store(repo_root)
     try:
         stats = store.get_stats()
+
+        emb_count = 0
+        emb_store = EmbeddingStore(get_db_path(root))
+        try:
+            emb_count = emb_store.count()
+        finally:
+            emb_store.close()
+
+        if detail_level == "minimal":
+            summary = (
+                f"{stats.total_nodes} nodes, {stats.total_edges} edges"
+                f" across {stats.files_count} files"
+                + (f" ({', '.join(stats.languages[:3])})" if stats.languages else "")
+            )
+            return {
+                "status": "ok",
+                "summary": summary,
+                "total_nodes": stats.total_nodes,
+                "total_edges": stats.total_edges,
+                "files_count": stats.files_count,
+                "last_updated": stats.last_updated,
+            }
 
         summary_parts = [
             f"Graph statistics for {root.name}:",
@@ -459,19 +487,8 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
         summary_parts.append("Edges by kind:")
         for kind, count in sorted(stats.edges_by_kind.items()):
             summary_parts.append(f"  {kind}: {count}")
-
-        # Add embedding info if available
-        emb_store = EmbeddingStore(get_db_path(root))
-        try:
-            emb_count = emb_store.count()
-            summary_parts.append("")
-            summary_parts.append(f"Embeddings: {emb_count} nodes embedded")
-            if not emb_store.available:
-                summary_parts.append(
-                    "  (install sentence-transformers for semantic search)"
-                )
-        finally:
-            emb_store.close()
+        summary_parts.append("")
+        summary_parts.append(f"Embeddings: {emb_count} nodes embedded")
 
         return {
             "status": "ok",
@@ -500,6 +517,7 @@ def find_large_functions(
     file_path_pattern: str | None = None,
     limit: int = 50,
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -512,6 +530,8 @@ def find_large_functions(
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results (default: 50).
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns full node data; "minimal" returns
+            only name, kind, line_count, and relative_path per result.
 
     Returns:
         Oversized nodes with line counts, ordered largest first.
@@ -533,7 +553,6 @@ def find_large_functions(
                 if n.line_start and n.line_end
                 else 0
             )
-            # Make file_path relative for readability
             try:
                 d["relative_path"] = str(Path(n.file_path).relative_to(root))
             except ValueError:
@@ -553,6 +572,19 @@ def find_large_functions(
             )
         if len(results) > 10:
             summary_parts.append(f"  ... and {len(results) - 10} more")
+
+        if detail_level == "minimal":
+            minimal = [
+                {k: r[k] for k in ("name", "kind", "line_count", "relative_path") if k in r}
+                for r in results
+            ]
+            return {
+                "status": "ok",
+                "summary": "\n".join(summary_parts),
+                "total_found": len(results),
+                "min_lines": min_lines,
+                "results": minimal,
+            }
 
         return {
             "status": "ok",

@@ -43,6 +43,7 @@ from .tools import (
     get_impact_radius,
     get_knowledge_gaps_func,
     get_minimal_context,
+    get_review_bundle,
     get_review_context,
     get_suggested_questions_func,
     get_surprising_connections_func,
@@ -355,6 +356,7 @@ async def embed_graph_tool(
 @mcp.tool()
 def list_graph_stats_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
 
@@ -363,8 +365,10 @@ def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns breakdown by kind; "minimal" returns
+            total_nodes, total_edges, files_count, and last_updated only.
     """
-    return list_graph_stats(repo_root=_resolve_repo_root(repo_root))
+    return list_graph_stats(repo_root=_resolve_repo_root(repo_root), detail_level=detail_level)
 
 
 @mcp.tool()
@@ -397,6 +401,7 @@ def find_large_functions_tool(
     file_path_pattern: Optional[str] = None,
     limit: int = 50,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -409,10 +414,12 @@ def find_large_functions_tool(
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full node data, "minimal" for
+            name/kind/line_count/relative_path only.
     """
     return find_large_functions(
         min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=_resolve_repo_root(repo_root),
+        limit=limit, repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
 
 
@@ -475,6 +482,7 @@ def get_affected_flows_tool(
     changed_files: Optional[list[str]] = None,
     base: str = "HEAD~1",
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find execution flows affected by changed files.
 
@@ -486,9 +494,12 @@ def get_affected_flows_tool(
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns raw flow data; "minimal" returns a
+            narrative summary with bullet IDs — raw steps moved to a "detail" key.
     """
     return get_affected_flows_func(
-        changed_files=changed_files, base=base, repo_root=_resolve_repo_root(repo_root),
+        changed_files=changed_files, base=base,
+        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
 
 
@@ -525,6 +536,7 @@ def get_community_tool(
     community_id: Optional[int] = None,
     include_members: bool = False,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Get detailed information about a single code community.
 
@@ -539,16 +551,19 @@ def get_community_tool(
         community_id: Database ID of the community.
         include_members: Include full member node details. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full metadata, "minimal" for name/size/cohesion/language.
     """
     return get_community_func(
         community_name=community_name, community_id=community_id,
         include_members=include_members, repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
     )
 
 
 @mcp.tool()
 def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -558,8 +573,12 @@ def get_architecture_overview_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full overview with edges, "minimal" for
+            community names, counts, and warnings only.
     """
-    return get_architecture_overview_func(repo_root=_resolve_repo_root(repo_root))
+    return get_architecture_overview_func(
+        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
+    )
 
 
 @mcp.tool()
@@ -599,6 +618,43 @@ async def detect_changes_tool(
 
 
 @mcp.tool()
+async def get_review_bundle_tool(
+    base: str = "HEAD~1",
+    changed_files: Optional[list[str]] = None,
+    max_nodes: int = 20,
+    include_snippets: bool = True,
+    repo_root: Optional[str] = None,
+) -> dict:
+    """Return a complete review package in a single round-trip.
+
+    Collapses the typical 2-4 tool call review workflow into one response.
+    Combines risk-scored change analysis, one-hop caller/callee subgraph
+    for changed symbols, affected flow summaries, and a structured checklist.
+
+    Use this instead of calling detect_changes + get_affected_flows + query_graph
+    separately — saves 60-80% of review round-trips.
+
+    Offloaded to a thread via ``asyncio.to_thread`` — runs git diff subprocesses
+    and BFS traversals that can take several seconds on large repos.
+
+    Args:
+        base: Git ref to diff against. Default: HEAD~1.
+        changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
+        max_nodes: Maximum neighbour nodes in the caller/callee subgraph. Default: 20.
+        include_snippets: Include source code snippets for changed functions. Default: True.
+        repo_root: Repository root path. Auto-detected if omitted.
+    """
+    return await asyncio.to_thread(
+        get_review_bundle,
+        base=base,
+        changed_files=changed_files,
+        max_nodes=max_nodes,
+        include_snippets=include_snippets,
+        repo_root=_resolve_repo_root(repo_root),
+    )
+
+
+@mcp.tool()
 def refactor_tool(
     mode: str = "rename",
     old_name: Optional[str] = None,
@@ -606,6 +662,7 @@ def refactor_tool(
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Graph-powered refactoring operations.
 
@@ -627,10 +684,13 @@ def refactor_tool(
         kind: (dead_code) Optional filter: Function or Class.
         file_pattern: (dead_code) Filter by file path substring.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full results, "minimal" caps dead_code/suggest
+            to 10 items with name/kind only.
     """
     return refactor_func(
         mode=mode, old_name=old_name, new_name=new_name,
         kind=kind, file_pattern=file_pattern, repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
     )
 
 
@@ -713,6 +773,7 @@ def get_wiki_page_tool(
 def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
 
@@ -722,9 +783,10 @@ def get_hub_nodes_tool(
     Args:
         top_n: Number of top hubs to return. Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full hub data, "minimal" for name/kind/degree only.
     """
     return get_hub_nodes_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n, detail_level=detail_level,
     )
 
 
@@ -732,6 +794,7 @@ def get_hub_nodes_tool(
 def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
 
@@ -742,15 +805,17 @@ def get_bridge_nodes_tool(
     Args:
         top_n: Number of top bridges to return. Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full data, "minimal" for name/kind/centrality only.
     """
     return get_bridge_nodes_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n, detail_level=detail_level,
     )
 
 
 @mcp.tool()
 def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Identify structural weaknesses in the codebase graph.
 
@@ -760,9 +825,10 @@ def get_knowledge_gaps_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full gap details, "minimal" for counts only.
     """
     return get_knowledge_gaps_func(
-        repo_root=_resolve_repo_root(repo_root),
+        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
 
 
@@ -770,6 +836,7 @@ def get_knowledge_gaps_tool(
 def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
 
@@ -780,15 +847,17 @@ def get_surprising_connections_tool(
     Args:
         top_n: Number of top surprises to return. Default: 15.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full edge data, "minimal" for source/target/score only.
     """
     return get_surprising_connections_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root), top_n=top_n, detail_level=detail_level,
     )
 
 
 @mcp.tool()
 def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -798,9 +867,10 @@ def get_suggested_questions_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full question data, "minimal" for top 5 text + counts.
     """
     return get_suggested_questions_func(
-        repo_root=_resolve_repo_root(repo_root),
+        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
 
 
@@ -835,13 +905,16 @@ def traverse_graph_tool(
 
 
 @mcp.tool()
-def list_repos_tool() -> dict:
+def list_repos_tool(detail_level: str = "standard") -> dict:
     """List all registered repositories in the multi-repo registry.
 
     Returns the list of repos registered at ~/.code-review-graph/registry.json.
     Use the CLI 'register' command to add repos.
+
+    Args:
+        detail_level: "standard" for full metadata, "minimal" for alias and path only.
     """
-    return list_repos_func()
+    return list_repos_func(detail_level=detail_level)
 
 
 @mcp.tool()
@@ -849,6 +922,7 @@ def cross_repo_search_tool(
     query: str,
     kind: Optional[str] = None,
     limit: int = 20,
+    detail_level: str = "standard",
 ) -> dict:
     """Search for code entities across all registered repositories.
 
@@ -859,8 +933,9 @@ def cross_repo_search_tool(
         query: Search string to match against node names.
         kind: Optional filter: File, Class, Function, Type, or Test.
         limit: Maximum results per repo. Default: 20.
+        detail_level: "standard" for full node data, "minimal" for name/kind/repo/file only.
     """
-    return cross_repo_search_func(query=query, kind=kind, limit=limit)
+    return cross_repo_search_func(query=query, kind=kind, limit=limit, detail_level=detail_level)
 
 
 @mcp.prompt()

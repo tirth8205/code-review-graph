@@ -27,6 +27,7 @@ def refactor_func(
     kind: str | None = None,
     file_pattern: str | None = None,
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Unified refactoring entry point.
 
@@ -43,6 +44,8 @@ def refactor_func(
         kind: (dead_code mode) Optional node kind filter.
         file_pattern: (dead_code mode) Optional file path substring filter.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns full data; "minimal" caps dead_code
+            and suggest lists to 10 items with name/kind/file only.
 
     Returns:
         Mode-specific results dict.
@@ -92,12 +95,26 @@ def refactor_func(
             dead = find_dead_code(
                 store, kind=kind, file_pattern=file_pattern
             )
-            result = {
-                "status": "ok",
-                "summary": f"Found {len(dead)} dead code symbol(s).",
-                "dead_code": dead,
-                "total": len(dead),
-            }
+            total = len(dead)
+            if detail_level == "minimal":
+                dead = [
+                    {k: d[k] for k in ("name", "kind", "file_path") if k in d}
+                    for d in dead[:10]
+                ]
+                result = {
+                    "status": "ok",
+                    "summary": f"Found {total} dead code symbol(s) (showing top 10).",
+                    "dead_code": dead,
+                    "total": total,
+                    "omitted": max(0, total - 10),
+                }
+            else:
+                result = {
+                    "status": "ok",
+                    "summary": f"Found {total} dead code symbol(s).",
+                    "dead_code": dead,
+                    "total": total,
+                }
             result["_hints"] = generate_hints(
                 "refactor", result, get_session()
             )
@@ -105,15 +122,26 @@ def refactor_func(
 
         else:  # suggest
             suggestions = suggest_refactorings(store)
-            result = {
-                "status": "ok",
-                "summary": (
-                    f"Generated {len(suggestions)} "
-                    "refactoring suggestion(s)."
-                ),
-                "suggestions": suggestions,
-                "total": len(suggestions),
-            }
+            total = len(suggestions)
+            if detail_level == "minimal":
+                suggestions = [
+                    {k: s[k] for k in ("name", "kind", "suggestion") if k in s}
+                    for s in suggestions[:10]
+                ]
+                result = {
+                    "status": "ok",
+                    "summary": f"Generated {total} refactoring suggestion(s) (showing top 10).",
+                    "suggestions": suggestions,
+                    "total": total,
+                    "omitted": max(0, total - 10),
+                }
+            else:
+                result = {
+                    "status": "ok",
+                    "summary": f"Generated {total} refactoring suggestion(s).",
+                    "suggestions": suggestions,
+                    "total": total,
+                }
             result["_hints"] = generate_hints(
                 "refactor", result, get_session()
             )
