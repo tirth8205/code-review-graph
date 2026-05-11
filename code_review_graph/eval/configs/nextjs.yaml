@@ -5,12 +5,12 @@ language: python
 size_category: medium
 
 test_commits:
-  - sha: 528801f841e519567ef54d6e52e9b9831d162e1b
-    description: "feat: add multi-platform MCP server installation support"
-    changed_files: 3
-  - sha: 84bde35459c52e1e0c4b25c6c4799743021e0fc7
-    description: "feat: add Google Antigravity platform support for MCP install"
-    changed_files: 2
+  - sha: 91083cb3b48229dd9d69c5e5c63cb59ca8a46822
+    description: "feat: community detection, flow analysis, and dead code improvements (#249)"
+    changed_files: 11
+  - sha: e4e9f0a1b30ba05b82a4cd17e5e00b0edd9adfd5
+    description: "fix: 11 open bugs post-v2.2.3 (parser, ignores, fastmcp CVE, Windows, VS Code) (#222)"
+    changed_files: 22
 
 entry_points:
   - "code_review_graph/cli.py::cli"

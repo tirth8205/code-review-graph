@@ -5,15 +5,15 @@ language: go
 size_category: small
 
 test_commits:
-  - sha: 052d1a79aafe3f04078a2716f8e77d4340308383
-    description: "feat(render): add PDF renderer and tests"
-    changed_files: 5
-  - sha: 472d086af2acd924cb4b9d7be0525f7d790f69bc
-    description: "fix(tree): panic in findCaseInsensitivePathRec with RedirectFixedPath"
-    changed_files: 2
-  - sha: 5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a
-    description: "fix(render): write content length in Data.Render"
-    changed_files: 2
+  - sha: 0a192fb0fa0127eac08cf24c624b92048ed823f6
+    description: "Tons of unit tests"
+    changed_files: 26
+  - sha: ac0ad2fed865d40a0adc1ac3ccaadc3acff5db4b
+    description: "Improves unit tests"
+    changed_files: 14
+  - sha: 0feaf8cbd80da13be634b13fd28bfb2d6e357839
+    description: "Split examples to alone repo (#1776)"
+    changed_files: 64
 
 entry_points:
   - "gin.go::Engine"

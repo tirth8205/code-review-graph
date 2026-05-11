@@ -5,12 +5,12 @@ language: python
 size_category: small
 
 test_commits:
-  - sha: fbb6f0bc4c60a0bada0e03c3480d0ccf30a3c1df
-    description: "all teardown callbacks are called despite errors"
+  - sha: c2705ffd9ce1dc8476cb29eaf5ff5d4c719852d9
+    description: "merge app and request context"
+    changed_files: 36
+  - sha: 0ec7f713d679ceed2c605e62ac5d38d579f29fa0
+    description: "Split the App and Blueprint into Sansio and IO parts"
     changed_files: 10
-  - sha: a29f88ce6f2f9843bd6fcbbfce1390a2071965d6
-    description: "document that headers must be set before streaming"
-    changed_files: 4
 
 entry_points:
   - "src/flask/app.py::Flask.wsgi_app"

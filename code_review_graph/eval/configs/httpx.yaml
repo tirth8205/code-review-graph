@@ -5,12 +5,12 @@ language: python
 size_category: small
 
 test_commits:
-  - sha: ae1b9f66238f75ced3ced5e4485408435de10768
-    description: "Expose FunctionAuth in __all__"
-    changed_files: 3
-  - sha: b55d4635701d9dc22928ee647880c76b078ba3f2
-    description: "Upgrade Python type checker mypy"
-    changed_files: 4
+  - sha: 8e36f2bc685dfbe43cd7503bc1c422a6ed6e05a5
+    description: "Introduce new SSLContext API & escalate deprecations. (#3319)"
+    changed_files: 29
+  - sha: ee37a762ef6378ed16681a3452f494a5640d98de
+    description: "Reintroduce sync API. (#735)"
+    changed_files: 18
 
 entry_points:
   - "httpx/_client.py::Client"
