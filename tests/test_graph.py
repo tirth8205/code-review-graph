@@ -318,3 +318,75 @@ class TestImpactRadiusSql:
         assert result["changed_nodes"] == []
         assert result["impacted_nodes"] == []
         assert result["total_impacted"] == 0
+
+
+class TestGetTransitiveTestsFrontierCap:
+    """Regression tests for O(N*M) query explosion in get_transitive_tests."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name: str, path: str) -> str:
+        node = NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=5, language="python",
+        )
+        self.store.upsert_node(node)
+        return f"{path}::{name}"
+
+    def _add_calls_edge(self, source_qn: str, target_qn: str) -> None:
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=source_qn, target=target_qn,
+            file_path=source_qn.split("::")[0], line=1,
+        ))
+
+    def test_frontier_capped_limits_sql_queries(self):
+        """Hub function with 200 callees must not issue 200 TESTED_BY queries."""
+        hub_qn = self._add_func("hub", "/t/hub.py")
+        for i in range(200):
+            callee_qn = self._add_func(f"callee_{i}", "/t/callee.py")
+            self._add_calls_edge(hub_qn, callee_qn)
+        self.store.commit()
+
+        query_count = 0
+
+        def _trace(stmt: str) -> None:
+            nonlocal query_count
+            query_count += 1
+
+        self.store._conn.set_trace_callback(_trace)
+        self.store.get_transitive_tests(hub_qn, max_frontier=50)
+        self.store._conn.set_trace_callback(None)
+
+        # Without cap: 200 callee TESTED_BY queries + overhead = ~204
+        # With cap of 50: ~54 queries max
+        assert query_count <= 60, f"Expected ≤60 queries with frontier cap, got {query_count}"
+
+    def test_uncapped_small_frontier_unchanged(self):
+        """Small fan-out (< cap) returns same results regardless of cap."""
+        hub_qn = self._add_func("hub", "/t/hub.py")
+        test_qn = self._add_func("test_hub", "/t/test_hub.py")
+        for i in range(5):
+            callee_qn = self._add_func(f"callee_{i}", "/t/callee.py")
+            self._add_calls_edge(hub_qn, callee_qn)
+            # Only callee_2 has a test
+            if i == 2:
+                self.store.upsert_edge(EdgeInfo(
+                    kind="TESTED_BY", source=test_qn, target=callee_qn,
+                    file_path="/t/test_hub.py", line=1,
+                ))
+        self.store.commit()
+
+        results_default = self.store.get_transitive_tests(hub_qn)
+        results_capped = self.store.get_transitive_tests(hub_qn, max_frontier=50)
+
+        indirect_default = [r for r in results_default if r["indirect"]]
+        indirect_capped = [r for r in results_capped if r["indirect"]]
+        assert len(indirect_default) == 1
+        assert len(indirect_capped) == 1
+        assert indirect_default[0]["name"] == indirect_capped[0]["name"]

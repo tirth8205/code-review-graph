@@ -315,6 +315,12 @@ def analyze_changes(
         if n.kind in ("Function", "Test", "Class")
     ]
 
+    # Cap to prevent O(N*M) query explosion on large PRs.
+    _max_funcs = int(os.environ.get("CRG_MAX_CHANGED_FUNCS", "500"))
+    funcs_truncated = len(changed_funcs) > _max_funcs
+    if funcs_truncated:
+        changed_funcs = changed_funcs[:_max_funcs]
+
     # Compute per-node risk scores.
     node_risks: list[dict[str, Any]] = []
     for node in changed_funcs:
@@ -359,6 +365,11 @@ def analyze_changes(
     if test_gaps:
         gap_names = [g["name"] for g in test_gaps[:5]]
         summary_parts.append(f"  - Untested: {', '.join(gap_names)}")
+    if funcs_truncated:
+        summary_parts.append(
+            f"  - Warning: analysis capped at {_max_funcs} functions "
+            f"(set CRG_MAX_CHANGED_FUNCS to adjust)"
+        )
 
     return {
         "summary": "\n".join(summary_parts),
@@ -367,4 +378,5 @@ def analyze_changes(
         "affected_flows": affected["affected_flows"],
         "test_gaps": test_gaps,
         "review_priorities": review_priorities,
+        "functions_truncated": funcs_truncated,
     }

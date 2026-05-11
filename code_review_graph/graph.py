@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -366,7 +367,7 @@ class GraphStore:
         return [self._row_to_edge(r) for r in rows]
 
     def get_transitive_tests(
-        self, qualified_name: str, max_depth: int = 1,
+        self, qualified_name: str, max_depth: int = 1, max_frontier: int | None = None,
     ) -> list[dict]:
         """Find tests covering a node, including indirect (transitive) coverage.
 
@@ -375,7 +376,13 @@ class GraphStore:
            then collect TESTED_BY edges on each callee.
 
         Returns a list of dicts with node fields plus ``indirect: bool``.
+
+        ``max_frontier`` caps the CALLS fan-out per BFS hop to prevent O(N*M)
+        query explosion on hub functions in large graphs. Defaults to
+        ``CRG_MAX_TRANSITIVE_FRONTIER`` env var (50 if unset).
         """
+        if max_frontier is None:
+            max_frontier = int(os.environ.get("CRG_MAX_TRANSITIVE_FRONTIER", "50"))
         conn = self._conn
         seen: set[str] = set()
         results: list[dict] = []
@@ -447,6 +454,8 @@ class GraphStore:
                     (qn,),
                 ).fetchall():
                     next_frontier.add(row["target_qualified"])
+            if len(next_frontier) > max_frontier:
+                next_frontier = set(list(next_frontier)[:max_frontier])
             for callee in next_frontier:
                 for row in conn.execute(
                     "SELECT source_qualified FROM edges "

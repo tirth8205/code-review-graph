@@ -473,3 +473,45 @@ class TestChanges:
             assert "risk_score" in result
             assert "test_gaps" in result
             assert "review_priorities" in result
+
+
+class TestAnalyzeChangesFunctionCap:
+    """Regression tests for O(N) slowdown when PR touches many functions."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_funcs(self, count: int, path: str = "app.py") -> None:
+        for i in range(count):
+            node = NodeInfo(
+                kind="Function", name=f"func_{i}", file_path=path,
+                line_start=i * 10 + 1, line_end=i * 10 + 9, language="python",
+            )
+            self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+
+    def test_changed_funcs_capped(self, monkeypatch):
+        """analyze_changes processes at most CRG_MAX_CHANGED_FUNCS functions."""
+        monkeypatch.setenv("CRG_MAX_CHANGED_FUNCS", "10")
+        self._add_funcs(20)
+
+        result = analyze_changes(self.store, changed_files=["app.py"])
+
+        assert len(result["changed_functions"]) == 10
+        assert result["functions_truncated"] is True
+        assert "CRG_MAX_CHANGED_FUNCS" in result["summary"]
+
+    def test_no_truncation_below_cap(self, monkeypatch):
+        """analyze_changes processes all functions when count is below cap."""
+        monkeypatch.setenv("CRG_MAX_CHANGED_FUNCS", "50")
+        self._add_funcs(5)
+
+        result = analyze_changes(self.store, changed_files=["app.py"])
+
+        assert len(result["changed_functions"]) == 5
+        assert result["functions_truncated"] is False
