@@ -9,11 +9,15 @@ by default).
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
 
+from .graph import GraphStore
+from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
     architecture_map_prompt,
     debug_issue_prompt,
@@ -43,7 +47,6 @@ from .tools import (
     get_suggested_questions_func,
     get_surprising_connections_func,
     get_wiki_page_func,
-    traverse_graph_func,
     list_communities_func,
     list_flows,
     list_graph_stats,
@@ -52,7 +55,10 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
+    traverse_graph_func,
 )
+
+logger = logging.getLogger(__name__)
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
@@ -68,9 +74,9 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
        (captured in ``_default_repo_root``).
     3. None — the underlying impl will fall back to the server's cwd.
 
-    Previously, only ``get_docs_section_tool`` consulted ``_default_repo_root``,
-    so ``serve --repo <X>`` had no effect for the other 21 tools. See: #222
-    follow-up.
+    All MCP tools that accept ``repo_root`` should use this helper so
+    ``serve --repo <X>`` applies consistently, including
+    ``get_docs_section_tool``. See: #222.
     """
     return repo_root if repo_root else _default_repo_root
 
@@ -378,7 +384,10 @@ def get_docs_section_tool(
         section_name: The section to retrieve (e.g. "review-delta", "usage").
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_docs_section(section_name=section_name, repo_root=repo_root)
+    return get_docs_section(
+        section_name=section_name,
+        repo_root=_resolve_repo_root(repo_root),
+    )
 
 
 @mcp.tool()
@@ -908,8 +917,73 @@ def pre_merge_check(base: str = "HEAD~1") -> list[dict]:
     return pre_merge_check_prompt(base=base)
 
 
+def _apply_tool_filter(tools: str | None = None) -> None:
+    """Remove tools not listed in the allow-list.
+
+    Accepts a comma-separated string of tool names to keep.  When set,
+    every registered MCP tool whose name is **not** in the list is
+    removed via ``FastMCP.remove_tool()``.
+
+    The allow-list can be supplied in two ways (first match wins):
+
+    1. ``tools`` argument (from ``serve --tools ...``).
+    2. ``CRG_TOOLS`` environment variable.
+
+    When neither is set, all tools remain available.
+
+    This is useful for token-constrained environments: CRG exposes 28+
+    tools by default (~8k description tokens per LLM turn).  Filtering
+    to a working set of 5-10 tools can reduce overhead by 70-85%.
+
+    Example::
+
+        # via CLI
+        code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool
+
+        # via env var
+        CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool
+    """
+    import asyncio
+    import os
+
+    raw = tools or os.environ.get("CRG_TOOLS")
+    if not raw:
+        return
+    allowed = {t.strip() for t in raw.split(",") if t.strip()}
+    if not allowed:
+        return
+    # FastMCP >=3 exposes tool enumeration via the async ``list_tools``
+    # method.  ``_apply_tool_filter`` is typically called from
+    # ``main()`` before the MCP event loop starts, but tests may invoke
+    # it from within a running event loop — in that case ``asyncio.run``
+    # raises ``RuntimeError``.  Fall back to running the coroutine on a
+    # dedicated short-lived loop in a worker thread.  Earlier code path
+    # relied on ``mcp._tool_manager._tools`` which is a private
+    # attribute that was removed in fastmcp>=3.0.
+    def _list_tool_names() -> list[str]:
+        coro_factory = mcp.list_tools
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return [t.name for t in asyncio.run(coro_factory())]
+        import concurrent.futures
+
+        def _runner() -> list[str]:
+            return [t.name for t in asyncio.run(coro_factory())]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_runner).result()
+
+    for name in _list_tool_names():
+        if name not in allowed:
+            mcp.local_provider.remove_tool(name)
+
+
+
 def main(
     repo_root: str | None = None,
+    tools: str | None = None,
+    auto_watch: bool = False,
     *,
     transport: str = "stdio",
     host: str | None = None,
@@ -926,26 +1000,45 @@ def main(
     See: #46, #136
 
     Args:
-        repo_root: Optional default repository root for tools.
+        repo_root: Default repository root for all tool calls.
+        tools: Comma-separated list of tool names to expose.
+            Falls back to ``CRG_TOOLS`` env var.  When unset, all
+            tools are available.
+        auto_watch: Start filesystem watcher in a background daemon thread
+            while the MCP server runs.
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
     """
     global _default_repo_root
-    _default_repo_root = repo_root
+    root = Path(repo_root) if repo_root else find_project_root()
+    _default_repo_root = str(root)
+    _apply_tool_filter(tools)
+
+    watch_store: GraphStore | None = None
+    if auto_watch:
+        watch_store = GraphStore(get_db_path(root))
+        thread = start_watch_thread(root, watch_store, daemon=True)
+        if thread is None:
+            logger.warning("Auto-watch was requested but could not be started")
+
     if sys.platform == "win32":
-        import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    if transport == "stdio":
-        # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
-        # notices corrupt the handshake stream on clients like Codex CLI.
-        mcp.run(transport="stdio", show_banner=False)
-    elif transport == "streamable-http":
-        if host is None or port is None:
-            raise ValueError("streamable-http transport requires host and port")
-        mcp.run(transport="streamable-http", host=host, port=port)
-    else:
-        raise ValueError(f"unsupported transport: {transport!r}")
+
+    try:
+        if transport == "stdio":
+            # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
+            # notices corrupt the handshake stream on clients like Codex CLI.
+            mcp.run(transport="stdio", show_banner=False)
+        elif transport == "streamable-http":
+            if host is None or port is None:
+                raise ValueError("streamable-http transport requires host and port")
+            mcp.run(transport="streamable-http", host=host, port=port)
+        else:
+            raise ValueError(f"unsupported transport: {transport!r}")
+    finally:
+        if watch_store is not None:
+            watch_store.close()
 
 
 if __name__ == "__main__":

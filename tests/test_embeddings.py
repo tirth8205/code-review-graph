@@ -334,6 +334,30 @@ class TestMiniMaxEmbeddingProvider:
             with pytest.raises(RuntimeError, match="invalid api key"):
                 provider.embed_query("test")
 
+    def test_embed_sends_user_agent_header(self):
+        # urllib's default UA ("Python-urllib/X.Y") is rejected by some
+        # Cloudflare-fronted gateways with HTTP 403 / error 1010. CRG must
+        # send an explicit User-Agent so requests get through.
+        provider = MiniMaxEmbeddingProvider(api_key="test-key")
+        mock_response = json.dumps({
+            "vectors": [[0.1] * 1536],
+            "total_tokens": 1,
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+        }).encode("utf-8")
+
+        mock_resp_obj = MagicMock()
+        mock_resp_obj.read.return_value = mock_response
+        mock_resp_obj.__enter__ = MagicMock(return_value=mock_resp_obj)
+        mock_resp_obj.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=mock_resp_obj) as mock_urlopen:
+            provider.embed_query("hello")
+
+        req = mock_urlopen.call_args[0][0]
+        ua = req.headers.get("User-agent", "")
+        assert ua.startswith("code-review-graph/")
+        assert "github.com/tirth8205/code-review-graph" in ua
+
 
 class TestGetProviderMiniMax:
     """Tests for get_provider() with MiniMax."""
@@ -464,6 +488,12 @@ class TestOpenAIEmbeddingProvider:
         assert "dimensions" not in payload  # not pinned by default
         assert req.headers["Authorization"] == "Bearer secret-key"
         assert req.headers["Content-type"] == "application/json"
+        # Cloudflare-fronted gateways (e.g. Fireworks) reject the urllib
+        # default UA with HTTP 403 / error 1010. See _USER_AGENT in
+        # embeddings.py.
+        ua = req.headers.get("User-agent", "")
+        assert ua.startswith("code-review-graph/")
+        assert "github.com/tirth8205/code-review-graph" in ua
         assert req.full_url == "http://127.0.0.1:3000/v1/embeddings"
 
     def test_explicit_dimension_forwarded_in_payload(self):

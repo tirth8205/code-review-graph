@@ -15,7 +15,7 @@ from ._common import _get_store
 
 
 def get_hub_nodes_func(
-    repo_root: str = "",
+    repo_root: str | None = None,
     top_n: int = 10,
 ) -> dict[str, Any]:
     """Find the most connected nodes in the codebase graph.
@@ -25,7 +25,7 @@ def get_hub_nodes_func(
     disproportionate blast radius.
 
     Args:
-        repo_root: Repository root (auto-detected if empty).
+        repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top hubs to return (default 10).
     """
     store, _root = _get_store(repo_root or None)
@@ -42,7 +42,7 @@ def get_hub_nodes_func(
 
 
 def get_bridge_nodes_func(
-    repo_root: str = "",
+    repo_root: str | None = None,
     top_n: int = 10,
 ) -> dict[str, Any]:
     """Find architectural chokepoints via betweenness centrality.
@@ -52,7 +52,7 @@ def get_bridge_nodes_func(
     connectivity.
 
     Args:
-        repo_root: Repository root (auto-detected if empty).
+        repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top bridges to return (default 10).
     """
     store, _root = _get_store(repo_root or None)
@@ -69,7 +69,7 @@ def get_bridge_nodes_func(
 
 
 def get_knowledge_gaps_func(
-    repo_root: str = "",
+    repo_root: str | None = None,
 ) -> dict[str, Any]:
     """Identify structural weaknesses in the codebase.
 
@@ -78,7 +78,7 @@ def get_knowledge_gaps_func(
     and single-file communities.
 
     Args:
-        repo_root: Repository root (auto-detected if empty).
+        repo_root: Repository root (auto-detected if omitted).
     """
     store, _root = _get_store(repo_root or None)
     gaps = find_knowledge_gaps(store)
@@ -107,7 +107,7 @@ def get_knowledge_gaps_func(
 
 
 def get_surprising_connections_func(
-    repo_root: str = "",
+    repo_root: str | None = None,
     top_n: int = 15,
 ) -> dict[str, Any]:
     """Find unexpected architectural coupling in the codebase.
@@ -116,7 +116,7 @@ def get_surprising_connections_func(
     cross-language, peripheral-to-hub, cross-test-boundary.
 
     Args:
-        repo_root: Repository root (auto-detected if empty).
+        repo_root: Repository root (auto-detected if omitted).
         top_n: Number of top surprises to return (default 15).
     """
     store, _root = _get_store(repo_root or None)
@@ -135,7 +135,7 @@ def get_surprising_connections_func(
 
 
 def get_suggested_questions_func(
-    repo_root: str = "",
+    repo_root: str | None = None,
 ) -> dict[str, Any]:
     """Auto-generate review questions from graph analysis.
 
@@ -144,7 +144,7 @@ def get_suggested_questions_func(
     hotspots.
 
     Args:
-        repo_root: Repository root (auto-detected if empty).
+        repo_root: Repository root (auto-detected if omitted).
     """
     store, _root = _get_store(repo_root or None)
     questions = generate_suggested_questions(store)

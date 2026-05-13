@@ -2,9 +2,149 @@
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-05-08
+
+Large additive release accumulated since v2.3.2 — 141 non-merge commits, 8 new languages/extensions, 5 new platform install targets, 6 new framework call resolvers, comprehensive Windows hardening, VS Code accessibility pass, and a full sweep of community PRs.
+
 ### Added
 
-- **GDScript support** (Godot): `.gd` files are parsed via the `gdscript` tree-sitter grammar shipped with `tree-sitter-language-pack`. Extracts inner classes (`class Name:`), the file-level `class_name` identity, functions (including `static func`), `extends` parent class as an IMPORTS_FROM edge, direct calls (`call`) and method calls (`attribute_call`). Adds 10 tests and `tests/fixtures/sample.gd`.
+#### Languages and extensions
+
+- **Nix support** (flake-aware): `.nix` files are parsed via the `nix` tree-sitter grammar shipped with `tree-sitter-language-pack`. Top-level and nested attrset bindings become `Function` nodes with flattened dotted names (e.g. `packages.default`, `devShells.default`). In `flake.nix`, `inputs.<name>.url = "..."` strings emit `IMPORTS_FROM` edges to the URL; `import <path>` and `callPackage <path> <args>` applications in any `.nix` file emit `IMPORTS_FROM` edges (relative paths are resolved against the caller's directory). Adds 7 tests (`TestNixParsing`) and fixtures `tests/fixtures/sample.nix`, `tests/fixtures/sample_module.nix`.
+- **GDScript support** (Godot, PR #316): `.gd` files are parsed via the `gdscript` tree-sitter grammar. Extracts inner classes (`class Name:`), the file-level `class_name` identity, functions (including `static func`), `extends` parent class as an IMPORTS_FROM edge, direct calls and method calls. Adds 10 tests and `tests/fixtures/sample.gd`.
+- **Verilog / SystemVerilog support** (PR #428): `.v`, `.sv`, `.svh` files parse modules, classes, packages, interfaces, programs, functions, and tasks via the `verilog` tree-sitter grammar. Per-construct extractors with dedicated unit tests.
+- **SQL support** (PR #398): `.sql` files parse `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TABLE`, and `CREATE VIEW` statements; emits CALLS edges for function invocations.
+- **ReScript support** (PR #309/323): `.res`/`.resi` parsing for modules, let-bindings, and external declarations.
+- **`.hh` extension support**: C++ header variants now resolve into the C++ parser path.
+- **`.ksh` extension and shebang-based detection** (PR #276): `.ksh` files parsed as shell; extension-less scripts detected via `#!/usr/bin/env <lang>` shebang lines.
+- **Julia improvements**: parametric constructors, `@enum` declarations, and `public` module exports now produce graph nodes.
+
+#### Platforms and install targets
+
+- **GitHub Copilot platform support** (PR #445): `code-review-graph install --platform copilot` writes Copilot-CLI-compatible MCP config without generating Claude-specific skill artifacts.
+- **Gemini CLI platform support** (PR #391): `--platform gemini-cli` skips Claude skills and writes Gemini-native MCP config.
+- **Qoder platform support** (PR #245): `--platform qoder` adds MCP server registration for Qoder.
+- **OpenCode plugin support** (PR #198 via #366): `--platform opencode` registers the MCP server with the OpenCode plugin manifest.
+- **Cursor hooks support** (PR #196): `install` now writes Cursor hook entries (gated behind `~/.cursor` detection so non-Cursor users are not affected).
+- **Codex install alignment**: native Codex integration path; no Claude skill files generated for Codex targets.
+
+#### MCP server and CLI features
+
+- **`crg-daemon`**: new multi-repo watch daemon that supervises per-repo file watchers via `subprocess.Popen` child processes. Documented in README, COMMANDS.md, and ROADMAP.md. 35 dedicated tests.
+- **Streamable HTTP transport** (PR #277): MCP server can now run over streamable HTTP in addition to stdio.
+- **`serve --tools` flag and `CRG_TOOLS` env var**: MCP tool filtering at startup so callers can expose only the subset they need.
+- **`--repo` precedence and validation in `get_docs_section`** (PR #378): honors `serve --repo` and validates path containment before returning section content.
+- **Search enrichment via PreToolUse hooks** (PR #248): hook-driven search index enrichment ahead of tool calls.
+- **External database directory support**: graph DB can now live on a network filesystem via the existing `CRG_DATA_DIR` mechanism, with the file locking path adjusted accordingly.
+- **SVN support** (PR #255): basic Subversion working-copy detection alongside git for change analysis.
+
+#### Parser and resolver improvements
+
+- **Spring DI call resolution** (PR #413): receiver method calls (`this.userService.find(...)`) resolve through `@Autowired`/constructor-injected fields to the concrete `InjectedType.method`. Emits `INJECTS` edges and stereotype metadata (`@Service`, `@Component`, `@Repository`, `@Controller`); writes fully-qualified `target_qualified` so `callers_of` queries work.
+- **Temporal workflow/activity call resolution**: `WorkflowStub.start(...)` and `ActivityStub.execute(...)` resolve to their concrete workflow/activity implementations.
+- **Kafka consumer/producer detection**: `@KafkaListener`-annotated methods and `KafkaTemplate.send(...)` calls emit `CONSUMES` and `PRODUCES` edges keyed on topic.
+- **Jedi-based Python call resolution** (PR #247): improved cross-file Python call resolution using the Jedi static-analysis library.
+- **Python callback REFERENCES edges** (PR #363): function names passed as callback arguments (`schedule(my_handler)`) now emit `REFERENCES` edges instead of being dropped.
+- **Mocha TDD `suite()` recognition** (PR #423): files using Mocha's TDD interface now classify as tests.
+- **Bun test runtime support** (PR #421): files importing `bun:test` are detected as tests.
+- **`__tests__/` directory detection** (PR #422): all files under `__tests__/` are classified as test files regardless of name.
+
+#### Embeddings
+
+- **OpenAI-compatible embedding provider** (PR #321): pluggable provider supporting OpenAI, Azure OpenAI, and any OpenAI-API-compatible endpoint, with configurable batch size.
+- **Localized embedding READMEs**: provider docs translated for non-English users.
+
+#### Visualization, accessibility, and VS Code extension
+
+- **WCAG 2.1 AA contrast pass**: 4.5:1 minimum text contrast across the standalone HTML and VS Code webview.
+- **Distinct `d3.symbol` shapes per node kind**: colorblind-friendly differentiation in both the standalone visualization and the VS Code webview.
+- **Keyboard navigation**: tab/arrow/enter/escape navigation across nodes, with focus styles and a skip-link to bypass the legend.
+- **ARIA roles and labels**: tooltip, detail panel, legend, search results, communities button, edge-pill keyboard activation, search input label.
+- **Help overlay**: interaction guide for both the standalone HTML and the keyboard-help overlay.
+- **Empty-state webview** in VS Code with a contextual depth slider and tooltip.
+- **Edge filter popover** in the VS Code toolbar — fixes density on narrow panels.
+- **Detail panel relocated to the left** so it no longer occludes top controls; close button restyled to match the toolbar.
+- **CONTAINS edge opacity** raised from 0.08 → 0.14 for visibility on dense graphs.
+- **GitHub Dark palette** unified across the VS Code extension.
+- **`IMPLEMENTS`, `TESTED_BY`, `DEPENDS_ON` edge types** rendered in the standalone HTML visualization.
+
+### Fixed
+
+#### `__version__` reporting
+
+- **`code_review_graph.__version__` now matches `pyproject.toml`** (was `2.1.0` since the v2.1.0 release). The User-Agent header that `embeddings.py` sends on cloud HTTP requests is built from this string, so cloud-embedding traffic was being mis-attributed across all releases between v2.1.0 and v2.3.2.
+
+#### C++ / Java / PHP parsing
+
+- **C++ scoped/destructor/operator method names** (PR #371, PR #403): `void Foo::bar()`, `Foo::~Foo()`, `Foo::operator==(...)` now extract the correct member name instead of the qualifier or the operator token.
+- **Java method name extraction** (PR #275): method names are now read from the `identifier` child of `method_declaration` rather than the return-type child (which was producing names like `int64`).
+- **Java superclass / super-interfaces** (PR #278): `extends Foo` and `implements Bar, Baz` now extract bare type names from the `superclass`/`super_interfaces` AST nodes.
+- **Java import resolution to file paths** (PR #280): `import com.example.foo.Bar` resolves through `src/main/java/...` and configured source roots to the actual file.
+- **PHP `CALL` extraction** (PR #298): method calls (`$obj->foo()`), static calls (`Foo::bar()`), and unqualified function calls now produce CALLS edges.
+- **Module-scope `CALLS` edges** (PR #285): top-level executable statements emit CALLS edges (previously only function/method bodies did).
+
+#### Windows
+
+- **Windows MCP stdio hang on long-running tools** (PR #400, PR #292): thread-pool selection now auto-selects on Windows MCP stdio so build/embed do not deadlock.
+- **Windows MCP stdin hang** (PR #425): all `git`/`svn` subprocesses now run with `stdin=DEVNULL`, preventing the FastMCP-stdio buffer from filling on Windows.
+- **Windows non-UTF-8 locale**: `subprocess.run` calls now pass `encoding="utf-8"` so cp1252 hosts no longer mis-decode git output.
+- **Windows test failures** (PR #274): UTF-8 encoding, CRLF normalization, and `stop_at` boundary handling fixes for Windows CI.
+
+#### Hooks and install
+
+- **Hooks JSON schema** (PR #288): `hooks.json` validation no longer fails on the wrapper layout — `matcher` is required and the wrapper is removed.
+- **Hooks merge instead of overwrite** (PR #114, PR #145, PR #203): `install_hooks` now merges into existing hook arrays and creates a `settings.json.bak` backup before modifying user config.
+- **Pre-commit hook adds `update` command** (PR #315): generated pre-commit hook runs `code-review-graph update` rather than the obsolete subcommand.
+- **Skip hooks gracefully outside git** (PR #293): `install` no longer fails when invoked from a non-git directory.
+- **Poetry / uv environment detection** (PR #287): `install` now generates the correct MCP serve command for projects using Poetry or uv.
+- **Hook quoting and `docs` repo_root** (PR #192): hook commands now quote repo paths with spaces, and the docs repo path is restored on install.
+
+#### MCP server
+
+- **fastmcp 3.x compatibility**: `_apply_tool_filter` restored on fastmcp ≥3, dependency floor bumped to `fastmcp>=3.2.4` to pick up the upstream Windows stdio EOF fixes.
+- **FastMCP banner suppressed for stdio transport** (PR #290): the startup banner no longer corrupts the stdio handshake.
+- **MCP config `cwd`, skills path, and JSONC parsing**: install now writes `cwd` into MCP config, points skills at the correct project path, and tolerates JSONC (comments + trailing commas) in existing config files.
+
+#### SQLite and post-processing
+
+- **SQLite transaction safety, FTS5 sync, and atomic operations** (PR #94, PR #279): nested-transaction handling, FTS5 content-table synchronization, and resource cleanup on error paths.
+- **CLI build/update/watch run post-processing** (PR #98): signatures, FTS, flows, and communities are now refreshed after every CLI graph mutation (was previously only refreshed by the MCP server).
+- **`reconcile()` auto-builds graphs and registers new repos**: cold-start path no longer requires a manual `build` before `reconcile`.
+- **Flow trace adjacency in-memory** (PR #296): `trace_flows` loads adjacency once instead of querying SQLite per hop.
+
+#### Other
+
+- **`UnicodeDecodeError` in `read_text`** (PR #303): all text reads now use `errors="replace"`.
+- **Dead-code callback references** (PR #424): functions referenced as callbacks no longer mis-classify as dead code.
+- **Skills.py table formatting** (PR #302).
+- **Search.py duplicate logger** removed.
+- **`status` command reports alive/dead** from the persisted state file.
+
+### Security
+
+- **Embeddings RCE hardening** (PR #397): remote code execution paths in the embedding provider are gated behind an explicit env var; cloud HTTP requests now send a versioned User-Agent (PR #390) and refuse to mix indexes built with different providers.
+
+### Documentation
+
+- **MCP tools documentation** (PR #306): catalog of all MCP tools with usage examples.
+- **venv usage guide** (PR #307).
+- **Windows setup guide** for Claude Code MCP integration.
+- **pipx / PyPI failure troubleshooting** with a `diagnose_pypi_connectivity.py` diagnostic script.
+- **MseeP.ai badge** added to README (PR #399).
+
+### Maintenance
+
+- **Beads (`bd`) issue tracking** initialized for the project (`bd prime` for workflow context).
+- **iCloud sync duplicate files** removed from the working tree.
+- **Working spec docs** moved out of git (already in `.gitignore`).
+- **CI lint and test failures** swept across multiple merged PRs.
+
+### Upgrade notes
+
+- `uvx --reinstall code-review-graph` or `pip install -U code-review-graph`.
+- Re-run `code-review-graph install` once after upgrading to pick up the JSONC-tolerant config writer and the corrected `cwd` / skills path in `.mcp.json`.
+- The `__version__` fix changes the User-Agent string emitted by cloud embedding providers from `code-review-graph/2.1.0` to `code-review-graph/2.3.3`. Anyone allow-listing the old User-Agent on a proxy needs to update their rule.
+- VS Code extension still ships separately — repackage and republish the `.vsix` if you want the v2.3.3 a11y improvements in the Marketplace build.
 
 ## [2.3.2] - 2026-04-14
 

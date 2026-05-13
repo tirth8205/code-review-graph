@@ -595,6 +595,8 @@ def d8():
         ("Continue",     "~/.continue/config.json",              YLW, YLW_BG),
         ("OpenCode",     ".opencode.json",                       RED, RED_BG),
         ("Antigravity",  "~/.gemini/antigravity/mcp_config.json",GRY, GRY_BG),
+        ("Qwen Code",    "~/.qwen/settings.json",                BLU, PRP_BG),  # blue-purple
+        ("Qoder",        ".qoder/mcp.json",                      GRN, ORG_BG),  # green-orange
         ("Kiro",         ".kiro/settings/mcp.json",              BLU, BLU_BG),
     ]
 
@@ -605,8 +607,8 @@ def d8():
 
     # Fan out to platforms
     cols = len(platforms)
-    card_w, card_h = 140, 80
-    total_w = cols * card_w + (cols-1) * 20
+    card_w, card_h = 120, 80  # narrower cards for 9 platforms
+    total_w = cols * card_w + (cols-1) * 15  # tighter spacing
     x0 = center_x - total_w/2
     card_y = 360
 
@@ -639,7 +641,7 @@ def d8():
 # ════════════════════════════════════════════
 def d9():
     els = []
-    els.append(TC(550, 15, "19 Languages + Notebook Support", 34))
+    els.append(TC(550, 15, "20 Languages + Notebook Support", 34))
 
     # Group languages by ecosystem
     groups = [
@@ -648,7 +650,8 @@ def d9():
         ("Systems",   ["C", "C++", "C#"],                                          ORG, ORG_BG),
         ("Mobile",    ["Kotlin", "Swift", "Dart"],                                 PRP, PRP_BG),
         ("Scripting", ["Ruby", "PHP", "Perl", "Lua", "R"],                         YLW, YLW_BG),
-        ("Other",     ["Solidity", "Jupyter/.ipynb"],                               GRY, GRY_BG),
+        ("Config",    ["Nix"],                                                     GRY, GRY_BG),
+        ("Other",     ["Solidity", "Jupyter/.ipynb"],                              GRY, GRY_BG),
     ]
 
     gw = 155  # group width

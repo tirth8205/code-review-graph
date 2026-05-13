@@ -250,9 +250,59 @@ code-review-graph register <path> [--alias name]  # Register a repository
 code-review-graph unregister <path_or_alias>       # Remove from registry
 code-review-graph repos                            # List registered repositories
 
+# Daemon (multi-repo watcher) — included with install, no extra dependencies
+code-review-graph daemon start [--foreground]       # Start the watch daemon
+code-review-graph daemon stop                       # Stop the daemon
+code-review-graph daemon restart [--foreground]     # Restart the daemon
+code-review-graph daemon status                     # Show daemon status and repos
+code-review-graph daemon logs [--repo ALIAS] [-f]   # View daemon or per-repo logs
+code-review-graph daemon add <path> [--alias NAME]  # Add a repo to daemon config
+code-review-graph daemon remove <path_or_alias>     # Remove a repo from daemon config
+
 # Evaluation
 code-review-graph eval                         # Run evaluation benchmarks
 
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
 ```
+
+## Standalone Daemon CLI (`crg-daemon`)
+
+The `crg-daemon` command is included with every `code-review-graph` installation — no
+separate install required. It is also available as a standalone entry point. It mirrors the
+`code-review-graph daemon` subcommands:
+
+```bash
+crg-daemon start [--foreground]       # Start the multi-repo watch daemon
+crg-daemon stop                       # Stop the daemon and all watcher processes
+crg-daemon restart [--foreground]     # Restart (stop + start)
+crg-daemon status                     # Show daemon status, repos, and process liveness
+crg-daemon logs [--repo ALIAS] [-f] [-n N]  # Tail daemon or per-repo log files
+crg-daemon add <path> [--alias NAME]  # Add a repository to watch.toml
+crg-daemon remove <path_or_alias>     # Remove a repository from watch.toml
+```
+
+### Configuration
+
+The daemon reads its configuration from `~/.code-review-graph/watch.toml`:
+
+```toml
+session_name = "crg-watch"   # logical daemon name
+log_dir = "~/.code-review-graph/logs"
+poll_interval = 2            # seconds between config file polls
+
+[[repos]]
+path = "/home/user/project-a"
+alias = "project-a"
+
+[[repos]]
+path = "/home/user/project-b"
+alias = "project-b"
+```
+
+The daemon spawns one `code-review-graph watch` child process per repo,
+managed via `subprocess.Popen`. It monitors the config file for changes and
+automatically reconciles child processes (starting/stopping as repos are
+added or removed). Health checks run every 30 seconds and automatically
+restart dead watchers. No external dependencies (tmux, screen, etc.) are
+required.

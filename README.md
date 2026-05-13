@@ -42,10 +42,10 @@ code-review-graph install          # auto-detects and configures all supported p
 code-review-graph build            # parse your codebase
 ```
 
-One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
+One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, installs platform-native hooks/skills where supported, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and Kiro" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, Kiro, and GitHub Copilot" width="85%" />
 </p>
 
 To target a specific platform:
@@ -54,7 +54,10 @@ To target a specific platform:
 code-review-graph install --platform codex       # configure only Codex
 code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
+code-review-graph install --platform gemini-cli   # configure only Gemini CLI
 code-review-graph install --platform kiro         # configure only Kiro
+code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
+code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
 ```
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
@@ -104,13 +107,13 @@ Large monorepos are where token waste is most painful. The graph cuts through th
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js monorepo: 27,732 files funnelled through code-review-graph down to ~15 files — 49x fewer tokens" width="80%" />
 </p>
 
-### 23 languages + Jupyter notebooks
+### 24 languages + Jupyter notebooks
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="19 languages organized by category: Web, Backend, Systems, Mobile, Scripting, plus Jupyter/Databricks notebook support" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="24 languages organized by category: Web, Backend, Systems, Mobile, Scripting, Config (Nix), plus Jupyter/Databricks notebook support" width="90%" />
 </p>
 
-Full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection in every language. Includes Zig, PowerShell, Julia, and Svelte SFC support. Plus Jupyter/Databricks notebook parsing (`.ipynb`) with multi-language cell support (Python, R, SQL), and Perl XS files (`.xs`).
+Full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection in every language. Includes Zig, PowerShell, Julia, Svelte SFC, and flake-aware Nix support. Plus Jupyter/Databricks notebook parsing (`.ipynb`) with multi-language cell support (Python, R, SQL), and Perl XS files (`.xs`).
 
 ---
 
@@ -192,7 +195,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only changed files. Subsequent updates complete in under 2 seconds. |
-| **23 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
+| **24 languages + notebooks** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Nix, Jupyter/Databricks (.ipynb) |
 | **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
 | **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
@@ -216,6 +219,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
 | **Wiki generation** | Auto-generate markdown wiki from community structure |
 | **Multi-repo registry** | Register multiple repos, search across all of them |
+| **Multi-repo daemon** | `crg-daemon` watches multiple repos as child processes, with health checks and auto-restart |
 | **MCP prompts** | 5 workflow templates: review, architecture, debug, onboard, pre-merge |
 | **Full-text search** | FTS5-powered hybrid search combining keyword and vector similarity |
 | **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
@@ -258,9 +262,63 @@ code-review-graph detect-changes   # Risk-scored change impact analysis
 code-review-graph register <path>  # Register repo in multi-repo registry
 code-review-graph unregister <id>  # Remove repo from registry
 code-review-graph repos            # List registered repositories
+code-review-graph daemon start     # Start multi-repo watch daemon
+code-review-graph daemon stop      # Stop the daemon
+code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start MCP server
 ```
+
+</details>
+
+<details>
+<summary><strong>Multi-repo daemon</strong></summary>
+<br>
+
+If your editor doesn't support hooks (e.g. Cursor, OpenCode), or you just want your
+graph to stay fresh in the background without any editor integration, the daemon is
+for you. It watches your repos for file changes and automatically rebuilds the graph
+— no manual `build` or `update` commands needed.
+
+The daemon is included with `code-review-graph` — no separate install required.
+
+**Quick setup:**
+
+```bash
+# 1. Register the repos you want to watch
+crg-daemon add ~/project-a --alias proj-a
+crg-daemon add ~/project-b
+
+# 2. Start the daemon (runs in the background)
+crg-daemon start
+
+# 3. That's it — graphs stay up to date automatically
+crg-daemon status                 # check daemon and per-repo watcher status
+crg-daemon logs --repo proj-a -f  # tail logs for a specific repo
+crg-daemon stop                   # stop daemon and all watcher processes
+```
+
+Also available as `code-review-graph daemon start|stop|status|...`.
+
+Under the hood, `crg-daemon add` writes to a TOML config file at
+`~/.code-review-graph/watch.toml`. You can also edit this file directly:
+
+```toml
+[[repos]]
+path = "/home/user/project-a"
+alias = "proj-a"
+
+[[repos]]
+path = "/home/user/project-b"
+alias = "project-b"
+```
+
+The daemon monitors this config file for changes and automatically starts/stops
+watcher processes as repos are added or removed. Health checks every 30 seconds
+restart dead watchers. No external dependencies required.
+
+See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for the
+full config reference and all available options.
 
 </details>
 
@@ -384,11 +442,57 @@ The cloud-egress warning is auto-skipped when the base URL points to localhost
 > much narrower quality gap against smaller models at this input length.
 > Body/docstring embedding is tracked as a follow-up enhancement.
 
+#### Tool Filtering
+
+CRG exposes 28 MCP tools by default. In token-constrained environments, you can
+limit the server to a subset of tools using `--tools` or the `CRG_TOOLS`
+environment variable:
+
+```bash
+# Via CLI flag
+code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool,detect_changes_tool
+
+# Via environment variable
+CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
+```
+
+The CLI flag takes precedence over the environment variable. When neither is set,
+all tools are available. This is especially useful for MCP client configurations:
+
+```json
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "code-review-graph",
+      "args": ["serve", "--tools", "query_graph_tool,semantic_search_nodes_tool,detect_changes_tool,get_review_context_tool"]
+    }
+  }
+}
+```
+
 </details>
 
 ---
 
 ## Troubleshooting
+
+### `pip` / `pipx` cannot download `hatchling` (or `Errno 9` / `Bad file descriptor` to PyPI)
+
+Installing from a **source tree** (for example `pipx install .`) needs build dependencies from **PyPI** (for example `hatchling`). If you see `Could not find a version that satisfies the requirement hatchling` after connection warnings, the Python/pip in that **terminal** may not be able to open an HTTPS client to `pypi.org` (sometimes seen in an integrated editor terminal; less often system-wide with VPN, firewall, or proxy).
+
+**Options:**
+
+1. Run the same command from **macOS Terminal.app** (or iTerm) instead of the IDE’s terminal, then retry `pipx install .` or `pipx install "git+https://..."` .
+2. Use **[uv](https://docs.astral.sh/uv/)** to install the CLI from a checkout (uses different download machinery than `pip` in many cases):
+
+   ```bash
+   cd /path/to/code-review-graph
+   uv tool install . --force
+   ```
+
+3. For **development in a clone** without a global install, use `uv sync` and `uv run code-review-graph …` (or activate `.venv` after `uv sync`).
+
+**Diagnose (optional):** `python3 scripts/diagnose_pypi_connectivity.py` — if it prints `FAILED`, the issue is environment/network, not a wrong package name in this repo.
 
 ### Windows Configuration Issues (Invalid JSON / Connection Closed)
 If you are using Windows and encounter `Invalid JSON: EOF while parsing` or `MCP error -32000: Connection closed` when connecting via Claude Code, do not use the `cmd /c` wrapper in your config.
@@ -429,5 +533,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, and Kiro</sub>
+<sub>Works with Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI</sub>
 </p>

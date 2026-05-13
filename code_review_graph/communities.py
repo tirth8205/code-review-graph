@@ -15,6 +15,9 @@ from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
 
+# Stay well under SQLite's default 999-variable limit per statement.
+_SQL_BATCH = 450
+
 # ---------------------------------------------------------------------------
 # Optional igraph import
 # ---------------------------------------------------------------------------
@@ -636,13 +639,19 @@ def incremental_detect_communities(
 
     conn = store._conn
 
-    # Check if any communities are affected
-    placeholders = ",".join("?" * len(changed_files))
-    affected = conn.execute(
-        f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
-        f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
-        changed_files,
-    ).fetchone()
+    # Check if any communities are affected (batch to stay under SQLite limit)
+    affected_count = 0
+    for i in range(0, len(changed_files), _SQL_BATCH):
+        batch = changed_files[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
+            f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
+            batch,
+        ).fetchone()
+        if row:
+            affected_count += row[0]
+    affected = (affected_count,) if affected_count else None
 
     if not affected or affected[0] == 0:
         return 0  # No communities affected, skip
@@ -701,11 +710,12 @@ def store_communities(
 
             # Batch update community_id on member nodes
             member_qns = comm.get("members", [])
-            if member_qns:
-                placeholders = ",".join("?" * len(member_qns))
+            for j in range(0, len(member_qns), _SQL_BATCH):
+                batch = member_qns[j:j + _SQL_BATCH]
+                placeholders = ",".join("?" * len(batch))
                 conn.execute(
                     f"UPDATE nodes SET community_id = ? WHERE qualified_name IN ({placeholders})",  # nosec B608
-                    [community_id] + member_qns,
+                    [community_id] + batch,
                 )
             count += 1
 

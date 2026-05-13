@@ -155,6 +155,7 @@ class TestGetDocsSection:
     """Tests for the get_docs_section tool."""
 
     def test_explicit_repo_root_uses_that_docs_file(self, tmp_path):
+        (tmp_path / ".code-review-graph").mkdir()
         docs_dir = tmp_path / "docs"
         docs_dir.mkdir()
         (docs_dir / "LLM-OPTIMIZED-REFERENCE.md").write_text(

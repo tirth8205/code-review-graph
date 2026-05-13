@@ -22,9 +22,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from . import __version__ as _crg_version
 from .graph import GraphNode, GraphStore, node_to_dict
 
 logger = logging.getLogger(__name__)
+
+# Sent on every cloud-provider HTTP request. Some providers (e.g. Fireworks)
+# sit behind Cloudflare and reject the urllib default ``Python-urllib/X.Y``
+# UA with HTTP 403 / error 1010 ("browser signature banned"). A real UA gets
+# us through and gives upstream a way to identify CRG-driven traffic.
+_USER_AGENT = (
+    f"code-review-graph/{_crg_version} "
+    "(+https://github.com/tirth8205/code-review-graph)"
+)
 
 # ---------------------------------------------------------------------------
 # Provider Interface and Implementations
@@ -66,10 +76,13 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         if self._model is None:
             try:
                 from sentence_transformers import SentenceTransformer
+                # Check environment variable, default to False to prevent RCE
+                _rce_val = os.environ.get("CRG_ALLOW_REMOTE_CODE", "0")
+                allow_remote_code = _rce_val.lower() in ("1", "true", "yes")
+
                 self._model = SentenceTransformer(
                     self._model_name,
-                    trust_remote_code=True,
-                    model_kwargs={"trust_remote_code": True},
+                    trust_remote_code=allow_remote_code,
                 )
             except ImportError:
                 raise ImportError(
@@ -198,6 +211,8 @@ class MiniMaxEmbeddingProvider(EmbeddingProvider):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
             },
         )
 
@@ -353,6 +368,8 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
             },
         )
 

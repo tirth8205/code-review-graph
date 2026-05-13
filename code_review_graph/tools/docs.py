@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 from ..embeddings import EmbeddingStore, embed_all_nodes
-from ..incremental import get_db_path
-from ._common import _get_store
+from ..incremental import find_project_root, get_db_path
+from ._common import _get_store, _validate_repo_root
 
 # ---------------------------------------------------------------------------
 # Tool 7: embed_graph
@@ -110,14 +110,12 @@ def get_docs_section(
     search_roots: list[Path] = []
 
     if repo_root:
-        search_roots.append(Path(repo_root))
-
-    try:
-        _, root = _get_store(repo_root)
-        if root not in search_roots:
-            search_roots.append(root)
-    except (RuntimeError, ValueError):
-        pass
+        try:
+            search_roots.append(_validate_repo_root(Path(repo_root)))
+        except ValueError:
+            pass
+    else:
+        search_roots.append(find_project_root())
 
     # Fallback: package directory (for uvx/pip installs)
     pkg_docs = (
