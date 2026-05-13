@@ -855,8 +855,11 @@ function moveTooltip(ev) {
   tooltip.style.left = x + "px"; tooltip.style.top = y + "px";
 }
 function hideTooltip() { tooltip.classList.remove("visible"); }
-var W = innerWidth, H = innerHeight;
-var svg = d3.select("svg").attr("viewBox", [0, 0, W, H]);
+var svgEl = document.getElementById("graph-svg");
+function getW() { return svgEl.clientWidth || window.innerWidth || 800; }
+function getH() { return svgEl.clientHeight || window.innerHeight || 600; }
+var W = getW(), H = getH();
+var svg = d3.select("#graph-svg").attr("viewBox", [0, 0, W, H]);
 var gRoot = svg.append("g");
 var currentTransform = d3.zoomIdentity;
 var zoomBehavior = d3.zoom()
@@ -1071,13 +1074,18 @@ if (N > 2000) {
   nodes.forEach(function(n) { if (n.kind === "File") collapsedFiles.add(n.qualified_name); });
 }
 updateNodes();
-function fitGraph() {
+function fitGraph(retries) {
+  if (retries === undefined) retries = 10;
   var b = gRoot.node().getBBox();
-  if (b.width === 0 || b.height === 0) return;
+  if (b.width === 0 || b.height === 0) {
+    if (retries > 0) requestAnimationFrame(function() { fitGraph(retries - 1); });
+    return;
+  }
   var pad = 0.1;
   var fw = b.width * (1 + 2*pad), fh = b.height * (1 + 2*pad);
-  var s = Math.min(W / fw, H / fh, 2.5);
-  var tx = W/2 - (b.x + b.width/2)*s, ty = H/2 - (b.y + b.height/2)*s;
+  var cw = getW(), ch = getH();
+  var s = Math.min(cw / fw, ch / fh, 2.5);
+  var tx = cw/2 - (b.x + b.width/2)*s, ty = ch/2 - (b.y + b.height/2)*s;
   svg.transition().duration(600).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(s));
 }
 var loadingOverlay = document.getElementById("loading-overlay");
@@ -1088,6 +1096,27 @@ if (nodes.length === 0) {
 }
 simulation.on("end", function() {
   loadingOverlay.classList.add("hidden");
+  // Re-read dimensions now that the window is fully rendered
+  var newW = getW(), newH = getH();
+  // If initial W/H were wrong, shift all node positions to the correct center
+  if (Math.abs(newW - W) > 50 || Math.abs(newH - H) > 50 || W < 100 || H < 100) {
+    var dx = newW/2 - W/2, dy = newH/2 - H/2;
+    nodes.forEach(function(n) { n.x += dx; n.y += dy; if (n.fx != null) n.fx += dx; if (n.fy != null) n.fy += dy; });
+  }
+  W = newW; H = newH;
+  svg.attr("viewBox", [0, 0, W, H]);
+  simulation.force("center", d3.forceCenter(W / 2, H / 2));
+  simulation.force("x", d3.forceX(W / 2).strength(0.03));
+  simulation.force("y", d3.forceY(H / 2).strength(0.03));
+  // Use requestAnimationFrame to guarantee browser has painted before measuring
+  requestAnimationFrame(function() { fitGraph(); });
+});
+window.addEventListener("resize", function() {
+  W = getW(); H = getH();
+  svg.attr("viewBox", [0, 0, W, H]);
+  simulation.force("center", d3.forceCenter(W / 2, H / 2));
+  simulation.force("x", d3.forceX(W / 2).strength(0.03));
+  simulation.force("y", d3.forceY(H / 2).strength(0.03));
   fitGraph();
 });
 function zoomToNode(qn) {
@@ -1605,7 +1634,7 @@ _AGGREGATED_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
 <div id="tooltip"></div>
 <button id="btn-back" aria-label="Back to overview">&larr; Back to Overview</button>
-<svg role="img" aria-label="Interactive code knowledge graph visualization (aggregated view)."></svg>
+<svg id="graph-svg" role="img" aria-label="Interactive code knowledge graph visualization (aggregated view)."></svg>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
@@ -1755,8 +1784,11 @@ function moveTooltip(ev) {
 function hideTooltip() { tooltip.classList.remove("visible"); }
 
 /* --- SVG setup --- */
-var W = innerWidth, H = innerHeight;
-var svg = d3.select("svg").attr("viewBox", [0, 0, W, H]);
+var svgEl = document.getElementById("graph-svg");
+function getW() { return svgEl.clientWidth || window.innerWidth || 800; }
+function getH() { return svgEl.clientHeight || window.innerHeight || 600; }
+var W = getW(), H = getH();
+var svg = d3.select("#graph-svg").attr("viewBox", [0, 0, W, H]);
 var gRoot = svg.append("g");
 var currentTransform = d3.zoomIdentity;
 var zoomBehavior = d3.zoom()
@@ -1922,7 +1954,21 @@ function renderGraph(nodesData, edgesData, drillDown) {
       .attr("y", function(d) { return d.y; });
   });
 
-  simulation.on("end", fitGraph);
+  simulation.on("end", function() {
+    // Re-read dimensions now that the window is fully rendered
+    var newW = getW(), newH = getH();
+    // If initial W/H were wrong, shift all node positions to the correct center
+    if (Math.abs(newW - W) > 50 || Math.abs(newH - H) > 50 || W < 100 || H < 100) {
+      var dx = newW/2 - W/2, dy = newH/2 - H/2;
+      currentNodes.forEach(function(n) { n.x += dx; n.y += dy; if (n.fx != null) n.fx += dx; if (n.fy != null) n.fy += dy; });
+    }
+    W = newW; H = newH;
+    svg.attr("viewBox", [0, 0, W, H]);
+    simulation.force("center", d3.forceCenter(W / 2, H / 2));
+    simulation.force("x", d3.forceX(W / 2).strength(0.03));
+    simulation.force("y", d3.forceY(H / 2).strength(0.03));
+    requestAnimationFrame(function() { fitGraph(); });
+  });
   updateLabelVisibility();
 }
 
@@ -1974,21 +2020,38 @@ function highlightConnected(d, on) {
   }
 }
 
-function fitGraph() {
+function fitGraph(retries) {
+  if (retries === undefined) retries = 10;
   var b = gRoot.node().getBBox();
-  if (b.width === 0 || b.height === 0) return;
+  if (b.width === 0 || b.height === 0) {
+    if (retries > 0) requestAnimationFrame(function() { fitGraph(retries - 1); });
+    return;
+  }
   var pad = 0.1;
   var fw = b.width * (1 + 2 * pad), fh = b.height * (1 + 2 * pad);
-  var s = Math.min(W / fw, H / fh, 2.5);
-  var tx = W / 2 - (b.x + b.width / 2) * s, ty = H / 2 - (b.y + b.height / 2) * s;
+  var cw = getW(), ch = getH();
+  var s = Math.min(cw / fw, ch / fh, 2.5);
+  var tx = cw / 2 - (b.x + b.width / 2) * s, ty = ch / 2 - (b.y + b.height / 2) * s;
   svg.transition().duration(600).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(s));
 }
+
+window.addEventListener(\"resize\", function() {
+  W = getW(); H = getH();
+  svg.attr(\"viewBox\", [0, 0, W, H]);
+  if (simulation) {
+    simulation.force(\"center\", d3.forceCenter(W / 2, H / 2));
+    simulation.force(\"x\", d3.forceX(W / 2).strength(0.03));
+    simulation.force(\"y\", d3.forceY(H / 2).strength(0.03));
+  }
+  fitGraph();
+});
 
 function zoomToNode(qn) {
   var nd = currentNodes.find(function(n) { return n.qualified_name === qn; });
   if (!nd || nd.x == null) return;
   var s = 2.0;
-  var tx = W / 2 - nd.x * s, ty = H / 2 - nd.y * s;
+  var cw = getW(), ch = getH();
+  var tx = cw / 2 - nd.x * s, ty = ch / 2 - nd.y * s;
   svg.transition().duration(600).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(s));
 }
 
