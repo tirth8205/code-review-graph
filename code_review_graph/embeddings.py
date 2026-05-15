@@ -653,6 +653,8 @@ def get_provider(
             return None
 
     # Default: local
+    if not _check_available():
+        return None
     try:
         return LocalEmbeddingProvider(model_name=model)
     except ImportError:

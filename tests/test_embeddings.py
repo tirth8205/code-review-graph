@@ -173,16 +173,33 @@ class TestGetProviderModel:
     """Tests for model parameter in get_provider()."""
 
     @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
-    def test_local_passes_model(self, mock_cls):
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_local_passes_model(self, _mock_available, mock_cls):
         mock_cls.return_value = MagicMock()
         get_provider(provider=None, model="custom/model")
         mock_cls.assert_called_once_with(model_name="custom/model")
 
     @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
-    def test_local_default_passes_none(self, mock_cls):
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_local_default_passes_none(self, _mock_available, mock_cls):
         mock_cls.return_value = MagicMock()
         get_provider(provider=None, model=None)
         mock_cls.assert_called_once_with(model_name=None)
+
+    @patch("code_review_graph.embeddings._check_available", return_value=False)
+    def test_local_unavailable_returns_none(self, _mock_available):
+        assert get_provider("local") is None
+
+    @patch("code_review_graph.embeddings._check_available", return_value=False)
+    def test_embedding_store_unavailable_without_local_dependency(
+        self, _mock_available, tmp_path,
+    ):
+        db = tmp_path / "embeddings.db"
+        store = EmbeddingStore(db, provider="local")
+        try:
+            assert store.available is False
+        finally:
+            store.close()
 
 
 class TestCloudProviderWarning:
@@ -237,8 +254,9 @@ class TestCloudProviderWarning:
         with patch(
             "code_review_graph.embeddings.LocalEmbeddingProvider",
         ) as mock_cls:
-            mock_cls.return_value = MagicMock()
-            get_provider(provider=None)
+            with patch("code_review_graph.embeddings._check_available", return_value=True):
+                mock_cls.return_value = MagicMock()
+                get_provider(provider=None)
         captured = capsys.readouterr()
         assert "cloud" not in captured.err.lower()
 
