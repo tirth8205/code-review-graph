@@ -15,6 +15,7 @@ from code_review_graph.tools import (
     get_flow,
     list_communities_func,
     list_flows,
+    query_graph,
 )
 
 
@@ -149,6 +150,112 @@ class TestTools:
         edges = self.store.search_edges_by_target_name("helper")
         assert len(edges) == 1
         assert edges[0].source_qualified == "/repo/main.py::process"
+
+
+class TestQueryGraphCallTargetFallbacks:
+    """Regression tests for mixed qualified and bare CALLS targets."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir).resolve()
+        (self.root / ".git").mkdir()
+        (self.root / ".code-review-graph").mkdir()
+
+        self.target_file = str(self.root / "target.m")
+        self.cross_file = str(self.root / "cross.m")
+        self.dispatch_file = str(self.root / "dispatch.m")
+        self.db_path = str(self.root / ".code-review-graph" / "graph.db")
+        self._seed_data()
+
+    def teardown_method(self):
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed_data(self):
+        with GraphStore(self.db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Function", name="target_func", file_path=self.target_file,
+                line_start=10, line_end=12, language="objc",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="same_file_caller", file_path=self.target_file,
+                line_start=20, line_end=24, language="objc",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="cross_file_caller", file_path=self.cross_file,
+                line_start=5, line_end=9, language="objc",
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.target_file}::same_file_caller",
+                target=f"{self.target_file}::target_func",
+                file_path=self.target_file,
+                line=22,
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.cross_file}::cross_file_caller",
+                target="target_func",
+                file_path=self.cross_file,
+                line=7,
+            ))
+
+            store.upsert_node(NodeInfo(
+                kind="Function", name="dispatcher", file_path=self.dispatch_file,
+                line_start=1, line_end=8, language="objc",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="resolved_helper", file_path=self.dispatch_file,
+                line_start=12, line_end=14, language="objc",
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.dispatch_file}::dispatcher",
+                target=f"{self.dispatch_file}::resolved_helper",
+                file_path=self.dispatch_file,
+                line=3,
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.dispatch_file}::dispatcher",
+                target="external_helper",
+                file_path=self.dispatch_file,
+                line=4,
+            ))
+            store.commit()
+
+    def test_callers_of_includes_qualified_and_bare_target_callers(self):
+        result = query_graph(
+            pattern="callers_of",
+            target=f"{self.target_file}::target_func",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        names = {r["name"] for r in result["results"]}
+        assert names == {"same_file_caller", "cross_file_caller"}
+        assert len(result["results"]) == 2
+
+        edge_targets = {e["target"] for e in result["edges"]}
+        assert edge_targets == {f"{self.target_file}::target_func", "target_func"}
+
+    def test_callees_of_includes_resolved_and_bare_target_callees(self):
+        result = query_graph(
+            pattern="callees_of",
+            target=f"{self.dispatch_file}::dispatcher",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        names = {r["name"] for r in result["results"]}
+        assert names == {"resolved_helper", "external_helper"}
+
+        edge_targets = {e["target"] for e in result["edges"]}
+        assert edge_targets == {
+            f"{self.dispatch_file}::resolved_helper",
+            "external_helper",
+        }
 
 
 class TestGetDocsSection:

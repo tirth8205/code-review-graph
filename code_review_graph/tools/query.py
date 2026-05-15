@@ -216,29 +216,43 @@ def query_graph(
         qn = node.qualified_name if node else target
 
         if pattern == "callers_of":
+            seen_sources: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind == "CALLS":
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
-                    edges_out.append(edge_to_dict(e))
+                    if e.source_qualified not in seen_sources:
+                        seen_sources.add(e.source_qualified)
+                        caller = store.get_node(e.source_qualified)
+                        if caller:
+                            results.append(node_to_dict(caller))
+                        edges_out.append(edge_to_dict(e))
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
-            if not results and node:
+            if node:
                 for e in store.search_edges_by_target_name(node.name):
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
-                    edges_out.append(edge_to_dict(e))
+                    if e.source_qualified not in seen_sources:
+                        seen_sources.add(e.source_qualified)
+                        caller = store.get_node(e.source_qualified)
+                        if caller:
+                            results.append(node_to_dict(caller))
+                        edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
+            seen_targets: set[str] = set()
             for e in store.get_edges_by_source(qn):
                 if e.kind == "CALLS":
-                    callee = store.get_node(e.target_qualified)
-                    if callee:
-                        results.append(node_to_dict(callee))
-                    edges_out.append(edge_to_dict(e))
+                    if e.target_qualified not in seen_targets:
+                        seen_targets.add(e.target_qualified)
+                        callee = store.get_node(e.target_qualified)
+                        if callee:
+                            results.append(node_to_dict(callee))
+                        elif "::" not in e.target_qualified:
+                            results.append({
+                                "kind": "Function",
+                                "name": e.target_qualified,
+                                "qualified_name": e.target_qualified,
+                            })
+                        edges_out.append(edge_to_dict(e))
 
         elif pattern == "imports_of":
             for e in store.get_edges_by_source(qn):
