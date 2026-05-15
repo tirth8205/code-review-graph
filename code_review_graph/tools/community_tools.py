@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from ..communities import get_architecture_overview, get_communities
@@ -144,8 +145,52 @@ def get_community_func(
 # ---------------------------------------------------------------------------
 
 
+_MINIMAL_COMMUNITY_FIELDS = ("id", "name", "size", "cohesion", "dominant_language")
+
+
+def _minimal_overview(overview: dict[str, Any]) -> dict[str, Any]:
+    """Compress overview for ``detail_level="minimal"``.
+
+    The full overview can exceed 600KB on medium repos because it embeds
+    every community's member list and every individual cross-community
+    edge. Minimal mode drops member lists and aggregates the edge list
+    to one row per community pair with a count and the top edge kinds —
+    enough to spot coupling smells without exploding token budgets.
+    """
+    communities = [
+        {k: c[k] for k in _MINIMAL_COMMUNITY_FIELDS if k in c}
+        for c in overview.get("communities", [])
+    ]
+    id_to_name = {c["id"]: c["name"] for c in communities if "id" in c}
+
+    edge_pair_counts: Counter[tuple[int, int]] = Counter()
+    edge_pair_kinds: dict[tuple[int, int], Counter[str]] = {}
+    for e in overview.get("cross_community_edges", []):
+        # Use canonical (low, high) ordering so A↔B and B↔A aggregate together.
+        a, b = e["source_community"], e["target_community"]
+        pair = (a, b) if a <= b else (b, a)
+        edge_pair_counts[pair] += 1
+        edge_pair_kinds.setdefault(pair, Counter())[e["edge_kind"]] += 1
+
+    cross_pairs = [
+        {
+            "source_community": id_to_name.get(a, f"community-{a}"),
+            "target_community": id_to_name.get(b, f"community-{b}"),
+            "edge_count": count,
+            "top_kinds": [k for k, _ in edge_pair_kinds[(a, b)].most_common(3)],
+        }
+        for (a, b), count in edge_pair_counts.most_common()
+    ]
+    return {
+        "communities": communities,
+        "cross_community_edges": cross_pairs,
+        "warnings": overview.get("warnings", []),
+    }
+
+
 def get_architecture_overview_func(
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -155,6 +200,11 @@ def get_architecture_overview_func(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" (default) returns the full overview
+                      including per-edge cross-community detail;
+                      "minimal" drops community member lists and
+                      aggregates edges to one row per community pair
+                      (typical reduction: 600KB → <5KB).
 
     Returns:
         Architecture overview with communities, cross-community edges,
@@ -163,14 +213,21 @@ def get_architecture_overview_func(
     store, root = _get_store(repo_root)
     try:
         overview = get_architecture_overview(store)
+        if detail_level == "minimal":
+            overview = _minimal_overview(overview)
         n_communities = len(overview["communities"])
         n_cross = len(overview["cross_community_edges"])
         n_warnings = len(overview["warnings"])
+        cross_label = (
+            "community pairs"
+            if detail_level == "minimal"
+            else "cross-community edges"
+        )
         result = {
             "status": "ok",
             "summary": (
                 f"Architecture: {n_communities} communities, "
-                f"{n_cross} cross-community edges, "
+                f"{n_cross} {cross_label}, "
                 f"{n_warnings} warning(s)"
             ),
             **overview,

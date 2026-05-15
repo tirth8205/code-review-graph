@@ -549,6 +549,7 @@ def get_community_tool(
 @mcp.tool()
 def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -558,8 +559,15 @@ def get_architecture_overview_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" (default) returns full per-edge detail;
+                      "minimal" drops community member lists and
+                      aggregates cross-community edges to one row per
+                      community pair (typical reduction: 600KB → <5KB).
     """
-    return get_architecture_overview_func(repo_root=_resolve_repo_root(repo_root))
+    return get_architecture_overview_func(
+        repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
+    )
 
 
 @mcp.tool()

@@ -326,8 +326,8 @@ class TestV2Integration:
         prompt_messages = review_changes_prompt(base="HEAD~1")
         assert isinstance(prompt_messages, list)
         assert len(prompt_messages) > 0
-        assert prompt_messages[0]["role"] == "user"
-        assert "detect_changes" in prompt_messages[0]["content"]
+        assert prompt_messages[0].role == "user"
+        assert "detect_changes" in prompt_messages[0].content.text
 
         # ---- Step 10: generate_wiki ----
         with tempfile.TemporaryDirectory() as wiki_dir:
