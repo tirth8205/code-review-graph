@@ -87,6 +87,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["code_review_graph"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"docs/LLM-OPTIMIZED-REFERENCE.md" = "code_review_graph/docs/LLM-OPTIMIZED-REFERENCE.md"
+
 [tool.hatch.build.targets.sdist]
 include = [
     "code_review_graph/",

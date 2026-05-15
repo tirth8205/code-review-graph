@@ -109,15 +109,27 @@ def get_docs_section(
 
     search_roots: list[Path] = []
 
+    # Wheel install: docs are packaged inside code_review_graph/docs.
+    in_pkg_docs = (
+        Path(__file__).parent.parent
+        / "docs"
+        / "LLM-OPTIMIZED-REFERENCE.md"
+    )
     if repo_root:
         try:
             search_roots.append(_validate_repo_root(Path(repo_root)))
         except ValueError:
             pass
-    else:
-        search_roots.append(find_project_root())
+    elif in_pkg_docs.exists():
+        in_pkg_root = in_pkg_docs.parent.parent
+        search_roots.append(in_pkg_root)
 
-    # Fallback: package directory (for uvx/pip installs)
+    if not repo_root:
+        project_root = find_project_root()
+        if project_root not in search_roots:
+            search_roots.append(project_root)
+
+    # Editable/source-tree fallback: docs live next to code_review_graph/.
     pkg_docs = (
         Path(__file__).parent.parent.parent
         / "docs"

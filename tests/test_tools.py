@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
@@ -188,6 +189,37 @@ class TestGetDocsSection:
         assert result["status"] in ("ok", "not_found")
         if result["status"] == "ok":
             assert len(result["content"]) > 0
+
+    def test_source_tree_docs_lookup_from_outside_repo(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+
+        result = get_docs_section(section_name="usage")
+
+        assert result["status"] == "ok"
+        assert len(result["content"]) > 0
+
+    def test_packaged_docs_lookup_from_outside_repo(self, tmp_path, monkeypatch):
+        package_dir = tmp_path / "site-packages" / "code_review_graph"
+        tools_dir = package_dir / "tools"
+        docs_dir = package_dir / "docs"
+        tools_dir.mkdir(parents=True)
+        docs_dir.mkdir()
+        (docs_dir / "LLM-OPTIMIZED-REFERENCE.md").write_text(
+            '<section name="usage">packaged docs</section>\n',
+            encoding="utf-8",
+        )
+        work_dir = tmp_path / "elsewhere"
+        work_dir.mkdir()
+
+        monkeypatch.chdir(work_dir)
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        monkeypatch.setattr(docs_module, "__file__", str(tools_dir / "docs.py"))
+
+        result = docs_module.get_docs_section("usage")
+
+        assert result["status"] == "ok"
+        assert result["content"] == "packaged docs"
 
 
 class TestFindLargeFunctions:
