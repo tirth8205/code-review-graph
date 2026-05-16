@@ -72,3 +72,78 @@ class TestWatchInteraction:
                             assert False, "Expected SystemExit"
                         except SystemExit as exc:
                             assert exc.code == 1
+
+
+class TestBuildUpdateCommands:
+    def test_build_skip_postprocess_does_not_run_extra_cli_postprocess(self):
+        argv = [
+            "code-review-graph",
+            "build",
+            "--skip-postprocess",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_parsed": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "none",
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ) as mock_postprocess:
+                            cli.main()
+
+        mock_build.assert_called_once_with(
+            full_rebuild=True,
+            repo_root="repo-root",
+            postprocess="none",
+        )
+        mock_postprocess.assert_not_called()
+
+    def test_update_skip_flows_does_not_run_extra_cli_postprocess(self):
+        argv = [
+            "code-review-graph",
+            "update",
+            "--skip-flows",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_updated": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "minimal",
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ) as mock_postprocess:
+                            cli.main()
+
+        mock_build.assert_called_once_with(
+            full_rebuild=False,
+            repo_root="repo-root",
+            base="HEAD~1",
+            postprocess="minimal",
+        )
+        mock_postprocess.assert_not_called()

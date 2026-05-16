@@ -322,21 +322,6 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
-def _cli_post_process(store: GraphStore) -> None:
-    """Run post-build pipeline and print a summary line for each step."""
-    from .postprocessing import run_post_processing
-
-    pp = run_post_processing(store)
-    if pp.get("signatures_computed"):
-        print(f"Signatures: {pp['signatures_computed']} nodes")
-    if pp.get("fts_indexed"):
-        print(f"FTS indexed: {pp['fts_indexed']} nodes")
-    if pp.get("flows_detected") is not None:
-        print(f"Flows: {pp['flows_detected']}")
-    if pp.get("communities_detected") is not None:
-        print(f"Communities: {pp['communities_detected']}")
-
-
 def _handle_data_dir_option(args, repo_root: Path) -> None:
     """Handle --data-dir option by updating registry if specified."""
     if hasattr(args, "data_dir") and args.data_dir:
@@ -923,7 +908,6 @@ def main() -> None:
             print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
-            _cli_post_process(store)
 
         elif args.command == "update":
             pp = (
@@ -947,8 +931,6 @@ def main() -> None:
                 f"{nodes} nodes, {edges} edges"
                 f" (postprocess={pp})"
             )
-            if result.get("files_updated", 0) > 0:
-                _cli_post_process(store)
 
         elif args.command == "status":
             stats = store.get_stats()
