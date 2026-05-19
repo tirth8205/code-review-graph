@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`code-review-graph uninstall` command** ([#482](https://github.com/tirth8205/code-review-graph/issues/482)): symmetric counterpart to `install` that walks the full inventory of artifacts `install` creates and removes them. Per-repo it removes the `.code-review-graph/` data directory, the generated `.claude/skills/`, `.gemini/skills/`, and `.qoder/skills/` directories, our pre-commit hook block (preserving any user hooks), the `.code-review-graph/` line in `.gitignore`, and the `<!-- code-review-graph MCP tools -->` section from `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.windsurfrules`, `QODER.md`, and the GitHub Copilot instruction file. User-level it removes `~/.code-review-graph/` (registry + daemon state + logs), the OpenCode plugin, and our entry from every MCP / hooks config we ever write (Codex TOML, Cursor, Windsurf, Zed, Continue, Antigravity, Qwen, Copilot CLI). Surgical edits preserve unrelated entries — uninstalling code-review-graph never deletes another tool's MCP server or hook. Supports `--dry-run`, `--yes`, `--keep-data`, `--keep-user-configs`, `--repo PATH`, and `--all-repos`.
+
 ## [2.3.3] - 2026-05-08
 
 Large additive release accumulated since v2.3.2 — 141 non-merge commits, 8 new languages/extensions, 5 new platform install targets, 6 new framework call resolvers, comprehensive Windows hardening, VS Code accessibility pass, and a full sweep of community PRs.

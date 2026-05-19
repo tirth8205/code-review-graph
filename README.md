@@ -70,6 +70,21 @@ Build the code review graph for this project
 
 The initial build takes ~10 seconds for a 500-file project. After that, the graph updates automatically on every file edit and git commit.
 
+### Uninstalling
+
+Decided to stop using code-review-graph? A single command removes every artifact `install` ever wrote — graph database, generated skills, MCP entries, hooks, and the user-level registry — without touching unrelated entries other tools have written into the same config files.
+
+```sh
+code-review-graph uninstall              # preview + confirm, then clean current repo + ~/
+code-review-graph uninstall --dry-run    # show every planned action, change nothing
+code-review-graph uninstall --yes        # skip the confirmation prompt
+code-review-graph uninstall --all-repos  # also sweep every repo in the registry
+code-review-graph uninstall --keep-data  # only remove configs, keep the graph DB
+code-review-graph uninstall --keep-user-configs --repo .  # only clean this repo
+```
+
+MCP entries, hook entries, and instruction-file sections are edited surgically: only the `code-review-graph` entry is removed; other servers, hooks, and content survive untouched.
+
 
 ## How It Works
 

@@ -3,6 +3,8 @@
 Usage:
     code-review-graph install
     code-review-graph init
+    code-review-graph uninstall [--repo PATH] [--all-repos] [--keep-data]
+                                [--keep-user-configs] [--dry-run] [--yes]
     code-review-graph build [--base BASE]
     code-review-graph update [--base BASE]
     code-review-graph watch
@@ -440,6 +442,39 @@ def main() -> None:
         help="Target platform for MCP config (default: all detected)",
     )
 
+    # uninstall
+    uninstall_cmd = sub.add_parser(
+        "uninstall",
+        help=(
+            "Remove files installed by code-review-graph "
+            "(MCP configs, hooks, skills, graph DB, registry)."
+        ),
+    )
+    uninstall_cmd.add_argument(
+        "--repo", default=None,
+        help="Repository root to clean up (default: current directory).",
+    )
+    uninstall_cmd.add_argument(
+        "--all-repos", action="store_true",
+        help="Also clean up every repo in ~/.code-review-graph/registry.json.",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-data", action="store_true",
+        help="Keep the .code-review-graph/ data directories (only remove configs).",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-user-configs", action="store_true",
+        help="Skip user-level (~/) configs; only clean the target repo(s).",
+    )
+    uninstall_cmd.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would be removed without changing anything.",
+    )
+    uninstall_cmd.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt.",
+    )
+
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -809,6 +844,59 @@ def main() -> None:
             )
             print(f"\nCompleted {len(results)} benchmark(s).")
             print("Run 'code-review-graph eval --report' to generate tables.")
+        return
+
+    if args.command == "uninstall":
+        from .uninstall import run as run_uninstall
+
+        target_repo = Path(args.repo).expanduser().resolve() if args.repo else None
+        # Always do a dry-run first so we can show the user what we are
+        # about to do; ask for confirmation unless --yes (or --dry-run
+        # which doesn't need one).
+        preview = run_uninstall(
+            repo=target_repo,
+            all_repos=args.all_repos,
+            keep_data=args.keep_data,
+            keep_user_configs=args.keep_user_configs,
+            dry_run=True,
+        )
+        print("code-review-graph uninstall — planned actions:")
+        if not preview.removed_paths and not preview.edited_paths:
+            print("  (nothing to do — no code-review-graph artifacts found)")
+            return
+        for line in preview.removed_paths:
+            print(f"  delete  {line}")
+        for line in preview.edited_paths:
+            print(f"  edit    {line}")
+        for line in preview.skipped_paths:
+            print(f"  skip    {line}")
+        if args.dry_run:
+            print()
+            print("[dry-run] No changes made. Re-run without --dry-run to apply.")
+            return
+        if not args.yes and not _confirm_yes_no(
+            "\nProceed with uninstall?",
+            default_yes=False,
+        ):
+            print("Aborted.")
+            return
+        result = run_uninstall(
+            repo=target_repo,
+            all_repos=args.all_repos,
+            keep_data=args.keep_data,
+            keep_user_configs=args.keep_user_configs,
+            dry_run=False,
+        )
+        print()
+        print(
+            f"Done. Removed {len(result.removed_paths)} path(s), "
+            f"edited {len(result.edited_paths)} config(s)."
+        )
+        if result.errors:
+            print("Errors:")
+            for err in result.errors:
+                print(f"  {err}")
+            sys.exit(1)
         return
 
     if args.command in ("init", "install"):
