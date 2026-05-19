@@ -560,6 +560,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 f" && code-review-graph update --skip-flows"
                                 f" --repo {repo_arg}"
@@ -577,6 +578,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 f" && code-review-graph status --repo {repo_arg}"
                                 " || echo 'Not a git repo, skipping'"
@@ -601,6 +603,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 " && code-review-graph update --skip-flows"
                                 " || true"
@@ -618,6 +621,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 " && code-review-graph status"
                                 " || echo 'Not a git repo, skipping'"

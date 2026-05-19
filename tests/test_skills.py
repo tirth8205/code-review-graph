@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import stat
 import sys
 from pathlib import Path
@@ -121,6 +122,7 @@ class TestGenerateHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
@@ -131,6 +133,7 @@ class TestGenerateHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert 0 < inner["timeout"] <= 600
 
     def test_does_not_emit_invalid_pre_commit_hook(self):
@@ -278,6 +281,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -288,7 +292,36 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert inner["statusMessage"] == "Checking code-review-graph status"
+
+
+    def test_post_tool_use_command_handles_large_stdin_payload(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+
+        payload = ("x" * 1024 + "\n") * 20000
+        proc = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+
+        broken_pipe = None
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except BrokenPipeError as exc:  # pragma: no cover - regression guard
+            broken_pipe = exc
+
+        proc.stdin = None
+        stdout, stderr = proc.communicate()
+        assert broken_pipe is None, f"hook command raised BrokenPipeError: {stderr}"
+        assert proc.returncode == 0, stderr
 
     def test_commands_do_not_pin_a_specific_repo_path(self, tmp_path):
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
