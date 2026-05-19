@@ -1,6 +1,10 @@
 <h1 align="center">code-review-graph</h1>
 
 <p align="center">
+  <strong>ٹوکن ضائع کرنا بند کریں۔ سمارٹ طریقے سے کوڈ ریویو کریں۔</strong>
+</p>
+
+<p align="center">
   <strong>Stop burning tokens. Start reviewing smarter.</strong>
 </p>
 
