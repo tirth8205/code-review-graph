@@ -449,6 +449,10 @@ _TEST_RUNNER_NAMES = frozenset({
 _TEST_ANNOTATIONS = frozenset({
     "Test", "ParameterizedTest", "RepeatedTest", "TestFactory",
     "org.junit.Test", "org.junit.jupiter.api.Test",
+    # Rust: built-in `#[test]` plus common async-runtime + framework
+    # variants. Stripped of the `#[ ]` wrapper before lookup.
+    "test", "tokio::test", "async_std::test",
+    "rstest", "rstest::rstest", "proptest",
 })
 
 # Spring stereotype annotations that mark classes as managed beans
@@ -4341,6 +4345,23 @@ class CodeParser:
                 if sib.type == "decorator":
                     text = sib.text.decode("utf-8", errors="replace")
                     deco_list.append(text.lstrip("@").strip())
+        # Rust: attributes are preceding siblings of function_item, not
+        # children. Walk back through `attribute_item` nodes and strip the
+        # `#[ ]` (or `#![ ]`) wrapper.
+        if language == "rust":
+            sib = child.prev_sibling
+            while sib is not None and sib.type == "attribute_item":
+                text = sib.text.decode("utf-8", errors="replace").strip()
+                if text.startswith("#!["):
+                    inner = text[3:].rstrip()
+                elif text.startswith("#["):
+                    inner = text[2:].rstrip()
+                else:
+                    inner = text
+                if inner.endswith("]"):
+                    inner = inner[:-1]
+                deco_list.append(inner.strip())
+                sib = sib.prev_sibling
         if deco_list:
             decorators = tuple(deco_list)
 
