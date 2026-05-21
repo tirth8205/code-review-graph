@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "all",
+    "copilot", "copilot-cli", "codebuddy", "all",
 ]
 
 
@@ -239,6 +239,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
+        install_codebuddy_hooks,
+        install_codebuddy_skills,
     )
 
     if not skip_skills:
@@ -278,6 +280,12 @@ def _handle_init(args: argparse.Namespace) -> None:
         qoder_skills_dir = install_qoder_skills(repo_root)
         if qoder_skills_dir:
             print(f"Installed Qoder skills to {qoder_skills_dir}")
+
+    # Install CodeBuddy skills (project-level)
+    if not skip_skills and target in ("codebuddy", "all"):
+        codebuddy_skills_dir = install_codebuddy_skills(repo_root)
+        print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+
     if not skip_hooks and target in ("codex", "all"):
         hooks_path = install_codex_hooks(repo_root)
         print(f"Installed Codex hooks in {hooks_path}")
@@ -315,6 +323,17 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed OpenCode plugin in {plugin_path}")
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
+
+    # CodeBuddy hooks (project-level .codebuddy/settings.json)
+    if not skip_hooks and target in ("codebuddy", "all"):
+        try:
+            codebuddy_settings = install_codebuddy_hooks(repo_root)
+            print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+            git_hook = install_git_hook(repo_root)
+            if git_hook:
+                print(f"Installed git pre-commit hook in {git_hook}")
+        except Exception as exc:
+            logger.warning("Could not install CodeBuddy hooks: %s", exc)
 
     print()
     print("Next steps:")

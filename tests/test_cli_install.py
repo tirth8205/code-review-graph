@@ -96,3 +96,45 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
 
     assert called["cursor_hooks"] is True
     assert "Installed Cursor hooks" in out
+
+
+def test_handle_init_codebuddy_installs_hooks_and_skills(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.find_repo_root",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: ["CodeBuddy"],
+    )
+
+    called = {"codebuddy_hooks": False, "codebuddy_skills": False, "git_hook": False}
+
+    def _install_codebuddy_hooks(repo_root):
+        called["codebuddy_hooks"] = True
+        return repo_root / ".codebuddy" / "settings.json"
+
+    def _install_codebuddy_skills(repo_root):
+        called["codebuddy_skills"] = True
+        return repo_root / ".codebuddy" / "skills"
+
+    def _install_git_hook(repo_root):
+        called["git_hook"] = True
+        return repo_root / ".git" / "hooks" / "pre-commit"
+
+    monkeypatch.setattr("code_review_graph.skills.install_codebuddy_hooks", _install_codebuddy_hooks)
+    monkeypatch.setattr("code_review_graph.skills.install_codebuddy_skills", _install_codebuddy_skills)
+    monkeypatch.setattr("code_review_graph.skills.install_git_hook", _install_git_hook)
+
+    _handle_init(_args(tmp_path, "codebuddy"))
+    out = capsys.readouterr().out
+
+    assert called["codebuddy_hooks"] is True
+    assert called["codebuddy_skills"] is True
+    assert called["git_hook"] is True
+    assert "Installed CodeBuddy hooks" in out
+    assert "Installed CodeBuddy skills" in out

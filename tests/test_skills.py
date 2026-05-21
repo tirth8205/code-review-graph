@@ -425,7 +425,7 @@ class TestInjectPlatformInstructionsFiltering:
         updated = inject_platform_instructions(tmp_path, target="all")
         assert set(updated) == {
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
-            "QODER.md", ".kiro/steering/code-review-graph.md",
+            "QODER.md", "CODEBUDDY.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
         }
 
@@ -433,7 +433,7 @@ class TestInjectPlatformInstructionsFiltering:
         updated = inject_platform_instructions(tmp_path)
         assert set(updated) == {
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
-            "QODER.md", ".kiro/steering/code-review-graph.md",
+            "QODER.md", "CODEBUDDY.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
         }
 

@@ -145,6 +145,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "codebuddy": {
+        "name": "CodeBuddy",
+        "config_path": lambda root: root / ".codebuddy" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".codebuddy").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
 }
 
 
@@ -919,6 +927,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
+    "CODEBUDDY.md": ("codebuddy",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
     ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
 }
@@ -1443,3 +1452,136 @@ def install_opencode_plugin() -> Path:
     logger.info("Wrote OpenCode plugin: %s", plugin_path)
 
     return plugin_path
+
+
+# --- CodeBuddy hooks + skills ---
+
+
+def generate_codebuddy_hooks_config(repo_root: Path) -> dict[str, Any]:
+    """Generate CodeBuddy hooks configuration for .codebuddy/settings.json.
+
+    Uses the same hook schema as Claude Code (PostToolUse / SessionStart),
+    since CodeBuddy Code shares the hooks format with Claude Code.
+    """
+    repo_arg = json.dumps(repo_root.resolve().as_posix())
+    return {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "Edit|Write|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph update --skip-flows"
+                                f" --repo {repo_arg}"
+                                " || true"
+                            ),
+                            "timeout": 30,
+                        },
+                    ],
+                },
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                f" && code-review-graph status --repo {repo_arg}"
+                                " || echo 'Not a git repo, skipping'"
+                            ),
+                            "timeout": 10,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+
+def install_codebuddy_hooks(repo_root: Path) -> Path:
+    """Write hooks config to .codebuddy/settings.json.
+
+    Merges new hook entries into existing settings, preserving both
+    non-hook configuration and user-defined hooks.  A backup of the
+    original file is created before any modifications.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        Path to the settings.json file that was written.
+    """
+    settings_dir = repo_root / ".codebuddy"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_dir / "settings.json"
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = settings_dir / "settings.json.bak"
+            shutil.copy2(settings_path, backup_path)
+            logger.info("Backed up existing CodeBuddy settings to %s", backup_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", settings_path, exc)
+
+    hooks_config = generate_codebuddy_hooks_config(repo_root)
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        logger.warning("Existing CodeBuddy hooks config is not a dict; replacing with defaults")
+        existing_hooks = {}
+
+    merged_hooks = dict(existing_hooks)
+    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
+        if isinstance(merged_hooks.get(hook_name), list):
+            merged_list = list(merged_hooks[hook_name])
+            for entry in hook_entries:
+                if entry not in merged_list:
+                    merged_list.append(entry)
+            merged_hooks[hook_name] = merged_list
+        else:
+            merged_hooks[hook_name] = hook_entries
+
+    existing["hooks"] = merged_hooks
+
+    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote CodeBuddy hooks config: %s", settings_path)
+    return settings_path
+
+
+def install_codebuddy_skills(repo_root: Path) -> Path:
+    """Install skills to CodeBuddy's project-level skills directory.
+
+    CodeBuddy expects skills in .codebuddy/skills/{skillName}/skill.md format.
+    Skills use the same content as Claude Code skills.
+
+    Args:
+        repo_root: Repository root directory.
+
+    Returns:
+        Path to the CodeBuddy skills directory.
+    """
+    skills_dir = repo_root / ".codebuddy" / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        skill_name = filename.removesuffix(".md")
+        skill_subdir = skills_dir / skill_name
+        skill_subdir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_subdir / "skill.md"
+        content = (
+            "---\n"
+            f"name: {skill['name']}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote CodeBuddy skill: %s", skill_path)
+
+    return skills_dir
