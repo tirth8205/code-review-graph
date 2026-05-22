@@ -65,6 +65,50 @@ class EmbeddingProvider(ABC):
 LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 
+# Process-wide cache of loaded sentence-transformer models, keyed by model name.
+# Populated by ``prewarm_local_embeddings()`` at server startup (see ``main.main``)
+# and by ``LocalEmbeddingProvider._get_model`` on first lazy load. Sharing the
+# loaded model across ``LocalEmbeddingProvider`` instances avoids re-importing
+# ``sentence_transformers`` + ``torch`` from worker threads, which deadlocks
+# ``semantic_search_nodes_tool`` on Windows stdio MCP (#385 fixed the peer
+# tools via ``asyncio.to_thread``; this cache fixes the remaining case where
+# torch DLL / OpenMP init runs inside an executor thread).
+_MODEL_CACHE: dict[str, Any] = {}
+
+
+def prewarm_local_embeddings(model_name: str | None = None) -> None:
+    """Eagerly load the local sentence-transformer model on the calling thread.
+
+    Call this from the **main thread** before entering an asyncio event loop
+    (e.g. before ``mcp.run()``) on Windows to prevent a deadlock where lazy-
+    loading ``sentence_transformers`` + ``torch`` inside a FastMCP executor
+    worker thread blocks indefinitely on DLL init / OpenMP thread-pool
+    registration.
+
+    No-op when ``sentence-transformers`` is not installed (cloud-provider
+    setups remain unaffected) or when the configured model is already cached.
+
+    Args:
+        model_name: Optional override; falls back to the ``CRG_EMBEDDING_MODEL``
+            environment variable and then to ``LOCAL_DEFAULT_MODEL``.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer  # noqa: F401
+    except ImportError:
+        return  # cloud-only setup: nothing to pre-warm
+
+    resolved = model_name or os.environ.get(
+        "CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL
+    )
+    if resolved in _MODEL_CACHE:
+        return
+
+    try:
+        _MODEL_CACHE[resolved] = LocalEmbeddingProvider(resolved)._get_model()
+    except Exception as exc:  # pragma: no cover — best-effort startup hook
+        logger.warning("prewarm_local_embeddings(%s) skipped: %s", resolved, exc)
+
+
 class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or os.environ.get(
@@ -74,6 +118,12 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     def _get_model(self):
         if self._model is None:
+            # Check the process-wide cache first — populated either by a prior
+            # provider instance or by ``prewarm_local_embeddings`` at startup.
+            cached = _MODEL_CACHE.get(self._model_name)
+            if cached is not None:
+                self._model = cached
+                return self._model
             try:
                 from sentence_transformers import SentenceTransformer
                 # Check environment variable, default to False to prevent RCE
@@ -84,6 +134,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                     self._model_name,
                     trust_remote_code=allow_remote_code,
                 )
+                _MODEL_CACHE[self._model_name] = self._model
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "

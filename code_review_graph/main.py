@@ -1024,6 +1024,15 @@ def main(
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # Pre-warm sentence-transformers on the main thread before fastmcp's
+        # event loop starts. Lazy-loading ``torch`` + tokenizers inside an
+        # executor worker thread deadlocks ``semantic_search_nodes_tool`` on
+        # Windows stdio MCP (DLL init / OpenMP thread-pool registration grabs
+        # locks the loop needs). #385 added ``asyncio.to_thread`` to peer
+        # tools but cannot fix this case — the dangerous initialization has
+        # to happen on the main thread before any worker thread is spawned.
+        from .embeddings import prewarm_local_embeddings
+        prewarm_local_embeddings()
 
     try:
         if transport == "stdio":
