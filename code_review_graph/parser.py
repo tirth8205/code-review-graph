@@ -252,7 +252,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "r": ["function_definition"],
     "perl": ["subroutine_declaration_statement", "method_declaration_statement"],
     "kotlin": ["function_declaration"],
-    "swift": ["function_declaration"],
+    "swift": ["function_declaration", "protocol_function_declaration"],
     "php": ["function_definition", "method_declaration"],
     "scala": ["function_definition", "function_declaration"],
     # Solidity: events and modifiers use kind="Function" because the graph
@@ -2309,10 +2309,18 @@ class CodeParser:
 
             # --- Imports ---
             if node_type in import_types:
-                self._extract_imports(
-                    child, language, source, file_path, edges,
-                )
-                continue
+                if language == "ruby":
+                    imports = self._extract_import(child, language, source)
+                    if imports:
+                        self._extract_imports(
+                            child, language, source, file_path, edges,
+                        )
+                        continue
+                else:
+                    self._extract_imports(
+                        child, language, source, file_path, edges,
+                    )
+                    continue
 
             # --- Calls ---
             if node_type in call_types:
@@ -6043,6 +6051,19 @@ class CodeParser:
                     for sub in child.children:
                         if sub.type in ("identifier", "type_identifier", "nested_identifier"):
                             bases.append(sub.text.decode("utf-8", errors="replace"))
+        elif language == "swift":
+            for child in node.children:
+                if child.type == "inheritance_specifier":
+                    for sub in child.children:
+                        if sub.type == "user_type":
+                            for ident in sub.children:
+                                if ident.type == "type_identifier":
+                                    bases.append(
+                                        ident.text.decode("utf-8", errors="replace")
+                                    )
+                                    break
+                        elif sub.type == "type_identifier":
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
         elif language == "solidity":
             # contract Foo is Bar, Baz { ... }
             for child in node.children:
@@ -6228,6 +6249,11 @@ class CodeParser:
                 match = re.search(r"""['"](.*?)['"]""", text)
                 if match:
                     imports.append(match.group(1))
+        elif language == "swift":
+            for child in node.children:
+                if child.type == "identifier":
+                    imports.append(child.text.decode("utf-8", errors="replace"))
+                    break
         elif language == "dart":
             # import 'dart:async' or import 'package:flutter/material.dart'
             # Node structure: import_or_export > library_import > import_specification
@@ -6431,6 +6457,12 @@ class CodeParser:
         # Simple call: func_name(args)
         # Kotlin uses "simple_identifier" instead of "identifier".
         if first.type in ("identifier", "simple_identifier"):
+            return first.text.decode("utf-8", errors="replace")
+
+        if language == "ruby" and first.type == "constant":
+            for child in reversed(node.children):
+                if child.type == "identifier":
+                    return child.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 
         # Perl: function_call_expression / ambiguous_function_call_expression

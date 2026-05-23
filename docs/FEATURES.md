@@ -9,11 +9,16 @@
 - **`get_minimal_context`**: Ultra-compact entry point (~100 tokens) with task-based tool routing.
 - **Incremental flow/community updates**: Only re-trace affected flows, skip community re-detection when unaffected.
 - **Visualization aggregation**: Community/file/auto modes with drill-down for 5k+ node graphs.
+- **axon-web browser explorer**: `axon web`, `axon-web`, and `code-review-graph web` start a local graph navigation UI with search, node inspection, query, impact, graph, status, SSE update endpoints, and local aggregate token-savings telemetry.
+- **Language Server Protocol integration**: `code-review-graph lsp` exposes graph-backed workspace symbols, document symbols, definitions, references, code lenses, callers, callees, and blast-radius commands over stdio.
+- **Watch JSON events**: `code-review-graph watch --json-events` emits structured update/removal/error events for editor integrations and background services.
+- **VS Code watch parity**: The VS Code extension can run persistent watch mode, stream CLI output, and stop the watcher on extension deactivation.
+- **Ruby, Swift, and Scala parser hardening**: Ruby constant method calls, Swift imports/inheritance, and existing Scala coverage are included in regression tests.
 - **Token-efficiency benchmarks**: 5 workflow benchmarks in eval framework.
 - **Pre-computed summary tables**: DB schema v6 with `community_summaries`, `flow_snapshots`, `risk_index`.
 - **Configurable limits**: `CRG_MAX_IMPACT_NODES`, `CRG_MAX_IMPACT_DEPTH`, `CRG_DEPENDENT_HOPS`, etc.
 - **Multi-hop dependents**: N-hop dependent discovery (default 2) with 500-file cap.
-- **615 tests** across 22 test files.
+- **623 tests** across 25 test files.
 
 ## v2.1.0
 - **22 MCP tools** (up from 9): 13 new tools for flows, communities, architecture, refactoring, wiki, multi-repo, and risk-scored change detection.
@@ -126,5 +131,6 @@
 ## Privacy & Data
 - All data stays 100% local
 - Graph stored in `.code-review-graph/graph.db` (SQLite), auto-gitignored
-- No telemetry, no network calls
+- No external telemetry; local aggregate web telemetry is stored only in `.code-review-graph/graph.db`
+- No network calls during normal operation
 - Respects `.gitignore` and `.code-review-graphignore`

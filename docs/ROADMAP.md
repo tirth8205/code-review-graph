@@ -2,7 +2,7 @@
 
 ## Shipped
 
-### v2.2.0
+### v2.2.x
 - Multi-repo watch daemon (`crg-daemon` / `code-review-graph daemon`)
 - TOML-based daemon configuration (`~/.code-review-graph/watch.toml`)
 - Child process management: one `code-review-graph watch` process per repo
@@ -11,6 +11,12 @@
 - Health checking with automatic restart of dead watchers
 - Standalone `crg-daemon` CLI entry point (7 subcommands)
 - Integrated `daemon` subcommand group in main CLI
+- axon-web local browser explorer (`code-review-graph web`, `axon web`, `axon-web`)
+- Language Server Protocol integration (`code-review-graph lsp`)
+- VS Code persistent watch mode with structured CLI event handling
+- Watch mode JSON events (`code-review-graph watch --json-events`)
+- Shared graph service layer for CLI, web, LSP, and editor integrations
+- Ruby, Swift, and Scala regression coverage for parser parity
 
 ### v2.0.0
 - 22 MCP tools (up from 9) and 5 MCP prompts
@@ -68,7 +74,7 @@
 
 - GitHub PR bot integration
 - Team sync (shared graph via git-tracked DB)
-- SSE/HTTP MCP transport for multi-client access
+- SSE/HTTP MCP transport for multi-client MCP access
 - Performance optimization for monorepos (>50k files)
 
 ## Ongoing

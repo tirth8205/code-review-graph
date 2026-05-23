@@ -44,6 +44,8 @@ Open the Command Palette (`Ctrl+Shift+P`) and run **Code Graph: Build Graph**.
 
 The graph database is stored locally at `.code-review-graph/graph.db` and updates automatically on file save.
 
+For continuous background indexing, run **Code Graph: Watch Mode**. The extension starts `code-review-graph watch --json-events`, streams progress to the **Code Graph Watch** output channel, and stops the watcher when the extension deactivates.
+
 ## Commands
 
 | Command | Description |
@@ -61,6 +63,26 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 | `Code Graph: Show Graph` | Open the interactive graph visualization |
 | `Code Graph: Compute Embeddings` | Generate vector embeddings for semantic search |
 | `Code Graph: Watch Mode` | Run graph in watch mode for continuous updates |
+
+## Browser UI and LSP
+
+The Python backend also ships a standalone browser explorer:
+
+```bash
+code-review-graph build
+axon web --repo . --host 127.0.0.1 --port 8765
+# Open http://127.0.0.1:8765/
+```
+
+`axon-web --repo . --host 127.0.0.1 --port 8765` starts the same UI.
+
+The browser dashboard includes graph size, estimated source-vs-graph token savings, observed web API request count, and estimated cumulative/average savings. Those estimates use the standard chars/4 approximation and are not model-provider billing data.
+
+Editor integrations can use the stdio Language Server Protocol server:
+
+```bash
+code-review-graph lsp --repo .
+```
 
 ## Settings
 

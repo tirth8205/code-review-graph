@@ -182,9 +182,19 @@ export class SqliteReader {
   }
 
   constructor(dbPath: string) {
-    this.db = new Database(dbPath, { readonly: true });
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('busy_timeout = 5000');
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      db.pragma('journal_mode = WAL');
+    } catch (err: unknown) {
+      const code = typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code)
+        : '';
+      if (code !== 'SQLITE_READONLY') {
+        throw err;
+      }
+    }
+    db.pragma('busy_timeout = 5000');
+    this.db = db;
   }
 
   /**

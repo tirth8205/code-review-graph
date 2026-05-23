@@ -27,17 +27,35 @@ Never include full files unless explicitly asked.
 MCP tools (24): get_minimal_context_tool, build_or_update_graph_tool, run_postprocess_tool, get_impact_radius_tool, query_graph_tool, get_review_context_tool, semantic_search_nodes_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool, find_large_functions_tool, list_flows_tool, get_flow_tool, get_affected_flows_tool, list_communities_tool, get_community_tool, get_architecture_overview_tool, detect_changes_tool, refactor_tool, apply_refactor_tool, generate_wiki_tool, get_wiki_page_tool, list_repos_tool, cross_repo_search_tool
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check
 Skills: build-graph, review-delta, review-pr
-CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|postprocess|register|unregister|repos|eval]
+CLI: code-review-graph [install|init|build|update|status|watch|web|lsp|visualize|serve|wiki|detect-changes|postprocess|register|unregister|repos|eval]
+Aliases: axon [same commands], axon-web [web explorer]
 Token efficiency: All tools support detail_level="minimal" for compact output. Always call get_minimal_context_tool first.
 </section>
 
 <section name="legal">
-MIT license. 100% local. No telemetry. DB file: .code-review-graph/graph.db
+MIT license. 100% local. No external telemetry. DB file: .code-review-graph/graph.db
 </section>
 
 <section name="watch">
 Run: code-review-graph watch (auto-updates graph on file save via watchdog)
+Structured events: code-review-graph watch --json-events emits JSON lines for updated, removed, and error events.
 Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
+</section>
+
+<section name="web">
+Run: code-review-graph build && axon web --repo . --host 127.0.0.1 --port 8765
+Open: http://127.0.0.1:8765/
+Equivalent entry point: axon-web --repo . --host 127.0.0.1 --port 8765
+Endpoints: /api/status, /api/search, /api/node, /api/query, /api/impact, /api/graph, /events
+Use for local browser graph navigation, search, node inspection, impact lookup, live graph update notifications, estimated source-vs-graph token savings, and local aggregate web API telemetry.
+Token estimate: /api/status returns token_estimate and telemetry using chars/4; it is dashboard guidance, not model-provider billing data.
+</section>
+
+<section name="lsp">
+Run: code-review-graph lsp --repo .
+Transport: stdio Language Server Protocol.
+Capabilities: workspace symbols, document symbols, definitions, references, code lenses, callers, callees, blast radius.
+Use for editor integrations such as VS Code.
 </section>
 
 <section name="embeddings">

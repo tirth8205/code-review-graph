@@ -235,6 +235,11 @@ code-review-graph update --base origin/main    # Custom base ref
 # Monitor and inspect
 code-review-graph status                       # Graph statistics
 code-review-graph watch                        # Auto-update on file changes
+code-review-graph watch --json-events          # Watch mode with JSON-line events
+code-review-graph web                          # Start local browser graph explorer
+axon web                                       # Same web explorer via short alias
+axon-web                                       # Dedicated web explorer entry point
+code-review-graph lsp                          # Start Language Server Protocol server
 code-review-graph visualize                    # Generate interactive HTML graph
 
 # Analysis
@@ -306,3 +311,35 @@ automatically reconciles child processes (starting/stopping as repos are
 added or removed). Health checks run every 30 seconds and automatically
 restart dead watchers. No external dependencies (tmux, screen, etc.) are
 required.
+
+## Browser Explorer
+
+```bash
+code-review-graph build
+axon web --repo . --host 127.0.0.1 --port 8765
+# Open http://127.0.0.1:8765/
+```
+
+`code-review-graph web`, `axon web`, and `axon-web` start the same local browser UI. The dashboard shows graph size, estimated source-vs-graph token savings, observed web API request count, and estimated cumulative/average savings. The token estimate uses the standard chars/4 approximation and is not model-provider billing data. Aggregate telemetry is stored locally in `.code-review-graph/graph.db`.
+
+The server exposes:
+
+```text
+GET /api/status
+GET /api/search?q=<query>
+GET /api/node?id=<node_id>
+GET /api/query?type=<pattern>&target=<name>
+GET /api/impact?file=<path>
+GET /api/graph?limit=<n>
+GET /events
+```
+
+`/events` is an SSE stream that emits graph update notifications when the local database changes.
+
+## LSP
+
+```bash
+code-review-graph lsp --repo .
+```
+
+Starts the stdio Language Server Protocol server for editor integrations. Supported capabilities include workspace symbols, document symbols, definitions, references, code lenses, and execute-command handlers for callers, callees, and blast radius.

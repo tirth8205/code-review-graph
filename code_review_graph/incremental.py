@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path, PurePosixPath
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .graph import GraphStore
 from .parser import CodeParser
@@ -1068,6 +1068,7 @@ def watch(
     repo_root: Path,
     store: GraphStore,
     on_files_updated: Optional[Callable] = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Watch for file changes and auto-update the graph.
 
@@ -1080,6 +1081,8 @@ def watch(
             batch of file updates completes.  Receives the store as its
             only argument.  Used by the CLI to run post-processing
             (FTS, flows, communities) after watch updates.
+        event_sink: Optional callback that receives structured update/error
+            events. Used by editor integrations.
     """
     import threading
 
@@ -1134,8 +1137,21 @@ def watch(
                 store.remove_file_data(event.src_path)
                 store.commit()
                 logger.info("Removed: %s", rel)
+                if event_sink:
+                    event_sink({
+                        "event": "removed",
+                        "file": rel,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
             except Exception as e:
                 logger.error("Error removing %s: %s", rel, e)
+                if event_sink:
+                    event_sink({
+                        "event": "error",
+                        "file": rel,
+                        "error": str(e),
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
 
         def _schedule(self, abs_path: str):
             """Add file to pending set and reset the debounce timer."""
@@ -1186,9 +1202,24 @@ def watch(
                     len(nodes),
                     len(edges),
                 )
+                if event_sink:
+                    event_sink({
+                        "event": "updated",
+                        "file": rel,
+                        "nodes": len(nodes),
+                        "edges": len(edges),
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
                 return True
             except Exception as e:
                 logger.error("Error updating %s: %s", abs_path, e)
+                if event_sink:
+                    event_sink({
+                        "event": "error",
+                        "file": str(path),
+                        "error": str(e),
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    })
                 return False
 
     handler = GraphUpdateHandler()

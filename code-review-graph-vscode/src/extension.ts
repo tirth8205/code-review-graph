@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import type { ChildProcess } from "node:child_process";
 
 import { SqliteReader } from "./backend/sqlite";
 import type { GraphNode } from "./backend/sqlite";
@@ -19,6 +20,8 @@ import { ScmDecorationProvider } from "./features/scmDecorations";
 let sqliteReader: SqliteReader | undefined;
 let autoUpdateTimer: ReturnType<typeof setTimeout> | undefined;
 let scmDecorationProvider: ScmDecorationProvider | undefined;
+let watchProcess: ChildProcess | undefined;
+let watchOutput: vscode.OutputChannel | undefined;
 
 /**
  * Locate the graph database file in the workspace.
@@ -554,13 +557,37 @@ function registerCommands(
         return;
       }
 
-      vscode.window.showInformationMessage("Code Graph: Watch mode started.");
-      const result = await cli.watchGraph(workspaceRoot);
-      if (!result.success) {
-        vscode.window.showErrorMessage(
-          `Code Graph: Watch failed. ${result.stderr}`
-        );
+      if (watchProcess) {
+        watchProcess.kill();
+        watchProcess = undefined;
+        vscode.window.showInformationMessage("Code Graph: Watch mode stopped.");
+        return;
       }
+
+      watchOutput ??= vscode.window.createOutputChannel("Code Graph Watch");
+      watchOutput.appendLine(`Starting watch mode in ${workspaceRoot}`);
+      watchProcess = cli.startWatchGraph(workspaceRoot);
+
+      watchProcess.stdout?.on("data", (data) => {
+        watchOutput?.append(data.toString());
+      });
+      watchProcess.stderr?.on("data", (data) => {
+        watchOutput?.append(data.toString());
+      });
+      watchProcess.on("error", (error) => {
+        watchProcess = undefined;
+        vscode.window.showErrorMessage(`Code Graph: Watch failed. ${error.message}`);
+      });
+      watchProcess.on("close", (code, signal) => {
+        const expectedStop = signal === "SIGTERM" || signal === "SIGKILL";
+        watchProcess = undefined;
+        watchOutput?.appendLine(`Watch stopped with code=${code} signal=${signal ?? ""}`);
+        if (code && !expectedStop) {
+          vscode.window.showWarningMessage(`Code Graph: Watch stopped with code ${code}.`);
+        }
+      });
+
+      vscode.window.showInformationMessage("Code Graph: Watch mode started.");
     })
   );
 
@@ -977,6 +1004,13 @@ export function deactivate(): void {
     clearTimeout(autoUpdateTimer);
     autoUpdateTimer = undefined;
   }
+
+  if (watchProcess) {
+    watchProcess.kill();
+    watchProcess = undefined;
+  }
+  watchOutput?.dispose();
+  watchOutput = undefined;
 
   sqliteReader?.close();
   sqliteReader = undefined;

@@ -9,6 +9,8 @@ Usage:
     code-review-graph status
     code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT]
     code-review-graph mcp [--auto-watch]
+    code-review-graph lsp
+    code-review-graph web
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
@@ -103,6 +105,8 @@ def _print_banner() -> None:
     {g}update{r}      Incremental update {d}(changed files only){r}
     {g}watch{r}       Auto-update on file changes
     {g}status{r}      Show graph statistics
+    {g}web{r}         Start axon-web browser explorer
+    {g}lsp{r}         Start graph Language Server Protocol server
     {g}visualize{r}   Generate interactive HTML graph
     {g}wiki{r}        Generate markdown wiki from communities
     {g}detect-changes{r} Analyze change impact {d}(risk-scored review){r}
@@ -502,6 +506,10 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    watch_cmd.add_argument(
+        "--json-events", action="store_true",
+        help="Print one JSON event per graph update",
+    )
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
@@ -709,6 +717,20 @@ def main() -> None:
         help="Repository path or alias to remove",
     )
 
+    # lsp
+    lsp_cmd = sub.add_parser("lsp", help="Start LSP server (stdio transport)")
+    lsp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+
+    # web
+    web_cmd = sub.add_parser("web", help="Start axon-web browser explorer")
+    web_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    web_cmd.add_argument("--host", default="127.0.0.1", help="Bind host")
+    web_cmd.add_argument("--port", type=int, default=8765, help="Bind port")
+    web_cmd.add_argument(
+        "--open", action="store_true", dest="open_browser",
+        help="Open the browser after starting the server",
+    )
+
     args = ap.parse_args()
 
     if args.version:
@@ -771,6 +793,21 @@ def main() -> None:
         handler = handlers.get(args.daemon_command)
         if handler:
             handler(args)
+        return
+
+    if args.command == "lsp":
+        from .lsp import main as lsp_main
+        lsp_main(repo_root=args.repo)
+        return
+
+    if args.command == "web":
+        from .web import run_web
+        run_web(
+            repo_root=args.repo,
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", 8765),
+            open_browser=getattr(args, "open_browser", False),
+        )
         return
 
     if args.command == "eval":
@@ -986,7 +1023,17 @@ def main() -> None:
             from .postprocessing import run_post_processing
 
             try:
-                watch(repo_root, store, on_files_updated=run_post_processing)
+                if getattr(args, "json_events", False):
+                    def _emit(event):
+                        print(json.dumps(event), flush=True)
+                    watch(
+                        repo_root,
+                        store,
+                        on_files_updated=run_post_processing,
+                        event_sink=_emit,
+                    )
+                else:
+                    watch(repo_root, store, on_files_updated=run_post_processing)
             except RuntimeError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)

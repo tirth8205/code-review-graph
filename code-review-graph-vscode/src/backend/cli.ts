@@ -1,4 +1,5 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import type { ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import * as vscode from 'vscode';
 
@@ -81,9 +82,13 @@ export class CliWrapper {
 
     /**
      * Start the watch daemon for continuous file monitoring.
+     * The caller owns the returned long-running process.
      */
-    async watchGraph(workspaceRoot: string): Promise<CliResult> {
-        return this.exec(['watch'], workspaceRoot);
+    startWatchGraph(workspaceRoot: string): ChildProcess {
+        return spawn(this.cliPath, ['watch', '--json-events'], {
+            cwd: workspaceRoot,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
     }
 
     /**

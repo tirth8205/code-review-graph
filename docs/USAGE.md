@@ -62,14 +62,44 @@ code-review-graph watch
 ```
 Auto-updates the graph on every file save. Zero manual work.
 
-### 5. Visualize the graph (optional)
+For tools that need structured progress events, use:
+
+```bash
+code-review-graph watch --json-events
+```
+
+Each update, removal, or error is written as one JSON line on stdout. The VS Code extension uses this mode for continuous background indexing.
+
+### 5. Explore the graph in the browser (optional)
+```bash
+code-review-graph build
+axon web --repo . --host 127.0.0.1 --port 8765
+# Open http://127.0.0.1:8765/
+```
+
+You can also run the dedicated entry point:
+
+```bash
+axon-web --repo . --host 127.0.0.1 --port 8765
+```
+
+The web explorer is a local browser UI for graph navigation. It reads `.code-review-graph/graph.db`, exposes search, node, query, impact, graph, and status endpoints, streams graph update notifications to the page, and displays estimated source-vs-graph token savings. It also records local aggregate telemetry for web API operations, so the dashboard can show observed request count plus estimated cumulative and average savings. Token estimates use the standard chars/4 approximation and are dashboard guidance, not model-provider billing data.
+
+### 6. Export a static graph (optional)
 ```bash
 code-review-graph visualize
 open .code-review-graph/graph.html
 ```
 Interactive D3.js force-directed graph. Starts collapsed (File nodes only) — click a file to expand its children. Use the search bar to filter, and click legend edge types to toggle visibility.
 
-### 6. Semantic search (optional)
+### 7. Start the LSP server (optional)
+```bash
+code-review-graph lsp --repo .
+```
+
+The Language Server Protocol server runs over stdio for editor integrations. It exposes workspace symbols, document symbols, definitions, references, code lenses, and commands for callers, callees, and blast-radius lookup.
+
+### 8. Semantic search (optional)
 ```bash
 pip install "code-review-graph[embeddings]"
 ```
@@ -77,25 +107,25 @@ Then use `embed_graph_tool` to compute vectors. `semantic_search_nodes_tool` aut
 
 Embedding providers: Local (sentence-transformers), Google Gemini, MiniMax. Configure via `CRG_EMBEDDING_MODEL` env var.
 
-### 7. Detect changes with risk scoring (v2)
+### 9. Detect changes with risk scoring (v2)
 ```
 Ask Claude: "Review my recent changes with risk scoring"
 ```
 Uses `detect_changes_tool` to map diffs to affected functions, flows, communities, and test gaps.
 
-### 8. Explore architecture (v2)
+### 10. Explore architecture (v2)
 ```
 Ask Claude: "Show me the architecture of this project"
 ```
 Uses `get_architecture_overview_tool` for community-based architecture map with coupling warnings.
 
-### 9. Generate wiki (v2)
+### 11. Generate wiki (v2)
 ```bash
 code-review-graph wiki
 ```
 Creates markdown wiki pages for each detected community in `.code-review-graph/wiki/`.
 
-### 10. Multi-repo search (v2)
+### 12. Multi-repo search (v2)
 ```bash
 code-review-graph register /path/to/other/repo --alias mylib
 ```

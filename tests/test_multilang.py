@@ -388,6 +388,15 @@ class TestRubyParsing:
         names = {f.name for f in funcs}
         assert "initialize" in names or "find_by_id" in names or "save" in names
 
+    def test_finds_imports_and_calls(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        assert {e.target for e in imports} == {"json"}
+
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "puts" in targets
+        assert any("save" in target for target in targets)
+
 
 class TestPHPParsing:
     def setup_method(self):
@@ -528,6 +537,17 @@ class TestSwiftParsing:
         assert "String" in targets
         # extension InMemoryRepo: CustomStringConvertible
         assert "CustomStringConvertible" in targets
+
+    def test_finds_imports_inheritance_and_calls(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        assert {e.target for e in imports} == {"Foundation"}
+
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        assert {e.target for e in inherits} >= {"UserRepository"}
+
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("save" in target for target in targets)
 
 
 class TestScalaParsing:
@@ -905,7 +925,8 @@ class TestPerlParsing:
     def test_finds_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
         targets = {e.target for e in calls}
-        assert any(t == "speak" or t.endswith("::speak") for t in targets)  # $self->speak() — method_call_expression
+        # $self->speak() method_call_expression
+        assert any(t == "speak" or t.endswith("::speak") for t in targets)
         assert "bless" in targets  # ambiguous_function_call_expression
 
     def test_finds_contains(self):

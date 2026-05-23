@@ -251,6 +251,11 @@ code-review-graph build            # Parse entire codebase
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Auto-update on file changes
+code-review-graph watch --json-events  # Emit machine-readable watch events
+code-review-graph web              # Start local browser graph explorer
+axon web                           # Same web explorer via the short alias
+axon-web                           # Dedicated web explorer entry point
+code-review-graph lsp              # Start Language Server Protocol server
 code-review-graph visualize        # Generate interactive HTML graph
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG
@@ -318,6 +323,24 @@ restart dead watchers. No external dependencies required.
 
 See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for the
 full config reference and all available options.
+
+</details>
+
+<details>
+<summary><strong>Browser explorer and editor integrations</strong></summary>
+<br>
+
+Build the graph, then start the local web UI:
+
+```bash
+code-review-graph build
+axon web --repo . --host 127.0.0.1 --port 8765
+# Open http://127.0.0.1:8765/
+```
+
+`axon-web --repo . --host 127.0.0.1 --port 8765` is equivalent. The browser explorer reads the local SQLite graph, supports search, node inspection, query and impact endpoints, receives live update notifications from the graph database, and shows estimated source-vs-graph token savings. It also records local aggregate telemetry for web API operations so the dashboard can show observed request count plus estimated cumulative savings.
+
+For editor integrations, `code-review-graph lsp` starts the stdio Language Server Protocol server. The VS Code extension also supports continuous indexing through `code-review-graph watch --json-events`.
 
 </details>
 
