@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
@@ -149,7 +150,9 @@ async def run_postprocess_tool(
     """
     return await asyncio.to_thread(
         run_postprocess,
-        flows=flows, communities=communities, fts=fts,
+        flows=flows,
+        communities=communities,
+        fts=fts,
         repo_root=_resolve_repo_root(repo_root),
     )
 
@@ -174,8 +177,10 @@ def get_minimal_context_tool(
         base: Git ref for diff comparison. Default: HEAD~1.
     """
     return get_minimal_context(
-        task=task, changed_files=changed_files,
-        repo_root=_resolve_repo_root(repo_root), base=base,
+        task=task,
+        changed_files=changed_files,
+        repo_root=_resolve_repo_root(repo_root),
+        base=base,
     )
 
 
@@ -200,8 +205,11 @@ def get_impact_radius_tool(
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     return get_impact_radius(
-        changed_files=changed_files, max_depth=max_depth,
-        repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
+        changed_files=changed_files,
+        max_depth=max_depth,
+        repo_root=_resolve_repo_root(repo_root),
+        base=base,
+        detail_level=detail_level,
     )
 
 
@@ -231,7 +239,9 @@ def query_graph_tool(
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     return query_graph(
-        pattern=pattern, target=target, repo_root=_resolve_repo_root(repo_root),
+        pattern=pattern,
+        target=target,
+        repo_root=_resolve_repo_root(repo_root),
         detail_level=detail_level,
     )
 
@@ -262,9 +272,13 @@ def get_review_context_tool(
             token-efficient summary. Default: standard.
     """
     return get_review_context(
-        changed_files=changed_files, max_depth=max_depth,
-        include_source=include_source, max_lines_per_file=max_lines_per_file,
-        repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
+        changed_files=changed_files,
+        max_depth=max_depth,
+        include_source=include_source,
+        max_lines_per_file=max_lines_per_file,
+        repo_root=_resolve_repo_root(repo_root),
+        base=base,
+        detail_level=detail_level,
     )
 
 
@@ -299,8 +313,13 @@ def semantic_search_nodes_tool(
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     return semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root),
-        model=model, provider=provider, detail_level=detail_level,
+        query=query,
+        kind=kind,
+        limit=limit,
+        repo_root=_resolve_repo_root(repo_root),
+        model=model,
+        provider=provider,
+        detail_level=detail_level,
     )
 
 
@@ -402,8 +421,11 @@ def find_large_functions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return find_large_functions(
-        min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=_resolve_repo_root(repo_root),
+        min_lines=min_lines,
+        kind=kind,
+        file_path_pattern=file_path_pattern,
+        limit=limit,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -430,7 +452,10 @@ def list_flows_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return list_flows(
-        repo_root=_resolve_repo_root(repo_root), sort_by=sort_by, limit=limit, kind=kind,
+        repo_root=_resolve_repo_root(repo_root),
+        sort_by=sort_by,
+        limit=limit,
+        kind=kind,
         detail_level=detail_level,
     )
 
@@ -456,8 +481,10 @@ def get_flow_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_flow(
-        flow_id=flow_id, flow_name=flow_name,
-        include_source=include_source, repo_root=_resolve_repo_root(repo_root),
+        flow_id=flow_id,
+        flow_name=flow_name,
+        include_source=include_source,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -479,7 +506,9 @@ def get_affected_flows_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_affected_flows_func(
-        changed_files=changed_files, base=base, repo_root=_resolve_repo_root(repo_root),
+        changed_files=changed_files,
+        base=base,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -505,7 +534,9 @@ def list_communities_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return list_communities_func(
-        repo_root=_resolve_repo_root(repo_root), sort_by=sort_by, min_size=min_size,
+        repo_root=_resolve_repo_root(repo_root),
+        sort_by=sort_by,
+        min_size=min_size,
         detail_level=detail_level,
     )
 
@@ -532,8 +563,10 @@ def get_community_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_community_func(
-        community_name=community_name, community_id=community_id,
-        include_members=include_members, repo_root=_resolve_repo_root(repo_root),
+        community_name=community_name,
+        community_id=community_id,
+        include_members=include_members,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -583,9 +616,12 @@ async def detect_changes_tool(
     """
     return await asyncio.to_thread(
         detect_changes_func,
-        base=base, changed_files=changed_files,
-        include_source=include_source, max_depth=max_depth,
-        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
+        base=base,
+        changed_files=changed_files,
+        include_source=include_source,
+        max_depth=max_depth,
+        repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
     )
 
 
@@ -620,8 +656,12 @@ def refactor_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return refactor_func(
-        mode=mode, old_name=old_name, new_name=new_name,
-        kind=kind, file_pattern=file_pattern, repo_root=_resolve_repo_root(repo_root),
+        mode=mode,
+        old_name=old_name,
+        new_name=new_name,
+        kind=kind,
+        file_pattern=file_pattern,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -650,7 +690,8 @@ def apply_refactor_tool(
             committing changes to disk. See: #176
     """
     return apply_refactor_func(
-        refactor_id=refactor_id, repo_root=_resolve_repo_root(repo_root),
+        refactor_id=refactor_id,
+        repo_root=_resolve_repo_root(repo_root),
         dry_run=dry_run,
     )
 
@@ -696,7 +737,8 @@ def get_wiki_page_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_wiki_page_func(
-        community_name=community_name, repo_root=_resolve_repo_root(repo_root),
+        community_name=community_name,
+        repo_root=_resolve_repo_root(repo_root),
     )
 
 
@@ -715,7 +757,8 @@ def get_hub_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_hub_nodes_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root),
+        top_n=top_n,
     )
 
 
@@ -735,7 +778,8 @@ def get_bridge_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_bridge_nodes_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root),
+        top_n=top_n,
     )
 
 
@@ -773,7 +817,8 @@ def get_surprising_connections_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return get_surprising_connections_func(
-        repo_root=_resolve_repo_root(repo_root), top_n=top_n,
+        repo_root=_resolve_repo_root(repo_root),
+        top_n=top_n,
     )
 
 
@@ -819,7 +864,9 @@ def traverse_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return traverse_graph_func(
-        query=query, mode=mode, depth=depth,
+        query=query,
+        mode=mode,
+        depth=depth,
         token_budget=token_budget,
         repo_root=_resolve_repo_root(repo_root) or "",
     )
@@ -948,6 +995,35 @@ def _apply_tool_filter(tools: str | None = None) -> None:
             mcp.remove_tool(name)
 
 
+def _start_watcher(repo_root: str | None) -> None:
+    """Start a background file watcher that auto-updates the graph.
+
+    Spawns the watchdog observer in a daemon thread so it dies when
+    the MCP server process exits. No separate process needed.
+    """
+    import logging
+    import threading
+
+    from .incremental import find_project_root, get_db_path, watch
+    from .graph import GraphStore
+    from .postprocessing import run_post_processing
+
+    logger = logging.getLogger(__name__)
+
+    root = Path(repo_root).resolve() if repo_root else find_project_root()
+    db_path = get_db_path(root)
+    store = GraphStore(db_path)
+
+    def _run():
+        try:
+            watch(root, store, on_files_updated=run_post_processing)
+        except Exception as e:
+            logger.error("Background watcher failed: %s", e)
+
+    thread = threading.Thread(target=_run, daemon=True, name="crg-watcher")
+    thread.start()
+    logger.info("Background watcher started for %s", root)
+
 
 def main(
     repo_root: str | None = None,
@@ -956,6 +1032,7 @@ def main(
     transport: str = "stdio",
     host: str | None = None,
     port: int | None = None,
+    watch: bool = False,
 ) -> None:
     """Run the MCP server (stdio or HTTP).
 
@@ -975,12 +1052,18 @@ def main(
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
+        watch: If True, start a background file watcher that auto-updates
+            the graph on file changes. Runs in the same process as the
+            MCP server (daemon thread).
     """
     global _default_repo_root
     _default_repo_root = repo_root
     _apply_tool_filter(tools)
+    if watch:
+        _start_watcher(repo_root)
     if sys.platform == "win32":
         import asyncio
+
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     if transport == "stdio":
         # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
