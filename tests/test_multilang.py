@@ -3083,3 +3083,367 @@ class TestZigParsing:
     def test_nodes_have_zig_language(self):
         for node in self.nodes:
             assert node.language == "zig"
+
+
+class TestHCLParsing:
+    """HCL / Terraform parser — closes #199."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.tf")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("main.tf")) == "hcl"
+        assert self.parser.detect_language(Path("config.hcl")) == "hcl"
+
+    def test_nodes_have_hcl_language(self):
+        for n in self.nodes:
+            assert n.language == "hcl"
+
+    def test_file_node(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].name.endswith("sample.tf")
+
+    def test_finds_resources(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "resource.aws_vpc.main" in classes
+        assert "resource.aws_instance.web" in classes
+        assert "resource.aws_subnet.main" in classes
+
+    def test_finds_data_sources(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "data.aws_ami.ubuntu" in classes
+
+    def test_finds_modules(self):
+        classes = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "module.security" in classes
+
+    def test_finds_variables(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "var.region" in funcs
+        assert "var.instance_type" in funcs
+
+    def test_finds_outputs(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "output.instance_ip" in funcs
+        assert "output.vpc_id" in funcs
+
+    def test_finds_locals(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "local.name_prefix" in funcs
+        assert "local.full_name" in funcs
+
+    def test_finds_provider(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "provider.aws" in funcs
+
+    def test_hcl_type_extra_metadata(self):
+        by_name = {n.name: n for n in self.nodes if n.kind != "File"}
+        assert by_name["resource.aws_vpc.main"].extra["hcl_type"] == "resource"
+        assert by_name["data.aws_ami.ubuntu"].extra["hcl_type"] == "data"
+        assert by_name["module.security"].extra["hcl_type"] == "module"
+        assert by_name["var.region"].extra["hcl_type"] == "variable"
+        assert by_name["output.instance_ip"].extra["hcl_type"] == "output"
+        assert by_name["local.name_prefix"].extra["hcl_type"] == "local"
+        assert by_name["provider.aws"].extra["hcl_type"] == "provider"
+
+    def test_module_source_creates_import_edge(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = [e.target for e in imports]
+        assert any("modules/security" in t for t in targets)
+
+    def test_contains_edges(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target for e in contains}
+        # All non-File nodes should be contained by the file
+        for n in self.nodes:
+            if n.kind != "File":
+                qn = f"{n.file_path}::{n.name}"
+                assert qn in targets, f"missing CONTAINS for {n.name}"
+
+    def test_resource_references_variable(self):
+        """resource.aws_instance.web references var.instance_type."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_instance.web" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.instance_type" in t for t in targets)
+
+    def test_resource_references_other_resource(self):
+        """resource.aws_instance.web references resource.aws_subnet.main."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_instance.web" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_subnet.main" in t for t in targets)
+
+    def test_resource_references_data_source(self):
+        """resource.aws_instance.web references data.aws_ami.ubuntu."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_instance.web" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("data.aws_ami.ubuntu" in t for t in targets)
+
+    def test_output_references_resource(self):
+        """output.instance_ip references resource.aws_instance.web."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "output.instance_ip" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_instance.web" in t for t in targets)
+
+    def test_module_references_resource(self):
+        """module.security references resource.aws_vpc.main."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "module.security" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_vpc.main" in t for t in targets)
+
+    def test_provider_references_variable(self):
+        """provider.aws references var.region."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "provider.aws" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.region" in t for t in targets)
+
+    def test_terraform_block_skipped(self):
+        """terraform {} block should not produce any nodes."""
+        names = {n.name for n in self.nodes if n.kind != "File"}
+        assert not any(name.startswith("terraform") for name in names)
+
+    def test_resource_references_local(self):
+        """resource.aws_vpc.main references local.full_name."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_vpc.main" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("local.full_name" in t for t in targets)
+
+    # ------------------------------------------------------------------
+    # Variable references inside function call arguments
+    # ------------------------------------------------------------------
+
+    def test_count_with_function_extracts_var_ref(self):
+        """length(var.subnet_ids) in count — var.subnet_ids must be extracted."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_instance.fleet" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.subnet_ids" in t for t in targets), (
+            f"Expected var.subnet_ids in refs from fleet; got {targets}"
+        )
+
+    # ------------------------------------------------------------------
+    # Block-local meta-argument iterators must not produce REFERENCES edges
+    # ------------------------------------------------------------------
+
+    def test_each_value_produces_no_spurious_edge(self):
+        """each.value.id should not produce any REFERENCES edge."""
+        each_edges = [
+            e for e in self.edges
+            if e.kind == "REFERENCES" and "each" in e.target
+        ]
+        assert each_edges == [], (
+            f"Spurious 'each' REFERENCES edges: {[e.target for e in each_edges]}"
+        )
+
+    def test_count_index_produces_no_spurious_edge(self):
+        """count.index should not produce any REFERENCES edge."""
+        count_edges = [
+            e for e in self.edges
+            if e.kind == "REFERENCES" and "count" in e.target
+        ]
+        assert count_edges == [], (
+            f"Spurious 'count' REFERENCES edges: {[e.target for e in count_edges]}"
+        )
+
+    def test_path_module_produces_no_edge(self):
+        """path.module must not produce a REFERENCES edge."""
+        path_edges = [
+            e for e in self.edges
+            if e.kind == "REFERENCES" and "path" in e.target
+        ]
+        assert path_edges == [], (
+            f"Spurious 'path' REFERENCES edges: {[e.target for e in path_edges]}"
+        )
+
+    def test_terraform_workspace_produces_no_edge(self):
+        """terraform.workspace must not produce a REFERENCES edge."""
+        tf_edges = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and e.target.rsplit("::", 1)[-1].startswith("terraform")
+        ]
+        assert tf_edges == [], (
+            f"Spurious 'terraform' REFERENCES edges: {[e.target for e in tf_edges]}"
+        )
+
+    # ------------------------------------------------------------------
+    # Resource-to-resource for_each chaining
+    # ------------------------------------------------------------------
+
+    def test_for_each_resource_chaining(self):
+        """for_each = aws_vpc.main emits REFERENCES to resource.aws_vpc.main."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_internet_gateway.gw" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_vpc.main" in t for t in targets), (
+            f"Expected resource.aws_vpc.main in refs from gw; got {targets}"
+        )
+
+    # ------------------------------------------------------------------
+    # Variable references inside template string interpolations
+    # ------------------------------------------------------------------
+
+    def test_template_interpolation_extracts_var_ref(self):
+        """\"${var.region}-static-assets\" must produce a REFERENCES edge to var.region."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_s3_bucket.static" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.region" in t for t in targets), (
+            f"Expected var.region in refs from static bucket; got {targets}"
+        )
+
+    # ------------------------------------------------------------------
+    # Nested block and dynamic block references
+    # ------------------------------------------------------------------
+
+    def test_lifecycle_replace_triggered_by(self):
+        """lifecycle { replace_triggered_by = [...] } must emit REFERENCES edges."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_autoscaling_group.web" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_launch_template.web" in t for t in targets), (
+            f"Expected resource.aws_launch_template.web in refs from asg.web; got {targets}"
+        )
+
+    def test_dynamic_block_for_each_ref(self):
+        """dynamic block: for_each = var.ingress_rules must produce REFERENCES edge."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_security_group.main" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.ingress_rules" in t for t in targets), (
+            f"Expected var.ingress_rules in refs from sg.main; got {targets}"
+        )
+
+    # ------------------------------------------------------------------
+    # Dynamic block iterator scope
+    # ------------------------------------------------------------------
+
+    def test_dynamic_block_iterator_no_spurious_edge(self):
+        """Iterator variables from dynamic blocks must not produce REFERENCES edges.
+
+        Covers: ingress (existing fixture), setting (default iterator),
+        srv (custom iterator=), origin_group and origin (nested dynamic).
+        """
+        iterator_names = ("ingress", "setting", "srv", "origin_group", "origin")
+        spurious = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and any(f"resource.{name}." in e.target for name in iterator_names)
+        ]
+        assert spurious == [], (
+            f"Spurious iterator REFERENCES edges: {[e.target for e in spurious]}"
+        )
+
+    def test_dynamic_block_default_iterator_for_each_extracted(self):
+        """for_each = var.settings inside dynamic block must produce a REFERENCES edge."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_elastic_beanstalk_environment.tfenvtest" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.settings" in t for t in targets), (
+            f"Expected var.settings in refs from tfenvtest; got {targets}"
+        )
+
+    def test_dynamic_block_resource_ref_alongside_iterator(self):
+        """Non-iterator attribute refs must still be extracted from the same block.
+
+        aws_elastic_beanstalk_environment.tfenvtest references both
+        var.settings (via for_each) and aws_elastic_beanstalk_application.tftest
+        (via application = <resource>.name) while also containing a 'setting'
+        iterator.  Both real refs must survive.
+        """
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_elastic_beanstalk_environment.tfenvtest" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("resource.aws_elastic_beanstalk_application.tftest" in t for t in targets), (
+            f"Expected aws_elastic_beanstalk_application.tftest ref; got {targets}"
+        )
+
+    def test_dynamic_block_custom_iterator_for_each_extracted(self):
+        """for_each = var.server_list with iterator = srv must still extract var.server_list."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_lb_listener_rule.hosts" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.server_list" in t for t in targets), (
+            f"Expected var.server_list in refs from aws_lb_listener_rule.hosts; got {targets}"
+        )
+
+    def test_nested_dynamic_outer_for_each_extracted(self):
+        """Outer dynamic for_each = var.load_balancer_origin_groups must be extracted."""
+        refs = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.aws_cloudfront_distribution.cdn" in e.source
+        ]
+        targets = {e.target for e in refs}
+        assert any("var.load_balancer_origin_groups" in t for t in targets), (
+            f"Expected var.load_balancer_origin_groups in refs from cdn; got {targets}"
+        )
+
+    def test_nested_dynamic_inner_iterator_refs_suppressed(self):
+        """Inner dynamic for_each = origin_group.value.origins must produce NO edge.
+
+        origin_group is an iterator variable from the outer dynamic block;
+        treating it as a resource type would emit a spurious
+        resource.origin_group.value edge.
+        """
+        spurious = [
+            e for e in self.edges
+            if e.kind == "REFERENCES"
+            and "resource.origin_group." in e.target
+        ]
+        assert spurious == [], (
+            f"Spurious origin_group REFERENCES edges: {[e.target for e in spurious]}"
+        )

@@ -223,6 +223,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".v": "verilog",
     ".vh": "verilog",
     ".sql": "sql",
+    ".tf": "hcl",
+    ".hcl": "hcl",
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -323,6 +325,9 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "gdscript": ["class_definition", "class_name_statement"],
     # SQL: CREATE TABLE / CREATE VIEW are handled via _parse_sql dispatch.
     "sql": [],
+    # HCL/Terraform: all constructs are blocks; dispatched via
+    # _extract_hcl_constructs.
+    "hcl": [],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -387,6 +392,8 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "gdscript": ["function_definition"],
     # SQL: CREATE FUNCTION / CREATE PROCEDURE handled via _parse_sql dispatch.
     "sql": [],
+    # HCL/Terraform: dispatched via _extract_hcl_constructs.
+    "hcl": [],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -440,6 +447,9 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "gdscript": ["extends_statement"],
     # SQL: table references extracted as IMPORTS_FROM via _parse_sql dispatch.
     "sql": [],
+    # HCL/Terraform: module source attributes become IMPORTS_FROM via
+    # _extract_hcl_constructs.
+    "hcl": [],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -503,6 +513,8 @@ _CALL_TYPES: dict[str, list[str]] = {
     "gdscript": ["call", "attribute_call"],
     # SQL: no call edges extracted (grammar too unreliable for procedure calls).
     "sql": [],
+    # HCL/Terraform: resource references dispatched via _extract_hcl_constructs.
+    "hcl": [],
 }
 
 
@@ -974,6 +986,173 @@ def file_hash(path: Path) -> str:
     """SHA-256 hash of file contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+# ---------------------------------------------------------------------------
+# HCL / Terraform helpers (module-level; no self needed)
+# ---------------------------------------------------------------------------
+
+def _hcl_text(node) -> str:
+    """Decode tree-sitter node bytes to a string."""
+    return node.text.decode("utf-8", errors="replace")
+
+
+def _hcl_child(node, *types: str):
+    """Return the first direct child whose type is in *types*, or None."""
+    return next((c for c in node.children if c.type in types), None)
+
+
+def _hcl_block_name(prefix: str, labels: list[str], n_labels: int) -> Optional[str]:
+    """Build *prefix.label0[.label1]* from the first *n_labels* labels, or None."""
+    if len(labels) < n_labels:
+        return None
+    return ".".join([prefix] + labels[:n_labels])
+
+
+# Terraform reference-namespace prefixes (special roots, not resource types).
+# These roots are *not* resource type names, so they must never be mapped to
+# ``resource.<root>.*``.  The block-local iterators (each, count, self) and
+# built-in namespace objects (path, terraform) are also included so that
+# expressions like ``each.value.id`` or ``terraform.workspace`` do not
+# generate spurious REFERENCES edges.
+_HCL_REF_PREFIXES: frozenset[str] = frozenset({
+    "var", "module", "local", "data",
+    # block-local meta-argument iterators
+    "each", "count", "self",
+    # built-in namespace objects
+    "path", "terraform",
+})
+
+
+def _hcl_ref_target(root: str, attrs: list[str]) -> Optional[str]:
+    """Map a ``variable_expr.get_attr*`` chain to its canonical graph name."""
+    if root == "var" and attrs:
+        return f"var.{attrs[0]}"
+    if root == "module" and attrs:
+        return f"module.{attrs[0]}"
+    if root == "local" and attrs:
+        return f"local.{attrs[0]}"
+    if root == "data" and len(attrs) >= 2:
+        return f"data.{attrs[0]}.{attrs[1]}"
+    if root not in _HCL_REF_PREFIXES and attrs:
+        return f"resource.{root}.{attrs[0]}"
+    return None
+
+
+def _hcl_variable_refs(expr_node):
+    """Yield (root, attrs, line) for each ``variable_expr get_attr*`` chain
+    that is a direct child sequence inside *expr_node*."""
+    children = expr_node.children
+    i = 0
+    while i < len(children):
+        child = children[i]
+        if child.type != "variable_expr":
+            i += 1
+            continue
+        ident = _hcl_child(child, "identifier")
+        if ident is None:
+            i += 1
+            continue
+        j, attrs = i + 1, []
+        while j < len(children) and children[j].type == "get_attr":
+            id_node = _hcl_child(children[j], "identifier")
+            if id_node:
+                attrs.append(_hcl_text(id_node))
+            j += 1
+        yield _hcl_text(ident), attrs, child.start_point[0] + 1
+        i = j
+
+
+# Node types to recurse into when scanning for HCL variable references.
+# ``function_call`` / ``function_arguments`` ensure that variable references
+# inside calls like ``length(var.x)`` are extracted.
+# ``quoted_template`` / ``template_interpolation`` ensure that variable
+# references inside ``"${var.x}"`` template strings are extracted.
+_HCL_RECURSE_TYPES: frozenset[str] = frozenset({
+    "expression", "body", "block", "attribute", "tuple",
+    "object", "object_elem", "collection_value",
+    "template_expr", "for_expr", "for_tuple_expr", "for_object_expr",
+    "for_intro", "for_cond", "conditional",
+    # variable refs inside function call arguments, e.g. length(var.x)
+    "function_call", "function_arguments",
+    # variable refs inside template string interpolations, e.g. "${var.x}"
+    "quoted_template", "template_interpolation",
+})
+
+
+def _hcl_for_iterator_names(for_expr_node) -> frozenset[str]:
+    """Return loop-local symbols declared by a Terraform for-expression."""
+    stack = [for_expr_node]
+    while stack:
+        current = stack.pop()
+        if current.type == "for_intro":
+            return frozenset(
+                _hcl_text(child)
+                for child in current.children
+                if child.type == "identifier"
+            )
+        stack.extend(reversed(current.children))
+    return frozenset()
+
+
+def _hcl_dynamic_iterator_name(block_node) -> Optional[str]:
+    """Return the iterator symbol for a ``dynamic`` block, or ``None``.
+
+    Defaults to the dynamic block's string label (e.g. ``"setting"`` becomes
+    the symbol ``setting``).  Can be overridden by an
+    ``iterator = <ident>`` attribute inside the block body.  Returns ``None``
+    when *block_node* is not a ``dynamic`` block.
+
+    This is used by ``_walk_hcl_expressions`` to build a *local_names* scope
+    so that iterator references such as ``setting.value[...]`` or
+    ``origin_group.key`` do not produce spurious ``resource.*`` REFERENCES
+    edges.
+    """
+    id_node = _hcl_child(block_node, "identifier")
+    if id_node is None or _hcl_text(id_node) != "dynamic":
+        return None
+
+    # Default iterator name = the string label of the dynamic block.
+    # Block children: identifier("dynamic"), string_lit(label), body
+    default_name: Optional[str] = None
+    for child in block_node.children:
+        if child.type == "string_lit":
+            tmpl = _hcl_child(child, "template_literal")
+            default_name = _hcl_text(tmpl) if tmpl is not None else _hcl_text(child).strip('"')
+            break
+    if default_name is None:
+        return None
+
+    # Check for optional ``iterator = <ident>`` override inside the block body.
+    # The value is an unquoted identifier expression, e.g. ``iterator = srv``.
+    body_node = _hcl_child(block_node, "body")
+    if body_node is not None:
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            if key is None or _hcl_text(key) != "iterator":
+                continue
+            expr = _hcl_child(attr, "expression")
+            if expr is None:
+                continue
+            # Handles both bare identifier (``srv``) and quoted string (``"srv"``)
+            raw = _hcl_text(expr).strip().strip('"')
+            if raw and raw.isidentifier():
+                return raw
+
+    return default_name
+
+
+# Dispatch table: block_type → (graph_kind, name_prefix, n_labels, emit_refs)
+# "terraform" and unknown types are absent so they are silently skipped.
+_HCL_BLOCK_CFG: dict[str, tuple[str, str, int, bool]] = {
+    "resource": ("Class",    "resource", 2, True),
+    "data":     ("Class",    "data",     2, True),
+    "module":   ("Class",    "module",   1, True),
+    "variable": ("Function", "var",      1, False),
+    "output":   ("Function", "output",   1, True),
+    "provider": ("Function", "provider", 1, True),
+}
 
 # ---------------------------------------------------------------------------
 # Parser
@@ -3101,6 +3280,18 @@ class CodeParser:
                 ):
                     continue
 
+            # --- HCL/Terraform-specific constructs ---
+            # All Terraform top-level constructs are ``block`` nodes whose
+            # first identifier child labels the block type (resource, module,
+            # variable, data, output, locals, provider, terraform).  Dispatch
+            # via _extract_hcl_constructs to produce Class, Function, and
+            # IMPORTS_FROM/REFERENCES edges.  See issue #199.
+            if language == "hcl" and node_type == "block":
+                if self._extract_hcl_constructs(
+                    child, file_path, nodes, edges,
+                ):
+                    continue
+
             # --- Julia-specific constructs ---
             # Short-form functions (`f(x) = expr`) parse as ``assignment``,
             # ``include("file.jl")`` as a call_expression, exports as
@@ -3730,6 +3921,178 @@ class CodeParser:
             _depth=_depth + 1,
         )
         return True
+
+    # ------------------------------------------------------------------
+    # HCL / Terraform constructs
+    # ------------------------------------------------------------------
+
+    def _extract_hcl_constructs(
+        self,
+        node,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> bool:
+        """Handle an HCL ``block`` node and emit Class/Function/edge data.
+
+        Mapping (see ``_HCL_BLOCK_CFG`` for the dispatch table):
+        - ``resource/data``        → Class  ``resource.type.name`` / ``data.type.name``
+        - ``module``               → Class  ``module.name`` + IMPORTS_FROM (source attr)
+        - ``variable/output/provider`` → Function  ``var|output|provider.name``
+        - ``locals``               → Function ``local.<key>`` per attribute
+        - ``terraform`` / unknown  → skipped
+
+        Returns True unconditionally so the main walker skips the subtree.
+        """
+        children = node.children
+        if not children or children[0].type != "identifier":
+            return False
+
+        block_type = _hcl_text(children[0])
+        labels = [
+            _hcl_text(tmpl)
+            for child in children[1:]
+            if child.type == "string_lit"
+            if (tmpl := _hcl_child(child, "template_literal")) is not None
+        ]
+        body_node = _hcl_child(node, "body")
+        line_start = node.start_point[0] + 1
+
+        if block_type == "locals":
+            return self._emit_hcl_locals(body_node, file_path, nodes, edges)
+
+        cfg = _HCL_BLOCK_CFG.get(block_type)
+        if cfg is None:  # "terraform" and unknown blocks silently skipped
+            return True
+
+        kind, prefix, n_labels, emit_refs = cfg
+        name = _hcl_block_name(prefix, labels, n_labels)
+        if name is None:
+            return True
+
+        qualified = self._qualify(name, file_path, None)
+        nodes.append(NodeInfo(
+            kind=kind, name=name, file_path=file_path,
+            line_start=line_start, line_end=node.end_point[0] + 1,
+            language="hcl", extra={"hcl_type": block_type},
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS", source=file_path, target=qualified,
+            file_path=file_path, line=line_start,
+        ))
+
+        if body_node is None:
+            return True
+
+        if block_type == "module":
+            src = self._hcl_get_attribute_string(body_node, "source")
+            if src:
+                resolved = self._resolve_module_to_file(src, file_path, "hcl")
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM", source=file_path, target=resolved or src,
+                    file_path=file_path, line=line_start,
+                ))
+
+        if emit_refs:
+            self._walk_hcl_expressions(body_node, file_path, edges, name)
+
+        return True
+
+    def _emit_hcl_locals(
+        self,
+        body_node,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> bool:
+        """Emit one Function node per binding in a ``locals { ... }`` block."""
+        if body_node is None:
+            return True
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            if key is None:
+                continue
+            lname = f"local.{_hcl_text(key)}"
+            lline = attr.start_point[0] + 1
+            nodes.append(NodeInfo(
+                kind="Function", name=lname, file_path=file_path,
+                line_start=lline, line_end=attr.end_point[0] + 1,
+                language="hcl", extra={"hcl_type": "local"},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS", source=file_path,
+                target=self._qualify(lname, file_path, None),
+                file_path=file_path, line=lline,
+            ))
+            self._walk_hcl_expressions(attr, file_path, edges, lname)
+        return True
+
+    def _hcl_get_attribute_string(self, body_node, attr_name: str) -> Optional[str]:
+        """Return the string value of a named attribute in an HCL body, or None."""
+        for attr in body_node.children:
+            if attr.type != "attribute":
+                continue
+            key = _hcl_child(attr, "identifier")
+            expr = _hcl_child(attr, "expression")
+            if key is None or expr is None or _hcl_text(key) != attr_name:
+                continue
+            # Navigate: expression > literal_value > string_lit > template_literal
+            lit = _hcl_child(expr, "literal_value")
+            if lit is None:
+                continue
+            str_lit = _hcl_child(lit, "string_lit")
+            if str_lit is None:
+                continue
+            tmpl = _hcl_child(str_lit, "template_literal")
+            if tmpl is not None:
+                return _hcl_text(tmpl)
+        return None
+
+    def _walk_hcl_expressions(
+        self,
+        node,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_name: str,
+        local_names: frozenset[str] = frozenset(),
+    ) -> None:
+        """Emit REFERENCES edges for every HCL variable reference under *node*.
+
+        *local_names* accumulates iterator symbols introduced by enclosing
+        ``dynamic`` blocks.  Any reference whose root matches a name in this
+        set is suppressed, preventing spurious ``resource.<iterator>.*``
+        edges from expressions like ``setting.value[...]`` or
+        ``origin_group.key``.
+        """
+        if node.type in ("expression", "body"):
+            for root, attrs, line in _hcl_variable_refs(node):
+                if root in local_names:
+                    continue
+                ref = _hcl_ref_target(root, attrs)
+                if ref:
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=self._qualify(enclosing_name, file_path, None),
+                        target=self._qualify(ref, file_path, None),
+                        file_path=file_path,
+                        line=line,
+                    ))
+        for child in node.children:
+            if child.type not in _HCL_RECURSE_TYPES:
+                continue
+            child_local_names = local_names
+            if child.type == "block":
+                iter_name = _hcl_dynamic_iterator_name(child)
+                if iter_name:
+                    child_local_names = local_names | {iter_name}
+            elif child.type == "for_expr":
+                child_local_names = (
+                    local_names | _hcl_for_iterator_names(child)
+                )
+            self._walk_hcl_expressions(child, file_path, edges, enclosing_name, child_local_names)
+
 
     def _extract_bash_source_command(
         self,

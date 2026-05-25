@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added Terraform/OpenTofu structural parsing for resources, data sources,
+  modules, variables, outputs, locals, providers, and expression references.
+  References resolve across sibling files in a Terraform module, and local
+  module sources connect to parsed target files (PR #514; Terraform portion of
+  #199).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).
