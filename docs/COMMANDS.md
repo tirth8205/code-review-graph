@@ -25,17 +25,36 @@ Review a PR or branch diff.
 
 #### `build_or_update_graph_tool`
 ```
-full_rebuild: bool = False    # True for full re-parse
-repo_root: str | None         # Auto-detected
-base: str = "HEAD~1"          # Git diff base
+full_rebuild: bool = False           # True for full re-parse
+repo_root: str | None                # Auto-detected
+base: str = "HEAD~1"                 # VCS diff base for incremental updates
+postprocess: str = "full"            # "full", "minimal", or "none"
+recurse_submodules: bool | None      # Falls back to CRG_RECURSE_SUBMODULES
+```
+
+#### `run_postprocess_tool`
+```
+flows: bool = True
+communities: bool = True
+fts: bool = True
+repo_root: str | None
+```
+
+#### `get_minimal_context_tool`
+```
+task: str = ""                       # What you are doing
+changed_files: list[str] | None      # Auto-detected from VCS when omitted
+repo_root: str | None
+base: str = "HEAD~1"
 ```
 
 #### `get_impact_radius_tool`
 ```
-changed_files: list[str] | None  # Auto-detected from git
+changed_files: list[str] | None  # Auto-detected from VCS
 max_depth: int = 2               # Hops in graph
 repo_root: str | None
 base: str = "HEAD~1"
+detail_level: str = "standard"   # "standard" or "minimal"
 ```
 Relevant responses may include compact estimated `context_savings` metadata.
 
@@ -45,6 +64,7 @@ pattern: str    # callers_of, callees_of, imports_of, importers_of,
                 # children_of, tests_for, inheritors_of, file_summary
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
+detail_level: str = "standard"   # "standard" or "minimal"
 ```
 
 #### `get_review_context_tool`
@@ -55,8 +75,18 @@ include_source: bool = True
 max_lines_per_file: int = 200
 repo_root: str | None
 base: str = "HEAD~1"
+detail_level: str = "standard"   # "standard" or "minimal"
 ```
 Relevant responses may include compact estimated `context_savings` metadata.
+
+#### `traverse_graph_tool`
+```
+query: str
+depth: int = 3                  # 1-6
+mode: str = "bfs"               # "bfs" or "dfs"
+token_budget: int = 2000
+repo_root: str | None
+```
 
 #### `semantic_search_nodes_tool`
 ```
@@ -65,14 +95,17 @@ kind: str | None     # File, Class, Function, Type, Test
 limit: int = 20
 repo_root: str | None
 model: str | None    # Embedding model (falls back to CRG_EMBEDDING_MODEL env var)
+provider: str | None # local, openai, google, minimax
+detail_level: str = "standard"
 ```
 
 #### `embed_graph_tool`
 ```
 repo_root: str | None
 model: str | None    # Embedding model name
+provider: str | None # local, openai, google, minimax
 ```
-Requires: `pip install code-review-graph[embeddings]`
+Local embeddings require: `pip install code-review-graph[embeddings]`. Cloud providers use stdlib HTTP clients and require their provider environment variables.
 
 #### `list_graph_stats_tool`
 ```
@@ -101,6 +134,7 @@ sort_by: str = "criticality"  # criticality, depth, node_count, file_count, name
 limit: int = 50
 kind: str | None              # Filter by entry point kind (e.g. "Test", "Function")
 repo_root: str | None
+detail_level: str = "standard"
 ```
 
 #### `get_flow_tool`
@@ -113,7 +147,7 @@ repo_root: str | None
 
 #### `get_affected_flows_tool`
 ```
-changed_files: list[str] | None  # Auto-detected from git
+changed_files: list[str] | None  # Auto-detected from VCS
 base: str = "HEAD~1"
 repo_root: str | None
 ```
@@ -125,6 +159,7 @@ repo_root: str | None
 sort_by: str = "size"    # size, cohesion, name
 min_size: int = 0
 repo_root: str | None
+detail_level: str = "standard"
 ```
 
 #### `get_community_tool`
@@ -142,6 +177,36 @@ detail_level: str = "minimal"    # "minimal" compact default, "standard" full de
 ```
 Minimal responses may include compact estimated `context_savings` metadata.
 
+### Graph Health and Architecture Tools
+
+#### `get_hub_nodes_tool`
+```
+top_n: int = 10
+repo_root: str | None
+```
+
+#### `get_bridge_nodes_tool`
+```
+top_n: int = 10
+repo_root: str | None
+```
+
+#### `get_knowledge_gaps_tool`
+```
+repo_root: str | None
+```
+
+#### `get_surprising_connections_tool`
+```
+top_n: int = 15
+repo_root: str | None
+```
+
+#### `get_suggested_questions_tool`
+```
+repo_root: str | None
+```
+
 ### Change Analysis and Refactoring Tools
 
 #### `detect_changes_tool`
@@ -151,8 +216,9 @@ changed_files: list[str] | None
 include_source: bool = False
 max_depth: int = 2
 repo_root: str | None
+detail_level: str = "standard"
 ```
-Primary tool for code review. Maps git diffs to affected functions, flows, communities, and test coverage gaps. Returns risk scores and prioritized review items.
+Primary tool for code review. Maps changed files to affected functions, flows, communities, and test coverage gaps. Returns risk scores and prioritized review items.
 Relevant responses may include compact estimated `context_savings` metadata.
 
 #### `refactor_tool`
@@ -169,6 +235,7 @@ repo_root: str | None
 ```
 refactor_id: str             # ID from prior refactor_tool call
 repo_root: str | None
+dry_run: bool = False        # Return diff without writing files
 ```
 
 ### Wiki Tools
@@ -229,18 +296,24 @@ base: str = "HEAD~1"
 
 ```bash
 # Setup
-code-review-graph install           # Register MCP server with Claude Code (alias: init)
+code-review-graph install           # Configure detected AI coding platforms (alias: init)
 code-review-graph install --dry-run # Preview without writing files
+code-review-graph install --platform codex  # Configure one platform
 
 # Build and update
 code-review-graph build                        # Full build
+code-review-graph build --skip-flows           # Parse + signatures + FTS only
+code-review-graph build --skip-postprocess     # Raw parse only
 code-review-graph update                       # Incremental update
 code-review-graph update --base origin/main    # Custom base ref
+code-review-graph postprocess                  # Re-run flows, communities, FTS
 
 # Monitor and inspect
 code-review-graph status                       # Graph statistics
 code-review-graph watch                        # Auto-update on file changes
 code-review-graph visualize                    # Generate interactive HTML graph
+code-review-graph visualize --format graphml   # Export GraphML
+code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
 # Analysis
 code-review-graph detect-changes               # Risk-scored change analysis
@@ -269,6 +342,9 @@ code-review-graph eval                         # Run evaluation benchmarks
 
 # Server
 code-review-graph serve                        # Start MCP server (stdio)
+code-review-graph serve --http                 # Streamable HTTP on localhost:5555
+code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist
+code-review-graph mcp                          # Alias for serve
 ```
 
 ## Standalone Daemon CLI (`crg-daemon`)

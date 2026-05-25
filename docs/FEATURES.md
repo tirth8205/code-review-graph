@@ -9,7 +9,7 @@
 - **Graph lookup correctness**: Review, impact, and file-summary tools resolve user-facing paths to stored graph paths; `callers_of` includes cross-file callers even when same-file callers exist.
 - **Install/runtime reliability**: Generated Codex/Claude hooks drain stdin, bundled docs are available from wheels, missing local embeddings report unavailable status, and `.svn` roots pass validation.
 - **CLI reliability**: `build --skip-postprocess` and `update --skip-flows` honor the requested post-processing level.
-- **Broad parser surface**: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Jupyter/Databricks notebooks, and Perl XS files.
+- **Broad parser surface**: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
 - **Local-first by design**: SQLite graph storage remains local, with no telemetry and no cloud-default behavior.
 
 ## v2.1.0
@@ -121,7 +121,8 @@
 - **FastMCP 3.0 compatible** stdio MCP server
 
 ## Privacy & Data
-- All data stays 100% local
+- Core graph data is stored locally
 - Graph stored in `.code-review-graph/graph.db` (SQLite), auto-gitignored
-- No telemetry, no network calls
+- No telemetry; core graph/review workflows do not require network access
+- Optional embedding and wiki features may call configured local or remote services when explicitly enabled
 - Respects `.gitignore` and `.code-review-graphignore`

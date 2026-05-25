@@ -26,7 +26,7 @@
 
 <br>
 
-AI 编码工具在每次任务中都会重新读取整个代码库。`code-review-graph` 解决了这个问题。它使用 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) 构建代码的结构化映射，增量跟踪变更，并通过 [MCP](https://modelcontextprotocol.io/) 为 AI 助手提供精准的上下文，使其只读取真正需要的内容。
+AI 编码工具在审查任务中可能会反复读取代码库的大量内容。`code-review-graph` 解决了这个问题。它使用 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) 构建代码的结构化映射，增量跟踪变更，并通过 [MCP](https://modelcontextprotocol.io/) 为 AI 助手提供精准的上下文，使其只读取真正需要的内容。
 
 <p align="center">
   <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：在 6 个真实仓库中平均减少 8.2 倍的 token 消耗" width="85%" />
@@ -45,7 +45,7 @@ code-review-graph build            # 解析代码库
 一条命令完成所有配置。`install` 会检测你安装了哪些 AI 编码工具，为每个工具写入正确的 MCP 配置，并将图感知指令注入平台规则。它会自动判断你是通过 `uvx` 还是 `pip`/`pipx` 安装的，并生成相应的配置。安装后请重启编辑器或工具。
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，全平台支持：自动检测 Codex、Claude Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity 和 Kiro" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装即可自动检测并配置支持的 AI 编码工具" width="85%" />
 </p>
 
 如需指定特定平台：
@@ -65,7 +65,7 @@ code-review-graph install --platform kiro         # 仅配置 Kiro
 Build the code review graph for this project
 ```
 
-首次构建在 500 个文件的项目上大约需要 10 秒。此后，图会在每次文件编辑和 git 提交时自动更新。
+首次构建在 500 个文件的项目上大约需要 10 秒。此后，可通过 watch 模式以及支持的平台钩子自动更新图。
 
 ---
 
@@ -91,7 +91,7 @@ Build the code review graph for this project
 
 ### 增量更新，不到 2 秒
 
-每次 git 提交或文件保存时触发钩子。图对变更文件做差异比较，通过 SHA-256 哈希校验找到相关依赖，仅重新解析变更部分。一个 2,900 文件的项目重新索引不到 2 秒。
+启用钩子或 watch 模式后，文件保存和受支持的提交钩子会触发增量更新。图对变更文件做差异比较，通过 SHA-256 哈希校验找到相关依赖，仅重新解析变更部分。一个 2,900 文件的项目重新索引不到 2 秒。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：git 提交触发差异比较，找到依赖项，仅重新解析 5 个文件，跳过 2,910 个文件" width="90%" />
@@ -105,20 +105,20 @@ Build the code review graph for this project
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js monorepo：27,732 个文件经过 code-review-graph 过滤后仅剩约 15 个文件——token 减少 49 倍" width="80%" />
 </p>
 
-### 支持 23 种语言 + Jupyter 笔记本
+### 广泛语言覆盖 + Jupyter 笔记本
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="按类别组织的 19 种语言：Web、后端、系统、移动端、脚本，外加 Jupyter/Databricks 笔记本支持" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="按类别组织的语言覆盖：Web、后端、系统、移动端、脚本，外加 Jupyter/Databricks 笔记本支持" width="90%" />
 </p>
 
-完整的 Tree-sitter 语法支持，涵盖每种语言的函数、类、导入、调用点、继承和测试检测。包括 Zig、PowerShell、Julia 和 Svelte SFC 支持，以及 Jupyter/Databricks 笔记本解析（`.ipynb`，支持 Python、R、SQL 多语言单元格）和 Perl XS 文件（`.xs`）。
+解析器支持覆盖当前解析面中的函数、类、导入、调用点、继承和测试检测：能用 Tree-sitter 的地方使用 Tree-sitter，需要时使用有针对性的回退解析。支持范围包括 Python、JavaScript/TypeScript/TSX、Go、Rust、Java、C/C++、C#、Ruby、Kotlin、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL、Vue/Svelte 单文件组件、按 TypeScript 解析的 Astro 文件、Jupyter/Databricks 笔记本（`.ipynb`）和 Perl XS 文件（`.xs`）。
 
 ---
 
 ## 基准测试
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="真实仓库基准测试：token 减少 4.9 倍到 27.3 倍，审查质量更高" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="真实仓库基准测试：token 减少 4.9 倍到 27.3 倍，并使用保守的影响分析" width="85%" />
 </p>
 
 所有数据来自针对 6 个真实开源仓库（共 13 次提交）的自动化评估。可通过 `code-review-graph eval --all` 复现。完整基准测试数据请参阅[英文 README](README.md)。
@@ -130,8 +130,8 @@ Build the code review graph for this project
 | 功能 | 说明 |
 |------|------|
 | **增量更新** | 仅重新解析变更文件，后续更新不到 2 秒完成 |
-| **23 种语言 + 笔记本** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
-| **影响半径分析** | 精确展示任何变更所影响的函数、类和文件 |
+| **广泛语言覆盖 + 笔记本** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed as TypeScript, Jupyter/Databricks (.ipynb) |
+| **影响半径分析** | 展示某次变更可能影响的函数、类和文件 |
 | **自动更新钩子** | 每次文件编辑和 git 提交时自动更新图，无需手动干预 |
 | **语义搜索** | 可选的向量嵌入，支持 sentence-transformers、Google Gemini、MiniMax，或任何 OpenAI 兼容端点（真实 OpenAI、Azure、new-api、LiteLLM、vLLM、LocalAI） |
 | **交互式可视化** | D3.js 力导向图，支持搜索、社区图例切换和按度数缩放的节点 |
@@ -155,7 +155,7 @@ Build the code review graph for this project
 | **多仓库注册** | 注册多个仓库，跨仓库搜索 |
 | **MCP 提示模板** | 5 种工作流模板：审查、架构、调试、入职引导、合并前检查 |
 | **全文搜索** | 基于 FTS5 的混合搜索，结合关键词和向量相似度 |
-| **本地存储** | SQLite 文件存储在 `.code-review-graph/` 中，无需外部数据库，无云依赖 |
+| **本地存储** | SQLite 文件存储在 `.code-review-graph/` 中，核心图存储无需外部数据库或云服务 |
 | **监听模式** | 工作时持续更新图 |
 
 ---
@@ -202,7 +202,7 @@ code-review-graph serve            # 启动 MCP 服务器
 </details>
 
 <details>
-<summary><strong>28 个 MCP 工具</strong></summary>
+<summary><strong>30 个 MCP 工具</strong></summary>
 <br>
 
 图构建完成后，AI 助手会自动使用这些工具。
@@ -210,6 +210,7 @@ code-review-graph serve            # 启动 MCP 服务器
 | 工具 | 说明 |
 |------|------|
 | `build_or_update_graph_tool` | 构建或增量更新图 |
+| `run_postprocess_tool` | 重新运行执行流、社区和全文索引后处理 |
 | `get_minimal_context_tool` | 超紧凑上下文（约 100 tokens）——首先调用此工具 |
 | `get_impact_radius_tool` | 变更文件的影响半径 |
 | `get_review_context_tool` | Token 优化的审查上下文，附带结构摘要 |
@@ -265,6 +266,7 @@ node_modules/**
 pip install code-review-graph[embeddings]          # 本地向量嵌入 (sentence-transformers)
 pip install code-review-graph[google-embeddings]   # Google Gemini 嵌入
 pip install code-review-graph[communities]         # 社区检测 (igraph)
+pip install code-review-graph[enrichment]          # Python 调用解析增强 (Jedi)
 pip install code-review-graph[eval]                # 评估基准测试 (matplotlib)
 pip install code-review-graph[wiki]                # 使用 LLM 摘要生成 Wiki (ollama)
 pip install code-review-graph[all]                 # 所有可选依赖
@@ -318,5 +320,5 @@ MIT。详见 [LICENSE](LICENSE)。
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>支持 Codex、Claude Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity 和 Kiro</sub>
+<sub>自动检测并配置支持的 AI 编码工具，包括 Codex、Claude Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Kiro、Qoder 和 GitHub Copilot</sub>
 </p>

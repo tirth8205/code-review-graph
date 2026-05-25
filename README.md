@@ -26,7 +26,7 @@
 
 <br>
 
-AI coding tools re-read your entire codebase on every task. `code-review-graph` fixes that. It builds a structural map of your code with [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), tracks changes incrementally, and gives your AI assistant precise context via [MCP](https://modelcontextprotocol.io/) so it reads only what matters.
+AI coding tools can end up re-reading large parts of your codebase on review tasks. `code-review-graph` fixes that. It builds a structural map of your code with [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), tracks changes incrementally, and gives your AI assistant precise context via [MCP](https://modelcontextprotocol.io/) so it reads only what matters.
 
 <p align="center">
   <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: 8.2x average token reduction across 6 real repositories" width="85%" />
@@ -45,7 +45,7 @@ code-review-graph build            # parse your codebase
 One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, installs platform-native hooks/skills where supported, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Qwen, Qoder, Kiro, and GitHub Copilot" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, and GitHub Copilot" width="85%" />
 </p>
 
 To target a specific platform:
@@ -68,7 +68,7 @@ Then open your project and ask your AI assistant:
 Build the code review graph for this project
 ```
 
-The initial build takes ~10 seconds for a 500-file project. After that, the graph updates automatically on every file edit and git commit.
+The initial build takes ~10 seconds for a 500-file project. After that, watch mode and supported hooks can keep the graph updated automatically.
 
 
 ## How It Works
@@ -93,10 +93,10 @@ When a file changes, the graph traces every caller, dependent, and test that cou
 
 ### Incremental updates in < 2 seconds
 
-On every git commit or file save, a hook fires. The graph diffs changed files, finds their dependents via SHA-256 hash checks, and re-parses only what changed. A 2,900-file project re-indexes in under 2 seconds.
+When hooks or watch mode are enabled, file saves and supported commit hooks trigger incremental updates. The graph diffs changed files, finds their dependents via SHA-256 hash checks, and re-parses only what changed. A 2,900-file project re-indexes in under 2 seconds.
 
 <p align="center">
-  <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: git commit triggers diff, finds dependents, re-parses only 5 files while 2,910 are skipped" width="90%" />
+  <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: supported hook or watch update triggers diff, finds dependents, re-parses only 5 files while 2,910 are skipped" width="90%" />
 </p>
 
 ### The monorepo problem, solved
@@ -113,14 +113,14 @@ Large monorepos are where token waste is most painful. The graph cuts through th
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage organized by category: Web, Backend, Systems, Mobile, Scripting, Config, plus Jupyter and Databricks notebook support" width="90%" />
 </p>
 
-Full Tree-sitter grammar support for functions, classes, imports, call sites, inheritance, and test detection across the parser surface. Current support includes Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
+Parser support covers functions, classes, imports, call sites, inheritance, and test detection across the current parser surface, using Tree-sitter where available and targeted fallbacks where needed. Current support includes Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
 ---
 
 ## Benchmarks
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across real repos: 4.9x to 27.3x fewer tokens, higher review quality" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across real repos: 4.9x to 27.3x fewer tokens with conservative impact analysis" width="85%" />
 </p>
 
 All numbers come from the automated evaluation runner against 6 real open-source repositories (13 commits total). Reproduce with `code-review-graph eval --all`. Raw data in [`evaluate/reports/summary.md`](evaluate/reports/summary.md).
@@ -151,7 +151,7 @@ In v2.3.4, review and impact tools also return a compact `context_savings` estim
 <summary><strong>Impact accuracy: 100% recall, 0.54 average F1</strong></summary>
 <br>
 
-The blast-radius analysis never misses an actually impacted file (perfect recall). It over-predicts in some cases, which is a conservative trade-off — better to flag too many files than miss a broken dependency.
+In the current evaluation sample, blast-radius analysis reaches 100% recall. It over-predicts in some cases, which is a conservative trade-off: better to flag too many files than miss a broken dependency.
 
 | Repo | Commits | Avg F1 | Avg Precision | Recall |
 |------|--------:|-------:|--------------:|-------:|
@@ -197,9 +197,9 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only changed files. Subsequent updates complete in under 2 seconds. |
-| **Broad language + notebook support** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Jupyter/Databricks (.ipynb), and Perl XS (.xs) |
-| **Blast-radius analysis** | Shows exactly which functions, classes, and files are affected by any change |
-| **Auto-update hooks** | Graph updates on every file edit and git commit without manual intervention |
+| **Broad language + notebook support** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks (.ipynb), and Perl XS (.xs) |
+| **Blast-radius analysis** | Shows which functions, classes, and files are likely affected by a change |
+| **Auto-update hooks** | Hooks and watch mode can update the graph on file saves and supported commit hooks |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
 | **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
@@ -224,7 +224,7 @@ The blast-radius analysis never misses an actually impacted file (perfect recall
 | **Multi-repo daemon** | `crg-daemon` watches multiple repos as child processes, with health checks and auto-restart |
 | **MCP prompts** | 5 workflow templates: review, architecture, debug, onboard, pre-merge |
 | **Full-text search** | FTS5-powered hybrid search combining keyword and vector similarity |
-| **Local storage** | SQLite file in `.code-review-graph/`. No external database, no cloud dependency. |
+| **Local storage** | SQLite file in `.code-review-graph/`. Core graph storage needs no external database or cloud service. |
 | **Watch mode** | Continuous graph updates as you work |
 
 ---
@@ -325,7 +325,7 @@ full config reference and all available options.
 </details>
 
 <details>
-<summary><strong>28 MCP tools</strong></summary>
+<summary><strong>30 MCP tools</strong></summary>
 <br>
 
 Your AI assistant uses these automatically once the graph is built.
@@ -333,6 +333,7 @@ Your AI assistant uses these automatically once the graph is built.
 | Tool | Description |
 |------|-------------|
 | `build_or_update_graph_tool` | Build or incrementally update the graph |
+| `run_postprocess_tool` | Re-run flow detection, community detection, and FTS indexing |
 | `get_minimal_context_tool` | Ultra-compact context (~100 tokens) — call this first |
 | `get_impact_radius_tool` | Blast radius of changed files |
 | `get_review_context_tool` | Token-optimised review context with structural summary |
@@ -388,6 +389,7 @@ Optional dependency groups:
 pip install code-review-graph[embeddings]          # Local vector embeddings (sentence-transformers)
 pip install code-review-graph[google-embeddings]   # Google Gemini embeddings
 pip install code-review-graph[communities]         # Community detection (igraph)
+pip install code-review-graph[enrichment]          # Python call-resolution enrichment (Jedi)
 pip install code-review-graph[eval]                # Evaluation benchmarks (matplotlib)
 pip install code-review-graph[wiki]                # Wiki generation with LLM summaries (ollama)
 pip install code-review-graph[all]                 # All optional dependencies
@@ -398,10 +400,18 @@ pip install code-review-graph[all]                 # All optional dependencies
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations | `30` |
+| `CRG_DATA_DIR` | Override directory for graph databases and generated graph artefacts | - |
 | `CRG_EMBEDDING_MODEL` | Default model for vector embeddings | `all-MiniLM-L6-v2` |
+| `CRG_ACCEPT_CLOUD_EMBEDDINGS` | Suppress the cloud embedding egress warning after explicit acknowledgement | - |
+| `CRG_ALLOW_REMOTE_CODE` | Allow HuggingFace models that require `trust_remote_code=True` | `0` |
 | `CRG_MAX_IMPACT_NODES` | Maximum nodes to include in impact analysis | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
+| `CRG_MAX_CHANGED_FUNCS` | Maximum changed functions analysed in one change report | `500` |
+| `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum frontier size for transitive caller/callee expansion | `50` |
+| `CRG_TOOL_TIMEOUT` | Optional timeout in seconds for bounded MCP tools (`0` disables timeout) | `0` |
+| `CRG_RECURSE_SUBMODULES` | Include git submodules in file collection when set to `1`, `true`, or `yes` | - |
+| `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
 | `CRG_OPENAI_BASE_URL` | OpenAI-compatible embeddings endpoint | - |
@@ -446,7 +456,7 @@ The cloud-egress warning is auto-skipped when the base URL points to localhost
 
 #### Tool Filtering
 
-CRG exposes 28 MCP tools by default. In token-constrained environments, you can
+CRG exposes 30 MCP tools by default. In token-constrained environments, you can
 limit the server to a subset of tools using `--tools` or the `CRG_TOOLS`
 environment variable:
 

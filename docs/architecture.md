@@ -2,30 +2,31 @@
 
 ## System Overview
 
-`code-review-graph` is a Claude Code plugin that maintains a persistent, incrementally-updated knowledge graph of a codebase. It's designed to make code reviews faster and more context-aware by providing structural understanding of code relationships.
+`code-review-graph` is a local-first code intelligence graph exposed through a CLI and MCP server. It maintains a persistent, incrementally updated knowledge graph of a codebase so AI coding tools can review changes with structural context instead of reading broad file dumps. Claude Code is supported, but it is one client among several.
 
 ## Component Diagram
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                        Claude Code                           │
+│                    AI coding clients / CLI                    │
 │                                                              │
-│  Skills (SKILL.md)          Hooks (hooks.json)               │
-│  ├── build-graph            └── PostToolUse (Write|Edit|Bash) │
-│  ├── review-delta                → incremental update         │
-│  └── review-pr                                               │
+│  MCP clients              Hooks / watch mode                 │
+│  ├── Codex                └── incremental update             │
+│  ├── Claude Code                                             │
+│  ├── Cursor, Windsurf, Zed, Continue                         │
+│  └── Gemini CLI, Qwen, Qoder, Copilot, OpenCode              │
 │          │                        │                          │
 │          ▼                        ▼                          │
 │  ┌────────────────────────────────────────────┐              │
-│  │            MCP Server (stdio)              │              │
+│  │      MCP Server (stdio or localhost HTTP)  │              │
 │  │                                            │              │
-│  │  22 MCP Tools + 5 MCP Prompts              │              │
+│  │  30 MCP Tools + 5 MCP Prompts              │              │
 │  │  ├── Core: build, impact, query, review,   │              │
-│  │  │   search, embed, stats, docs, large_fn  │              │
+│  │  │   search, traverse, embed, stats, docs  │              │
 │  │  ├── Flows: list, get, affected            │              │
-│  │  ├── Communities: list, get, architecture   │              │
+│  │  ├── Communities: list, get, architecture  │              │
 │  │  ├── Analysis: detect_changes, refactor,   │              │
-│  │  │   apply_refactor                        │              │
+│  │  │   apply_refactor, hotspots, gaps        │              │
 │  │  ├── Wiki: generate, get_page              │              │
 │  │  └── Multi-repo: list_repos, cross_search  │              │
 │  └────────────────┬───────────────────────────┘              │
@@ -39,7 +40,7 @@
    └────┬────┘ └────┬────┘  └──────┬──────┘
         │           │              │
         ▼           ▼              ▼
-   Tree-sitter   SQLite DB      git diff
+   Tree-sitter   SQLite DB      git/svn diff
    grammars      (.code-review- subprocess
                  graph/
                  graph.db)
@@ -55,7 +56,7 @@
 5. Metadata updated with timestamp
 
 ### Incremental Update
-1. `get_changed_files()` runs `git diff --name-only` against base ref
+1. `get_changed_files()` uses VCS metadata to identify changed files (git diff by default, with SVN support in the incremental layer)
 2. `find_dependents()` queries the graph for files importing the changed files
 3. Changed + dependent files are re-parsed (others skipped via hash comparison)
 4. Only affected rows in SQLite are updated
@@ -65,7 +66,8 @@
 2. `get_impact_radius()` performs BFS from changed nodes through the graph
 3. Source snippets extracted for changed areas only
 4. Review guidance generated (test coverage gaps, wide blast radius warnings)
-5. Assembled into a structured, token-efficient context for Claude
+5. Assembled into a structured, token-efficient context for MCP clients and the CLI
+6. Where a cheap baseline can be estimated, compact `context_savings` metadata is attached as an estimate rather than an exact tokenisation
 
 ## Storage
 
@@ -77,7 +79,8 @@
 - **flow_memberships** table: flow_id, node_id, position
 - **communities** table: id, name, level, parent_id, cohesion, size, dominant_language, description
 - **nodes_fts** (FTS5 virtual table): full-text search on name, qualified_name, file_path, signature
-- **embeddings** table (separate DB): node_id, model, vector, hash
+- **community_summaries**, **flow_snapshots**, **risk_index** tables: compact precomputed summaries for token-efficient queries
+- **embeddings** table (separate DB): qualified_name, vector, text_hash, provider
 
 Indexes on qualified_name, file_path, edge source/target, criticality, community_id, and cohesion for fast lookups.
 

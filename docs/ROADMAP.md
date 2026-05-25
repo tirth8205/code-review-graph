@@ -2,6 +2,22 @@
 
 ## Shipped
 
+### v2.3.4
+- 30 MCP tools and 5 MCP prompts
+- Estimated context savings metadata for review, impact, detect-changes, and compact architecture responses
+- Compact architecture overview by default to reduce large MCP payloads
+- Bounded change-analysis controls for large diffs (`CRG_MAX_CHANGED_FUNCS`, `CRG_MAX_TRANSITIVE_FRONTIER`, `CRG_TOOL_TIMEOUT`)
+- Windows FastMCP semantic-search deadlock mitigation
+- Rust test detection and path lookup correctness fixes
+- Documentation and release metadata refreshed for the 2.3.4 release
+
+### v2.3.3
+- Broad parser surface expansion across source languages, shell scripts, notebooks, and SFC-style files
+- Additional AI coding platform install targets including Gemini CLI, Qwen, Kiro, Qoder, and GitHub Copilot variants
+- Streamable HTTP MCP transport on localhost
+- Parser/resolver, Windows, FastMCP, and daemon reliability fixes
+- Community PR sweep and VS Code accessibility improvements
+
 ### v2.2.0
 - Multi-repo watch daemon (`crg-daemon` / `code-review-graph daemon`)
 - TOML-based daemon configuration (`~/.code-review-graph/watch.toml`)
@@ -68,10 +84,9 @@
 
 - GitHub PR bot integration
 - Team sync (shared graph via git-tracked DB)
-- SSE/HTTP MCP transport for multi-client access
 - Performance optimization for monorepos (>50k files)
 
 ## Ongoing
 
 - Additional language grammars as requested
-- Integration with more Claude Code features as the platform evolves
+- Integration updates as AI coding platforms evolve

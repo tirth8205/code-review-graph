@@ -26,7 +26,7 @@
 
 <br>
 
-AI 코딩 도구는 매 작업마다 전체 코드베이스를 다시 읽습니다. `code-review-graph`는 이 문제를 해결합니다. [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)로 코드의 구조적 맵을 구축하고, 변경 사항을 점진적으로 추적하며, [MCP](https://modelcontextprotocol.io/)를 통해 AI 어시스턴트에게 정확한 컨텍스트를 제공하여 필요한 부분만 읽도록 합니다.
+AI 코딩 도구는 리뷰 작업에서 코드베이스의 큰 부분을 반복해서 읽게 될 수 있습니다. `code-review-graph`는 이 문제를 해결합니다. [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)로 코드의 구조적 맵을 구축하고, 변경 사항을 점진적으로 추적하며, [MCP](https://modelcontextprotocol.io/)를 통해 AI 어시스턴트에게 정확한 컨텍스트를 제공하여 필요한 부분만 읽도록 합니다.
 
 <p align="center">
   <img src="diagrams/diagram1_before_vs_after.png" alt="토큰 문제: 6개 실제 저장소에서 평균 8.2배 토큰 절감" width="85%" />
@@ -45,7 +45,7 @@ code-review-graph build            # 코드베이스 파싱
 하나의 명령으로 모든 설정이 완료됩니다. `install`은 사용 중인 AI 코딩 도구를 감지하고, 각 도구에 맞는 MCP 설정을 작성하며, 플랫폼 규칙에 그래프 인식 지침을 주입합니다. `uvx` 또는 `pip`/`pipx` 중 어떤 방식으로 설치했는지 자동 감지하여 올바른 설정을 생성합니다. 설치 후 에디터/도구를 재시작하세요.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Kiro 자동 감지" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 지원되는 AI 코딩 도구를 자동 감지하고 설정" width="85%" />
 </p>
 
 특정 플랫폼만 설정하려면:
@@ -65,7 +65,7 @@ Python 3.10 이상이 필요합니다. 최상의 경험을 위해 [uv](https://d
 Build the code review graph for this project
 ```
 
-초기 빌드는 500개 파일 프로젝트 기준 약 10초가 소요됩니다. 이후에는 파일 편집 및 git 커밋마다 그래프가 자동으로 업데이트됩니다.
+초기 빌드는 500개 파일 프로젝트 기준 약 10초가 소요됩니다. 이후에는 watch 모드와 지원되는 플랫폼 훅으로 그래프를 자동 업데이트할 수 있습니다.
 
 ---
 
@@ -91,7 +91,7 @@ Build the code review graph for this project
 
 ### 2초 미만의 점진적 업데이트
 
-git 커밋이나 파일 저장마다 훅이 실행됩니다. 그래프는 변경된 파일을 비교하고, SHA-256 해시 검사를 통해 의존 대상을 찾으며, 변경된 부분만 다시 파싱합니다. 2,900개 파일 프로젝트의 재인덱싱이 2초 이내에 완료됩니다.
+훅 또는 watch 모드를 사용하면 파일 저장과 지원되는 커밋 훅에서 점진적 업데이트가 실행됩니다. 그래프는 변경된 파일을 비교하고, SHA-256 해시 검사를 통해 의존 대상을 찾으며, 변경된 부분만 다시 파싱합니다. 2,900개 파일 프로젝트의 재인덱싱이 2초 이내에 완료됩니다.
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="점진적 업데이트 흐름: git 커밋이 diff를 트리거하고, 의존 대상을 찾고, 5개 파일만 다시 파싱하며 2,910개는 건너뜀" width="90%" />
@@ -105,20 +105,20 @@ git 커밋이나 파일 저장마다 훅이 실행됩니다. 그래프는 변경
   <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js 모노레포: 27,732개 파일이 code-review-graph를 거쳐 약 15개 파일로 -- 49배 적은 토큰" width="80%" />
 </p>
 
-### 23개 언어 + Jupyter 노트북
+### 폭넓은 언어 지원 + Jupyter 노트북
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="카테고리별 19개 언어: 웹, 백엔드, 시스템, 모바일, 스크립팅, 그리고 Jupyter/Databricks 노트북 지원" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="카테고리별 언어 지원: 웹, 백엔드, 시스템, 모바일, 스크립팅, 그리고 Jupyter/Databricks 노트북 지원" width="90%" />
 </p>
 
-모든 언어에서 함수, 클래스, import, 호출 위치, 상속, 테스트 감지를 위한 완전한 Tree-sitter 문법을 지원합니다. Zig, PowerShell, Julia, Svelte SFC도 포함됩니다. 다중 언어 셀 지원(Python, R, SQL)이 가능한 Jupyter/Databricks 노트북(`.ipynb`) 파싱과 Perl XS 파일(`.xs`)도 지원합니다.
+현재 파서가 지원하는 범위에서 함수, 클래스, import, 호출 위치, 상속, 테스트 감지를 추출합니다. 가능한 경우 Tree-sitter를 사용하고 필요한 곳에서는 대상별 fallback 파서를 사용합니다. 지원 범위에는 Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFC, TypeScript 파서로 처리되는 Astro 파일, Jupyter/Databricks 노트북(`.ipynb`), Perl XS 파일(`.xs`)이 포함됩니다.
 
 ---
 
 ## 벤치마크
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="실제 저장소 벤치마크: 4.9배에서 27.3배 적은 토큰, 더 높은 리뷰 품질" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="실제 저장소 벤치마크: 4.9배에서 27.3배 적은 토큰과 보수적인 영향 분석" width="85%" />
 </p>
 
 모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 원본 데이터는 [`evaluate/reports/summary.md`](evaluate/reports/summary.md)에 있습니다.
@@ -132,8 +132,8 @@ git 커밋이나 파일 저장마다 훅이 실행됩니다. 그래프는 변경
 | 기능 | 세부 사항 |
 |------|-----------|
 | **점진적 업데이트** | 변경된 파일만 다시 파싱합니다. 이후 업데이트는 2초 이내에 완료됩니다. |
-| **23개 언어 + 노트북** | Python, TypeScript/TSX, JavaScript, Vue, Svelte, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++, Dart, R, Perl, Lua, Zig, PowerShell, Julia, Jupyter/Databricks (.ipynb) |
-| **영향 범위 분석** | 변경에 의해 영향 받는 함수, 클래스, 파일을 정확히 보여줍니다 |
+| **폭넓은 언어 지원 + 노트북** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed as TypeScript, Jupyter/Databricks (.ipynb) |
+| **영향 범위 분석** | 변경에 의해 영향 받을 가능성이 있는 함수, 클래스, 파일을 보여줍니다 |
 | **자동 업데이트 훅** | 수동 개입 없이 파일 편집 및 git 커밋마다 그래프가 업데이트됩니다 |
 | **시맨틱 검색** | sentence-transformers, Google Gemini, MiniMax, 또는 OpenAI 호환 엔드포인트(실제 OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI)를 통한 선택적 벡터 임베딩 |
 | **인터랙티브 시각화** | 검색, 커뮤니티 범례 토글, 차수 기반 노드 크기 조정이 가능한 D3.js 포스 다이렉티드 그래프 |
@@ -157,7 +157,7 @@ git 커밋이나 파일 저장마다 훅이 실행됩니다. 그래프는 변경
 | **멀티 레포 레지스트리** | 여러 저장소를 등록하고 모든 저장소에서 검색 |
 | **MCP 프롬프트** | 5개 워크플로 템플릿: 리뷰, 아키텍처, 디버그, 온보딩, 사전 머지 검사 |
 | **전문 검색** | FTS5 기반 키워드와 벡터 유사도를 결합한 하이브리드 검색 |
-| **로컬 스토리지** | `.code-review-graph/`에 SQLite 파일 저장. 외부 데이터베이스나 클라우드 의존성 없음. |
+| **로컬 스토리지** | `.code-review-graph/`에 SQLite 파일 저장. 핵심 그래프 저장에는 외부 데이터베이스나 클라우드 서비스가 필요 없습니다. |
 | **감시 모드** | 작업 중 지속적인 그래프 업데이트 |
 
 ---
@@ -204,7 +204,7 @@ code-review-graph serve            # MCP 서버 시작
 </details>
 
 <details>
-<summary><strong>28개 MCP 도구</strong></summary>
+<summary><strong>30개 MCP 도구</strong></summary>
 <br>
 
 그래프가 빌드되면 AI 어시스턴트가 이 도구들을 자동으로 사용합니다.
@@ -212,6 +212,7 @@ code-review-graph serve            # MCP 서버 시작
 | 도구 | 설명 |
 |------|------|
 | `build_or_update_graph_tool` | 그래프 빌드 또는 점진적 업데이트 |
+| `run_postprocess_tool` | 실행 흐름, 커뮤니티, 전체 텍스트 색인 후처리 다시 실행 |
 | `get_minimal_context_tool` | 초소형 컨텍스트 (~100 토큰) -- 이것을 먼저 호출 |
 | `get_impact_radius_tool` | 변경된 파일의 영향 범위 |
 | `get_review_context_tool` | 구조적 요약이 포함된 토큰 최적화 리뷰 컨텍스트 |
@@ -267,6 +268,7 @@ node_modules/**
 pip install code-review-graph[embeddings]          # 로컬 벡터 임베딩 (sentence-transformers)
 pip install code-review-graph[google-embeddings]   # Google Gemini 임베딩
 pip install code-review-graph[communities]         # 커뮤니티 감지 (igraph)
+pip install code-review-graph[enrichment]          # Python 호출 해결 보강 (Jedi)
 pip install code-review-graph[eval]                # 평가 벤치마크 (matplotlib)
 pip install code-review-graph[wiki]                # LLM 요약 위키 생성 (ollama)
 pip install code-review-graph[all]                 # 모든 선택적 의존성
@@ -320,5 +322,5 @@ MIT. [LICENSE](LICENSE)를 참조하세요.
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Kiro에서 사용 가능</sub>
+<sub>Codex, Claude Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Kiro, Qoder, GitHub Copilot 등 지원되는 AI 코딩 도구를 자동 감지하고 설정합니다</sub>
 </p>

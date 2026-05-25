@@ -33,7 +33,7 @@ Token efficiency: Prefer detail_level="minimal" where available. Always call get
 </section>
 
 <section name="legal">
-MIT license. 100% local. No telemetry. DB file: .code-review-graph/graph.db
+MIT licence. Core graph/review workflows are local and there is no telemetry. DB file: .code-review-graph/graph.db. Optional cloud embeddings send embedded source snippets to the configured provider only when selected.
 </section>
 
 <section name="watch">
@@ -45,12 +45,12 @@ Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
 Optional: pip install code-review-graph[embeddings]
 Then call embed_graph_tool to compute vectors.
 semantic_search_nodes_tool auto-uses vectors when available, falls back to keyword + FTS5.
-Providers: Local (all-MiniLM-L6-v2, 384-dim), Google Gemini, MiniMax (embo-01, 1536-dim).
-Configure via CRG_EMBEDDING_MODEL env var or model parameter.
+Providers: local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, and MiniMax.
+Configure via provider/model parameters, CRG_EMBEDDING_MODEL for local, or CRG_OPENAI_* for OpenAI-compatible endpoints.
 </section>
 
 <section name="languages">
-Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Jupyter/Databricks notebooks, and Perl XS files.
+Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
 Parser: Tree-sitter via tree-sitter-language-pack
 </section>
 
@@ -67,4 +67,4 @@ When user asks anything about "code-review-graph", "how to use", "commands", "re
 1. Call get_docs_section_tool with the exact section name.
 2. Use ONLY that content + current graph state.
 3. Never include full docs or source code in your reasoning.
-This guarantees 90%+ token savings.
+This keeps documentation lookup compact and avoids loading broad reference files by default.

@@ -31,7 +31,7 @@ pip uninstall code-review-graph
 pipx install code-review-graph
 ```
 
-`pipx` installs CLI tools in an isolated venv and guarantees `~/.local/bin` is on PATH.
+`pipx` installs CLI tools in an isolated venv. If the command is not found afterwards, run `pipx ensurepath` or add `~/.local/bin` to your PATH.
 
 **Option 2 — Use `uvx` (no install needed):**
 
@@ -181,7 +181,9 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 If a tool returns an ImportError, install the relevant optional group:
 - `pip install code-review-graph[embeddings]` for semantic search
 - `pip install code-review-graph[google-embeddings]` for Google Gemini embeddings
+- OpenAI-compatible and MiniMax embeddings use stdlib HTTP clients and require only their environment variables
 - `pip install code-review-graph[communities]` for igraph-based community detection
+- `pip install code-review-graph[enrichment]` for Python call-resolution enrichment via Jedi
 - `pip install code-review-graph[eval]` for evaluation benchmarks (matplotlib)
 - `pip install code-review-graph[wiki]` for wiki LLM summaries (ollama)
 - `pip install code-review-graph[all]` for everything
