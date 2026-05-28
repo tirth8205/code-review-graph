@@ -8,7 +8,7 @@ Supports multiple rendering modes for large graphs:
 - ``full``  — render every node (default, current behavior)
 - ``community`` — aggregate by community; double-click to drill down
 - ``file``  — aggregate by file; each file is a node
-- ``auto``  — choose community mode when node count exceeds threshold
+- ``auto``  — choose community mode when node or edge count exceeds threshold
 """
 
 from __future__ import annotations
@@ -361,7 +361,8 @@ def generate_html(
     store: GraphStore,
     output_path: str | Path,
     mode: str = "auto",
-    max_full_nodes: int = 3000,
+    max_full_nodes: int = 800,
+    max_full_edges: int = 3000,
 ) -> Path:
     """Generate a self-contained interactive HTML visualization.
 
@@ -370,8 +371,9 @@ def generate_html(
         output_path: Path for the output HTML file.
         mode: Rendering mode — ``"auto"``, ``"full"``, ``"community"``,
               or ``"file"``.  ``"auto"`` switches to ``"community"`` when
-              the node count exceeds *max_full_nodes*.
-        max_full_nodes: Threshold for auto-switching to community mode.
+              the node or edge count exceeds the full-render thresholds.
+        max_full_nodes: Node threshold for auto-switching to community mode.
+        max_full_edges: Edge threshold for auto-switching to community mode.
 
     Writes the HTML file to *output_path* and returns the resolved Path.
     """
@@ -388,7 +390,12 @@ def generate_html(
     effective_mode = mode
     if effective_mode == "auto":
         effective_mode = (
-            "community" if stats.total_nodes > max_full_nodes else "full"
+            "community"
+            if (
+                stats.total_nodes > max_full_nodes
+                or stats.total_edges > max_full_edges
+            )
+            else "full"
         )
 
     if effective_mode == "community":

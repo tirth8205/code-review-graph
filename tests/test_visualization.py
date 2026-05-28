@@ -489,8 +489,14 @@ def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     from code_review_graph.visualization import generate_html
 
     output_path = tmp_path / "auto_low.html"
-    # Threshold higher than node count -> should use full template
-    generate_html(large_store, output_path, mode="auto", max_full_nodes=100000)
+    # Thresholds higher than graph size -> should use full template
+    generate_html(
+        large_store,
+        output_path,
+        mode="auto",
+        max_full_nodes=100000,
+        max_full_edges=100000,
+    )
     content = output_path.read_text()
     # Full template has btn-community and flow-select
     assert "btn-community" in content
@@ -503,6 +509,23 @@ def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     # Aggregated template has btn-back and community_details
     assert "btn-back" in content2
     assert "community_details" in content2
+
+
+def test_auto_mode_switches_at_edge_threshold(large_store, tmp_path):
+    """Auto mode should aggregate dense graphs even when node count is modest."""
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "auto_dense.html"
+    generate_html(
+        large_store,
+        output_path,
+        mode="auto",
+        max_full_nodes=100000,
+        max_full_edges=1,
+    )
+    content = output_path.read_text()
+    assert "btn-back" in content
+    assert "community_details" in content
 
 
 def test_community_mode_html_generation(large_store, tmp_path):
