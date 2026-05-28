@@ -429,6 +429,34 @@ class TestAntelopeCppParsing:
         assert any(e.target == "eosio.token::transfer" for e in action_edges)
         assert any(e.target == "prices" and e.extra["from_dapp"] for e in table_edges)
 
+    def test_cpp_access_edges_resolve_sibling_header_alias(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "antelope_split.cpp")
+        action = next(
+            n for n in nodes
+            if n.name == "touch" and n.extra.get("antelope_kind") == "action"
+        )
+        assert action.parent_name == "split"
+
+        header_target = str(FIXTURES / "antelope_split.hpp") + "::split.pricereqs"
+        assert any(
+            e.kind == "READS_TABLE"
+            and e.target == header_target
+            and e.extra["operation"] == "find"
+            for e in edges
+        )
+        assert any(
+            e.kind == "WRITES_TABLE"
+            and e.target == header_target
+            and e.extra["operation"] == "emplace"
+            for e in edges
+        )
+        assert any(
+            e.kind == "WRITES_TABLE"
+            and e.target == header_target
+            and e.extra["operation"] == "modify"
+            for e in edges
+        )
+
 
 class TestHhParsing:
     def setup_method(self):

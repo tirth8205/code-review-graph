@@ -4980,7 +4980,9 @@ class CodeParser:
             elif alias_node:
                 target = self._qualify(alias_node.name, alias_node.file_path, None)
             else:
-                target = table_target
+                target = self._infer_antelope_header_table_alias_target(
+                    table_target, file_path, source_parent,
+                ) or table_target
             edges.append(EdgeInfo(
                 kind=edge_kind,
                 source=source_qn,
@@ -5005,6 +5007,33 @@ class CodeParser:
                 return same_parent[0]
         if len(candidates) == 1:
             return candidates[0]
+        return None
+
+    @staticmethod
+    def _infer_antelope_header_table_alias_target(
+        table_target: str,
+        file_path: str,
+        source_parent: Optional[str],
+    ) -> Optional[str]:
+        """Infer a header-declared table alias from a sibling C++ implementation.
+
+        Antelope contracts commonly declare ``using pricerequests =
+        multi_index<...>`` in ``contract.hpp`` and instantiate that alias in
+        ``contract.cpp`` action bodies.  Each file is parsed independently, so
+        the ``.cpp`` pass cannot directly see the header alias node.  When the
+        action parent and sibling header are clear, emit the fully qualified
+        alias target anyway; the graph resolver can then connect the access edge
+        to the real Type node parsed from the header.
+        """
+        if not source_parent or not table_target:
+            return None
+        path = Path(file_path)
+        if path.suffix.lower() not in {".cc", ".cpp", ".cxx"}:
+            return None
+        for suffix in (".hpp", ".h", ".hh", ".hxx"):
+            header = path.with_suffix(suffix)
+            if header.exists():
+                return f"{header}::{source_parent}.{table_target}"
         return None
 
     @staticmethod
