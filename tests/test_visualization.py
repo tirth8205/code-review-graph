@@ -554,6 +554,87 @@ def test_file_mode_html_generation(large_store, tmp_path):
     assert "DEPENDS_ON" in content
 
 
+def test_antelope_mode_filters_contract_model(tmp_path):
+    """Antelope mode should render contract concepts without test/frontend noise."""
+    from code_review_graph.visualization import generate_html
+
+    db_path = tmp_path / "antelope.db"
+    store = GraphStore(db_path)
+    contract_file = "contracts/oovp.oracle/oovp.oracle.hpp"
+    test_file = "tests/unit/oovp.oracle.test.js"
+
+    store.upsert_node(NodeInfo(
+        kind="File", name=contract_file, file_path=contract_file,
+        line_start=1, line_end=100, language="cpp", parent_name=None,
+        params=None, return_type=None, modifiers=None, is_test=False, extra={},
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Class", name="oracle", file_path=contract_file,
+        line_start=10, line_end=90, language="cpp", parent_name=None,
+        params=None, return_type=None, modifiers=None, is_test=False,
+        extra={"antelope_kind": "contract"},
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Function", name="requestprice", file_path=contract_file,
+        line_start=20, line_end=30, language="cpp", parent_name="oracle",
+        params=None, return_type=None, modifiers=None, is_test=False,
+        extra={"antelope_kind": "action"},
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Type", name="pricerequests", file_path=contract_file,
+        line_start=80, line_end=80, language="cpp", parent_name="oracle",
+        params=None, return_type=None, modifiers=None, is_test=False,
+        extra={
+            "antelope_kind": "multi_index",
+            "antelope_table_name": "requests",
+            "antelope_row_type": "price_request",
+        },
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Test", name="test_request", file_path=test_file,
+        line_start=1, line_end=5, language="javascript", parent_name=None,
+        params=None, return_type=None, modifiers=None, is_test=True, extra={},
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="REQUIRES_AUTH",
+        source=f"{contract_file}::oracle.requestprice",
+        target="requester",
+        file_path=contract_file,
+        line=22,
+        extra={},
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="WRITES_TABLE",
+        source=f"{contract_file}::oracle.requestprice",
+        target="pricerequests",
+        file_path=contract_file,
+        line=25,
+        extra={},
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="CALLS_ACTION",
+        source=f"{test_file}::test_request",
+        target="oracle::requestprice",
+        file_path=test_file,
+        line=3,
+        extra={},
+    ))
+    store.commit()
+
+    output_path = tmp_path / "antelope.html"
+    generate_html(store, output_path, mode="antelope")
+    content = output_path.read_text()
+    assert '"mode": "antelope"' in content
+    assert '"kind": "Contract"' in content
+    assert '"kind": "Action"' in content
+    assert '"kind": "MultiIndex"' in content
+    assert "REQUIRES_AUTH" in content
+    assert "WRITES_TABLE" in content
+    assert "requester" in content
+    assert "test_request" not in content
+    assert "CALLS_ACTION" not in content
+
+
 def test_full_mode_backward_compatible(store_with_data, tmp_path):
     """Full mode should produce identical output to the original 2-arg call."""
     from code_review_graph.visualization import generate_html

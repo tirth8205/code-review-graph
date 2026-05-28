@@ -8,6 +8,7 @@ Supports multiple rendering modes for large graphs:
 - ``full``  — render every node (default, current behavior)
 - ``community`` — aggregate by community; double-click to drill down
 - ``file``  — aggregate by file; each file is a node
+- ``antelope`` — contract-centric CDT view for actions, tables, auth, and inline calls
 - ``auto``  — choose community mode when node or edge count exceeds threshold
 """
 
@@ -120,6 +121,7 @@ def export_graph_data(store: GraphStore) -> dict:
             d["params"] = gnode.params
             d["return_type"] = gnode.return_type
             d["community_id"] = community_map.get(gnode.qualified_name)
+            d["extra"] = gnode.extra or {}
             nodes.append(d)
 
     name_index = _build_name_index(nodes, seen_qn)
@@ -128,6 +130,15 @@ def export_graph_data(store: GraphStore) -> dict:
 
     # Resolve short/unqualified edge targets to full qualified names,
     # then drop edges that still can't be resolved (external/stdlib calls).
+    # Antelope semantic edges intentionally target non-code concepts such as
+    # auth actors, table names, notification topics, and inline action names;
+    # keep those raw targets so the Antelope visualization can materialize them
+    # as virtual nodes.
+    antelope_external_edges = {
+        "REQUIRES_AUTH", "NOTIFIES", "HANDLES_NOTIFICATION",
+        "READS_TABLE", "WRITES_TABLE", "ERASES_TABLE", "MAPS_TO_TABLE",
+        "SENDS_INLINE_ACTION", "CALLS_ACTION",
+    }
     edges = []
     for e in all_edges:
         src = _resolve_target(e["source"], e["source"], seen_qn, name_index)
@@ -135,6 +146,9 @@ def export_graph_data(store: GraphStore) -> dict:
         if src and tgt:
             e["source"] = src
             e["target"] = tgt
+            edges.append(e)
+        elif src and e["kind"] in antelope_external_edges:
+            e["source"] = src
             edges.append(e)
 
     stats = store.get_stats()
@@ -357,6 +371,187 @@ def _aggregate_file(data: dict) -> dict:
     }
 
 
+def _contract_dir(file_path: str) -> str:
+    parts = file_path.replace("\\", "/").split("/")
+    if "contracts" in parts:
+        idx = parts.index("contracts")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return ""
+
+
+def _antelope_display_kind(node: dict) -> str:
+    antelope_kind = (node.get("extra") or {}).get("antelope_kind")
+    return {
+        "contract": "Contract",
+        "action": "Action",
+        "table": "Table",
+        "multi_index": "MultiIndex",
+        "singleton": "Singleton",
+        "notification": "Notification",
+        "abi_contract": "Contract",
+        "abi_action": "Action",
+        "abi_table": "Table",
+    }.get(antelope_kind, node.get("kind", "Node"))
+
+
+def _antelope_node_label(node: dict) -> str:
+    kind = (node.get("extra") or {}).get("antelope_kind")
+    if kind == "action" and node.get("parent_name"):
+        return f"{node['parent_name']}::{node['name']}"
+    if kind == "notification" and node.get("parent_name"):
+        return f"{node['parent_name']}::{node['name']}"
+    table_name = (node.get("extra") or {}).get("antelope_table_name")
+    if table_name and table_name != node.get("name"):
+        return f"{node['name']} ({table_name})"
+    return node.get("name") or node.get("qualified_name", "")
+
+
+def _antelope_stats(nodes: list[dict], edges: list[dict]) -> dict:
+    return {
+        "total_nodes": len(nodes),
+        "total_edges": len(edges),
+        "nodes_by_kind": dict(Counter(n.get("kind", "Node") for n in nodes)),
+        "edges_by_kind": dict(Counter(e.get("kind", "EDGE") for e in edges)),
+        "languages": sorted({n.get("language", "") for n in nodes if n.get("language")}),
+        "files_count": len({n.get("file_path", "") for n in nodes if n.get("file_path")}),
+        "last_updated": None,
+    }
+
+
+def _filter_antelope(data: dict) -> dict:
+    """Build a contract-centric Antelope/CDT visualization.
+
+    The community overview is useful for architecture, but Antelope projects
+    often need the contract model directly: contracts, actions, tables,
+    notifications, authorization checks, table operations, and inline actions.
+    This mode keeps only those domain nodes and creates small virtual nodes for
+    auth actors, table names, notification topics, and external inline targets.
+    """
+    antelope_kinds = {
+        "contract", "action", "table", "multi_index", "singleton", "notification",
+        "abi_contract", "abi_action", "abi_table",
+    }
+    semantic_edges = {
+        "REQUIRES_AUTH", "NOTIFIES", "HANDLES_NOTIFICATION",
+        "READS_TABLE", "WRITES_TABLE", "ERASES_TABLE", "MAPS_TO_TABLE",
+        "SENDS_INLINE_ACTION",
+    }
+
+    out_nodes: list[dict] = []
+    node_by_qn: dict[str, dict] = {}
+    qn_by_short: dict[str, list[str]] = defaultdict(list)
+    contract_by_name: dict[str, str] = {}
+
+    for node in data["nodes"]:
+        extra = node.get("extra") or {}
+        kind = extra.get("antelope_kind")
+        if kind not in antelope_kinds:
+            continue
+        file_path = node.get("file_path", "").replace("\\", "/")
+        if file_path and "/contracts/" not in file_path and not file_path.startswith("contracts/"):
+            continue
+
+        copied = dict(node)
+        copied["kind"] = _antelope_display_kind(node)
+        copied["name"] = _antelope_node_label(node)
+        copied["contract_dir"] = _contract_dir(node.get("file_path", ""))
+        copied["antelope_kind"] = kind
+        out_nodes.append(copied)
+        node_by_qn[copied["qualified_name"]] = copied
+        qn_by_short[node.get("name", "")].append(copied["qualified_name"])
+        table_name = extra.get("antelope_table_name")
+        if table_name:
+            qn_by_short[table_name].append(copied["qualified_name"])
+        if kind in {"contract", "abi_contract"}:
+            contract_by_name[node.get("name", "")] = copied["qualified_name"]
+
+    out_edges: list[dict] = []
+    edge_seen: set[tuple[str, str, str, int]] = set()
+    virtual_nodes: dict[str, dict] = {}
+
+    def add_node(node: dict) -> None:
+        if node["qualified_name"] in node_by_qn:
+            return
+        node_by_qn[node["qualified_name"]] = node
+        out_nodes.append(node)
+
+    def add_virtual(qn: str, name: str, kind: str) -> str:
+        if qn not in virtual_nodes:
+            virtual_nodes[qn] = {
+                "qualified_name": qn,
+                "name": name,
+                "kind": kind,
+                "file_path": "",
+                "line_start": None,
+                "line_end": None,
+                "language": "antelope",
+                "parent_name": None,
+                "is_test": False,
+                "extra": {},
+            }
+            add_node(virtual_nodes[qn])
+        return qn
+
+    def add_edge(kind: str, source: str, target: str, line: int = 0, weight: int = 1) -> None:
+        key = (kind, source, target, line)
+        if key in edge_seen:
+            return
+        edge_seen.add(key)
+        out_edges.append({
+            "kind": kind,
+            "source": source,
+            "target": target,
+            "line": line,
+            "weight": weight,
+        })
+
+    # Contract containment edges make the top-level model readable without
+    # requiring users to drill through file communities.
+    for node in list(out_nodes):
+        parent = node.get("parent_name")
+        contract_qn = contract_by_name.get(parent or "")
+        if contract_qn and contract_qn != node["qualified_name"]:
+            add_edge("CONTAINS", contract_qn, node["qualified_name"], node.get("line_start") or 0)
+
+    for edge in data["edges"]:
+        if edge.get("kind") not in semantic_edges:
+            continue
+        source = edge["source"]
+        target = edge["target"]
+        if source not in node_by_qn:
+            continue
+
+        resolved_target = target if target in node_by_qn else None
+        if not resolved_target and target in qn_by_short and len(qn_by_short[target]) == 1:
+            resolved_target = qn_by_short[target][0]
+
+        if not resolved_target:
+            ek = edge["kind"]
+            safe_target = target.replace(" ", "_")
+            if ek == "REQUIRES_AUTH":
+                resolved_target = add_virtual(f"__auth__{safe_target}", target, "Auth")
+            elif ek in {"READS_TABLE", "WRITES_TABLE", "ERASES_TABLE", "MAPS_TO_TABLE"}:
+                resolved_target = add_virtual(f"__table__{safe_target}", target, "TableRef")
+            elif ek in {"HANDLES_NOTIFICATION", "NOTIFIES"}:
+                resolved_target = add_virtual(f"__notify__{safe_target}", target, "Notify")
+            elif ek == "SENDS_INLINE_ACTION":
+                resolved_target = add_virtual(f"__inline__{safe_target}", target, "InlineAction")
+            else:
+                resolved_target = add_virtual(f"__target__{safe_target}", target, "Target")
+
+        add_edge(edge["kind"], source, resolved_target, edge.get("line") or 0)
+
+    return {
+        "nodes": out_nodes,
+        "edges": out_edges,
+        "stats": _antelope_stats(out_nodes, out_edges),
+        "flows": [],
+        "communities": [],
+        "mode": "antelope",
+    }
+
+
 def generate_html(
     store: GraphStore,
     output_path: str | Path,
@@ -370,8 +565,9 @@ def generate_html(
         store: The GraphStore to read graph data from.
         output_path: Path for the output HTML file.
         mode: Rendering mode — ``"auto"``, ``"full"``, ``"community"``,
-              or ``"file"``.  ``"auto"`` switches to ``"community"`` when
-              the node or edge count exceeds the full-render thresholds.
+              ``"file"``, or ``"antelope"``.  ``"auto"`` switches to
+              ``"community"`` when the node or edge count exceeds the
+              full-render thresholds.
         max_full_nodes: Node threshold for auto-switching to community mode.
         max_full_edges: Edge threshold for auto-switching to community mode.
 
@@ -406,6 +602,10 @@ def generate_html(
         html = _AGGREGATED_HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
     elif effective_mode == "file":
         agg = _aggregate_file(data)
+        data_json = json.dumps(agg, default=str).replace("</", "<\\/")
+        html = _AGGREGATED_HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
+    elif effective_mode == "antelope":
+        agg = _filter_antelope(data)
         data_json = json.dumps(agg, default=str).replace("</", "<\\/")
         html = _AGGREGATED_HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
     else:
@@ -1624,12 +1824,20 @@ function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
 
 var KIND_COLOR = {
   Community: "#1f6feb", File: "#58a6ff", Class: "#f0883e",
-  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e"
+  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e",
+  Contract: "#f0883e", Action: "#3fb950", Table: "#58a6ff",
+  MultiIndex: "#d2a8ff", Singleton: "#a5d6ff", Notification: "#ff7b72",
+  Auth: "#f2cc60", TableRef: "#79c0ff", Notify: "#ff7b72",
+  InlineAction: "#ffa657"
 };
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
   CALLS: "#3fb950", IMPORTS_FROM: "#f0883e",
-  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)"
+  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)",
+  REQUIRES_AUTH: "#f2cc60", READS_TABLE: "#79c0ff",
+  WRITES_TABLE: "#3fb950", ERASES_TABLE: "#ff7b72",
+  MAPS_TO_TABLE: "#d2a8ff", SENDS_INLINE_ACTION: "#ffa657",
+  HANDLES_NOTIFICATION: "#ff7b72", NOTIFIES: "#ff7b72"
 };
 var EDGE_CFG = {
   CROSS_COMMUNITY: { dash: null, width: 2, opacity: 0.6, marker: "" },
@@ -1638,6 +1846,14 @@ var EDGE_CFG = {
   CALLS:           { dash: null, width: 1.5, opacity: 0.7, marker: "url(#arrow-calls)" },
   IMPORTS_FROM:    { dash: "6,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-imports)" },
   INHERITS:        { dash: "3,4", width: 2, opacity: 0.7, marker: "url(#arrow-inherits)" },
+  REQUIRES_AUTH:   { dash: "4,3", width: 1.5, opacity: 0.75, marker: "url(#arrow-auth)" },
+  READS_TABLE:     { dash: "6,3", width: 1.3, opacity: 0.55, marker: "url(#arrow-table)" },
+  WRITES_TABLE:    { dash: null, width: 1.7, opacity: 0.75, marker: "url(#arrow-calls)" },
+  ERASES_TABLE:    { dash: "2,3", width: 1.7, opacity: 0.75, marker: "url(#arrow-danger)" },
+  MAPS_TO_TABLE:   { dash: "3,3", width: 1.5, opacity: 0.65, marker: "" },
+  SENDS_INLINE_ACTION: { dash: null, width: 1.7, opacity: 0.75, marker: "url(#arrow-inline)" },
+  HANDLES_NOTIFICATION: { dash: "5,3", width: 1.6, opacity: 0.75, marker: "url(#arrow-danger)" },
+  NOTIFIES:        { dash: "5,3", width: 1.6, opacity: 0.75, marker: "url(#arrow-danger)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || { dash: null, width: 1, opacity: 0.3, marker: "" }; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -1702,6 +1918,8 @@ if (dataMode === "community") {
   filterInfo.textContent = "Showing communities. Double-click to drill down.";
 } else if (dataMode === "file") {
   filterInfo.textContent = "Showing file-level aggregation.";
+} else if (dataMode === "antelope") {
+  filterInfo.textContent = "Showing Antelope contracts, actions, tables, auth, notifications, and inline actions.";
 } else {
   filterInfo.textContent = "Showing all nodes.";
 }
@@ -1774,7 +1992,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-auth",color:"#f2cc60"},{id:"arrow-table",color:"#79c0ff"},{id:"arrow-danger",color:"#ff7b72"},{id:"arrow-inline",color:"#ffa657"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -1793,6 +2011,11 @@ var isDrilledDown = false;
 
 function nodeRadius(d) {
   if (d.kind === "Community") return Math.max(12, Math.min(40, 8 + Math.sqrt(d.member_count || 1) * 3));
+  if (d.kind === "Contract") return 20;
+  if (d.kind === "Action") return 9;
+  if (d.kind === "Notification") return 10;
+  if (d.kind === "Table" || d.kind === "MultiIndex" || d.kind === "Singleton") return 11;
+  if (d.kind === "Auth" || d.kind === "TableRef" || d.kind === "Notify" || d.kind === "InlineAction") return 7;
   if (d.kind === "File") {
     if (d.symbol_count != null) return Math.max(8, Math.min(30, 6 + Math.sqrt(d.symbol_count || 1) * 2));
     return 18;

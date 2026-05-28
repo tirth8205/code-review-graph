@@ -556,9 +556,9 @@ def main() -> None:
     vis_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     vis_cmd.add_argument(
         "--mode",
-        choices=["auto", "full", "community", "file"],
+        choices=["auto", "full", "community", "file", "antelope"],
         default="auto",
-        help="Rendering mode: auto (default), full, community, or file",
+        help="Rendering mode: auto (default), full, community, file, or antelope",
     )
     vis_cmd.add_argument(
         "--serve",
