@@ -373,6 +373,13 @@ class TestAntelopeCppParsing:
         assert alias.extra["antelope_table_name"] == "prices"
         assert alias.extra["antelope_row_type"] == "price_row"
         assert alias.extra["antelope_secondary_indices"] == ["byvalue"]
+        assert any(
+            e.kind == "MAPS_TO_TABLE"
+            and e.source.endswith("::oracle.prices")
+            and e.target.endswith("::oracle.price_row")
+            and e.extra["table_name"] == "prices"
+            for e in self.edges
+        )
 
     def test_extracts_antelope_semantic_edges(self):
         auth_edges = [e for e in self.edges if e.kind == "REQUIRES_AUTH"]

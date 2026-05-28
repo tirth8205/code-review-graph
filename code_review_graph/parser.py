@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -4729,15 +4730,54 @@ class CodeParser:
             file_path=file_path,
             line=child.start_point[0] + 1,
         ))
+        row_target = self._resolve_antelope_row_type_target(
+            row_type, file_path, enclosing_class, nodes,
+        )
         edges.append(EdgeInfo(
             kind="MAPS_TO_TABLE",
             source=qualified,
-            target=table_name,
+            target=row_target or table_name,
             file_path=file_path,
             line=child.start_point[0] + 1,
-            extra={"row_type": row_type, "table_kind": table_kind},
+            extra={
+                "row_type": row_type,
+                "table_kind": table_kind,
+                "table_name": table_name,
+            },
         ))
         return True
+
+    def _resolve_antelope_row_type_target(
+        self,
+        row_type: Optional[str],
+        file_path: str,
+        enclosing_class: Optional[str],
+        nodes: list[NodeInfo],
+    ) -> Optional[str]:
+        if not row_type:
+            return None
+        row_name = row_type.split("::")[-1]
+        candidates = [
+            n for n in nodes
+            if n.kind == "Class"
+            and n.name == row_name
+            and n.extra.get("antelope_kind") == "table"
+        ]
+        if not candidates:
+            return None
+        for node in candidates:
+            if node.parent_name == enclosing_class and node.file_path == file_path:
+                return self._qualify(node.name, node.file_path, node.parent_name)
+        for node in candidates:
+            if node.parent_name == enclosing_class:
+                return self._qualify(node.name, node.file_path, node.parent_name)
+        for node in candidates:
+            if node.file_path == file_path:
+                return self._qualify(node.name, node.file_path, node.parent_name)
+        if len(candidates) == 1:
+            node = candidates[0]
+            return self._qualify(node.name, node.file_path, node.parent_name)
+        return None
 
     def _enrich_antelope_cpp(
         self,
@@ -4751,12 +4791,13 @@ class CodeParser:
 
         text = source.decode("utf-8", errors="replace")
         line_offsets = self._line_offsets(text)
-        table_alias_nodes = {
-            n.name: n
-            for n in nodes
-            if n.kind == "Type"
-            and n.extra.get("antelope_kind") in ("multi_index", "singleton")
-        }
+        table_alias_nodes: dict[str, list[NodeInfo]] = defaultdict(list)
+        for n in nodes:
+            if (
+                n.kind == "Type"
+                and n.extra.get("antelope_kind") in ("multi_index", "singleton")
+            ):
+                table_alias_nodes[n.name].append(n)
 
         for node in nodes:
             kind = node.extra.get("antelope_kind")
@@ -4777,7 +4818,7 @@ class CodeParser:
             )
             self._emit_antelope_table_access_edges(
                 body, source_qn, file_path, node.line_start, table_alias_nodes,
-                edges,
+                node.parent_name, edges,
             )
             pattern = node.extra.get("antelope_notify_pattern")
             if pattern:
@@ -4877,7 +4918,8 @@ class CodeParser:
         source_qn: str,
         file_path: str,
         line_start: int,
-        table_alias_nodes: dict[str, NodeInfo],
+        table_alias_nodes: dict[str, list[NodeInfo]],
+        source_parent: Optional[str],
         edges: list[EdgeInfo],
     ) -> None:
         table_vars: dict[str, str] = {}
@@ -4928,7 +4970,9 @@ class CodeParser:
             if dedupe in seen:
                 continue
             seen.add(dedupe)
-            alias_node = table_alias_nodes.get(table_target)
+            alias_node = self._resolve_antelope_table_alias_node(
+                table_target, table_alias_nodes, source_parent,
+            )
             if alias_node and alias_node.parent_name:
                 target = self._qualify(
                     alias_node.name, alias_node.file_path, alias_node.parent_name,
@@ -4945,6 +4989,23 @@ class CodeParser:
                 line=line,
                 extra={"operation": op, "table_variable": var_name},
             ))
+
+    @staticmethod
+    def _resolve_antelope_table_alias_node(
+        table_target: str,
+        table_alias_nodes: dict[str, list[NodeInfo]],
+        source_parent: Optional[str],
+    ) -> Optional[NodeInfo]:
+        candidates = table_alias_nodes.get(table_target) or []
+        if not candidates:
+            return None
+        if source_parent:
+            same_parent = [n for n in candidates if n.parent_name == source_parent]
+            if len(same_parent) == 1:
+                return same_parent[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     @staticmethod
     def _read_balanced_call_arg(text: str, open_paren: int) -> tuple[str, int]:
