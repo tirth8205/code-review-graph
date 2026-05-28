@@ -32,6 +32,40 @@ _SQL_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ANTELOPE_SIGNAL_RE = re.compile(
+    rb"\b(?:CONTRACT|ACTION|TABLE|SEND_INLINE_ACTION)\b|"
+    rb"\[\[\s*eosio::|__attribute__\s*\(\(\s*eosio_|"
+    rb"\beosio::(?:multi_index|singleton|action|contract)\b|"
+    rb"\b(?:multi_index|singleton)\s*<",
+)
+
+_ANTELOPE_MACRO_REPLACEMENTS: tuple[tuple[re.Pattern[bytes], bytes], ...] = (
+    # Preserve byte length so Tree-sitter byte offsets still line up with the
+    # original source used for line snippets and metadata extraction.
+    (
+        re.compile(rb"(?<![A-Za-z0-9_])CONTRACT(?=\s+[A-Za-z_])"),
+        b"class   ",
+    ),
+    (
+        re.compile(rb"(?<![A-Za-z0-9_])ACTION(?=\s+[A-Za-z_:~])"),
+        b"void  ",
+    ),
+    (
+        re.compile(rb"(?<![A-Za-z0-9_])TABLE(?=\s+[A-Za-z_])"),
+        b"class",
+    ),
+)
+
+_ANTELOPE_TABLE_READ_OPS = frozenset({
+    "find", "require_find", "get", "get_or_default", "get_index",
+    "lower_bound", "upper_bound", "begin", "cbegin", "end", "cend",
+    "rbegin", "crbegin", "rend", "crend", "available_primary_key",
+    "iterator_to",
+})
+
+_ANTELOPE_TABLE_WRITE_OPS = frozenset({"emplace", "modify", "set"})
+
+
 # SQL keywords that can appear after FROM/JOIN but are NOT table names.
 _SQL_KEYWORDS: frozenset[str] = frozenset({
     "SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
@@ -142,6 +176,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".v": "verilog",
     ".vh": "verilog",
     ".sql": "sql",
+    ".abi": "antelope_abi",
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -939,11 +974,18 @@ class CodeParser:
         if language == "sql":
             return self._parse_sql(path, source)
 
+        if language == "antelope_abi":
+            return self._parse_antelope_abi(path, source)
+
         parser = self._get_parser(language)
         if not parser:
             return [], []
 
-        tree = parser.parse(source)
+        parse_source = source
+        if language == "cpp":
+            parse_source = self._preprocess_antelope_cpp_macros(source)
+
+        tree = parser.parse(parse_source)
         nodes: list[NodeInfo] = []
         edges: list[EdgeInfo] = []
         file_path_str = str(path)
@@ -962,7 +1004,7 @@ class CodeParser:
 
         # Pre-scan for import mappings and defined names
         import_map, defined_names = self._collect_file_scope(
-            tree.root_node, language, source,
+            tree.root_node, language, parse_source,
         )
 
         # Walk the tree
@@ -970,6 +1012,11 @@ class CodeParser:
             tree.root_node, source, language, file_path_str, nodes, edges,
             import_map=import_map, defined_names=defined_names,
         )
+
+        if language == "cpp":
+            self._enrich_antelope_cpp(source, file_path_str, nodes, edges)
+        elif language in ("javascript", "typescript", "tsx"):
+            self._enrich_antelope_js(source, file_path_str, nodes, edges)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -991,6 +1038,212 @@ class CodeParser:
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
+
+        return nodes, edges
+
+    @staticmethod
+    def _preprocess_antelope_cpp_macros(source: bytes) -> bytes:
+        """Make CDT helper macros parse like ordinary C++ without moving bytes.
+
+        CDT still exposes ``CONTRACT``, ``ACTION``, and ``TABLE`` as helper
+        macros over the modern ``[[eosio::*]]`` attributes.  Tree-sitter sees
+        the raw macro tokens, which makes contract classes parse as malformed
+        function definitions.  Replacing the macros with same-length C++
+        keywords gives the generic parser a faithful tree while preserving byte
+        offsets for line numbers and source snippets.
+        """
+        if not _ANTELOPE_SIGNAL_RE.search(source):
+            return source
+        rewritten = source
+        for pattern, replacement in _ANTELOPE_MACRO_REPLACEMENTS:
+            rewritten = pattern.sub(replacement, rewritten)
+        return CodeParser._blank_cpp_macro_invocations(
+            rewritten,
+            (b"EOSLIB_SERIALIZE", b"EOSLIB_SERIALIZE_DERIVED"),
+        )
+
+    @staticmethod
+    def _blank_cpp_macro_invocations(source: bytes, names: tuple[bytes, ...]) -> bytes:
+        """Replace statement-like macro calls with whitespace, preserving bytes."""
+        data = bytearray(source)
+        for name in names:
+            search_from = 0
+            while True:
+                pos = source.find(name, search_from)
+                if pos == -1:
+                    break
+                before = source[pos - 1:pos] if pos > 0 else b""
+                after = source[pos + len(name):pos + len(name) + 1]
+                if (
+                    (before and (before.isalnum() or before == b"_"))
+                    or (after and (after.isalnum() or after == b"_"))
+                ):
+                    search_from = pos + len(name)
+                    continue
+                i = pos + len(name)
+                while i < len(source) and source[i:i + 1] in b" \t\r\n":
+                    i += 1
+                if i >= len(source) or source[i:i + 1] != b"(":
+                    search_from = i
+                    continue
+                end = CodeParser._find_balanced_paren_bytes(source, i)
+                if end == -1:
+                    search_from = i + 1
+                    continue
+                blank_end = end + 1
+                if blank_end < len(source) and source[blank_end:blank_end + 1] == b";":
+                    blank_end += 1
+                for j in range(pos, blank_end):
+                    if data[j] not in (ord("\n"), ord("\r")):
+                        data[j] = ord(" ")
+                search_from = blank_end
+        return bytes(data)
+
+    @staticmethod
+    def _find_balanced_paren_bytes(source: bytes, open_paren: int) -> int:
+        depth = 0
+        quote: Optional[int] = None
+        escape = False
+        for i in range(open_paren, len(source)):
+            ch = source[i]
+            if quote is not None:
+                if escape:
+                    escape = False
+                elif ch == ord("\\"):
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in (ord("'"), ord('"')):
+                quote = ch
+                continue
+            if ch == ord("("):
+                depth += 1
+            elif ch == ord(")"):
+                depth -= 1
+                if depth == 0:
+                    return i
+        return -1
+
+    def _parse_antelope_abi(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse Antelope ABI JSON enough to connect source, tests, and dapps."""
+        file_path_str = str(path)
+        try:
+            abi = json.loads(source.decode("utf-8", errors="replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return [], []
+
+        lines = source.count(b"\n") + 1
+        contract_name = path.stem
+        nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=lines,
+            language="antelope_abi",
+        )]
+        edges: list[EdgeInfo] = []
+
+        nodes.append(NodeInfo(
+            kind="Class",
+            name=contract_name,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=lines,
+            language="antelope_abi",
+            extra={"antelope_kind": "abi_contract"},
+        ))
+        contract_qn = self._qualify(contract_name, file_path_str, None)
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=file_path_str,
+            target=contract_qn,
+            file_path=file_path_str,
+            line=1,
+        ))
+
+        structs = {
+            s.get("name"): s for s in abi.get("structs", [])
+            if isinstance(s, dict) and s.get("name")
+        }
+        for action in abi.get("actions", []):
+            if not isinstance(action, dict) or not action.get("name"):
+                continue
+            action_name = str(action["name"])
+            action_type = str(action.get("type") or action_name)
+            fields = structs.get(action_type, {}).get("fields", [])
+            params = None
+            if isinstance(fields, list):
+                rendered = [
+                    f"{f.get('type', '')} {f.get('name', '')}".strip()
+                    for f in fields if isinstance(f, dict)
+                ]
+                params = f"({', '.join(rendered)})" if rendered else None
+            extra = {
+                "antelope_kind": "abi_action",
+                "antelope_abi_type": action_type,
+            }
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=action_name,
+                file_path=file_path_str,
+                line_start=1,
+                line_end=lines,
+                language="antelope_abi",
+                parent_name=contract_name,
+                params=params,
+                extra=extra,
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=contract_qn,
+                target=self._qualify(action_name, file_path_str, contract_name),
+                file_path=file_path_str,
+                line=1,
+            ))
+
+        for table in abi.get("tables", []):
+            if not isinstance(table, dict) or not table.get("name"):
+                continue
+            table_name = str(table["name"])
+            table_type = str(table.get("type") or table_name)
+            extra = {
+                "antelope_kind": "abi_table",
+                "antelope_table_name": table_name,
+                "antelope_row_type": table_type,
+            }
+            for key in ("index_type", "key_names", "key_types"):
+                if key in table:
+                    extra[f"antelope_{key}"] = table[key]
+            nodes.append(NodeInfo(
+                kind="Type",
+                name=table_name,
+                file_path=file_path_str,
+                line_start=1,
+                line_end=lines,
+                language="antelope_abi",
+                parent_name=contract_name,
+                extra=extra,
+            ))
+            table_qn = self._qualify(table_name, file_path_str, contract_name)
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=contract_qn,
+                target=table_qn,
+                file_path=file_path_str,
+                line=1,
+            ))
+            edges.append(EdgeInfo(
+                kind="MAPS_TO_TABLE",
+                source=table_qn,
+                target=table_name,
+                file_path=file_path_str,
+                line=1,
+                extra={"row_type": table_type, "table_kind": "abi_table"},
+            ))
 
         return nodes, edges
 
@@ -2279,6 +2532,32 @@ class CodeParser:
                     child, source, language, file_path, nodes, edges,
                     enclosing_class, enclosing_func,
                     import_map, defined_names, _depth,
+                )
+            ):
+                continue
+
+            # --- Antelope/CDT action declarations in C++ class bodies ---
+            # After macro preprocessing, ``ACTION foo(...)`` becomes a C++
+            # field_declaration with a function_declarator, not a full
+            # function_definition.  Surface it as an addressable action node so
+            # header-only ABI declarations participate in graph queries.
+            if (
+                language == "cpp"
+                and node_type == "field_declaration"
+                and self._extract_cpp_field_function_declaration(
+                    child, source, language, file_path, nodes, edges,
+                    enclosing_class, import_map, defined_names,
+                )
+            ):
+                continue
+
+            # --- Antelope/CDT table aliases ---
+            if (
+                language == "cpp"
+                and node_type in ("alias_declaration", "type_definition")
+                and self._extract_antelope_table_alias(
+                    child, source, file_path, nodes, edges,
+                    enclosing_class,
                 )
             ):
                 continue
@@ -4190,6 +4469,677 @@ class CodeParser:
                         extra={"kafka_type": ann_name},
                     ))
 
+    @staticmethod
+    def _node_source_text(node, source: bytes) -> str:
+        return source[node.start_byte:node.end_byte].decode(
+            "utf-8", errors="replace",
+        )
+
+    @staticmethod
+    def _line_starting_at(source: bytes, byte_offset: int) -> str:
+        start = source.rfind(b"\n", 0, byte_offset) + 1
+        end = source.find(b"\n", byte_offset)
+        if end == -1:
+            end = len(source)
+        return source[start:end].decode("utf-8", errors="replace")
+
+    def _antelope_macro_at_node_start(
+        self, node, source: bytes,
+    ) -> Optional[str]:
+        line = self._line_starting_at(source, node.start_byte)
+        stripped = line.lstrip()
+        for macro in ("CONTRACT", "ACTION", "TABLE"):
+            if re.match(rf"^{macro}\b", stripped):
+                return macro
+        return None
+
+    def _antelope_attribute_source(self, node, source: bytes) -> str:
+        """Return text likely to contain attributes attached to *node*."""
+        if node.parent and node.parent.type in (
+            "field_declaration", "declaration", "function_definition",
+            "class_specifier", "struct_specifier",
+        ):
+            text = self._node_source_text(node.parent, source)
+        else:
+            text = self._node_source_text(node, source)
+        cut_points = [
+            pos for pos in (text.find("{"), text.find(";")) if pos != -1
+        ]
+        if cut_points:
+            text = text[: min(cut_points)]
+        return text
+
+    def _get_antelope_cpp_metadata(
+        self, node, source: bytes, semantic: str,
+    ) -> dict:
+        """Detect Antelope/CDT meaning for a parsed C++ node."""
+        extra: dict = {}
+        macro = self._antelope_macro_at_node_start(node, source)
+        if macro:
+            extra["antelope_macro"] = macro
+            extra["antelope_kind"] = {
+                "CONTRACT": "contract",
+                "ACTION": "action",
+                "TABLE": "table",
+            }[macro]
+
+        attr_text = self._antelope_attribute_source(node, source)
+        attrs: list[str] = []
+        for match in re.finditer(
+            r"\[\[\s*eosio::([A-Za-z_][A-Za-z0-9_]*)"
+            r"(?:\s*\((.*?)\))?\s*\]\]",
+            attr_text,
+            re.DOTALL,
+        ):
+            attr_name = match.group(1)
+            attrs.append(attr_name)
+            attr_arg = self._strip_cpp_literal(match.group(2) or "")
+            if attr_name in ("contract", "action", "table"):
+                extra["antelope_kind"] = attr_name
+                if attr_arg:
+                    extra["antelope_abi_name"] = attr_arg
+            elif attr_name == "on_notify":
+                extra["antelope_kind"] = "notification"
+                if attr_arg:
+                    extra["antelope_notify_pattern"] = attr_arg
+            elif attr_name == "read_only":
+                extra["antelope_kind"] = "read_only"
+        if attrs:
+            extra["antelope_attributes"] = attrs
+
+        if semantic == "class" and not extra.get("antelope_kind"):
+            text = self._node_source_text(node, source)
+            if re.search(r":\s*(?:public\s+)?(?:eosio::)?contract\b", text):
+                extra["antelope_kind"] = "contract"
+
+        return extra
+
+    @staticmethod
+    def _strip_cpp_literal(value: str) -> str:
+        value = value.strip()
+        if value.endswith("_n"):
+            value = value[:-2].strip()
+        if (
+            len(value) >= 2
+            and value[0] == value[-1]
+            and value[0] in ("'", '"')
+        ):
+            value = value[1:-1]
+        return value.strip()
+
+    def _get_cpp_function_scope(self, node) -> Optional[str]:
+        """Return the qualifier in ``Contract::action(...)`` definitions."""
+        for child in node.children:
+            if child.type != "function_declarator":
+                continue
+            for sub in child.children:
+                if sub.type != "qualified_identifier":
+                    continue
+                parts = [
+                    p.text.decode("utf-8", errors="replace")
+                    for p in sub.children
+                    if p.type in (
+                        "namespace_identifier", "type_identifier",
+                        "identifier", "field_identifier",
+                    )
+                ]
+                if len(parts) >= 2:
+                    return ".".join(parts[:-1])
+        return None
+
+    def _extract_cpp_field_function_declaration(
+        self,
+        child,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+    ) -> bool:
+        if not any(sub.type == "function_declarator" for sub in child.children):
+            return False
+
+        extra = self._get_antelope_cpp_metadata(child, source, "function")
+        if extra.get("antelope_kind") not in (
+            "action", "notification", "read_only",
+        ):
+            return False
+
+        name = self._get_name(child, language, "function")
+        if not name:
+            return False
+
+        func_decl = next(
+            (sub for sub in child.children if sub.type == "function_declarator"),
+            child,
+        )
+        params = self._get_params(func_decl, language, source)
+        parent_name = enclosing_class
+        qualified = self._qualify(name, file_path, parent_name)
+        nodes.append(NodeInfo(
+            kind="Function",
+            name=name,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language=language,
+            parent_name=parent_name,
+            params=params,
+            extra=extra,
+        ))
+        container = (
+            self._qualify(parent_name, file_path, None)
+            if parent_name
+            else file_path
+        )
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=container,
+            target=qualified,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+        if defined_names is not None:
+            defined_names.add(name)
+        return True
+
+    def _extract_antelope_table_alias(
+        self,
+        child,
+        source: bytes,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+    ) -> bool:
+        text = self._node_source_text(child, source)
+        if "multi_index" not in text and "singleton" not in text:
+            return False
+
+        alias = table_kind = table_name = row_type = None
+        using_match = re.search(
+            r"\busing\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+            r"(?:eosio::)?(multi_index|singleton)\s*<\s*"
+            r"((?:\"[^\"]+\"|'[^']+')\s*_n)\s*,\s*"
+            r"([A-Za-z_:][A-Za-z0-9_:]*)",
+            text,
+            re.DOTALL,
+        )
+        if using_match:
+            alias = using_match.group(1)
+            table_kind = using_match.group(2)
+            table_name = self._strip_cpp_literal(using_match.group(3))
+            row_type = using_match.group(4)
+        else:
+            typedef_match = re.search(
+                r"\btypedef\s+(?:eosio::)?(multi_index|singleton)\s*<\s*"
+                r"((?:\"[^\"]+\"|'[^']+')\s*_n)\s*,\s*"
+                r"([A-Za-z_:][A-Za-z0-9_:]*)[\s\S]*?>\s*"
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*;",
+                text,
+                re.DOTALL,
+            )
+            if typedef_match:
+                table_kind = typedef_match.group(1)
+                table_name = self._strip_cpp_literal(typedef_match.group(2))
+                row_type = typedef_match.group(3)
+                alias = typedef_match.group(4)
+
+        if not alias or not table_kind or not table_name:
+            return False
+
+        indices = [
+            self._strip_cpp_literal(m.group(1))
+            for m in re.finditer(
+                r"indexed_by\s*<\s*((?:\"[^\"]+\"|'[^']+')\s*_n)",
+                text,
+            )
+        ]
+        extra = {
+            "antelope_kind": table_kind,
+            "antelope_table_name": table_name,
+            "antelope_row_type": row_type,
+        }
+        if indices:
+            extra["antelope_secondary_indices"] = indices
+
+        qualified = self._qualify(alias, file_path, enclosing_class)
+        nodes.append(NodeInfo(
+            kind="Type",
+            name=alias,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language="cpp",
+            parent_name=enclosing_class,
+            extra=extra,
+        ))
+        container = (
+            self._qualify(enclosing_class, file_path, None)
+            if enclosing_class
+            else file_path
+        )
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=container,
+            target=qualified,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+        edges.append(EdgeInfo(
+            kind="MAPS_TO_TABLE",
+            source=qualified,
+            target=table_name,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+            extra={"row_type": row_type, "table_kind": table_kind},
+        ))
+        return True
+
+    def _enrich_antelope_cpp(
+        self,
+        source: bytes,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        if not _ANTELOPE_SIGNAL_RE.search(source):
+            return
+
+        text = source.decode("utf-8", errors="replace")
+        line_offsets = self._line_offsets(text)
+        table_alias_nodes = {
+            n.name: n
+            for n in nodes
+            if n.kind == "Type"
+            and n.extra.get("antelope_kind") in ("multi_index", "singleton")
+        }
+
+        for node in nodes:
+            kind = node.extra.get("antelope_kind")
+            if kind not in ("action", "notification", "read_only"):
+                continue
+            if node.line_start <= 0 or node.line_end < node.line_start:
+                continue
+
+            start = line_offsets[min(node.line_start - 1, len(line_offsets) - 1)]
+            end_line = min(node.line_end, len(line_offsets) - 1)
+            end = line_offsets[end_line]
+            body = text[start:end]
+            source_qn = self._qualify(node.name, file_path, node.parent_name)
+
+            self._emit_antelope_auth_edges(body, source_qn, file_path, node.line_start, edges)
+            self._emit_antelope_inline_action_edges(
+                body, source_qn, file_path, node.line_start, edges,
+            )
+            self._emit_antelope_table_access_edges(
+                body, source_qn, file_path, node.line_start, table_alias_nodes,
+                edges,
+            )
+            pattern = node.extra.get("antelope_notify_pattern")
+            if pattern:
+                edges.append(EdgeInfo(
+                    kind="HANDLES_NOTIFICATION",
+                    source=source_qn,
+                    target=pattern,
+                    file_path=file_path,
+                    line=node.line_start,
+                    extra={"antelope": True},
+                ))
+
+    @staticmethod
+    def _line_offsets(text: str) -> list[int]:
+        offsets = [0]
+        for match in re.finditer("\n", text):
+            offsets.append(match.end())
+        offsets.append(len(text))
+        return offsets
+
+    def _emit_antelope_auth_edges(
+        self,
+        body: str,
+        source_qn: str,
+        file_path: str,
+        line_start: int,
+        edges: list[EdgeInfo],
+    ) -> None:
+        for match in re.finditer(r"\b(?:eosio::)?require_auth\s*\(", body):
+            arg, _ = self._read_balanced_call_arg(body, match.end() - 1)
+            if not arg:
+                continue
+            edges.append(EdgeInfo(
+                kind="REQUIRES_AUTH",
+                source=source_qn,
+                target=self._clean_antelope_expr(arg),
+                file_path=file_path,
+                line=line_start + body[:match.start()].count("\n"),
+                extra={"antelope": True},
+            ))
+        for match in re.finditer(r"\b(?:eosio::)?require_recipient\s*\(", body):
+            arg, _ = self._read_balanced_call_arg(body, match.end() - 1)
+            if not arg:
+                continue
+            edges.append(EdgeInfo(
+                kind="NOTIFIES",
+                source=source_qn,
+                target=self._clean_antelope_expr(arg),
+                file_path=file_path,
+                line=line_start + body[:match.start()].count("\n"),
+                extra={"antelope": True},
+            ))
+
+    def _emit_antelope_inline_action_edges(
+        self,
+        body: str,
+        source_qn: str,
+        file_path: str,
+        line_start: int,
+        edges: list[EdgeInfo],
+    ) -> None:
+        for match in re.finditer(r"\b(?:eosio::)?action\s*\(", body):
+            arg_text, _ = self._read_balanced_call_arg(body, match.end() - 1)
+            args = self._split_top_level_args(arg_text)
+            if len(args) < 3:
+                continue
+            contract_expr = self._clean_antelope_expr(args[1])
+            action_name = self._clean_antelope_expr(args[2])
+            target = f"{contract_expr}::{action_name}" if contract_expr else action_name
+            edges.append(EdgeInfo(
+                kind="SENDS_INLINE_ACTION",
+                source=source_qn,
+                target=target,
+                file_path=file_path,
+                line=line_start + body[:match.start()].count("\n"),
+                extra={"contract": contract_expr, "action": action_name},
+            ))
+
+        for match in re.finditer(r"\bSEND_INLINE_ACTION\s*\(", body):
+            arg_text, _ = self._read_balanced_call_arg(body, match.end() - 1)
+            args = self._split_top_level_args(arg_text)
+            if len(args) < 2:
+                continue
+            action_name = self._clean_antelope_expr(args[1])
+            edges.append(EdgeInfo(
+                kind="SENDS_INLINE_ACTION",
+                source=source_qn,
+                target=action_name,
+                file_path=file_path,
+                line=line_start + body[:match.start()].count("\n"),
+                extra={"action": action_name, "macro": "SEND_INLINE_ACTION"},
+            ))
+
+    def _emit_antelope_table_access_edges(
+        self,
+        body: str,
+        source_qn: str,
+        file_path: str,
+        line_start: int,
+        table_alias_nodes: dict[str, NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        table_vars: dict[str, str] = {}
+        for match in re.finditer(
+            r"\b([A-Za-z_][A-Za-z0-9_:]*)\s+"
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+            body,
+        ):
+            table_type = match.group(1).split("::")[-1]
+            var_name = match.group(2)
+            if table_type in {
+                "action", "asset", "check", "name", "symbol",
+                "permission_level", "std", "string",
+            }:
+                continue
+            table_vars[var_name] = table_type
+
+        # Secondary index handles should inherit the table variable's target.
+        for match in re.finditer(
+            r"\bauto\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"
+            r"([A-Za-z_][A-Za-z0-9_]*)\.get_index\s*<",
+            body,
+        ):
+            idx_var, table_var = match.group(1), match.group(2)
+            if table_var in table_vars:
+                table_vars[idx_var] = table_vars[table_var]
+
+        seen: set[tuple[str, str, int]] = set()
+        for match in re.finditer(
+            r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*"
+            r"([A-Za-z_][A-Za-z0-9_]*)\b",
+            body,
+        ):
+            var_name, op = match.group(1), match.group(2)
+            table_target = table_vars.get(var_name)
+            if not table_target:
+                continue
+            if op in _ANTELOPE_TABLE_WRITE_OPS:
+                edge_kind = "WRITES_TABLE"
+            elif op == "erase":
+                edge_kind = "ERASES_TABLE"
+            elif op in _ANTELOPE_TABLE_READ_OPS:
+                edge_kind = "READS_TABLE"
+            else:
+                continue
+            line = line_start + body[:match.start()].count("\n")
+            dedupe = (edge_kind, table_target, line)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            alias_node = table_alias_nodes.get(table_target)
+            if alias_node and alias_node.parent_name:
+                target = self._qualify(
+                    alias_node.name, alias_node.file_path, alias_node.parent_name,
+                )
+            elif alias_node:
+                target = self._qualify(alias_node.name, alias_node.file_path, None)
+            else:
+                target = table_target
+            edges.append(EdgeInfo(
+                kind=edge_kind,
+                source=source_qn,
+                target=target,
+                file_path=file_path,
+                line=line,
+                extra={"operation": op, "table_variable": var_name},
+            ))
+
+    @staticmethod
+    def _read_balanced_call_arg(text: str, open_paren: int) -> tuple[str, int]:
+        if open_paren < 0 or open_paren >= len(text) or text[open_paren] != "(":
+            return "", open_paren
+        depth = 0
+        quote: Optional[str] = None
+        escape = False
+        for i in range(open_paren, len(text)):
+            ch = text[i]
+            if quote:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                continue
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return text[open_paren + 1:i], i
+        return "", open_paren
+
+    @staticmethod
+    def _split_top_level_args(arg_text: str) -> list[str]:
+        args: list[str] = []
+        start = 0
+        depth = 0
+        quote: Optional[str] = None
+        escape = False
+        bracket_pairs = {"(": ")", "{": "}", "[": "]", "<": ">"}
+        closers = set(bracket_pairs.values())
+        for i, ch in enumerate(arg_text):
+            if quote:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    quote = None
+                continue
+            if ch in ("'", '"'):
+                quote = ch
+                continue
+            if ch in bracket_pairs:
+                depth += 1
+            elif ch in closers and depth > 0:
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(arg_text[start:i].strip())
+                start = i + 1
+        tail = arg_text[start:].strip()
+        if tail:
+            args.append(tail)
+        return args
+
+    def _clean_antelope_expr(self, expr: str) -> str:
+        expr = re.sub(r"\s+", " ", expr).strip()
+        # name literals: "transfer"_n, 'transfer'_n, transfer_name
+        expr = self._strip_cpp_literal(expr)
+        # The constructor target often arrives as name{"foo"} or symbol_code("X").
+        literal_match = re.search(r'["\']([^"\']+)["\']\s*_n?', expr)
+        if literal_match and len(expr) <= len(literal_match.group(0)) + 8:
+            return literal_match.group(1)
+        return expr.strip()
+
+    def _enrich_antelope_js(
+        self,
+        source: bytes,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        text = source.decode("utf-8", errors="replace")
+        if not any(
+            marker in text
+            for marker in (
+                ".contract.actions.", ".contract.tables.", "api.transact",
+                "actions:",
+            )
+        ):
+            return
+
+        for match in re.finditer(
+            r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)*contract\.actions\."
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^,\n)]+)",
+            text,
+        ):
+            action_name = match.group(1)
+            contract_expr = self._clean_js_expr(match.group(2))
+            line = text[:match.start()].count("\n") + 1
+            edges.append(EdgeInfo(
+                kind="CALLS_ACTION",
+                source=self._node_at_line(nodes, file_path, line),
+                target=f"{contract_expr}::{action_name}" if contract_expr else action_name,
+                file_path=file_path,
+                line=line,
+                extra={"contract": contract_expr, "action": action_name},
+            ))
+
+        for match in re.finditer(
+            r"\b(?:[A-Za-z_][A-Za-z0-9_]*\.)*contract\.tables\."
+            r"([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*([^,\n)]+)",
+            text,
+        ):
+            table_name = match.group(1)
+            contract_expr = self._clean_js_expr(match.group(2))
+            line = text[:match.start()].count("\n") + 1
+            edges.append(EdgeInfo(
+                kind="READS_TABLE",
+                source=self._node_at_line(nodes, file_path, line),
+                target=table_name,
+                file_path=file_path,
+                line=line,
+                extra={
+                    "contract": contract_expr,
+                    "table": table_name,
+                    "from_dapp": True,
+                },
+            ))
+
+        action_obj_patterns = (
+            re.compile(
+                r"\{\s*account\s*:\s*([^,\n{}]+),\s*"
+                r"name\s*:\s*(['\"])([^'\"]+)\2",
+                re.DOTALL,
+            ),
+            re.compile(
+                r"\{\s*name\s*:\s*(['\"])([^'\"]+)\1,\s*"
+                r"account\s*:\s*([^,\n{}]+)",
+                re.DOTALL,
+            ),
+        )
+        for pattern in action_obj_patterns:
+            for match in pattern.finditer(text):
+                if pattern is action_obj_patterns[0]:
+                    contract_expr = self._clean_js_expr(match.group(1))
+                    action_name = match.group(3)
+                else:
+                    action_name = match.group(2)
+                    contract_expr = self._clean_js_expr(match.group(3))
+                line = text[:match.start()].count("\n") + 1
+                edges.append(EdgeInfo(
+                    kind="CALLS_ACTION",
+                    source=self._node_at_line(nodes, file_path, line),
+                    target=(
+                        f"{contract_expr}::{action_name}"
+                        if contract_expr else action_name
+                    ),
+                    file_path=file_path,
+                    line=line,
+                    extra={
+                        "contract": contract_expr,
+                        "action": action_name,
+                        "shape": "eosjs_action_object",
+                    },
+                ))
+
+    @staticmethod
+    def _clean_js_expr(expr: str) -> str:
+        expr = re.sub(r"\s+", " ", expr).strip()
+        if (
+            len(expr) >= 2
+            and expr[0] == expr[-1]
+            and expr[0] in ("'", '"', "`")
+        ):
+            return expr[1:-1]
+        return expr
+
+    def _node_at_line(
+        self, nodes: list[NodeInfo], file_path: str, line: int,
+    ) -> str:
+        candidates = [
+            n for n in nodes
+            if n.file_path == file_path
+            and n.kind != "File"
+            and n.line_start <= line <= n.line_end
+        ]
+        if not candidates:
+            return file_path
+        candidates.sort(
+            key=lambda n: (
+                n.line_end - n.line_start,
+                0 if n.kind == "Test" else 1,
+            )
+        )
+        node = candidates[0]
+        return self._qualify(node.name, file_path, node.parent_name)
+
     def _extract_classes(
         self,
         child,
@@ -4211,11 +5161,14 @@ class CodeParser:
         if not name:
             return False
 
+        extra: dict = {}
+        if language == "cpp":
+            extra.update(self._get_antelope_cpp_metadata(child, source, "class"))
+
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
         # protocol uses its own protocol_declaration node type.
-        extra: dict = {}
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -4377,12 +5330,24 @@ class CodeParser:
             parent_name = enclosing_func
             container_scope = enclosing_func
 
+        antelope_extra: dict = {}
+        if language == "cpp":
+            antelope_extra = self._get_antelope_cpp_metadata(
+                child, source, "function",
+            )
+            scoped_parent = self._get_cpp_function_scope(child)
+            if scoped_parent and antelope_extra.get("antelope_kind") in (
+                "action", "notification", "read_only",
+            ):
+                parent_name = scoped_parent
+                container_scope = scoped_parent
+
         qualified = self._qualify(name, file_path, parent_name)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 
         # Java: detect Temporal method-level annotations and Kafka listeners
-        method_extra: dict = {}
+        method_extra: dict = dict(antelope_extra)
         if language == "java" and deco_list:
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
@@ -4494,9 +5459,18 @@ class CodeParser:
                             break
 
         # Recurse to find calls inside the function
+        recurse_class = enclosing_class
+        if (
+            language == "cpp"
+            and method_extra.get("antelope_kind") in (
+                "action", "notification", "read_only",
+            )
+        ):
+            recurse_class = parent_name
+
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
-            enclosing_class=enclosing_class, enclosing_func=name,
+            enclosing_class=recurse_class, enclosing_func=name,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )

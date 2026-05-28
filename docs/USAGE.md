@@ -116,14 +116,14 @@ Since v2.3.4, review and impact tools include compact `context_savings` metadata
 
 ## Supported Languages
 
-The parser currently covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte single-file components, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
+The parser currently covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, Antelope/CDT smart contracts and ABI files (`.abi`), C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte single-file components, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
 Extension-less scripts are detected by shebang for common bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
 ## What Gets Indexed
 
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests
-- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON
+- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, plus specialised framework edges such as Antelope `REQUIRES_AUTH`, `READS_TABLE`, `WRITES_TABLE`, `ERASES_TABLE`, `SENDS_INLINE_ACTION`, `HANDLES_NOTIFICATION`, and dapp `CALLS_ACTION`.
 
 See [schema.md](schema.md) for full details.
 

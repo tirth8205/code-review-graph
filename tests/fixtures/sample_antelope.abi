@@ -1,0 +1,33 @@
+{
+  "version": "eosio::abi/1.2",
+  "structs": [
+    {
+      "name": "setprice",
+      "base": "",
+      "fields": [
+        { "name": "user", "type": "name" },
+        { "name": "id", "type": "uint64" }
+      ]
+    },
+    {
+      "name": "price_row",
+      "base": "",
+      "fields": [
+        { "name": "id", "type": "uint64" },
+        { "name": "value", "type": "uint64" }
+      ]
+    }
+  ],
+  "actions": [
+    { "name": "setprice", "type": "setprice", "ricardian_contract": "" }
+  ],
+  "tables": [
+    {
+      "name": "prices",
+      "type": "price_row",
+      "index_type": "i64",
+      "key_names": ["id"],
+      "key_types": ["uint64"]
+    }
+  ]
+}

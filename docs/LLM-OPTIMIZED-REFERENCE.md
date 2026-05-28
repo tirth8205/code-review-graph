@@ -50,7 +50,7 @@ Configure via provider/model parameters, CRG_EMBEDDING_MODEL for local, or CRG_O
 </section>
 
 <section name="languages">
-Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
+Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, Antelope/CDT smart contracts and ABI files, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
 Parser: Tree-sitter via tree-sitter-language-pack
 </section>
 

@@ -336,6 +336,93 @@ class TestCppParsing:
         assert len(inherits) >= 1
 
 
+class TestAntelopeCppParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample_antelope.cpp")
+
+    def test_detects_abi_language(self):
+        assert self.parser.detect_language(Path("sample.abi")) == "antelope_abi"
+
+    def test_extracts_contract_actions_tables_and_aliases(self):
+        contracts = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("antelope_kind") == "contract"
+        ]
+        assert [(n.name, n.line_start, n.line_end) for n in contracts] == [
+            ("oracle", 6, 27)
+        ]
+
+        actions = {
+            (n.name, n.parent_name)
+            for n in self.nodes
+            if n.extra.get("antelope_kind") == "action"
+        }
+        assert ("setprice", "oracle") in actions
+        assert ("clear", "oracle") in actions
+        assert ("ACTION", "oracle") not in actions
+
+        table = next(
+            n for n in self.nodes
+            if n.name == "price_row" and n.extra.get("antelope_kind") == "table"
+        )
+        assert table.parent_name == "oracle"
+
+        alias = next(n for n in self.nodes if n.name == "prices" and n.kind == "Type")
+        assert alias.extra["antelope_kind"] == "multi_index"
+        assert alias.extra["antelope_table_name"] == "prices"
+        assert alias.extra["antelope_row_type"] == "price_row"
+        assert alias.extra["antelope_secondary_indices"] == ["byvalue"]
+
+    def test_extracts_antelope_semantic_edges(self):
+        auth_edges = [e for e in self.edges if e.kind == "REQUIRES_AUTH"]
+        assert any(e.source.endswith("::oracle.setprice") and e.target == "user" for e in auth_edges)
+        assert any(e.source.endswith("::oracle.clear") and e.target == "get_self()" for e in auth_edges)
+
+        writes = [e for e in self.edges if e.kind == "WRITES_TABLE"]
+        erases = [e for e in self.edges if e.kind == "ERASES_TABLE"]
+        reads = [e for e in self.edges if e.kind == "READS_TABLE"]
+        assert any(e.target.endswith("::oracle.prices") and e.extra["operation"] == "emplace"
+                   for e in writes)
+        assert any(e.target.endswith("::oracle.prices") and e.extra["operation"] == "modify"
+                   for e in writes)
+        assert any(e.target.endswith("::oracle.prices") and e.extra["operation"] == "require_find"
+                   for e in reads)
+        assert any(e.target.endswith("::oracle.prices") and e.extra["operation"] == "erase"
+                   for e in erases)
+
+        inline = [e for e in self.edges if e.kind == "SENDS_INLINE_ACTION"]
+        assert any(e.target == "eosio.token::transfer" for e in inline)
+
+        notifications = [e for e in self.edges if e.kind == "HANDLES_NOTIFICATION"]
+        assert any(e.source.endswith("::oracle.on_transfer") and e.target == "*::transfer"
+                   for e in notifications)
+
+    def test_extracts_antelope_abi(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_antelope.abi")
+        actions = [
+            n for n in nodes
+            if n.extra.get("antelope_kind") == "abi_action"
+        ]
+        tables = [
+            n for n in nodes
+            if n.extra.get("antelope_kind") == "abi_table"
+        ]
+        assert actions[0].name == "setprice"
+        assert actions[0].params == "(name user, uint64 id)"
+        assert tables[0].name == "prices"
+        assert tables[0].extra["antelope_row_type"] == "price_row"
+        assert any(e.kind == "MAPS_TO_TABLE" and e.target == "prices" for e in edges)
+
+    def test_extracts_dapp_action_and_table_edges(self):
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_antelope_dapp.js")
+        action_edges = [e for e in edges if e.kind == "CALLS_ACTION"]
+        table_edges = [e for e in edges if e.kind == "READS_TABLE"]
+        assert any(e.target == "oracle::setprice" for e in action_edges)
+        assert any(e.target == "eosio.token::transfer" for e in action_edges)
+        assert any(e.target == "prices" and e.extra["from_dapp"] for e in table_edges)
+
+
 class TestHhParsing:
     def setup_method(self):
         self.parser = CodeParser()
