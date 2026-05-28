@@ -1,4 +1,4 @@
-"""Tests for Go, Rust, Java, C, C++, C#, VB.NET Ruby, PHP, Kotlin, Swift, Solidity, and Vue parsing."""
+"""Tests for Go, Rust, Java, C, C++, C#, VB.NET, Ruby, PHP, Kotlin, Swift, Solidity, and Vue parsing."""
 
 from pathlib import Path
 

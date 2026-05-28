@@ -250,7 +250,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "java": ["method_declaration", "constructor_declaration"],
     "c": ["function_definition"],
     "cpp": ["function_definition"],
-    "csharp": ["method_declaration", "constructor_declaration", "operator_statement", "property_statement", ],
+    "csharp": ["method_declaration", "constructor_declaration"],
     "ruby": ["method", "singleton_method"],
     "r": ["function_definition"],
     "perl": ["subroutine_declaration_statement", "method_declaration_statement"],
