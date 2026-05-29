@@ -9,6 +9,7 @@ import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
+    _validate_repo_root,
     get_affected_flows_func,
     get_architecture_overview_func,
     get_community_func,
@@ -19,8 +20,8 @@ from code_review_graph.tools import (
     list_communities_func,
     list_flows,
     query_graph,
-    _validate_repo_root,
 )
+from code_review_graph.tools.query import traverse_graph_func
 
 
 class TestTools:
@@ -260,6 +261,131 @@ class TestQueryGraphCallTargetFallbacks:
             f"{self.dispatch_file}::resolved_helper",
             "external_helper",
         }
+
+
+class TestAntelopeTableQueries:
+    def setup_method(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / ".code-review-graph").mkdir()
+        self.store = GraphStore(self.root / ".code-review-graph" / "graph.db")
+        self.contract_file = str(self.root / "contracts" / "oovp.oracle" / "oovp.oracle.hpp")
+        self.impl_file = str(self.root / "contracts" / "oovp.oracle" / "oovp.oracle.cpp")
+        self.contract_qn = f"{self.contract_file}::oracle"
+        self.alias_qn = f"{self.contract_file}::oracle.pricerequests"
+        self.row_qn = f"{self.contract_file}::oracle.price_request"
+        self.writer_qn = f"{self.impl_file}::oracle.requestprice"
+        self.reader_qn = f"{self.impl_file}::oracle.settle"
+        self._seed_data()
+
+    def teardown_method(self):
+        self.store.close()
+
+    def _seed_data(self):
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="oracle", file_path=self.contract_file,
+            line_start=1, line_end=100, language="cpp",
+            extra={"antelope_kind": "contract"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Type", name="pricerequests", file_path=self.contract_file,
+            line_start=80, line_end=80, language="cpp", parent_name="oracle",
+            extra={
+                "antelope_kind": "multi_index",
+                "antelope_table_name": "requests",
+                "antelope_row_type": "price_request",
+            },
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="price_request", file_path=self.contract_file,
+            line_start=40, line_end=70, language="cpp", parent_name="oracle",
+            extra={"antelope_kind": "table"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="requestprice", file_path=self.impl_file,
+            line_start=10, line_end=20, language="cpp", parent_name="oracle",
+            extra={"antelope_kind": "action"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="settle", file_path=self.impl_file,
+            line_start=30, line_end=40, language="cpp", parent_name="oracle",
+            extra={"antelope_kind": "action"},
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="MAPS_TO_TABLE",
+            source=self.alias_qn,
+            target=self.row_qn,
+            file_path=self.contract_file,
+            line=80,
+            extra={"table_name": "requests", "row_type": "price_request"},
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="WRITES_TABLE",
+            source=self.writer_qn,
+            target=self.alias_qn,
+            file_path=self.impl_file,
+            line=15,
+            extra={"operation": "emplace"},
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="READS_TABLE",
+            source=self.reader_qn,
+            target=self.alias_qn,
+            file_path=self.impl_file,
+            line=35,
+            extra={"operation": "find"},
+        ))
+        self.store.commit()
+
+    def test_query_writers_of_accepts_table_name_alias_and_row_struct(self):
+        for target in ("requests", "pricerequests", "price_request"):
+            result = query_graph(
+                pattern="writers_of",
+                target=target,
+                repo_root=str(self.root),
+            )
+
+            assert result["status"] == "ok"
+            assert [r["qualified_name"] for r in result["results"]] == [self.writer_qn]
+            assert result["edges"][0]["kind"] == "WRITES_TABLE"
+            assert self.alias_qn in result["resolved_targets"]
+
+    def test_query_readers_and_accessors_are_focused(self):
+        readers = query_graph(
+            pattern="readers_of",
+            target="requests",
+            repo_root=str(self.root),
+        )
+        assert [r["qualified_name"] for r in readers["results"]] == [self.reader_qn]
+        assert {e["kind"] for e in readers["edges"]} == {"READS_TABLE"}
+
+        accessors = query_graph(
+            pattern="accessors_of",
+            target="requests",
+            repo_root=str(self.root),
+        )
+        assert {r["qualified_name"] for r in accessors["results"]} == {
+            self.writer_qn,
+            self.reader_qn,
+        }
+        assert {e["kind"] for e in accessors["edges"]} == {
+            "READS_TABLE",
+            "WRITES_TABLE",
+        }
+
+    def test_traverse_graph_includes_via_edge_kind(self):
+        result = traverse_graph_func(
+            query="pricerequests",
+            depth=1,
+            repo_root=str(self.root),
+        )
+
+        via_edges = [
+            row.get("via_edge", {})
+            for row in result["traversal"]
+            if row.get("via_edge")
+        ]
+        assert any(edge.get("kind") == "WRITES_TABLE" for edge in via_edges)
+        assert all("direction" in edge for edge in via_edges)
 
 
 def _seed_repo_relative_graph(root: Path) -> None:

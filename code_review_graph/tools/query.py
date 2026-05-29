@@ -29,6 +29,17 @@ _QUERY_PATTERNS = {
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
     "file_summary": "Get a summary of all nodes in a file",
+    "writers_of": "Find functions/actions that write to an Antelope table",
+    "readers_of": "Find functions/actions that read from an Antelope table",
+    "erasers_of": "Find functions/actions that erase from an Antelope table",
+    "accessors_of": "Find functions/actions that read, write, or erase an Antelope table",
+}
+
+_TABLE_ACCESS_PATTERNS = {
+    "writers_of": {"WRITES_TABLE"},
+    "readers_of": {"READS_TABLE"},
+    "erasers_of": {"ERASES_TABLE"},
+    "accessors_of": {"READS_TABLE", "WRITES_TABLE", "ERASES_TABLE"},
 }
 
 
@@ -152,7 +163,8 @@ def query_graph(
 
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
-                 importers_of, children_of, tests_for, inheritors_of, file_summary.
+                 importers_of, children_of, tests_for, inheritors_of,
+                 file_summary, writers_of, readers_of, erasers_of, accessors_of.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -191,6 +203,62 @@ def query_graph(
                 ),
                 "results": [], "edges": [],
             }
+
+        if pattern in _TABLE_ACCESS_PATTERNS:
+            table_qns = _resolve_antelope_table_targets(store, target)
+            if not table_qns:
+                return {
+                    "status": "not_found",
+                    "pattern": pattern,
+                    "target": target,
+                    "description": _QUERY_PATTERNS[pattern],
+                    "summary": f"No Antelope table node or alias found matching '{target}'.",
+                    "results": [],
+                    "edges": [],
+                }
+            edge_kinds = _TABLE_ACCESS_PATTERNS[pattern]
+            seen_sources: set[str] = set()
+            for e in store.get_all_edges():
+                if e.kind not in edge_kinds or e.target_qualified not in table_qns:
+                    continue
+                if e.source_qualified not in seen_sources:
+                    seen_sources.add(e.source_qualified)
+                    source = store.get_node(e.source_qualified)
+                    if source:
+                        results.append(node_to_dict(source))
+                    else:
+                        results.append({
+                            "kind": "Node",
+                            "name": e.source_qualified.rsplit("::", 1)[-1],
+                            "qualified_name": e.source_qualified,
+                        })
+                edges_out.append(edge_to_dict(e))
+
+            summary = (
+                f"Found {len(results)} result(s) for {pattern}('{target}') "
+                f"across {len(table_qns)} table target(s)"
+            )
+            response = {
+                "status": "ok",
+                "pattern": pattern,
+                "target": target,
+                "description": _QUERY_PATTERNS[pattern],
+                "summary": summary,
+                "resolved_targets": sorted(table_qns),
+                "results": results if detail_level != "minimal" else [
+                    {
+                        k: r[k]
+                        for k in ("name", "kind", "file_path")
+                        if k in r
+                    }
+                    for r in results[:5]
+                ],
+            }
+            if detail_level != "minimal":
+                response["edges"] = edges_out
+            else:
+                response["result_count"] = len(results)
+            return response
 
         # Resolve target - try as-is, then as absolute path, then search.
         # file_summary targets are paths, so skip broad node search.
@@ -366,6 +434,53 @@ def query_graph(
         }
     finally:
         store.close()
+
+
+def _resolve_antelope_table_targets(store, target: str) -> set[str]:
+    """Resolve table aliases, table names, and row structs to queryable targets."""
+    matches: set[str] = set()
+    raw = target.strip()
+    short = raw.rsplit("::", 1)[-1].split(".")[-1]
+
+    for node in store.search_nodes(raw, limit=50):
+        extra = node.extra or {}
+        if (
+            node.kind in {"Type", "Class"}
+            and extra.get("antelope_kind") in {
+                "multi_index", "singleton", "table", "abi_table",
+            }
+        ):
+            matches.add(node.qualified_name)
+
+    for node in store.get_all_nodes():
+        extra = node.extra or {}
+        antelope_kind = extra.get("antelope_kind")
+        if antelope_kind not in {"multi_index", "singleton", "table", "abi_table"}:
+            continue
+        table_name = extra.get("antelope_table_name")
+        row_type = extra.get("antelope_row_type")
+        if (
+            raw in {node.qualified_name, node.name, table_name, row_type}
+            or short in {node.name, table_name, row_type}
+            or node.qualified_name.endswith(f"::{raw}")
+            or node.qualified_name.endswith(f".{raw}")
+        ):
+            matches.add(node.qualified_name)
+
+    # If the user names a row struct, include aliases that MAPS_TO_TABLE to it.
+    expanded = set(matches)
+    for edge in store.get_all_edges():
+        if edge.kind != "MAPS_TO_TABLE":
+            continue
+        if edge.target_qualified in matches:
+            expanded.add(edge.source_qualified)
+        extra = edge.extra or {}
+        if raw in {edge.target_qualified, extra.get("table_name"), extra.get("row_type")}:
+            expanded.add(edge.source_qualified)
+        if short in {extra.get("table_name"), extra.get("row_type")}:
+            expanded.add(edge.source_qualified)
+
+    return expanded
 
 
 # ---------------------------------------------------------------------------
@@ -623,17 +738,17 @@ def traverse_graph_func(
 
         # BFS / DFS traversal
         visited: dict[str, int] = {}  # qn -> depth
-        queue: list[tuple[str, int]] = [
-            (start_qn, 0),
+        queue: list[tuple[str, int, dict[str, Any] | None]] = [
+            (start_qn, 0, None),
         ]
         traversal: list[dict] = []
         approx_tokens = 0
 
         while queue:
             if mode == "bfs":
-                current_qn, cur_depth = queue.pop(0)
+                current_qn, cur_depth, via_edge = queue.pop(0)
             else:
-                current_qn, cur_depth = queue.pop()
+                current_qn, cur_depth, via_edge = queue.pop()
 
             if current_qn in visited:
                 continue
@@ -652,27 +767,38 @@ def traverse_graph_func(
                 "file": node.file_path,
                 "depth": cur_depth,
             }
+            if via_edge is not None:
+                entry["via_edge"] = via_edge
             approx_tokens += len(str(entry)) // 4
             if approx_tokens > token_budget:
                 break
 
             traversal.append(entry)
 
-            # Get neighbours
-            out_edges = store.get_edges_by_source(
-                current_qn
-            )
-            in_edges = store.get_edges_by_target(
-                current_qn
-            )
+            # Get neighbours. Include edge kind/direction in the queued item so
+            # traversal output can be filtered without a second graph lookup.
+            out_edges = store.get_edges_by_source(current_qn)
+            in_edges = store.get_edges_by_target(current_qn)
             for e in out_edges:
                 tgt = e.target_qualified
                 if tgt not in visited:
-                    queue.append((tgt, cur_depth + 1))
+                    queue.append((tgt, cur_depth + 1, {
+                        "kind": e.kind,
+                        "direction": "out",
+                        "source": e.source_qualified,
+                        "target": e.target_qualified,
+                        "line": e.line,
+                    }))
             for e in in_edges:
                 src = e.source_qualified
                 if src not in visited:
-                    queue.append((src, cur_depth + 1))
+                    queue.append((src, cur_depth + 1, {
+                        "kind": e.kind,
+                        "direction": "in",
+                        "source": e.source_qualified,
+                        "target": e.target_qualified,
+                        "line": e.line,
+                    }))
 
         return {
             "start_node": start_qn,
