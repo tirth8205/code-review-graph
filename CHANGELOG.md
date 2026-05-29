@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Oracle PL/SQL support**: `.pls`, `.pks`, `.pkb`, `.prc`, `.fnc`, `.trg`, and `.plsql`
+  file extensions are parsed via a dedicated regex parser (no tree-sitter grammar exists for
+  Oracle PL/SQL). Extracts PACKAGE specs, PACKAGE BODYs with member PROCEDURE/FUNCTION nodes,
+  standalone PROCEDUREs and FUNCTIONs, TRIGGERs with event and table metadata, and TYPE
+  definitions. Emits CALLS edges for inter-package calls (Oracle built-in system packages such
+  as `DBMS_*` and `UTL_*` are suppressed to reduce noise) and IMPORTS_FROM edges for FROM/JOIN
+  table references and trigger target tables. `.sql` files whose first 500 bytes match an Oracle
+  object keyword (`PACKAGE`, `TRIGGER`, `PROCEDURE`, `FUNCTION`, `TYPE`) are auto-routed to the
+  PL/SQL parser. Wrapped (obfuscated) Oracle files are silently skipped. Adds 24 tests and
+  `tests/fixtures/sample.plsql`. Files must be present on disk — no Oracle database connection
+  is required; export your objects from SQL Developer, TOAD, or version control before running
+  `code-review-graph build`.
+
 ## [2.3.5] - 2026-05-25
 
 **Real-time token savings, visible to humans.** The estimated context-savings

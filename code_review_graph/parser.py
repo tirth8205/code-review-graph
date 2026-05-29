@@ -142,6 +142,14 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".v": "verilog",
     ".vh": "verilog",
     ".sql": "sql",
+    # Oracle PL/SQL: projects using Oracle-specific file extensions
+    ".plsql": "plsql", # generic PL/SQL (also used as test fixture extension)
+    ".pls": "plsql",   # generic PL/SQL source
+    ".pks": "plsql",   # package specification
+    ".pkb": "plsql",   # package body
+    ".prc": "plsql",   # stored procedure
+    ".fnc": "plsql",   # function
+    ".trg": "plsql",   # trigger
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -235,6 +243,8 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "gdscript": ["class_definition", "class_name_statement"],
     # SQL: CREATE TABLE / CREATE VIEW are handled via _parse_sql dispatch.
     "sql": [],
+    # PL/SQL (Oracle): all constructs handled via _parse_plsql dispatch.
+    "plsql": [],
 }
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
@@ -296,6 +306,8 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "gdscript": ["function_definition"],
     # SQL: CREATE FUNCTION / CREATE PROCEDURE handled via _parse_sql dispatch.
     "sql": [],
+    # PL/SQL (Oracle): all constructs handled via _parse_plsql dispatch.
+    "plsql": [],
 }
 
 _IMPORT_TYPES: dict[str, list[str]] = {
@@ -348,6 +360,8 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "gdscript": ["extends_statement"],
     # SQL: table references extracted as IMPORTS_FROM via _parse_sql dispatch.
     "sql": [],
+    # PL/SQL (Oracle): all constructs handled via _parse_plsql dispatch.
+    "plsql": [],
 }
 
 _CALL_TYPES: dict[str, list[str]] = {
@@ -406,6 +420,8 @@ _CALL_TYPES: dict[str, list[str]] = {
     "gdscript": ["call", "attribute_call"],
     # SQL: no call edges extracted (grammar too unreliable for procedure calls).
     "sql": [],
+    # PL/SQL (Oracle): all constructs handled via _parse_plsql dispatch.
+    "plsql": [],
 }
 
 # Patterns that indicate a test function
@@ -753,6 +769,33 @@ def _is_test_file(path: str) -> bool:
     return any(p.search(path) for p in _TEST_FILE_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Oracle PL/SQL detection helpers (module-level, used by parse_bytes)
+# ---------------------------------------------------------------------------
+
+# Matches the first keyword of any Oracle PL/SQL object definition,
+# with or without a leading CREATE [OR REPLACE] prefix.
+_ORACLE_HEADER_RE = re.compile(
+    r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?"
+    r"(?:PACKAGE(?:\s+BODY)?|TRIGGER|PROCEDURE|FUNCTION|TYPE(?:\s+BODY)?)\s+",
+    re.IGNORECASE,
+)
+
+# Oracle wraps obfuscated package bodies with the literal word "wrapped"
+# on the first line: e.g. "PACKAGE BODY  blc_accounts wrapped".
+_ORACLE_WRAPPED_RE = re.compile(r"\bwrapped\b", re.IGNORECASE)
+
+
+def _is_oracle_plsql(source: bytes) -> bool:
+    """Return True if *source* looks like an Oracle PL/SQL object definition.
+
+    Inspects the first 500 bytes only.  Wrapped (obfuscated) files are NOT
+    considered Oracle PL/SQL here — the caller must skip them separately.
+    """
+    head = source[:500].decode("utf-8", errors="replace").lstrip()
+    return bool(_ORACLE_HEADER_RE.match(head))
+
+
 def _is_test_function(
     name: str, file_path: str, decorators: tuple[str, ...] = (),
 ) -> bool:
@@ -934,10 +977,20 @@ class CodeParser:
         if language == "rescript":
             return self._parse_rescript(path, source)
 
-        # SQL: dedicated parser — tree-sitter for tables/views/functions +
-        # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
+        # SQL / Oracle PL/SQL: route to the appropriate dedicated parser.
+        # Wrapped Oracle objects (obfuscated bytecode) are skipped entirely.
         if language == "sql":
+            if _is_oracle_plsql(source):
+                if _ORACLE_WRAPPED_RE.search(source[:300].decode("utf-8", errors="replace")):
+                    return [], []
+                return self._parse_plsql(path, source)
             return self._parse_sql(path, source)
+
+        # PL/SQL via Oracle-specific file extensions (.pks, .pkb, .prc, etc.)
+        if language == "plsql":
+            if _ORACLE_WRAPPED_RE.search(source[:300].decode("utf-8", errors="replace")):
+                return [], []
+            return self._parse_plsql(path, source)
 
         parser = self._get_parser(language)
         if not parser:
@@ -2109,6 +2162,365 @@ class CodeParser:
             file_path=file_path_str,
             line=line_start,
         ))
+
+    # ------------------------------------------------------------------
+    # PL/SQL parser (Oracle) — regex constants and parser method
+    # ------------------------------------------------------------------
+
+    # PACKAGE spec: "PACKAGE ["]name["]" with optional CREATE [OR REPLACE].
+    # IS/AS may appear on a later line after comments, so we only capture name.
+    _PLSQL_PACKAGE_SPEC_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?PACKAGE\s+(?!BODY\b)"
+        r'"?([\w.]+)"?',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # PACKAGE BODY: IS/AS may appear on the same or next line (\s+ covers both).
+    _PLSQL_PACKAGE_BODY_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?PACKAGE\s+BODY\s+"
+        r'"?([\w.]+)"?\s+(?:IS|AS)\b',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # Standalone PROCEDURE (with or without CREATE OR REPLACE / schema prefix).
+    _PLSQL_PROC_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?PROCEDURE\s+"
+        r'"?([\w.]+)"?',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # Standalone FUNCTION.
+    _PLSQL_FUNC_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?FUNCTION\s+"
+        r'"?([\w.]+)"?',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # TRIGGER with event and table captured.
+    _PLSQL_TRIGGER_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?TRIGGER\s+"
+        r'"?([\w.]+)"?'
+        r"\s+(BEFORE|AFTER|INSTEAD\s+OF)\s+"
+        r"((?:INSERT|UPDATE|DELETE)(?:\s+OR\s+(?:INSERT|UPDATE|DELETE))*)"
+        r"\s+ON\s+"
+        r'"?([\w.]+)"?',
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # TYPE spec (TABLE OF, AS OBJECT, UNDER, etc.).
+    # FORCE and EDITIONABLE/NONEDITIONABLE are each optional and separated by
+    # their own \s+, so that "FORCE AS" doesn't consume the space before AS.
+    _PLSQL_TYPE_RE = re.compile(
+        r"^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?)?TYPE\s+(?!BODY\b)"
+        r'"?([\w.]+)"?'
+        r"(?:\s+FORCE)?"
+        r"(?:\s+(?:EDITIONABLE|NONEDITIONABLE))?"
+        r"\s+(?:AS|IS|UNDER)\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # PROCEDURE/FUNCTION member inside a package body slice.
+    # No indentation requirement — some Oracle shops place members at column 0.
+    _PLSQL_MEMBER_RE = re.compile(
+        r"^(?:MEMBER\s+)?(PROCEDURE|FUNCTION)\s+(\w+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    # Package-qualified call: PKG.PROC( or SCHEMA.PKG.PROC( (matches innermost pair)
+    _PLSQL_INTERCALL_RE = re.compile(
+        r"\b([A-Za-z_][A-Za-z0-9_$#]*)\.([A-Za-z_][A-Za-z0-9_$#]*)\s*\(",
+        re.IGNORECASE,
+    )
+
+    # Oracle built-in / system packages — suppress noisy but semantically
+    # uninteresting edges (infra calls rather than business-logic calls).
+    _ORACLE_SYSTEM_PKGS: frozenset[str] = frozenset({
+        "DBMS_OUTPUT", "DBMS_SCHEDULER", "DBMS_SQL", "DBMS_LOB", "DBMS_CRYPTO",
+        "DBMS_UTILITY", "DBMS_METADATA", "DBMS_STATS", "DBMS_LOCK", "DBMS_PIPE",
+        "DBMS_ALERT", "DBMS_TRANSACTION", "DBMS_SESSION", "DBMS_APPLICATION_INFO",
+        "DBMS_RANDOM", "DBMS_XMLGEN", "DBMS_ROWID", "DBMS_TYPES",
+        "UTL_FILE", "UTL_HTTP", "UTL_SMTP", "UTL_TCP", "UTL_RAW",
+        "UTL_I18N", "UTL_URL", "UTL_ENCODE",
+        "SYS", "STANDARD", "APEX_UTIL", "HTP", "OWA_UTIL",
+    })
+
+    def _extract_plsql_calls(
+        self,
+        body_text: str,
+        body_offset: int,
+        source_qname: str,
+        file_path_str: str,
+        edges: list[EdgeInfo],
+        line_of_fn,
+    ) -> None:
+        """Emit CALLS edges for package-qualified calls found in *body_text*.
+
+        *body_offset* is the character offset of *body_text* within the full
+        source — used to compute correct line numbers.  Each unique
+        PKG.PROC target produces at most one edge per source node.
+        """
+        seen_calls: set[str] = set()
+        for cm in self._PLSQL_INTERCALL_RE.finditer(body_text):
+            pkg = cm.group(1)
+            proc = cm.group(2)
+            if pkg.upper() in self._ORACLE_SYSTEM_PKGS:
+                continue
+            call_target = f"{pkg}.{proc}"
+            if call_target not in seen_calls:
+                seen_calls.add(call_target)
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=source_qname,
+                    target=call_target,
+                    file_path=file_path_str,
+                    line=line_of_fn(body_offset + cm.start()),
+                ))
+
+    def _parse_plsql(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse an Oracle PL/SQL file using regex (no tree-sitter grammar).
+
+        Extracts:
+        - PACKAGE specs       → Class nodes, extra["plsql_kind"]="package"
+        - PACKAGE BODYs       → Class nodes, extra["plsql_kind"]="package_body"
+          - member PROCEDURE/FUNCTION → Function nodes with parent_name=pkg
+        - Standalone PROCEDURE → Function nodes, extra["plsql_kind"]="procedure"
+        - Standalone FUNCTION  → Function nodes, extra["plsql_kind"]="function"
+        - TRIGGER              → Function nodes, extra["plsql_kind"]="trigger"
+        - TYPE                 → Class nodes,    extra["plsql_kind"]="type"
+        - FROM/JOIN references → IMPORTS_FROM edges (reuses _SQL_TABLE_RE)
+
+        Wrapped (obfuscated) files must be rejected by the caller before reaching
+        this method — they are never passed in.
+        """
+        text = source.decode("utf-8", errors="replace")
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+
+        nodes: list[NodeInfo] = []
+        edges: list[EdgeInfo] = []
+
+        nodes.append(NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=text.count("\n") + 1,
+            language="plsql",
+            is_test=test_file,
+        ))
+
+        seen: set[str] = set()
+        # Bare member names added via the package body loop — used to avoid
+        # re-extracting their CALLS in the standalone proc/func loops below.
+        member_bare_names: set[str] = set()
+
+        def _strip_schema(raw: str) -> str:
+            return raw.strip('"').split(".")[-1]
+
+        def _qualified(name: str) -> str:
+            return f"{file_path_str}::{name}"
+
+        def _line_of(offset: int) -> int:
+            return text[:offset].count("\n") + 1
+
+        # --- PACKAGE BODY ---
+        # Spec and body use distinct seen-keys so both nodes coexist when a
+        # file contains both (common in Oracle shops).
+        for m in self._PLSQL_PACKAGE_BODY_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            body_key = _qualified(f"__body__{name}")
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if body_key not in seen:
+                seen.add(body_key)
+                nodes.append(NodeInfo(
+                    kind="Class", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={"plsql_kind": "package_body"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+
+            # Find the body boundary using the package name specifically to
+            # avoid stopping at inner END proc_name; closers.
+            body_start = m.end()
+            end_pat = re.compile(
+                rf"^\s*END\s+{re.escape(name)}\s*;",
+                re.IGNORECASE | re.MULTILINE,
+            )
+            end_m = end_pat.search(text, body_start)
+            body_end = end_m.start() if end_m else len(text)
+            body_slice = text[body_start:body_end]
+            for mm in self._PLSQL_MEMBER_RE.finditer(body_slice):
+                kind_kw = mm.group(1).upper()
+                member_name = mm.group(2)
+                member_line = _line_of(body_start + mm.start())
+                mq = _qualified(f"{name}.{member_name}")
+                if mq not in seen:
+                    seen.add(mq)
+                    nodes.append(NodeInfo(
+                        kind="Function", name=member_name,
+                        file_path=file_path_str,
+                        line_start=member_line, line_end=member_line,
+                        language="plsql", parent_name=name,
+                        extra={"plsql_kind": kind_kw.lower()},
+                    ))
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS", source=_qualified(name),
+                        target=mq, file_path=file_path_str, line=member_line,
+                    ))
+                    member_bare_names.add(member_name)
+                    # Extract inter-package CALLS from this member's body.
+                    mem_body_start = body_start + mm.end()
+                    end_mem_pat = re.compile(
+                        rf"^\s*END\s+{re.escape(member_name)}\s*;",
+                        re.IGNORECASE | re.MULTILINE,
+                    )
+                    end_mem_m = end_mem_pat.search(text, body_start + mm.start())
+                    mem_body_end = end_mem_m.start() if end_mem_m else body_end
+                    self._extract_plsql_calls(
+                        text[mem_body_start:mem_body_end],
+                        mem_body_start, mq, file_path_str, edges, _line_of,
+                    )
+
+        # --- PACKAGE SPEC ---
+        for m in self._PLSQL_PACKAGE_SPEC_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            spec_key = _qualified(f"__spec__{name}")
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if spec_key not in seen:
+                seen.add(spec_key)
+                nodes.append(NodeInfo(
+                    kind="Class", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={"plsql_kind": "package"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+
+        # --- TRIGGERS ---
+        for m in self._PLSQL_TRIGGER_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            event = f"{m.group(2).upper()} {m.group(3).upper()}"
+            table = _strip_schema(m.group(4))
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if qname not in seen:
+                seen.add(qname)
+                nodes.append(NodeInfo(
+                    kind="Function", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={
+                        "plsql_kind": "trigger",
+                        "trigger_event": event,
+                        "trigger_table": table,
+                    },
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM", source=file_path_str,
+                    target=table, file_path=file_path_str, line=line,
+                ))
+
+        # --- STANDALONE PROCEDURES ---
+        for m in self._PLSQL_PROC_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if qname not in seen:
+                seen.add(qname)
+                nodes.append(NodeInfo(
+                    kind="Function", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={"plsql_kind": "procedure"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+                # Skip procedures already extracted as package body members to
+                # avoid emitting duplicate CALLS edges with a bare source name.
+                if name not in member_bare_names:
+                    proc_body_start = m.end()
+                    end_proc_pat = re.compile(
+                        rf"^\s*END\s+{re.escape(name)}\s*;",
+                        re.IGNORECASE | re.MULTILINE,
+                    )
+                    end_proc_m = end_proc_pat.search(text, m.start())
+                    proc_body_end = end_proc_m.start() if end_proc_m else len(text)
+                    self._extract_plsql_calls(
+                        text[proc_body_start:proc_body_end],
+                        proc_body_start, qname, file_path_str, edges, _line_of,
+                    )
+
+        # --- STANDALONE FUNCTIONS ---
+        for m in self._PLSQL_FUNC_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if qname not in seen:
+                seen.add(qname)
+                nodes.append(NodeInfo(
+                    kind="Function", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={"plsql_kind": "function"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+                if name not in member_bare_names:
+                    func_body_start = m.end()
+                    end_func_pat = re.compile(
+                        rf"^\s*END\s+{re.escape(name)}\s*;",
+                        re.IGNORECASE | re.MULTILINE,
+                    )
+                    end_func_m = end_func_pat.search(text, m.start())
+                    func_body_end = end_func_m.start() if end_func_m else len(text)
+                    self._extract_plsql_calls(
+                        text[func_body_start:func_body_end],
+                        func_body_start, qname, file_path_str, edges, _line_of,
+                    )
+
+        # --- TYPES ---
+        for m in self._PLSQL_TYPE_RE.finditer(text):
+            name = _strip_schema(m.group(1))
+            qname = _qualified(name)
+            line = _line_of(m.start())
+            if qname not in seen:
+                seen.add(qname)
+                nodes.append(NodeInfo(
+                    kind="Class", name=name, file_path=file_path_str,
+                    line_start=line, line_end=line, language="plsql",
+                    extra={"plsql_kind": "type"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path_str,
+                    target=qname, file_path=file_path_str, line=line,
+                ))
+
+        # --- TABLE REFERENCES (FROM / JOIN) — reuse SQL regex ---
+        seen_refs: set[str] = set()
+        for m in _SQL_TABLE_RE.finditer(text):
+            ref = m.group(1).strip('"`').split(".")[-1]
+            if ref and ref.upper() not in _SQL_KEYWORDS and ref not in seen_refs:
+                seen_refs.add(ref)
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM", source=file_path_str,
+                    target=ref, file_path=file_path_str, line=_line_of(m.start()),
+                ))
+
+        return nodes, edges
 
     def _resolve_call_targets(
         self,

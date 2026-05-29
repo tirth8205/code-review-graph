@@ -2548,3 +2548,170 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+
+# ---------------------------------------------------------------------------
+# Oracle PL/SQL
+# ---------------------------------------------------------------------------
+
+class TestPlsqlParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.plsql")
+
+    # --- language detection ---
+
+    def test_detects_language_by_extension(self):
+        for ext in (".pks", ".pkb", ".prc", ".fnc", ".trg", ".pls"):
+            assert self.parser.detect_language(Path(f"hr{ext}")) == "plsql"
+
+    def test_sql_file_with_oracle_header_routes_to_plsql(self):
+        """A .sql file starting with PACKAGE/TRIGGER/etc. is parsed as PL/SQL."""
+        src = b"PACKAGE BODY hr_pkg AS\nPROCEDURE p IS BEGIN NULL; END;\nEND hr_pkg;\n"
+        nodes, _ = self.parser.parse_bytes(Path("hr.sql"), src)
+        langs = {n.language for n in nodes}
+        assert "plsql" in langs
+
+    def test_wrapped_sql_returns_empty(self):
+        """Wrapped (obfuscated) Oracle files are silently skipped."""
+        src = b"PACKAGE BODY blc_accounts wrapped \na000000\n1\nabcd\n"
+        nodes, edges = self.parser.parse_bytes(Path("blc.sql"), src)
+        assert nodes == [] and edges == []
+
+    def test_wrapped_plsql_extension_returns_empty(self):
+        src = b"PACKAGE BODY blc_accounts wrapped \na000000\nabcd\n"
+        nodes, edges = self.parser.parse_bytes(Path("blc.pkb"), src)
+        assert nodes == [] and edges == []
+
+    # --- file node ---
+
+    def test_file_node_exists_and_language(self):
+        file_nodes = [n for n in self.nodes if n.kind == "File"]
+        assert len(file_nodes) == 1
+        assert file_nodes[0].language == "plsql"
+
+    # --- package spec ---
+
+    def test_finds_package_spec(self):
+        pkgs = [n for n in self.nodes
+                if n.kind == "Class" and n.extra.get("plsql_kind") == "package"]
+        assert any(p.name == "HR_PKG" for p in pkgs)
+
+    def test_package_spec_contains_edge(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split("::")[-1] for e in contains}
+        assert "HR_PKG" in targets
+
+    # --- package body ---
+
+    def test_finds_package_body(self):
+        bodies = [n for n in self.nodes
+                  if n.extra.get("plsql_kind") == "package_body"]
+        assert any(b.name == "HR_PKG" for b in bodies)
+
+    def test_finds_package_members(self):
+        members = [n for n in self.nodes
+                   if n.kind == "Function" and n.parent_name == "HR_PKG"]
+        names = {m.name for m in members}
+        assert "hire_employee" in names
+        assert "get_salary" in names
+
+    def test_member_plsql_kind(self):
+        members = {n.name: n for n in self.nodes
+                   if n.kind == "Function" and n.parent_name == "HR_PKG"}
+        assert members["hire_employee"].extra["plsql_kind"] == "procedure"
+        assert members["get_salary"].extra["plsql_kind"] == "function"
+
+    def test_package_member_contains_edge(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        # Edge source should reference the package name
+        pkg_contains = [e for e in contains if "HR_PKG" in e.source]
+        assert len(pkg_contains) >= 2
+
+    # --- trigger ---
+
+    def test_finds_trigger(self):
+        trigs = [n for n in self.nodes
+                 if n.extra.get("plsql_kind") == "trigger"]
+        assert any(t.name == "AUDIT_EMP_TRG" for t in trigs)
+
+    def test_trigger_event_metadata(self):
+        trig = next(n for n in self.nodes if n.extra.get("plsql_kind") == "trigger")
+        assert "trigger_event" in trig.extra
+        assert "trigger_table" in trig.extra
+        assert "INSERT" in trig.extra["trigger_event"]
+
+    def test_trigger_imports_table_edge(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "EMPLOYEES" in targets
+
+    # --- standalone procedure / function ---
+
+    def test_finds_standalone_procedure(self):
+        procs = [n for n in self.nodes
+                 if n.kind == "Function"
+                 and n.extra.get("plsql_kind") == "procedure"
+                 and n.parent_name is None]
+        assert any(p.name == "standalone_proc" for p in procs)
+
+    def test_finds_standalone_function(self):
+        funcs = [n for n in self.nodes
+                 if n.kind == "Function"
+                 and n.extra.get("plsql_kind") == "function"
+                 and n.parent_name is None]
+        assert any(f.name == "standalone_func" for f in funcs)
+
+    def test_create_or_replace_procedure_detected(self):
+        """Procedures using CREATE OR REPLACE prefix are also captured."""
+        procs = [n for n in self.nodes
+                 if n.kind == "Function" and n.extra.get("plsql_kind") == "procedure"]
+        names = {p.name for p in procs}
+        assert "standalone_func_alt" in names
+
+    # --- type ---
+
+    def test_finds_type(self):
+        types = [n for n in self.nodes
+                 if n.kind == "Class" and n.extra.get("plsql_kind") == "type"]
+        assert any(t.name == "ADDRESS_T" for t in types)
+
+    # --- table references ---
+
+    def test_table_reference_edges(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) >= 1
+
+    # --- inter-package CALLS edges ---
+
+    def test_calls_edges_emitted(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 1, "Expected at least one CALLS edge from package body members"
+
+    def test_calls_edge_from_hire_employee_to_audit_pkg(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "AUDIT_PKG.log_change" in targets
+
+    def test_calls_edge_from_get_salary_to_notif_pkg(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "NOTIF_PKG.send_alert" in targets
+
+    def test_calls_edge_source_is_qualified_member(self):
+        """CALLS edge source must be the package-qualified member, not bare file."""
+        hire_calls = [
+            e for e in self.edges
+            if e.kind == "CALLS" and e.target == "AUDIT_PKG.log_change"
+        ]
+        assert len(hire_calls) == 1
+        assert "HR_PKG.hire_employee" in hire_calls[0].source
+
+    def test_system_pkg_calls_not_emitted(self):
+        """Calls to Oracle system packages (DBMS_*, UTL_*) are suppressed."""
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert not any(
+            t.upper().startswith(("DBMS_", "UTL_", "SYS."))
+            for t in targets
+        )
