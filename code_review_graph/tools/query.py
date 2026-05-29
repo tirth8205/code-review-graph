@@ -217,12 +217,12 @@ def query_graph(
                     "edges": [],
                 }
             edge_kinds = _TABLE_ACCESS_PATTERNS[pattern]
-            seen_sources: set[str] = set()
+            seen_table_sources: set[str] = set()
             for e in store.get_all_edges():
                 if e.kind not in edge_kinds or e.target_qualified not in table_qns:
                     continue
-                if e.source_qualified not in seen_sources:
-                    seen_sources.add(e.source_qualified)
+                if e.source_qualified not in seen_table_sources:
+                    seen_table_sources.add(e.source_qualified)
                     source = store.get_node(e.source_qualified)
                     if source:
                         results.append(node_to_dict(source))
@@ -238,7 +238,7 @@ def query_graph(
                 f"Found {len(results)} result(s) for {pattern}('{target}') "
                 f"across {len(table_qns)} table target(s)"
             )
-            response = {
+            response: dict[str, Any] = {
                 "status": "ok",
                 "pattern": pattern,
                 "target": target,

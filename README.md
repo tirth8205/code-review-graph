@@ -256,6 +256,7 @@ code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Auto-update on file changes
 code-review-graph visualize        # Generate interactive HTML graph
+code-review-graph visualize --mode antelope    # Contract/actions/tables view
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
@@ -370,8 +371,8 @@ Your AI assistant uses these automatically once the graph is built.
 | `get_minimal_context_tool` | Ultra-compact context (~100 tokens) — call this first |
 | `get_impact_radius_tool` | Blast radius of changed files |
 | `get_review_context_tool` | Token-optimised review context with structural summary |
-| `query_graph_tool` | Callers, callees, tests, imports, inheritance queries |
-| `traverse_graph_tool` | BFS/DFS traversal from any node with token budget |
+| `query_graph_tool` | Callers, callees, tests, imports, inheritance, and Antelope table access queries |
+| `traverse_graph_tool` | BFS/DFS traversal from any node with token budget and edge metadata |
 | `semantic_search_nodes_tool` | Search code entities by name or meaning |
 | `embed_graph_tool` | Compute vector embeddings for semantic search |
 | `list_graph_stats_tool` | Graph size and health |

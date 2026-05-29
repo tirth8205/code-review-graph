@@ -127,7 +127,7 @@ A dependency-injection relationship, currently used by Java/Spring enrichment fo
 Data or event flow relationships emitted by specialised parsers when a source consumes or produces a named resource.
 
 ### Antelope / CDT edges
-Antelope smart contract enrichment emits `REQUIRES_AUTH`, `NOTIFIES`, `HANDLES_NOTIFICATION`, `READS_TABLE`, `WRITES_TABLE`, `ERASES_TABLE`, `MAPS_TO_TABLE`, `SENDS_INLINE_ACTION`, and dapp-side `CALLS_ACTION` edges. These connect CDT `CONTRACT` / `ACTION` / `TABLE` macros, `[[eosio::*]]` attributes, `multi_index` / `singleton` aliases, inline actions, ABI declarations, and eosjs/Hydra-style frontend or test calls.
+Antelope smart contract enrichment emits `REQUIRES_AUTH`, `NOTIFIES`, `HANDLES_NOTIFICATION`, `READS_TABLE`, `WRITES_TABLE`, `ERASES_TABLE`, `MAPS_TO_TABLE`, `SENDS_INLINE_ACTION`, and dapp-side `CALLS_ACTION` edges. These connect CDT `CONTRACT` / `ACTION` / `TABLE` macros, `[[eosio::*]]` attributes, `multi_index` / `singleton` aliases, inline actions, ABI declarations, and eosjs/Hydra-style frontend or test calls. `MAPS_TO_TABLE` links table aliases and ABI table entries back to their `TABLE` row structs and carries table-name metadata when available.
 
 ### TEMPORAL_STUB
 Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.

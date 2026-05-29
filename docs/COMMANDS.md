@@ -63,11 +63,15 @@ Relevant responses may include compact estimated `context_savings` metadata.
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, file_summary
+                # children_of, tests_for, inheritors_of, file_summary,
+                # writers_of, readers_of, erasers_of, accessors_of
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 ```
+The `writers_of`, `readers_of`, `erasers_of`, and `accessors_of` patterns target
+Antelope/CDT table nodes and aliases, including `TABLE` row structs,
+`multi_index` / `singleton` aliases, and ABI table names.
 
 #### `get_review_context_tool`
 ```
@@ -316,6 +320,7 @@ code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph status                       # Graph statistics
 code-review-graph watch                        # Auto-update on file changes
 code-review-graph visualize                    # Generate interactive HTML graph
+code-review-graph visualize --mode antelope    # Contract/actions/tables view
 code-review-graph visualize --format graphml   # Export GraphML
 code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
