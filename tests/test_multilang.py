@@ -2494,6 +2494,87 @@ class TestVerilogParsing:
         assert len(file_nodes) == 1
         assert file_nodes[0].language == "verilog"
 
+    # --- Tier 1: ports, nets/wires, parameters -------------------------------
+
+    def _sig(self, name, parent=None):
+        """Return the signal-level Function node with the given name (and
+        optional parent module), or None."""
+        for n in self.nodes:
+            if (
+                n.name == name
+                and n.extra.get("verilog_kind")
+                and (parent is None or n.parent_name == parent)
+            ):
+                return n
+        return None
+
+    def test_ansi_ports_have_direction_and_parent(self):
+        clk = self._sig("clk", "FIFOController")
+        dout = self._sig("data_out", "FIFOController")
+        assert clk is not None and clk.extra["verilog_kind"] == "port"
+        assert clk.modifiers == "input"
+        assert dout is not None and dout.extra["verilog_kind"] == "port"
+        assert dout.modifiers == "output"
+
+    def test_header_parameters_with_defaults(self):
+        depth = self._sig("DEPTH", "FIFOController")
+        width = self._sig("WIDTH", "FIFOController")
+        assert depth is not None and depth.extra["verilog_kind"] == "parameter"
+        assert depth.extra.get("default") == "16"
+        assert width is not None and width.extra.get("default") == "8"
+
+    def test_multi_identifier_nets(self):
+        # `logic [..] wr_ptr, rd_ptr, count;` -> three separate net nodes.
+        for nm in ("wr_ptr", "rd_ptr", "count"):
+            node = self._sig(nm, "FIFOController")
+            assert node is not None, f"missing net {nm}"
+            assert node.extra["verilog_kind"] == "net"
+
+    def test_wire_net_and_localparam(self):
+        wire = self._sig("overflow_flag", "FIFOController")
+        assert wire is not None and wire.extra["verilog_kind"] == "net"
+        assert wire.modifiers == "wire"
+        lp = self._sig("ALMOST_FULL", "FIFOController")
+        assert lp is not None and lp.extra["verilog_kind"] == "localparam"
+
+    def test_multi_module_signal_attribution(self):
+        # Signals must attribute to the correct module when several coexist.
+        for nm in ("stage_data", "stage_valid"):
+            net = self._sig(nm, "Top")
+            assert net is not None, f"missing feedthrough net {nm}"
+            assert net.extra["verilog_kind"] == "net"
+            assert net.modifiers == "wire"
+        stages = self._sig("STAGES", "Top")
+        assert stages is not None and stages.extra["verilog_kind"] == "localparam"
+        din = self._sig("din", "Top")
+        dout = self._sig("dout", "Top")
+        assert din is not None and din.extra["verilog_kind"] == "port"
+        assert din.modifiers == "input"
+        assert dout is not None and dout.modifiers == "output"
+
+    def test_signal_nodes_have_contains_edge_from_parent(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target.split(".")[-1] for e in contains}
+        for nm in ("clk", "DEPTH", "overflow_flag", "stage_data", "STAGES"):
+            assert nm in targets, f"no CONTAINS edge for {nm}"
+
+    def test_non_ansi_ports(self, tmp_path):
+        src = (
+            "module M(a, b);\n"
+            "  input a;\n"
+            "  output b;\n"
+            "endmodule\n"
+        )
+        f = tmp_path / "nonansi.sv"
+        f.write_text(src)
+        nodes, _ = self.parser.parse_file(f)
+        a = next((n for n in nodes if n.name == "a"
+                  and n.extra.get("verilog_kind") == "port"), None)
+        b = next((n for n in nodes if n.name == "b"
+                  and n.extra.get("verilog_kind") == "port"), None)
+        assert a is not None and a.modifiers == "input"
+        assert b is not None and b.modifiers == "output"
+
 class TestSQLParsing:
     def setup_method(self):
         self.parser = CodeParser()

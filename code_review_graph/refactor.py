@@ -376,6 +376,12 @@ def find_dead_code(
         if _is_entry_point(node):
             continue
 
+        # Verilog/SystemVerilog signal-level nodes (ports/nets/params) are
+        # declarations modeled as Function nodes, not callable functions --
+        # they have no CALLS edges and must never be flagged as "dead code".
+        if node.extra.get("verilog_kind"):
+            continue
+
         # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM),
         # and value references (REFERENCES -- function-as-value in maps, arrays, etc.).
 

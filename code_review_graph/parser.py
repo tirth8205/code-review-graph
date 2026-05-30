@@ -2352,6 +2352,13 @@ class CodeParser:
             ):
                 continue
 
+            # --- Verilog/SystemVerilog signal-level constructs ---
+            if language == "verilog" and self._extract_verilog_constructs(
+                child, node_type, source, file_path, nodes, edges,
+                enclosing_class, enclosing_func,
+            ):
+                continue
+
             # Recurse for other node types
             self._extract_from_tree(
                 child, source, language, file_path, nodes, edges,
@@ -5174,6 +5181,192 @@ class CodeParser:
                     file_path=file_path,
                     line=child.start_point[0] + 1,
                 ))
+            return True
+
+        return False
+
+    def _extract_verilog_constructs(
+        self,
+        child,
+        node_type: str,
+        source: bytes,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> bool:
+        """Handle Verilog/SystemVerilog signal-level constructs.
+
+        Emits ``Function`` nodes for ports, nets/wires, and parameters,
+        each tagged with ``extra["verilog_kind"]`` and linked to its
+        enclosing module/interface via a ``CONTAINS`` edge (or the File
+        node at top level). Returns True if the child was fully handled
+        (skip default recursion); False to fall through to recursion.
+        """
+        def _decode(node) -> str:
+            return node.text.decode("utf-8", errors="replace")
+
+        def _find_simple_identifier(node) -> Optional[str]:
+            # Depth-first search for the first simple_identifier leaf.
+            if node.type == "simple_identifier":
+                return _decode(node)
+            for sub in node.children:
+                found = _find_simple_identifier(sub)
+                if found:
+                    return found
+            return None
+
+        def _emit(
+            name: Optional[str], src_node, kind: str,
+            modifiers: Optional[str], return_type: Optional[str],
+            default: Optional[str] = None,
+        ) -> None:
+            if not name:
+                return
+            qualified = self._qualify(name, file_path, enclosing_class)
+            extra: dict = {"verilog_kind": kind}
+            if default is not None:
+                extra["default"] = default
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=name,
+                file_path=file_path,
+                line_start=src_node.start_point[0] + 1,
+                line_end=src_node.end_point[0] + 1,
+                language="verilog",
+                parent_name=enclosing_class,
+                return_type=return_type,
+                modifiers=modifiers,
+                extra=extra,
+            ))
+            container = (
+                self._qualify(enclosing_class, file_path, None)
+                if enclosing_class else file_path
+            )
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=container,
+                target=qualified,
+                file_path=file_path,
+                line=src_node.start_point[0] + 1,
+            ))
+
+        # --- ANSI ports: iterate the whole port-declaration list so that
+        # headerless trailing ports (``input logic a, b``) inherit the
+        # direction/datatype of the preceding declaration. ---
+        if node_type == "list_of_port_declarations":
+            last_dir: Optional[str] = None
+            last_type: Optional[str] = None
+            for port in child.children:
+                if port.type != "ansi_port_declaration":
+                    continue
+                pdir = last_dir
+                ptype = last_type
+                pname = None
+                for sub in port.children:
+                    if sub.type in (
+                        "variable_port_header", "net_port_header",
+                        "net_port_header1", "interface_port_header",
+                    ):
+                        for hh in sub.children:
+                            if hh.type == "port_direction":
+                                pdir = _decode(hh).strip() or pdir
+                            elif hh.type == "data_type":
+                                ptype = _decode(hh)
+                    elif sub.type == "port_identifier":
+                        pname = _find_simple_identifier(sub)
+                if pname:
+                    last_dir = pdir
+                    last_type = ptype
+                    _emit(pname, port, "port", pdir, ptype)
+            return True
+
+        # --- Non-ANSI ports: input/output/inout declarations ---
+        if node_type in (
+            "input_declaration", "output_declaration", "inout_declaration",
+        ):
+            direction = node_type.split("_", 1)[0]  # input / output / inout
+            dtype = None
+            for sub in child.children:
+                if sub.type == "data_type":
+                    dtype = _decode(sub)
+                elif sub.type == "list_of_port_identifiers":
+                    for pid in sub.children:
+                        if pid.type == "port_identifier":
+                            _emit(
+                                _find_simple_identifier(pid), child,
+                                "port", direction, dtype,
+                            )
+            return True
+
+        # --- Parameters / localparams (header #(...) and module body) ---
+        if node_type in (
+            "parameter_declaration", "local_parameter_declaration",
+        ):
+            kind = (
+                "localparam"
+                if node_type == "local_parameter_declaration"
+                else "parameter"
+            )
+            dtype = None
+            for sub in child.children:
+                if sub.type in ("data_type_or_implicit1", "data_type"):
+                    dtype = _decode(sub)
+                elif sub.type == "list_of_param_assignments":
+                    for pa in sub.children:
+                        if pa.type != "param_assignment":
+                            continue
+                        pname = None
+                        default = None
+                        for piece in pa.children:
+                            if piece.type in (
+                                "parameter_identifier", "simple_identifier",
+                            ):
+                                pname = _find_simple_identifier(piece)
+                            elif piece.type == "constant_param_expression":
+                                default = _decode(piece)
+                        _emit(pname, pa, kind, None, dtype, default)
+            return True
+
+        # --- Nets / wires ---
+        if node_type == "net_declaration":
+            keyword = None
+            for sub in child.children:
+                if sub.type == "net_type":
+                    keyword = _decode(sub).strip()
+            for sub in child.children:
+                if sub.type == "list_of_net_decl_assignments":
+                    for na in sub.children:
+                        if na.type == "net_decl_assignment":
+                            _emit(
+                                _find_simple_identifier(na), na,
+                                "net", keyword, keyword,
+                            )
+            return True
+
+        # --- Variables (logic / reg / var / bit / integer) ---
+        if node_type == "data_declaration":
+            # Skip package imports (handled as IMPORTS_FROM) and typedefs
+            # (Tier 2) — let those fall through to existing handling.
+            for sub in child.children:
+                if sub.type in (
+                    "package_import_declaration", "type_declaration",
+                ):
+                    return False
+            dtype = None
+            for sub in child.children:
+                if sub.type == "data_type_or_implicit1":
+                    dtype = _decode(sub)
+            keyword = dtype.split()[0] if dtype else None
+            for sub in child.children:
+                if sub.type == "list_of_variable_decl_assignments":
+                    for va in sub.children:
+                        if va.type == "variable_decl_assignment":
+                            _emit(
+                                _find_simple_identifier(va), va,
+                                "net", keyword, dtype,
+                            )
             return True
 
         return False

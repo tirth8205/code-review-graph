@@ -36,6 +36,8 @@ module FIFOController #(parameter int DEPTH = 16, parameter int WIDTH = 8) (
 
     logic [WIDTH-1:0]       mem [0:DEPTH-1];
     logic [$clog2(DEPTH):0] wr_ptr, rd_ptr, count;
+    wire                    overflow_flag;
+    localparam int          ALMOST_FULL = DEPTH - 1;
 
     // Module instantiation - creates CALLS edge from FIFOController to Adder
     Adder #(.WIDTH(WIDTH)) ptr_adder (.a(wr_ptr[WIDTH-1:0]), .b(rd_ptr[WIDTH-1:0]), .sum());
@@ -74,4 +76,16 @@ module FIFOController #(parameter int DEPTH = 16, parameter int WIDTH = 8) (
         empty = (count == 0);
     end
 
+endmodule
+
+// Top-level wrapper: multi-module hierarchy with wire feedthrough.
+// stage_data/stage_valid carry a signal from the Adder output into the
+// FIFOController input. Instantiation port maps kept single-line (grammar
+// is brittle on multi-line connections).
+module Top #(parameter int WIDTH = 8) (input logic clk, input logic rst_n, input logic [WIDTH-1:0] din, output logic [WIDTH-1:0] dout);
+    wire [WIDTH-1:0] stage_data;
+    wire             stage_valid;
+    localparam int   STAGES = 2;
+    Adder #(.WIDTH(WIDTH)) u_add (.a(din), .b(din), .sum(stage_data));
+    FIFOController #(.WIDTH(WIDTH)) u_fifo (.clk(clk), .rst_n(rst_n), .data_in(stage_data), .wr_en(stage_valid), .rd_en(stage_valid), .data_out(dout), .full(), .empty());
 endmodule
