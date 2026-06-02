@@ -100,8 +100,8 @@ class TestEnrichSearch:
             ),
             EdgeInfo(
                 kind="TESTED_BY",
-                source=f"{self.tmpdir}/test_parser.py::test_parse_file",
-                target=f"{self.tmpdir}/parser.py::parse_file",
+                source=f"{self.tmpdir}/parser.py::parse_file",
+                target=f"{self.tmpdir}/test_parser.py::test_parse_file",
                 file_path=f"{self.tmpdir}/test_parser.py", line=1,
             ),
         ]

@@ -439,7 +439,7 @@ class TestGetTransitiveTestsFrontierCap:
             # Only callee_2 has a test
             if i == 2:
                 self.store.upsert_edge(EdgeInfo(
-                    kind="TESTED_BY", source=test_qn, target=callee_qn,
+                    kind="TESTED_BY", source=callee_qn, target=test_qn,
                     file_path="/t/test_hub.py", line=1,
                 ))
         self.store.commit()
