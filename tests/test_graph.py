@@ -226,6 +226,66 @@ class TestGraphStore:
         assert self.store.get_metadata("test_key") == "test_value"
         assert self.store.get_metadata("nonexistent") is None
 
+    def test_get_transitive_tests_follows_direct_tested_by_edge(self):
+        """Regression test for #515: get_transitive_tests must follow
+        TESTED_BY edges by source_qualified (production) since the parser
+        stores source=production, target=test. The test function uses an
+        unconventional name so the bare-name fallback cannot mask the bug.
+        """
+        self.store.upsert_node(self._make_file_node("/src/calc.py"))
+        self.store.upsert_node(self._make_func_node("add", "/src/calc.py"))
+        self.store.upsert_node(self._make_file_node("/tests/check.py"))
+        self.store.upsert_node(self._make_func_node(
+            "verify_addition", "/tests/check.py", is_test=True,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/src/calc.py::add",
+            target="/tests/check.py::verify_addition",
+            file_path="/tests/check.py", line=1,
+        ))
+        self.store.commit()
+
+        results = self.store.get_transitive_tests("/src/calc.py::add")
+        qns = {r["qualified_name"] for r in results}
+        assert "/tests/check.py::verify_addition" in qns
+        assert all(not r["indirect"] for r in results)
+
+    def test_get_transitive_tests_follows_calls_then_tested_by(self):
+        """Transitive coverage: caller -> CALLS -> callee -> TESTED_BY -> test.
+        Uses an unconventional test name so the bare-name fallback cannot
+        match. See: #515.
+        """
+        self.store.upsert_node(self._make_file_node("/src/svc.py"))
+        self.store.upsert_node(self._make_func_node("orchestrate", "/src/svc.py"))
+        self.store.upsert_node(self._make_func_node("compute", "/src/svc.py"))
+        self.store.upsert_node(self._make_file_node("/tests/check.py"))
+        self.store.upsert_node(self._make_func_node(
+            "verify_compute", "/tests/check.py", is_test=True,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/src/svc.py::orchestrate",
+            target="/src/svc.py::compute", file_path="/src/svc.py", line=2,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/src/svc.py::compute",
+            target="/tests/check.py::verify_compute",
+            file_path="/tests/check.py", line=1,
+        ))
+        self.store.commit()
+
+        results = self.store.get_transitive_tests(
+            "/src/svc.py::orchestrate", max_depth=2,
+        )
+        qns = {r["qualified_name"] for r in results}
+        assert "/tests/check.py::verify_compute" in qns
+        match = next(
+            r for r in results
+            if r["qualified_name"] == "/tests/check.py::verify_compute"
+        )
+        assert match["indirect"] is True
+
     def test_get_all_community_ids_logs_when_column_missing(self, caplog):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
