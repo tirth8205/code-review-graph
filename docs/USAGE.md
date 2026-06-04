@@ -30,7 +30,7 @@ code-review-graph install --platform claude-code
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
 | **Zed** | `.zed/settings.json` |
 | **Continue** | `.continue/config.json` |
-| **OpenCode** | `.opencode.json` |
+| **OpenCode** | `opencode.json` / `opencode.jsonc` |
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
 | **Gemini CLI** | `.gemini/settings.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |

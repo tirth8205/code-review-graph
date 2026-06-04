@@ -765,11 +765,68 @@ class TestInstallPlatformConfigs:
     def test_install_opencode_config(self, tmp_path):
         configured = install_platform_configs(tmp_path, target="opencode")
         assert "OpenCode" in configured
-        config_path = tmp_path / ".opencode.json"
+        config_path = tmp_path / "opencode.jsonc"
         data = json.loads(config_path.read_text())
-        entry = data["mcpServers"]["code-review-graph"]
-        assert entry["type"] == "stdio"
-        assert entry["env"] == []
+        entry = data["mcp"]["code-review-graph"]
+        assert entry["type"] == "local"
+        assert isinstance(entry["command"], list)
+        assert entry["command"][-1] == "serve"
+        assert "args" not in entry
+        assert "env" not in entry
+
+    def test_install_opencode_warns_on_legacy_dotfile(self, tmp_path, capsys):
+        legacy = tmp_path / ".opencode.json"
+        legacy.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "code-review-graph": {
+                            "command": "old",
+                            "args": ["old"],
+                            "type": "stdio",
+                        }
+                    }
+                }
+            )
+        )
+        install_platform_configs(tmp_path, target="opencode")
+        captured = capsys.readouterr()
+        assert "removing/replacing" in captured.out
+        assert str(legacy) in captured.out
+        assert (tmp_path / "opencode.jsonc").exists()
+        assert legacy.exists()
+
+    def test_install_opencode_no_warning_when_no_legacy(self, tmp_path, capsys):
+        install_platform_configs(tmp_path, target="opencode")
+        captured = capsys.readouterr()
+        assert "removing/replacing" not in captured.out
+
+    def test_install_opencode_merges_into_existing_jsonc(self, tmp_path):
+        existing = tmp_path / "opencode.jsonc"
+        existing.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://opencode.ai/config.json",
+                    "mcp": {"other-server": {"type": "local", "command": ["x"]}},
+                }
+            )
+        )
+        install_platform_configs(tmp_path, target="opencode")
+        assert existing.exists()
+        assert not (tmp_path / "opencode.json").exists()
+        data = json.loads(existing.read_text())
+        assert "other-server" in data["mcp"]
+        assert "code-review-graph" in data["mcp"]
+
+    def test_install_opencode_merges_into_existing_json(self, tmp_path):
+        existing = tmp_path / "opencode.json"
+        existing.write_text(json.dumps({"mcp": {"other": {"type": "local"}}}))
+        install_platform_configs(tmp_path, target="opencode")
+        assert existing.exists()
+        assert not (tmp_path / "opencode.jsonc").exists()
+        data = json.loads(existing.read_text())
+        assert "other" in data["mcp"]
+        assert "code-review-graph" in data["mcp"]
 
     def test_install_gemini_cli_config(self, tmp_path):
         gemini_config = tmp_path / ".gemini" / "settings.json"
@@ -860,7 +917,7 @@ class TestInstallPlatformConfigs:
         assert "OpenCode" in configured
         assert codex_config.exists()
         assert (tmp_path / ".mcp.json").exists()
-        assert (tmp_path / ".opencode.json").exists()
+        assert (tmp_path / "opencode.jsonc").exists()
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""

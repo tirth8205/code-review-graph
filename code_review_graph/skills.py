@@ -84,11 +84,15 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        "config_path": lambda root: root / ".opencode.json",
-        "key": "mcpServers",
+        "config_path": lambda root: (
+            root / "opencode.jsonc" if (root / "opencode.jsonc").exists()
+            else root / "opencode.json" if (root / "opencode.json").exists()
+            else root / "opencode.jsonc"
+        ),
+        "key": "mcp",
         "detect": lambda: True,
         "format": "object",
-        "needs_type": True,
+        "needs_type": False,
     },
     "antigravity": {
         "name": "Antigravity",
@@ -235,15 +239,43 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
-    entry: dict[str, Any] = {"command": command, "args": args}
+    if key == "opencode":
+        entry: dict[str, Any] = {"command": [command, *args], "type": "local"}
+        if repo_root is not None:
+            entry["cwd"] = str(repo_root)
+        return entry
+    entry = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
-    if key == "opencode":
-        entry["env"] = []
     return entry
+
+
+def _warn_legacy_opencode_config(repo_root: Path) -> None:
+    """Warn when a legacy ``.opencode.json`` (Cursor-shaped) is still present."""
+    legacy = repo_root / ".opencode.json"
+    if not legacy.is_file():
+        return
+    try:
+        data = json.loads(
+            re.sub(
+                r"(^|\s)//.*$",
+                "",
+                legacy.read_text(encoding="utf-8", errors="replace"),
+                flags=re.MULTILINE,
+            )
+        )
+    except (json.JSONDecodeError, OSError):
+        return
+    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) \
+            and "code-review-graph" in data["mcpServers"]:
+        print(
+            f"  Note: removing/replacing {legacy} is recommended — it was written "
+            f"by an older code-review-graph and uses a schema OpenCode does not "
+            f"load. The new config is at {repo_root / 'opencode.json'}."
+        )
 
 
 def _format_toml_value(value: Any) -> str:
@@ -319,6 +351,8 @@ def install_platform_configs(
     configured: list[str] = []
 
     for key, plat in platforms_to_install.items():
+        if key == "opencode":
+            _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
@@ -347,7 +381,7 @@ def install_platform_configs(
             raw = config_path.read_text(encoding="utf-8", errors="replace")
             # Strip single-line comments and trailing commas (JSONC compat
             # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
+            stripped = re.sub(r'(^|\s)//.*$', '', raw, flags=re.MULTILINE)
             stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
             try:
                 existing = json.loads(stripped)
