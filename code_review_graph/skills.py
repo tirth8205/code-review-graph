@@ -282,7 +282,7 @@ def _strip_jsonc_comments(text: str) -> str:
             i += 1
             continue
         if c == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
+            while i < n and text[i] not in "\r\n":
                 i += 1
             continue
         out.append(c)

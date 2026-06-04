@@ -1004,6 +1004,10 @@ class TestJsoncHelpers:
         )
         assert json.loads(_strip_jsonc_comments(raw)) == {"a": 1, "b": 2}
 
+    def test_strip_jsonc_comments_handles_crlf_and_cr_line_endings(self):
+        assert json.loads(_strip_jsonc_comments('// tail\r\n{"a": 1, "b": 2}\r\n')) == {"a": 1, "b": 2}
+        assert json.loads(_strip_jsonc_comments('// tail\r{"a": 1, "b": 2}\r')) == {"a": 1, "b": 2}
+
     def test_opencode_config_path_prefers_jsonc_then_json_then_defaults_to_jsonc(
         self, tmp_path,
     ):
