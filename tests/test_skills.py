@@ -22,7 +22,9 @@ from code_review_graph.skills import (
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
+    _opencode_config_path,
     _opencode_plugin_content,
+    _strip_jsonc_comments,
     generate_codex_hooks_config,
     generate_cursor_hooks_config,
     generate_hooks_config,
@@ -980,6 +982,36 @@ class TestInstallPlatformConfigs:
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
         expected_cmd, _ = _detect_serve_command()
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
+
+
+class TestJsoncHelpers:
+    def test_strip_jsonc_comments_preserves_slashes_in_strings(self):
+        raw = (
+            '{"$schema": "https://opencode.ai/config.json", '
+            '"x": "a // b", "y": "hi\\"//escaped"}'
+        )
+        assert json.loads(_strip_jsonc_comments(raw)) == {
+            "$schema": "https://opencode.ai/config.json",
+            "x": "a // b",
+            "y": 'hi"//escaped',
+        }
+
+    def test_strip_jsonc_comments_strips_full_line_and_inline_outside_strings(self):
+        raw = (
+            '// header comment\n'
+            '{"a": 1, "b": 2} // inline tail\n'
+            '// {"ignored": true}\n'
+        )
+        assert json.loads(_strip_jsonc_comments(raw)) == {"a": 1, "b": 2}
+
+    def test_opencode_config_path_prefers_jsonc_then_json_then_defaults_to_jsonc(
+        self, tmp_path,
+    ):
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.jsonc"
+        (tmp_path / "opencode.json").write_text("{}")
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.json"
+        (tmp_path / "opencode.jsonc").write_text("{}")
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.jsonc"
 
 
 class TestGeminiCLIInstall:

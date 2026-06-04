@@ -84,11 +84,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        "config_path": lambda root: (
-            root / "opencode.jsonc" if (root / "opencode.jsonc").exists()
-            else root / "opencode.json" if (root / "opencode.json").exists()
-            else root / "opencode.jsonc"
-        ),
+        "config_path": lambda root: _opencode_config_path(root),
         "key": "mcp",
         "detect": lambda: True,
         "format": "object",
@@ -253,6 +249,47 @@ def _build_server_entry(
     return entry
 
 
+def _opencode_config_path(root: Path) -> Path:
+    """Pick the project-level OpenCode config file to read or write."""
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    return root / "opencode.jsonc"
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Remove ``//`` line comments from JSONC text, respecting quoted strings."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        c = text[i]
+        if in_string:
+            if c == "\\" and i + 1 < n:
+                out.append(c)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            out.append(c)
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _warn_legacy_opencode_config(repo_root: Path) -> None:
     """Warn when a legacy ``.opencode.json`` (Cursor-shaped) is still present."""
     legacy = repo_root / ".opencode.json"
@@ -260,12 +297,7 @@ def _warn_legacy_opencode_config(repo_root: Path) -> None:
         return
     try:
         data = json.loads(
-            re.sub(
-                r"(^|\s)//.*$",
-                "",
-                legacy.read_text(encoding="utf-8", errors="replace"),
-                flags=re.MULTILINE,
-            )
+            _strip_jsonc_comments(legacy.read_text(encoding="utf-8", errors="replace"))
         )
     except (json.JSONDecodeError, OSError):
         return
@@ -274,7 +306,7 @@ def _warn_legacy_opencode_config(repo_root: Path) -> None:
         print(
             f"  Note: removing/replacing {legacy} is recommended — it was written "
             f"by an older code-review-graph and uses a schema OpenCode does not "
-            f"load. The new config is at {repo_root / 'opencode.json'}."
+            f"load. The new config is at {_opencode_config_path(repo_root)}."
         )
 
 
@@ -381,7 +413,7 @@ def install_platform_configs(
             raw = config_path.read_text(encoding="utf-8", errors="replace")
             # Strip single-line comments and trailing commas (JSONC compat
             # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'(^|\s)//.*$', '', raw, flags=re.MULTILINE)
+            stripped = _strip_jsonc_comments(raw)
             stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
             try:
                 existing = json.loads(stripped)
