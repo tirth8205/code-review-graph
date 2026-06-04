@@ -243,6 +243,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_antigravity_hooks,
+        install_antigravity_skills,
         install_codex_hooks,
         install_cursor_hooks,
         install_gemini_cli_hooks,
@@ -263,6 +265,11 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target in ("gemini-cli", "all"):
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
             print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+
+        # Antigravity skills are workspace-scoped under .agents/.
+        if target in ("antigravity", "all"):
+            antigravity_skills_dir = install_antigravity_skills(repo_root)
+            print(f"Installed Antigravity skills in {antigravity_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -319,6 +326,13 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed Gemini CLI hooks in {gemini_settings}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
+
+    if not skip_hooks and target in ("antigravity", "all"):
+        try:
+            antigravity_hooks = install_antigravity_hooks(repo_root)
+            print(f"Installed Antigravity hooks in {antigravity_hooks}")
+        except Exception as exc:
+            logger.warning("Could not install Antigravity hooks: %s", exc)
 
     # OpenCode plugin (user-level, gated by same detect() as MCP config)
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():

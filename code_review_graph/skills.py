@@ -1085,6 +1085,169 @@ def install_gemini_cli_skills(repo_root: Path) -> Path:
     return skills_root
 
 
+def install_antigravity_skills(repo_root: Path) -> Path:
+    """Install Antigravity Agent Skills in .agents/skills/<skill>/SKILL.md."""
+    skills_root = repo_root / ".agents" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote Antigravity skill: %s", skill_path)
+
+    return skills_root
+
+
+def install_antigravity_hooks(repo_root: Path) -> Path:
+    """Install Antigravity hooks in .agents/hooks.json and write hook scripts.
+
+    Workspace-scoped (project) configuration.
+    """
+    settings_dir = repo_root / ".agents"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_dir / "hooks.json"
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = settings_dir / "hooks.json.bak"
+            shutil.copy2(settings_path, backup_path)
+            logger.info("Backed up existing Antigravity hooks to %s", backup_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", settings_path, exc)
+
+    hooks_dir = settings_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_arg = repo_root.resolve().as_posix()
+
+    session_start_script = """\
+#!/usr/bin/env bash
+# code-review-graph: session start status (Antigravity hook)
+# Must output ONLY JSON on stdout. Logs go to stderr. Never blocks the session.
+set -euo pipefail
+
+cat > /dev/null || true
+
+msg="$(code-review-graph status --repo "__CRG_REPO__" 2>&1 || true)"
+
+python3 -c '
+import json, sys
+msg = sys.stdin.read()
+if msg.strip():
+    print(json.dumps({"injectSteps": [{"ephemeralMessage": msg}]}))
+else:
+    print(json.dumps({}))
+' <<< "$msg" 2>/dev/null || echo '{}'
+exit 0
+"""
+    session_start_script = session_start_script.replace("__CRG_REPO__", repo_arg)
+
+    update_script = """\
+#!/usr/bin/env bash
+# code-review-graph: incremental update after tool use (Antigravity hook)
+# Must output ONLY JSON on stdout. Returns empty JSON object {}.
+set -euo pipefail
+
+cat > /dev/null || true
+
+code-review-graph update --skip-flows --repo "__CRG_REPO__" >/dev/null 2>&1 || true
+echo '{}'
+exit 0
+"""
+    update_script = update_script.replace("__CRG_REPO__", repo_arg)
+
+    session_start_path = hooks_dir / "crg-session-start.sh"
+    session_start_path.write_text(session_start_script, encoding="utf-8")
+    session_start_path.chmod(0o755)
+
+    update_path = hooks_dir / "crg-update.sh"
+    update_path.write_text(update_script, encoding="utf-8")
+    update_path.chmod(0o755)
+
+    crg_hooks = existing.get("code-review-graph", {})
+    if not isinstance(crg_hooks, dict):
+        crg_hooks = {}
+
+    pre_invocation = crg_hooks.get("PreInvocation", [])
+    if not isinstance(pre_invocation, list):
+        pre_invocation = []
+
+    has_pre_inv = False
+    pre_inv_cmd = "bash hooks/crg-session-start.sh"
+    for item in pre_invocation:
+        if isinstance(item, dict) and item.get("command") == pre_inv_cmd:
+            has_pre_inv = True
+            break
+
+    if not has_pre_inv:
+        pre_invocation.append({
+            "type": "command",
+            "command": pre_inv_cmd,
+            "timeout": 10,
+        })
+    crg_hooks["PreInvocation"] = pre_invocation
+
+    post_tool_use = crg_hooks.get("PostToolUse", [])
+    if not isinstance(post_tool_use, list):
+        post_tool_use = []
+
+    has_post_hook = False
+    matcher_str = "write_to_file|replace_file_content|multi_replace_file_content|run_command"
+    post_cmd = "bash hooks/crg-update.sh"
+    for item in post_tool_use:
+        if not isinstance(item, dict):
+            continue
+        if item.get("matcher") == matcher_str:
+            hooks_list = item.get("hooks", [])
+            if any(isinstance(h, dict) and h.get("command") == post_cmd for h in hooks_list):
+                has_post_hook = True
+                break
+
+    if not has_post_hook:
+        new_entry = {
+            "matcher": matcher_str,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": post_cmd,
+                    "timeout": 30,
+                }
+            ],
+        }
+        matched_entry = None
+        for item in post_tool_use:
+            if isinstance(item, dict) and item.get("matcher") == matcher_str:
+                matched_entry = item
+                break
+        if matched_entry:
+            hooks_list = matched_entry.setdefault("hooks", [])
+            if not isinstance(hooks_list, list):
+                hooks_list = []
+            hooks_list.append(new_entry["hooks"][0])
+            matched_entry["hooks"] = hooks_list
+        else:
+            post_tool_use.append(new_entry)
+
+    crg_hooks["PostToolUse"] = post_tool_use
+    existing["code-review-graph"] = crg_hooks
+
+    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote Antigravity hooks config: %s", settings_path)
+    return settings_path
+
+
 def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[str]:
     """Inject 'use graph first' instructions into platform rule files.
 

@@ -96,3 +96,45 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
 
     assert called["cursor_hooks"] is True
     assert "Installed Cursor hooks" in out
+
+
+def test_handle_init_antigravity_installs_skills_and_hooks(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.find_repo_root",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: ["Antigravity"],
+    )
+
+    called = {"antigravity_skills": False, "antigravity_hooks": False}
+
+    def _install_antigravity_skills(repo_root):
+        called["antigravity_skills"] = True
+        return repo_root / ".agents" / "skills"
+
+    def _install_antigravity_hooks(repo_root):
+        called["antigravity_hooks"] = True
+        return repo_root / ".agents" / "hooks.json"
+
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_antigravity_skills",
+        _install_antigravity_skills,
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_antigravity_hooks",
+        _install_antigravity_hooks,
+    )
+
+    _handle_init(_args(tmp_path, "antigravity"))
+    out = capsys.readouterr().out
+
+    assert called["antigravity_skills"] is True
+    assert called["antigravity_hooks"] is True
+    assert "Installed Antigravity skills" in out
+    assert "Installed Antigravity hooks" in out
