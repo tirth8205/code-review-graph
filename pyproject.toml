@@ -133,6 +133,7 @@ norecursedirs = ["tests/fixtures"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.1.0",
     "pytest>=8.4.2",
     "pytest-asyncio>=0.23,<1",
 ]

@@ -9,7 +9,7 @@ from typing import Any
 from ..changes import analyze_changes, parse_diff_ranges, parse_git_diff_ranges  # noqa: F401
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
-from ..graph import edge_to_dict, node_to_dict
+from ..graph import DSL_LEGEND, edge_to_dict, edge_to_dsl, node_to_dict, node_to_dsl
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_staged_and_unstaged
 from ._common import _get_store, _resolve_graph_file_paths
@@ -30,6 +30,7 @@ def get_review_context(
     repo_root: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict[str, Any]:
     """Generate a focused review context from changed files.
 
@@ -46,11 +47,16 @@ def get_review_context(
             "minimal" returns summary, risk level, changed/impacted file counts,
             top 5 key entity names, test gap count, and next tool suggestions.
             Default: "standard".
+        format: ``"dict"`` (default) or ``"dsl"`` for line-based subgraph
+            encoding (~3× fewer tokens). When ``"dsl"``, ``context.legend``
+            is included with the decoder key.
 
     Returns:
         Structured review context with subgraph, source snippets, and
         review guidance.
     """
+    _n = node_to_dsl if format == "dsl" else node_to_dict
+    _e = edge_to_dsl if format == "dsl" else edge_to_dict
     store, root = _get_store(repo_root)
     try:
         # Get impact radius first
@@ -127,14 +133,16 @@ def get_review_context(
             "impacted_files": impact["impacted_files"],
             "graph": {
                 "changed_nodes": [
-                    node_to_dict(n) for n in impact["changed_nodes"]
+                    _n(n) for n in impact["changed_nodes"]
                 ],
                 "impacted_nodes": [
-                    node_to_dict(n) for n in impact["impacted_nodes"]
+                    _n(n) for n in impact["impacted_nodes"]
                 ],
-                "edges": [edge_to_dict(e) for e in impact["edges"]],
+                "edges": [_e(e) for e in impact["edges"]],
             },
         }
+        if format == "dsl":
+            context["legend"] = DSL_LEGEND
 
         # Add source snippets for changed files
         if include_source:

@@ -396,6 +396,13 @@ Your AI assistant uses these automatically once the graph is built.
 | `list_repos_tool` | List registered repositories |
 | `cross_repo_search_tool` | Search across all registered repositories |
 
+The three highest-payload tools — `get_impact_radius_tool`,
+`query_graph_tool`, and `get_review_context_tool` — accept an optional
+`format="dsl"` parameter that returns the graph payload as one-line
+strings instead of JSON dicts (~2× smaller responses, ~8K tokens saved
+per call on typical blast-radius queries). Default stays `format="dict"`
+for backwards compatibility.
+
 **MCP Prompts** (5 workflow templates):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
 

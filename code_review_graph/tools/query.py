@@ -8,7 +8,16 @@ from typing import Any
 
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
-from ..graph import _sanitize_name, edge_to_dict, node_to_dict
+from ..graph import (
+    DSL_LEGEND,
+    _sanitize_name,
+    edge_to_dict,
+    edge_to_dsl,
+    encode_edges,
+    encode_nodes,
+    node_to_dict,
+    node_to_dsl,
+)
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
 from ..search import hybrid_search
@@ -39,6 +48,7 @@ def get_impact_radius(
     repo_root: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files.
 
@@ -50,6 +60,10 @@ def get_impact_radius(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         detail_level: "standard" (full output) or "minimal" (summary only).
+        format: ``"dict"`` (default, returns lists of JSON-style objects) or
+            ``"dsl"`` (returns one-line DSL strings; ~3× fewer tokens).
+            When ``"dsl"``, the response also includes a ``legend`` field
+            with the decoding key.
 
     Returns:
         Changed nodes, impacted nodes, impacted files, connecting edges,
@@ -80,34 +94,36 @@ def get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results
         )
 
-        changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
-        impacted_dicts = [node_to_dict(n) for n in result["impacted_nodes"]]
-        edge_dicts = [edge_to_dict(e) for e in result["edges"]]
+        changed_encoded = encode_nodes(result["changed_nodes"], format)
+        impacted_encoded = encode_nodes(result["impacted_nodes"], format)
+        edge_encoded = encode_edges(result["edges"], format)
         truncated = result["truncated"]
         total_impacted = result["total_impacted"]
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
-            f"  - {len(changed_dicts)} nodes directly changed",
-            f"  - {len(impacted_dicts)} nodes impacted (within {max_depth} hops)",
+            f"  - {len(changed_encoded)} nodes directly changed",
+            f"  - {len(impacted_encoded)} nodes impacted (within {max_depth} hops)",
             f"  - {len(result['impacted_files'])} additional files affected",
         ]
         if truncated:
             summary_parts.append(
-                f"  - Results truncated: showing {len(impacted_dicts)}"
+                f"  - Results truncated: showing {len(impacted_encoded)}"
                 f" of {total_impacted} impacted nodes"
             )
 
         if detail_level == "minimal":
-            impacted_count = len(impacted_dicts)
+            impacted_count = len(impacted_encoded)
             if impacted_count > 20:
                 risk = "high"
             elif impacted_count > 5:
                 risk = "medium"
             else:
                 risk = "low"
+            # Key entities work for both formats — read .name on the original
+            # node objects rather than parsing the encoded form.
             key_entities = [
-                n["name"] for n in impacted_dicts[:5]
+                n.name for n in result["impacted_nodes"][:5]
             ]
             minimal_response = {
                 "status": "ok",
@@ -124,13 +140,15 @@ def get_impact_radius(
             "status": "ok",
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
-            "changed_nodes": changed_dicts,
-            "impacted_nodes": impacted_dicts,
+            "changed_nodes": changed_encoded,
+            "impacted_nodes": impacted_encoded,
             "impacted_files": result["impacted_files"],
-            "edges": edge_dicts,
+            "edges": edge_encoded,
             "truncated": truncated,
             "total_impacted": total_impacted,
         }
+        if format == "dsl":
+            response["legend"] = DSL_LEGEND
         attach_context_savings(response, original_tokens=original_tokens)
         return response
     finally:
@@ -147,6 +165,7 @@ def query_graph(
     target: str,
     repo_root: str | None = None,
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -156,10 +175,18 @@ def query_graph(
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
+        format: ``"dict"`` (default) or ``"dsl"`` for compact line-based output.
+            When ``"dsl"``, the response also includes a ``legend`` field.
 
     Returns:
         Matching nodes and edges for the query.
     """
+    # Picker helpers: route node/edge encoding through the chosen format.
+    # Synthetic dicts (import targets, importer records) bypass this — they
+    # aren't real graph rows and stay as small dicts in both modes.
+    _n = node_to_dsl if format == "dsl" else node_to_dict
+    _e = edge_to_dsl if format == "dsl" else edge_to_dict
+
     store, root = _get_store(repo_root)
     try:
         if pattern not in _QUERY_PATTERNS:
@@ -171,8 +198,11 @@ def query_graph(
                 ),
             }
 
-        results: list[dict] = []
-        edges_out: list[dict] = []
+        # Results may hold dicts (format='dict') or DSL strings (format='dsl').
+        # Synthetic dicts for imports_of/importers_of stay as dicts in both
+        # modes (they aren't real graph rows).
+        results: list[Any] = []
+        edges_out: list[Any] = []
 
         # For callers_of, skip common builtins early (bare names only)
         # "Who calls .map()?" returns hundreds of useless hits.
@@ -213,7 +243,7 @@ def query_graph(
                             f"Multiple matches for '{target}'. "
                             "Please use a qualified name."
                         ),
-                        "candidates": [node_to_dict(c) for c in candidates],
+                        "candidates": [_n(c) for c in candidates],
                     }
 
         if not node and pattern != "file_summary":
@@ -232,8 +262,8 @@ def query_graph(
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
                         if caller:
-                            results.append(node_to_dict(caller))
-                        edges_out.append(edge_to_dict(e))
+                            results.append(_n(caller))
+                        edges_out.append(_e(e))
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
@@ -243,8 +273,8 @@ def query_graph(
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
                         if caller:
-                            results.append(node_to_dict(caller))
-                        edges_out.append(edge_to_dict(e))
+                            results.append(_n(caller))
+                        edges_out.append(_e(e))
 
         elif pattern == "callees_of":
             seen_targets: set[str] = set()
@@ -254,20 +284,20 @@ def query_graph(
                         seen_targets.add(e.target_qualified)
                         callee = store.get_node(e.target_qualified)
                         if callee:
-                            results.append(node_to_dict(callee))
+                            results.append(_n(callee))
                         elif "::" not in e.target_qualified:
                             results.append({
                                 "kind": "Function",
                                 "name": e.target_qualified,
                                 "qualified_name": e.target_qualified,
                             })
-                        edges_out.append(edge_to_dict(e))
+                        edges_out.append(_e(e))
 
         elif pattern == "imports_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "IMPORTS_FROM":
                     results.append({"import_target": e.target_qualified})
-                    edges_out.append(edge_to_dict(e))
+                    edges_out.append(_e(e))
 
         elif pattern == "importers_of":
             # Find edges where target matches this file.
@@ -283,37 +313,39 @@ def query_graph(
                         "importer": e.source_qualified,
                         "file": e.file_path,
                     })
-                    edges_out.append(edge_to_dict(e))
+                    edges_out.append(_e(e))
 
         elif pattern == "children_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "CONTAINS":
                     child = store.get_node(e.target_qualified)
                     if child:
-                        results.append(node_to_dict(child))
+                        results.append(_n(child))
 
         elif pattern == "tests_for":
+            seen_qns: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind == "TESTED_BY":
                     test = store.get_node(e.source_qualified)
-                    if test:
-                        results.append(node_to_dict(test))
+                    if test and test.qualified_name not in seen_qns:
+                        seen_qns.add(test.qualified_name)
+                        results.append(_n(test))
             # Also search by naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)
             test_nodes += store.search_nodes(f"Test{name}", limit=10)
-            seen = {r.get("qualified_name") for r in results}
             for t in test_nodes:
-                if t.qualified_name not in seen and t.is_test:
-                    results.append(node_to_dict(t))
+                if t.qualified_name not in seen_qns and t.is_test:
+                    seen_qns.add(t.qualified_name)
+                    results.append(_n(t))
 
         elif pattern == "inheritors_of":
             for e in store.get_edges_by_target(qn):
                 if e.kind in ("INHERITS", "IMPLEMENTS"):
                     child = store.get_node(e.source_qualified)
                     if child:
-                        results.append(node_to_dict(child))
-                    edges_out.append(edge_to_dict(e))
+                        results.append(_n(child))
+                    edges_out.append(_e(e))
             # Fallback: INHERITS/IMPLEMENTS edges store unqualified base names
             # (e.g. "Animal") while qn is fully qualified
             # (e.g. "sample.dart::Animal"). Search by plain name too. See: #87
@@ -322,14 +354,14 @@ def query_graph(
                     for e in store.search_edges_by_target_name(node.name, kind=kind):
                         child = store.get_node(e.source_qualified)
                         if child:
-                            results.append(node_to_dict(child))
-                        edges_out.append(edge_to_dict(e))
+                            results.append(_n(child))
+                        edges_out.append(_e(e))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])
             for graph_path in graph_paths:
                 for n in store.get_nodes_by_file(graph_path):
-                    results.append(node_to_dict(n))
+                    results.append(_n(n))
 
         summary = (
             f"Found {len(results)} result(s) "
@@ -337,14 +369,18 @@ def query_graph(
         )
 
         if detail_level == "minimal":
-            minimal_results = [
-                {
-                    k: r[k]
-                    for k in ("name", "kind", "file_path")
-                    if k in r
-                }
-                for r in results[:5]
-            ]
+            if format == "dsl":
+                # DSL strings already contain everything; just truncate.
+                minimal_results: list = results[:5]
+            else:
+                minimal_results = [
+                    {
+                        k: r[k]
+                        for k in ("name", "kind", "file_path")
+                        if isinstance(r, dict) and k in r
+                    }
+                    for r in results[:5]
+                ]
             return {
                 "status": "ok",
                 "pattern": pattern,
@@ -355,7 +391,7 @@ def query_graph(
                 "results": minimal_results,
             }
 
-        return {
+        response: dict[str, Any] = {
             "status": "ok",
             "pattern": pattern,
             "target": target,
@@ -364,6 +400,9 @@ def query_graph(
             "results": results,
             "edges": edges_out,
         }
+        if format == "dsl":
+            response["legend"] = DSL_LEGEND
+        return response
     finally:
         store.close()
 

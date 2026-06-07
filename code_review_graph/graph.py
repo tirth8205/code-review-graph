@@ -1365,3 +1365,147 @@ def edge_to_dict(e: GraphEdge) -> dict:
         "file_path": e.file_path, "line": e.line,
         "confidence": e.confidence, "confidence_tier": e.confidence_tier,
     }
+
+
+# ---------------------------------------------------------------------------
+# DSL output mode — token-efficient one-line encoding for LLM consumption
+#
+# When a tool returns hundreds of nodes/edges, the JSON-dict form costs ~60
+# tokens per node and ~45 tokens per edge. The DSL form below is ~18 and ~12
+# respectively (3–4× compression), preserving every field that matters for
+# downstream reasoning. Internal database IDs and the redundant
+# confidence_tier (derivable from the float `confidence`) are dropped.
+# ---------------------------------------------------------------------------
+
+_NODE_KIND_CODE: dict[str, str] = {
+    "Function": "fn", "Class": "cl", "File": "fi",
+    "Test": "tst", "Community": "com",
+}
+
+_EDGE_KIND_CODE: dict[str, str] = {
+    "CALLS": "c", "IMPORTS_FROM": "i", "INHERITS": "h",
+    "CONTAINS": "n", "TESTED_BY": "t", "REFERENCES": "r",
+    "CROSS_COMMUNITY": "x",
+}
+
+_LANG_CODE: dict[str, str] = {
+    "python": "py", "javascript": "js", "typescript": "ts", "tsx": "tsx",
+    "go": "go", "rust": "rs", "java": "jv", "csharp": "cs", "ruby": "rb",
+    "cpp": "cp", "c": "c", "kotlin": "kt", "swift": "sw", "php": "ph",
+    "scala": "sc", "solidity": "sl", "vue": "vu", "dart": "dr", "r": "r",
+    "perl": "pl", "lua": "lu", "objc": "m", "bash": "sh",
+    # Note: 'luau' intentionally not abbreviated to avoid collision with 'lua'.
+    # Languages absent from this table fall through verbose (e.g. 'powershell',
+    # 'elixir', 'svelte') — self-documenting names need no legend entry.
+}
+
+DSL_LEGEND: str = (
+    "# legend: nodes 'kind name@file:start-end lang [parent=...] [T=test]'  "
+    "edges 'src→tgt kind @file:line conf'  "
+    "kinds: fn=Function cl=Class fi=File tst=Test com=Community  "
+    "edges: c=CALLS i=IMPORTS_FROM h=INHERITS n=CONTAINS t=TESTED_BY "
+    "r=REFERENCES x=CROSS_COMMUNITY  "
+    "langs: py=python js=javascript ts=typescript tsx=tsx go=go rs=rust "
+    "jv=java cs=csharp rb=ruby cp=cpp c=c kt=kotlin sw=swift ph=php "
+    "sc=scala sl=solidity vu=vue dr=dart r=r pl=perl lu=lua m=objc sh=bash"
+)
+
+
+def _dsl_sanitize(s: str) -> str:
+    """Strip characters that would break the one-line-per-row DSL contract.
+
+    Builds on ``_sanitize_name`` (which removes control chars but preserves
+    ``\\t`` and ``\\n`` because JSON can encode them) and additionally
+    collapses any remaining whitespace runs to a single space so a name like
+    ``"weird\\nname"`` doesn't split a DSL record across two lines.
+    """
+    if s is None:
+        return ""
+    cleaned = _sanitize_name(s)
+    # Collapse tabs/newlines/multiple spaces to single space — DSL is line-oriented
+    return " ".join(cleaned.split())
+
+
+def node_to_dsl(n: GraphNode) -> str:
+    """Encode a node as a single compact DSL line.
+
+    Format: ``<kind> <name>@<file>:<start>-<end> <lang> [parent=<parent>] [T]``
+
+    Drops the internal database ``id`` (not useful to LLMs) and folds the
+    ``qualified_name`` into the bare ``name`` + optional ``parent=`` suffix
+    (an LLM can reconstruct ``parent::name`` deterministically). The trailing
+    ``[T]`` flag is emitted only when ``is_test`` is true.
+
+    Example:
+        ``fn validateOrder@src/orders/validator.py:142-178 py parent=OrderValidator``
+    """
+    kind = _NODE_KIND_CODE.get(n.kind, n.kind.lower())
+    name = _dsl_sanitize(n.name)
+    # None language → empty string (rather than literal "None"). Known
+    # languages get their short code; unknown ones pass through verbose.
+    lang = _LANG_CODE.get(n.language, n.language) if n.language else ""
+    parts = [f"{kind} {name}@{n.file_path}:{n.line_start}-{n.line_end} {lang}".rstrip()]
+    if n.parent_name:
+        # Encode only the bare parent (last segment after `::`) to avoid
+        # repeating the file_path that already appears above.
+        parent = _dsl_sanitize(n.parent_name).rsplit("::", 1)[-1]
+        parts.append(f"parent={parent}")
+    if n.is_test:
+        parts.append("[T]")
+    return " ".join(parts)
+
+
+def edge_to_dsl(e: GraphEdge) -> str:
+    """Encode an edge as a single compact DSL line.
+
+    Format: ``<source>→<target> <kind> @<file>:<line> <confidence>``
+
+    Two redundancies are eliminated relative to the dict form:
+
+    1. The internal database ``id`` is dropped (not useful to LLMs).
+    2. The ``confidence_tier`` string is dropped (fully derivable from the
+       float ``confidence``: ≥0.9 EXTRACTED, ≥0.5 INFERRED, else AMBIGUOUS).
+    3. The ``file_path::`` prefix is stripped from ``source_qualified`` when
+       it matches the edge's ``file_path`` (which it does for edges
+       extracted from the source's containing file — the common case).
+
+    Example::
+
+        OrderValidator::validateOrder→src/orders/db.py::Database::persist
+            c @src/orders/validator.py:160 0.95
+    """
+    kind = _EDGE_KIND_CODE.get(e.kind, e.kind.lower())
+    src = _dsl_sanitize(e.source_qualified)
+    tgt = _dsl_sanitize(e.target_qualified)
+    # Strip redundant file_path prefix from source (it's already in @file:line)
+    if e.file_path and src.startswith(e.file_path + "::"):
+        src = src[len(e.file_path) + 2:]
+    return f"{src}\u2192{tgt} {kind} @{e.file_path}:{e.line} {e.confidence:.2f}"
+
+
+def encode_nodes(
+    nodes: "list[GraphNode]", fmt: str = "dict",
+) -> "list[dict] | list[str]":
+    """Encode a node list as dicts (default) or DSL strings.
+
+    Args:
+        nodes: List of GraphNode instances.
+        fmt: ``"dict"`` (default, backwards compatible) or ``"dsl"``.
+    """
+    if fmt == "dsl":
+        return [node_to_dsl(n) for n in nodes]
+    return [node_to_dict(n) for n in nodes]
+
+
+def encode_edges(
+    edges: "list[GraphEdge]", fmt: str = "dict",
+) -> "list[dict] | list[str]":
+    """Encode an edge list as dicts (default) or DSL strings.
+
+    Args:
+        edges: List of GraphEdge instances.
+        fmt: ``"dict"`` (default, backwards compatible) or ``"dsl"``.
+    """
+    if fmt == "dsl":
+        return [edge_to_dsl(e) for e in edges]
+    return [edge_to_dict(e) for e in edges]

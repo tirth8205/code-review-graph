@@ -193,6 +193,7 @@ def get_impact_radius_tool(
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
@@ -205,10 +206,12 @@ def get_impact_radius_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        format: "dict" (default) or "dsl" for compact line-based encoding (~3× fewer tokens).
     """
     return get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
+        format=format,
     )
 
 
@@ -218,6 +221,7 @@ def query_graph_tool(
     target: str,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -236,10 +240,11 @@ def query_graph_tool(
         target: Node name, qualified name, or file path to query.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        format: "dict" (default) or "dsl" for compact line-based encoding (~3× fewer tokens).
     """
     return query_graph(
         pattern=pattern, target=target, repo_root=_resolve_repo_root(repo_root),
-        detail_level=detail_level,
+        detail_level=detail_level, format=format,
     )
 
 
@@ -252,6 +257,7 @@ def get_review_context_tool(
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    format: str = "dict",
 ) -> dict:
     """Generate a focused, token-efficient review context for code changes.
 
@@ -267,11 +273,13 @@ def get_review_context_tool(
         base: Git ref for change detection. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
+        format: "dict" (default) or "dsl" for compact line-based encoding (~3× fewer tokens).
     """
     return get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
+        format=format,
     )
 
 
