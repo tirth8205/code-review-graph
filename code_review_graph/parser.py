@@ -142,6 +142,14 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".v": "verilog",
     ".vh": "verilog",
     ".sql": "sql",
+    # Knowledge formats (.md/.yaml): no tree-sitter grammar bundled, so they use
+    # regex-based extraction (same approach as ReScript). This lets documentation and
+    # config live in the same graph as code, linkable via CONTAINS/REFERENCES edges.
+    ".md": "markdown",
+    ".mdx": "markdown",
+    ".qmd": "markdown",
+    ".yaml": "yaml",
+    ".yml": "yaml",
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -939,6 +947,12 @@ class CodeParser:
         if language == "sql":
             return self._parse_sql(path, source)
 
+        # Knowledge formats: regex-based extraction (no tree-sitter grammar bundled).
+        if language == "markdown":
+            return self._parse_markdown(path, source)
+        if language == "yaml":
+            return self._parse_yaml(path, source)
+
         parser = self._get_parser(language)
         if not parser:
             return [], []
@@ -1553,6 +1567,138 @@ class CodeParser:
     # is bundled for ReScript, so we extract best-effort structure via
     # comment-stripping + line-anchored regex + brace-counted module scan).
     # ------------------------------------------------------------------
+    # Knowledge extractors (regex-based, no tree-sitter grammar): .md and .yaml.
+    # Markdown headings -> Section nodes; nesting -> CONTAINS; links -> REFERENCES.
+    # YAML top-level keys / registry entries -> nodes, so config and docs share the
+    # graph with code via the same edge kinds.
+    # ------------------------------------------------------------------
+
+    def _parse_markdown(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Markdown: File + Section(heading) nodes; CONTAINS (nesting) + REFERENCES (links)."""
+        text = source.decode("utf-8", errors="replace")
+        fp = str(path)
+        stem = path.stem
+        lines = text.splitlines()
+        nodes: list[NodeInfo] = [
+            NodeInfo(
+                kind="File", name=path.name, file_path=fp,
+                line_start=1, line_end=max(1, len(lines)), language="markdown",
+            )
+        ]
+        edges: list[EdgeInfo] = []
+        h_re = re.compile(r"^(#{1,6})\s+(.+)")
+        bt_re = re.compile(r"`([^`\n]+)`")
+        wl_re = re.compile(r"\[\[([^\]\|]+)")
+        ml_re = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+        stack: list[tuple[int, str]] = []
+        seen_sec: set[str] = set()
+        seen_ref: set[str] = set()
+        in_code = False
+        for i, line in enumerate(lines, 1):
+            s = line.strip()
+            if s.startswith("```"):
+                in_code = not in_code
+                continue
+            if in_code:
+                continue
+            m = h_re.match(line)
+            if m:
+                level = len(m.group(1))
+                title = m.group(2).strip()
+                qn = f"{stem}#{title}"
+                if qn in seen_sec:
+                    qn = f"{qn}@L{i}"
+                seen_sec.add(qn)
+                while stack and stack[-1][0] >= level:
+                    stack.pop()
+                parent = stack[-1][1] if stack else path.name
+                nodes.append(
+                    NodeInfo(
+                        kind="Section", name=qn, file_path=fp, line_start=i,
+                        line_end=i, language="markdown", parent_name=parent,
+                    )
+                )
+                edges.append(
+                    EdgeInfo(kind="CONTAINS", source=parent, target=qn, file_path=fp, line=i)
+                )
+                stack.append((level, qn))
+                continue
+            for tok in bt_re.findall(line) + wl_re.findall(line) + ml_re.findall(line):
+                tok_s = tok.strip()
+                t = tok_s.split("#")[0].rsplit("/", 1)[-1]
+                t = t[:-3] if t.endswith(".md") else t
+                looks_like = bool(re.fullmatch(r"[\w.\-]{3,60}", tok_s))
+                if (tok_s.endswith(".md") or looks_like) and t and t != stem and t not in seen_ref:
+                    seen_ref.add(t)
+                    edges.append(
+                        EdgeInfo(
+                            kind="REFERENCES", source=path.name, target=t,
+                            file_path=fp, line=i,
+                        )
+                    )
+        return nodes, edges
+
+    def _parse_yaml(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """YAML (regex): File + Section(top-key) + Type(entry) nodes + CONTAINS edges."""
+        text = source.decode("utf-8", errors="replace")
+        fp = str(path)
+        stem = path.stem
+        lines = text.splitlines()
+        nodes: list[NodeInfo] = [
+            NodeInfo(
+                kind="File", name=path.name, file_path=fp,
+                line_start=1, line_end=max(1, len(lines)), language="yaml",
+            )
+        ]
+        edges: list[EdgeInfo] = []
+        topkey_re = re.compile(r"^([A-Za-z_][\w-]*):")
+        entry_re = re.compile(r"""^\s*-?\s*(?:id|name):\s*["']?([\w./-]{2,60})""")
+        cur_top = path.name
+        seen: set[str] = set()
+        for i, line in enumerate(lines, 1):
+            mt = topkey_re.match(line)
+            if mt:
+                key = mt.group(1)
+                qn = f"{stem}:{key}"
+                if qn not in seen:
+                    seen.add(qn)
+                    nodes.append(
+                        NodeInfo(
+                            kind="Section", name=qn, file_path=fp, line_start=i,
+                            line_end=i, language="yaml", parent_name=path.name,
+                        )
+                    )
+                    edges.append(
+                        EdgeInfo(
+                            kind="CONTAINS", source=path.name, target=qn,
+                            file_path=fp, line=i,
+                        )
+                    )
+                    cur_top = qn
+                continue
+            me = entry_re.match(line)
+            if me:
+                eid = me.group(1)
+                qn = f"{stem}::{eid}"
+                if qn not in seen:
+                    seen.add(qn)
+                    nodes.append(
+                        NodeInfo(
+                            kind="Type", name=qn, file_path=fp, line_start=i,
+                            line_end=i, language="yaml", parent_name=cur_top,
+                        )
+                    )
+                    edges.append(
+                        EdgeInfo(
+                            kind="CONTAINS", source=cur_top, target=qn,
+                            file_path=fp, line=i,
+                        )
+                    )
+        return nodes, edges
 
     def _parse_rescript(
         self, path: Path, source: bytes,
