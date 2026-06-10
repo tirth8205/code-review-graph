@@ -48,7 +48,7 @@ runs:
     # tracks LATEST_VERSION in code_review_graph/migrations.py — bump it when
     # the database schema changes so stale caches are not restored.
     - name: Cache knowledge graph
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: .code-review-graph
         key: code-review-graph-schema9-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
