@@ -785,6 +785,72 @@ def _is_test_function(
     return False
 
 
+def _modifier_annotation_names(node) -> list[str]:
+    """Return annotation names from a ``modifiers`` child of *node*.
+
+    Covers Java/Kotlin/C# where annotations live inside a ``modifiers``
+    node as ``annotation`` / ``marker_annotation`` children. The leading
+    ``@`` is stripped. See: #295
+    """
+    names: list[str] = []
+    for sub in node.children:
+        if sub.type == "modifiers":
+            for mod in sub.children:
+                if mod.type in ("annotation", "marker_annotation"):
+                    text = mod.text.decode("utf-8", errors="replace")
+                    names.append(text.lstrip("@").strip())
+    return names
+
+
+def _csharp_attribute_names(node) -> list[str]:
+    """Return C# attribute names from ``attribute_list`` children of *node*.
+
+    C# attributes (``[HttpGet]``, ``[Authorize]``, ``[ApiController]``) are
+    ``attribute_list`` nodes, each wrapping one or more ``attribute`` nodes
+    whose first ``identifier`` is the attribute name. The bracket wrapper
+    and any argument list are dropped. See: #295
+    """
+    names: list[str] = []
+    for sub in node.children:
+        if sub.type != "attribute_list":
+            continue
+        for attr in sub.children:
+            if attr.type != "attribute":
+                continue
+            for ident in attr.children:
+                if ident.type in ("identifier", "qualified_name"):
+                    names.append(ident.text.decode("utf-8", errors="replace").strip())
+                    break
+    return names
+
+
+def _csharp_namespaces(root_node) -> list[str]:
+    """Return all namespaces declared in a C# compilation unit.
+
+    Handles both the block form (``namespace_declaration``) and the C# 10+
+    file-scoped form (``file_scoped_namespace_declaration``). A single file
+    may declare multiple namespaces; all are returned in source order.
+    See: #310
+    """
+    namespaces: list[str] = []
+
+    def _walk(node) -> None:
+        if node.type in (
+            "namespace_declaration", "file_scoped_namespace_declaration",
+        ):
+            for c in node.children:
+                if c.type in ("qualified_name", "identifier"):
+                    text = c.text.decode("utf-8", errors="replace").strip()
+                    if text:
+                        namespaces.append(text)
+                    break
+        for c in node.children:
+            _walk(c)
+
+    _walk(root_node)
+    return namespaces
+
+
 def file_hash(path: Path) -> str:
     """SHA-256 hash of file contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1000,6 +1066,14 @@ class CodeParser:
 
         # File node
         test_file = _is_test_file(file_path_str)
+        file_extra: dict = {}
+        # C#: record the namespace(s) this file declares so query-time
+        # fallbacks can resolve namespace-form IMPORTS_FROM targets (from
+        # `using X.Y;` directives) back to the declaring file. See: #310
+        if language == "csharp":
+            ns_list = _csharp_namespaces(tree.root_node)
+            if ns_list:
+                file_extra["csharp_namespaces"] = ns_list
         nodes.append(NodeInfo(
             kind="File",
             name=file_path_str,
@@ -1008,6 +1082,7 @@ class CodeParser:
             line_end=source.count(b"\n") + 1,
             language=language,
             is_test=test_file,
+            extra=file_extra,
         ))
 
         # Pre-scan for import mappings and defined names
@@ -4296,6 +4371,23 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
 
+        # Class-level annotation persistence for all annotation-bearing
+        # languages.  Kotlin (@HiltViewModel, @AndroidEntryPoint) and C#
+        # ([ApiController], [Route]) lost this metadata entirely; Java reuses
+        # the list already gathered above.  Stored in ``modifiers`` (string)
+        # and ``extra["decorators"]`` (list).  See: #295
+        if language == "java":
+            class_decorators = list(class_annotations)
+        else:
+            class_decorators = _modifier_annotation_names(child)
+            if language == "csharp":
+                class_decorators.extend(_csharp_attribute_names(child))
+        class_modifiers: Optional[str] = (
+            ",".join(class_decorators) if class_decorators else None
+        )
+        if class_decorators and "decorators" not in extra:
+            extra["decorators"] = class_decorators
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -4304,6 +4396,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            modifiers=class_modifiers,
             extra=extra,
         )
         nodes.append(node)
@@ -4412,6 +4505,12 @@ class CodeParser:
                     inner = inner[:-1]
                 deco_list.append(inner.strip())
                 sib = sib.prev_sibling
+        # C#: attributes use `attribute_list` child nodes ([HttpGet],
+        # [Authorize]) rather than `modifiers > annotation`. Capture the
+        # attribute name from each `attribute_list > attribute > identifier`.
+        # See: #295
+        if language == "csharp":
+            deco_list.extend(_csharp_attribute_names(child))
         if deco_list:
             decorators = tuple(deco_list)
 
@@ -4445,6 +4544,15 @@ class CodeParser:
                     child, name, enclosing_class, file_path, edges,
                 )
 
+        # Persist annotations/decorators so consumers can filter on them
+        # (e.g. "show me all @Composable functions").  Stored in BOTH
+        # ``modifiers`` (comma-joined string) and ``extra["decorators"]``
+        # (list) — merged into the existing method_extra dict rather than a
+        # separate one.  See: #295
+        modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
+        if deco_list:
+            method_extra["decorators"] = list(deco_list)
+
         node = NodeInfo(
             kind=kind,
             name=name,
@@ -4455,6 +4563,7 @@ class CodeParser:
             parent_name=parent_name,
             params=params,
             return_type=ret_type,
+            modifiers=modifiers_str,
             is_test=is_test,
             extra=method_extra,
         )
