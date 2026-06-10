@@ -12,8 +12,10 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -96,6 +98,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": False,
     },
+    "gemini-cli": {
+        "name": "Gemini CLI",
+        "config_path": lambda root: root / ".gemini" / "settings.json",
+        "key": "mcpServers",
+        "detect": lambda: bool(shutil.which("gemini")) or (Path.home() / ".gemini").exists(),
+        "format": "object",
+        "needs_type": False,
+    },
     "qwen": {
         "name": "Qwen Code",
         "config_path": lambda root: Path.home() / ".qwen" / "settings.json",
@@ -117,6 +127,22 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": lambda root: root / ".qoder" / "mcp.json",
         "key": "mcpServers",
         "detect": lambda: True,
+        "format": "object",
+        "needs_type": True,
+    },
+    "copilot": {
+        "name": "GitHub Copilot",
+        "config_path": lambda root: root / ".vscode" / "mcp.json",
+        "key": "servers",
+        "detect": lambda: (Path.home() / ".vscode").exists(),
+        "format": "object",
+        "needs_type": True,
+    },
+    "copilot-cli": {
+        "name": "GitHub Copilot CLI",
+        "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
+        "key": "servers",
+        "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
     },
@@ -204,10 +230,15 @@ def _detect_serve_command() -> tuple[str, list[str]]:
     return (sys.executable, ["-m", "code_review_graph", "serve"])
 
 
-def _build_server_entry(plat: dict[str, Any], key: str = "") -> dict[str, Any]:
+def _build_server_entry(
+    plat: dict[str, Any], key: str = "", repo_root: "Path | None" = None,
+) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
     entry: dict[str, Any] = {"command": command, "args": args}
+    # Include cwd so the MCP server can find the graph database
+    if repo_root is not None:
+        entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
     if key == "opencode":
@@ -290,7 +321,7 @@ def install_platform_configs(
     for key, plat in platforms_to_install.items():
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
-        server_entry = _build_server_entry(plat, key=key)
+        server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
         if plat["format"] == "toml":
             changed = _merge_toml_mcp_server(
@@ -313,11 +344,18 @@ def install_platform_configs(
         # Read existing config
         existing: dict[str, Any] = {}
         if config_path.exists():
+            raw = config_path.read_text(encoding="utf-8", errors="replace")
+            # Strip single-line comments and trailing commas (JSONC compat
+            # for editors like Zed that allow non-standard JSON).
+            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
+            stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
             try:
-                existing = json.loads(config_path.read_text(encoding="utf-8", errors="replace"))
+                existing = json.loads(stripped)
             except (json.JSONDecodeError, OSError):
-                logger.warning("Invalid JSON in %s, will overwrite.", config_path)
-                existing = {}
+                print(f"  {plat['name']}: {config_path} contains "
+                      f"unparseable JSON — skipping to avoid data loss. "
+                      f"Please add the MCP config manually.")
+                continue
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])
@@ -365,11 +403,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
             "1. Run `list_graph_stats` to see overall codebase metrics.\n"
-            "2. Run `get_architecture_overview` for high-level community structure.\n"
-            "3. Use `list_communities` to find major modules, then `get_community` "
+            "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
+            "3. Use `list_communities_tool` to find major modules, then `get_community` "
             "for details.\n"
-            "4. Use `semantic_search_nodes` to find specific functions or classes.\n"
-            "5. Use `query_graph` with patterns like `callers_of`, `callees_of`, "
+            "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
+            "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
             "`imports_of` to trace relationships.\n"
             "6. Use `list_flows` and `get_flow` to understand execution paths.\n\n"
             "### Tips\n\n"
@@ -392,11 +430,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Review Changes\n\n"
             "Perform a thorough, risk-aware code review using the knowledge graph.\n\n"
             "### Steps\n\n"
-            "1. Run `detect_changes` to get risk-scored change analysis.\n"
-            "2. Run `get_affected_flows` to find impacted execution paths.\n"
-            "3. For each high-risk function, run `query_graph` with "
+            "1. Run `detect_changes_tool` to get risk-scored change analysis.\n"
+            "2. Run `get_affected_flows_tool` to find impacted execution paths.\n"
+            "3. For each high-risk function, run `query_graph_tool` with "
             'pattern="tests_for" to check test coverage.\n'
-            "4. Run `get_impact_radius` to understand the blast radius.\n"
+            "4. Run `get_impact_radius_tool` to understand the blast radius.\n"
             "5. For any untested changes, suggest specific test cases.\n\n"
             "### Output Format\n\n"
             "Provide findings grouped by risk level (high/medium/low) with:\n"
@@ -420,12 +458,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Debug Issue\n\n"
             "Use the knowledge graph to systematically trace and debug issues.\n\n"
             "### Steps\n\n"
-            "1. Use `semantic_search_nodes` to find code related to the issue.\n"
-            "2. Use `query_graph` with `callers_of` and `callees_of` to trace "
+            "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
+            "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
             "3. Use `get_flow` to see full execution paths through suspected areas.\n"
-            "4. Run `detect_changes` to check if recent changes caused the issue.\n"
-            "5. Use `get_impact_radius` on suspected files to see what else is affected.\n\n"
+            "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
+            "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
             "### Tips\n\n"
             "- Check both callers and callees to understand the full context.\n"
             "- Look at affected flows to find the entry point that triggers the bug.\n"
@@ -452,11 +490,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             '3. For renames, use `refactor_tool` with mode="rename" to preview all '
             "affected locations.\n"
             "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
-            "5. After changes, run `detect_changes` to verify the refactoring impact.\n\n"
+            "5. After changes, run `detect_changes_tool` to verify the refactoring impact.\n\n"
             "### Safety Checks\n\n"
             "- Always preview before applying (rename mode gives you an edit list).\n"
-            "- Check `get_impact_radius` before major refactors.\n"
-            "- Use `get_affected_flows` to ensure no critical paths are broken.\n"
+            "- Check `get_impact_radius_tool` before major refactors.\n"
+            "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
             '- ALWAYS start with `get_minimal_context(task="<your task>")` '
@@ -488,7 +526,11 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
-        path = skills_dir / filename
+        # Claude Code expects skills at .claude/skills/<name>/skill.md
+        skill_name = filename.removesuffix(".md")
+        skill_subdir = skills_dir / skill_name
+        skill_subdir.mkdir(parents=True, exist_ok=True)
+        path = skill_subdir / "skill.md"
         content = (
             "---\n"
             f"name: {skill['name']}\n"
@@ -519,6 +561,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 f" && code-review-graph update --skip-flows"
                                 f" --repo {repo_arg}"
@@ -536,6 +579,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                         {
                             "type": "command",
                             "command": (
+                                "cat >/dev/null || true; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 f" && code-review-graph status --repo {repo_arg}"
                                 " || echo 'Not a git repo, skipping'"
@@ -549,13 +593,66 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
+    """Generate native Codex hooks configuration for ~/.codex/hooks.json."""
+    return {
+        "hooks": {
+            "PostToolUse": [
+                {
+                    "matcher": "Write|Edit|Bash",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "cat >/dev/null || true; "
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                " && code-review-graph update --skip-flows"
+                                " || true"
+                            ),
+                            "timeout": 30,
+                            "statusMessage": "Updating code-review-graph",
+                        },
+                    ],
+                },
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "startup|resume",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "cat >/dev/null || true; "
+                                "git rev-parse --git-dir >/dev/null 2>&1"
+                                " && code-review-graph status"
+                                " || echo 'Not a git repo, skipping'"
+                            ),
+                            "timeout": 10,
+                            "statusMessage": "Checking code-review-graph status",
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
-    Called automatically by ``code-review-graph install``
-    Creates ``.git/hooks/pre-commit`` if it doesn't exist, or appends to an
-    existing one — preserving any hooks already there. Returns None when no
-    ``.git`` directory is found.
+    Called automatically by ``code-review-graph install``.
+    The hooks directory is resolved via ``git rev-parse --git-path hooks`` so
+    the hook lands where git actually runs it — including linked worktrees
+    and submodules (where ``.git`` is a file, not a directory) and repos with
+    ``core.hooksPath`` set (issue #313). ``core.hooksPath`` users with their
+    own hook manager (husky, pre-commit) may prefer integrating the
+    ``code-review-graph`` commands into that manager manually instead.
+
+    Creates ``pre-commit`` if it doesn't exist, or appends to an existing
+    one — the hook is appended, not overwritten, preserving any hooks
+    already there. Falls back to the legacy ``.git/hooks`` resolution when
+    git itself is unavailable. Returns None when no hooks directory can be
+    determined.
     """
     script = """\
 #!/bin/sh
@@ -567,13 +664,35 @@ fi
 """
     marker = "code-review-graph detect-changes"
 
-    git_dir = repo_root / ".git"
-    if not git_dir.is_dir():
-        logger.warning("No .git directory found at %s — skipping git hook install.", repo_root)
-        return None
+    hooks_dir: Path | None = None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "hooks"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(repo_root),
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Output is relative to repo_root (".git/hooks", a core.hooksPath
+            # value such as ".husky") or absolute (linked worktrees).
+            hooks_dir = repo_root / result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
 
-    hook_path = git_dir / "hooks" / "pre-commit"
-    hook_path.parent.mkdir(exist_ok=True)
+    if hooks_dir is None:
+        git_dir = repo_root / ".git"
+        if not git_dir.is_dir():
+            logger.warning(
+                "No git hooks directory found at %s — skipping git hook install.", repo_root
+            )
+            return None
+        hooks_dir = git_dir / "hooks"
+
+    hook_path = hooks_dir / "pre-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
 
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8")
@@ -639,6 +758,62 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
     logger.info("Wrote hooks config: %s", settings_path)
 
 
+def install_codex_hooks(repo_root: Path) -> Path:
+    """Write native Codex hooks config to ~/.codex/hooks.json.
+
+    Merges code-review-graph hook entries into any existing hooks.json,
+    preserving user-defined hook entries and other top-level settings.
+    A backup of the original file is created before modifications.
+    """
+    codex_dir = Path.home() / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    hooks_path = codex_dir / "hooks.json"
+
+    existing: dict[str, Any] = {}
+    if hooks_path.exists():
+        try:
+            existing = json.loads(hooks_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = codex_dir / "hooks.json.bak"
+            shutil.copy2(hooks_path, backup_path)
+            logger.info("Backed up existing Codex hooks to %s", backup_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", hooks_path, exc)
+
+    hooks_config = generate_codex_hooks_config(repo_root)
+    existing_hooks = existing.get("hooks", {})
+    if not isinstance(existing_hooks, dict):
+        logger.warning("Existing Codex hooks config is not a dict; replacing with defaults")
+        existing_hooks = {}
+
+    merged_hooks = dict(existing_hooks)
+    for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
+        if isinstance(merged_hooks.get(hook_name), list):
+            merged_list = list(merged_hooks[hook_name])
+            existing_commands = {
+                hook.get("command", "")
+                for entry in merged_list
+                if isinstance(entry, dict)
+                for hook in entry.get("hooks", [])
+                if isinstance(hook, dict)
+            }
+            for entry in hook_entries:
+                entry_commands = [
+                    hook.get("command", "")
+                    for hook in entry.get("hooks", [])
+                    if isinstance(hook, dict)
+                ]
+                if not any(command in existing_commands for command in entry_commands):
+                    merged_list.append(entry)
+            merged_hooks[hook_name] = merged_list
+        else:
+            merged_hooks[hook_name] = hook_entries
+
+    existing["hooks"] = merged_hooks
+    hooks_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote Codex hooks config: %s", hooks_path)
+    return hooks_path
+
+
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
 
 _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
@@ -652,11 +827,11 @@ scanning cannot.
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
 Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
@@ -664,22 +839,78 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
 | Tool | Use when |
 | ------ | ---------- |
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of a change |
-| `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
 | `refactor_tool` | Planning renames, finding dead code |
 
 ### Workflow
 
 1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
 """
+
+# Copilot-specific instruction file content: uses VS Code tool references and
+# includes YAML front matter so Copilot Chat applies it across the workspace.
+_COPILOT_SECTION = f"""---
+applyTo: '**'
+description: >-
+  Use code-review-graph MCP tools for token-efficient
+  codebase exploration and code review.
+---
+
+{_CLAUDE_MD_SECTION_MARKER}
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using file/search tools to
+explore the codebase.** The graph is faster, cheaper (fewer
+tokens), and gives you structural context (callers, dependents,
+test coverage) that file scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool`
+- **Understanding impact**: `get_impact_radius_tool`
+- **Code review**: `detect_changes_tool` + `get_review_context_tool`
+- **Finding relationships**: `query_graph_tool` callers_of/callees_of
+- **Architecture questions**: `get_architecture_overview_tool`
+
+Fall back to file/search tools **only** when the graph doesn't
+cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+| ------ | ---------- |
+| `detect_changes_tool` | Risk-scored change analysis |
+| `get_review_context_tool` | Token-efficient source snippets |
+| `get_impact_radius_tool` | Blast radius of a change |
+| `get_affected_flows_tool` | Impacted execution paths |
+| `query_graph_tool` | Trace callers, callees, imports, tests |
+| `semantic_search_nodes_tool` | Find functions/classes by keyword |
+| `get_architecture_overview_tool` | High-level structure |
+| `refactor_tool` | Rename planning, dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
+"""
+
+# Maps instruction file path → (marker, section) for files that need content
+# different from the default _CLAUDE_MD_SECTION.
+_PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
+    ".github/code-review-graph.instruction.md": (_CLAUDE_MD_SECTION_MARKER, _COPILOT_SECTION),
+}
 
 
 def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
@@ -720,12 +951,170 @@ def inject_claude_md(repo_root: Path) -> None:
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "AGENTS.md": ("cursor", "opencode", "antigravity"),
-    "GEMINI.md": ("antigravity",),
+    "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
+    ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
 }
+
+
+# --- Gemini CLI hooks + skills (workspace-level: .gemini/) ---
+
+
+def install_gemini_cli_hooks(repo_root: Path) -> Path:
+    """Install Gemini CLI hooks in .gemini/settings.json and write hook scripts.
+
+    Hooks schema reference:
+    - https://geminicli.com/docs/hooks/reference/
+
+    This is workspace-scoped (project) configuration: .gemini/settings.json
+    """
+    settings_dir = repo_root / ".gemini"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    settings_path = settings_dir / "settings.json"
+
+    existing: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            existing = json.loads(settings_path.read_text(encoding="utf-8", errors="replace"))
+            backup_path = settings_dir / "settings.json.bak"
+            shutil.copy2(settings_path, backup_path)
+            logger.info("Backed up existing Gemini CLI settings to %s", backup_path)
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read existing %s: %s", settings_path, exc)
+
+    hooks_dir = settings_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_arg = repo_root.resolve().as_posix()
+    session_start_script = """\
+#!/usr/bin/env bash
+# code-review-graph: session start status (Gemini CLI hook)
+# Must output ONLY JSON on stdout. Logs go to stderr. Never blocks the session.
+set -euo pipefail
+
+cat > /dev/null || true
+
+msg="$(code-review-graph status --repo "__CRG_REPO__" 2>&1 | head -n 1 || true)"
+
+CRG_MSG="$msg" python3 -c '
+import json,os
+m=os.environ.get("CRG_MSG","")
+print(json.dumps({"systemMessage":m,"suppressOutput":True}))
+' 2>/dev/null || echo '{"suppressOutput": true}'
+exit 0
+"""
+    session_start_script = session_start_script.replace("__CRG_REPO__", repo_arg)
+
+    update_script = """\
+#!/usr/bin/env bash
+# code-review-graph: incremental update after write/replace (Gemini CLI hook)
+# Must output ONLY JSON on stdout. Low-noise: no systemMessage.
+set -euo pipefail
+
+cat > /dev/null || true
+
+code-review-graph update --skip-flows --repo "__CRG_REPO__" >/dev/null 2>&1 || true
+echo '{"suppressOutput": true}'
+exit 0
+"""
+    update_script = update_script.replace("__CRG_REPO__", repo_arg)
+
+    session_start_path = hooks_dir / "crg-session-start.sh"
+    session_start_path.write_text(session_start_script, encoding="utf-8")
+    session_start_path.chmod(0o755)
+
+    update_path = hooks_dir / "crg-update.sh"
+    update_path.write_text(update_script, encoding="utf-8")
+    update_path.chmod(0o755)
+
+    hooks_obj = existing.get("hooks", {})
+    if not isinstance(hooks_obj, dict):
+        hooks_obj = {}
+
+    def _ensure_group(
+        event_name: str, matcher: str, hook_command: str, name: str, timeout: int,
+    ) -> None:
+        arr = hooks_obj.get(event_name, [])
+        if not isinstance(arr, list):
+            arr = []
+
+        # De-duplicate by command (and type) inside nested hooks list.
+        def _group_has_command(group: Any) -> bool:
+            if not isinstance(group, dict):
+                return False
+            nested = group.get("hooks", [])
+            if not isinstance(nested, list):
+                return False
+            for h in nested:
+                if isinstance(h, dict) and h.get("type") == "command" \
+                        and h.get("command") == hook_command:
+                    return True
+            return False
+
+        if any(_group_has_command(g) for g in arr):
+            hooks_obj[event_name] = arr
+            return
+
+        arr.append(
+            {
+                "matcher": matcher,
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": hook_command,
+                        "name": name,
+                        "timeout": timeout,
+                    }
+                ],
+            }
+        )
+        hooks_obj[event_name] = arr
+
+    _ensure_group(
+        event_name="SessionStart",
+        matcher="",
+        hook_command="bash .gemini/hooks/crg-session-start.sh",
+        name="code-review-graph status",
+        timeout=10_000,
+    )
+    _ensure_group(
+        event_name="AfterTool",
+        matcher="write_file|replace",
+        hook_command="bash .gemini/hooks/crg-update.sh",
+        name="code-review-graph update",
+        timeout=30_000,
+    )
+
+    existing["hooks"] = hooks_obj
+    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    logger.info("Wrote Gemini CLI hooks config: %s", settings_path)
+    return settings_path
+
+
+def install_gemini_cli_skills(repo_root: Path) -> Path:
+    """Install Gemini CLI Agent Skills in .gemini/skills/<skill>/SKILL.md."""
+    skills_root = repo_root / ".gemini" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote Gemini CLI skill: %s", skill_path)
+
+    return skills_root
 
 
 def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[str]:
@@ -746,7 +1135,11 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
         if target != "all" and target not in owners:
             continue
         path = repo_root / filename
-        if _inject_instructions(path, _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION):
+        if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS:
+            marker, section = _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS[filename]
+        else:
+            marker, section = _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION
+        if _inject_instructions(path, marker, section):
             updated.append(filename)
     return updated
 

@@ -1,0 +1,3 @@
+repo,commit,description,changed_files,naive_tokens,standard_tokens,graph_tokens,naive_to_graph_ratio,standard_to_graph_ratio
+fastapi,fa3588c38c7473aca7536b12d686102de4b0f407,Fix typo for client_secret in OAuth2 form docstrings,1,6045,299,195653,0.0,0.0
+fastapi,0227991a01e61bf5cdd93cc00e9e243f52b47a4a,Exclude spam comments from statistics in scripts/people.py,1,3844,735,133131,0.0,0.0

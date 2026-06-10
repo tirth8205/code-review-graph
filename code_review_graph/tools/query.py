@@ -6,12 +6,13 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
 from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
 from ..search import hybrid_search
-from ._common import _BUILTIN_CALL_NAMES, _get_store
+from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +73,9 @@ def get_impact_radius(
                 "total_impacted": 0,
             }
 
-        # Convert to absolute paths for graph lookup
-        abs_files = [str(root / f) for f in changed_files]
+        # Resolve user-facing paths to the file paths stored in the graph.
+        original_tokens = estimate_file_tokens(root, changed_files)
+        abs_files = _resolve_graph_file_paths(store, root, changed_files)
         result = store.get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results
         )
@@ -107,7 +109,7 @@ def get_impact_radius(
             key_entities = [
                 n["name"] for n in impacted_dicts[:5]
             ]
-            return {
+            minimal_response = {
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
@@ -115,8 +117,10 @@ def get_impact_radius(
                 "key_entities": key_entities,
                 "truncated": truncated,
             }
+            attach_context_savings(minimal_response, original_tokens=original_tokens)
+            return minimal_response
 
-        return {
+        response = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
@@ -127,6 +131,8 @@ def get_impact_radius(
             "truncated": truncated,
             "total_impacted": total_impacted,
         }
+        attach_context_savings(response, original_tokens=original_tokens)
+        return response
     finally:
         store.close()
 
@@ -186,26 +192,29 @@ def query_graph(
                 "results": [], "edges": [],
             }
 
-        # Resolve target - try as-is, then as absolute path, then search
-        node = store.get_node(target)
-        if not node:
-            abs_target = str(root / target)
-            node = store.get_node(abs_target)
-        if not node:
-            # Search by name
-            candidates = store.search_nodes(target, limit=5)
-            if len(candidates) == 1:
-                node = candidates[0]
-                target = node.qualified_name
-            elif len(candidates) > 1:
-                return {
-                    "status": "ambiguous",
-                    "summary": (
-                        f"Multiple matches for '{target}'. "
-                        "Please use a qualified name."
-                    ),
-                    "candidates": [node_to_dict(c) for c in candidates],
-                }
+        # Resolve target - try as-is, then as absolute path, then search.
+        # file_summary targets are paths, so skip broad node search.
+        node = None
+        if pattern != "file_summary":
+            node = store.get_node(target)
+            if not node:
+                abs_target = str(root / target)
+                node = store.get_node(abs_target)
+            if not node:
+                # Search by name
+                candidates = store.search_nodes(target, limit=5)
+                if len(candidates) == 1:
+                    node = candidates[0]
+                    target = node.qualified_name
+                elif len(candidates) > 1:
+                    return {
+                        "status": "ambiguous",
+                        "summary": (
+                            f"Multiple matches for '{target}'. "
+                            "Please use a qualified name."
+                        ),
+                        "candidates": [node_to_dict(c) for c in candidates],
+                    }
 
         if not node and pattern != "file_summary":
             return {
@@ -216,29 +225,43 @@ def query_graph(
         qn = node.qualified_name if node else target
 
         if pattern == "callers_of":
+            seen_sources: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind == "CALLS":
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
-                    edges_out.append(edge_to_dict(e))
+                    if e.source_qualified not in seen_sources:
+                        seen_sources.add(e.source_qualified)
+                        caller = store.get_node(e.source_qualified)
+                        if caller:
+                            results.append(node_to_dict(caller))
+                        edges_out.append(edge_to_dict(e))
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
-            if not results and node:
+            if node:
                 for e in store.search_edges_by_target_name(node.name):
-                    caller = store.get_node(e.source_qualified)
-                    if caller:
-                        results.append(node_to_dict(caller))
-                    edges_out.append(edge_to_dict(e))
+                    if e.source_qualified not in seen_sources:
+                        seen_sources.add(e.source_qualified)
+                        caller = store.get_node(e.source_qualified)
+                        if caller:
+                            results.append(node_to_dict(caller))
+                        edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
+            seen_targets: set[str] = set()
             for e in store.get_edges_by_source(qn):
                 if e.kind == "CALLS":
-                    callee = store.get_node(e.target_qualified)
-                    if callee:
-                        results.append(node_to_dict(callee))
-                    edges_out.append(edge_to_dict(e))
+                    if e.target_qualified not in seen_targets:
+                        seen_targets.add(e.target_qualified)
+                        callee = store.get_node(e.target_qualified)
+                        if callee:
+                            results.append(node_to_dict(callee))
+                        elif "::" not in e.target_qualified:
+                            results.append({
+                                "kind": "Function",
+                                "name": e.target_qualified,
+                                "qualified_name": e.target_qualified,
+                            })
+                        edges_out.append(edge_to_dict(e))
 
         elif pattern == "imports_of":
             for e in store.get_edges_by_source(qn):
@@ -303,10 +326,10 @@ def query_graph(
                         edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
-            abs_path = str(root / target)
-            file_nodes = store.get_nodes_by_file(abs_path)
-            for n in file_nodes:
-                results.append(node_to_dict(n))
+            graph_paths = _resolve_graph_file_paths(store, root, [target])
+            for graph_path in graph_paths:
+                for n in store.get_nodes_by_file(graph_path):
+                    results.append(node_to_dict(n))
 
         summary = (
             f"Found {len(results)} result(s) "

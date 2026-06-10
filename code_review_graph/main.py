@@ -9,11 +9,16 @@ by default).
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import sys
+from pathlib import Path
 from typing import Optional
 
 from fastmcp import FastMCP
 
+from .graph import GraphStore
+from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
     architecture_map_prompt,
     debug_issue_prompt,
@@ -43,7 +48,6 @@ from .tools import (
     get_suggested_questions_func,
     get_surprising_connections_func,
     get_wiki_page_func,
-    traverse_graph_func,
     list_communities_func,
     list_flows,
     list_graph_stats,
@@ -52,7 +56,10 @@ from .tools import (
     refactor_func,
     run_postprocess,
     semantic_search_nodes,
+    traverse_graph_func,
 )
+
+logger = logging.getLogger(__name__)
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
@@ -68,9 +75,9 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
        (captured in ``_default_repo_root``).
     3. None — the underlying impl will fall back to the server's cwd.
 
-    Previously, only ``get_docs_section_tool`` consulted ``_default_repo_root``,
-    so ``serve --repo <X>`` had no effect for the other 21 tools. See: #222
-    follow-up.
+    All MCP tools that accept ``repo_root`` should use this helper so
+    ``serve --repo <X>`` applies consistently, including
+    ``get_docs_section_tool``. See: #222.
     """
     return repo_root if repo_root else _default_repo_root
 
@@ -378,7 +385,10 @@ def get_docs_section_tool(
         section_name: The section to retrieve (e.g. "review-delta", "usage").
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_docs_section(section_name=section_name, repo_root=repo_root)
+    return get_docs_section(
+        section_name=section_name,
+        repo_root=_resolve_repo_root(repo_root),
+    )
 
 
 @mcp.tool()
@@ -540,6 +550,7 @@ def get_community_tool(
 @mcp.tool()
 def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "minimal",
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -549,8 +560,15 @@ def get_architecture_overview_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "minimal" (default) drops community member lists
+                      and aggregates cross-community edges to one row per
+                      community pair (typical reduction: 600KB -> <5KB);
+                      "standard" returns full per-edge detail.
     """
-    return get_architecture_overview_func(repo_root=_resolve_repo_root(repo_root))
+    return get_architecture_overview_func(
+        repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
+    )
 
 
 @mcp.tool()
@@ -581,12 +599,28 @@ async def detect_changes_tool(
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
     """
-    return await asyncio.to_thread(
+    coro = asyncio.to_thread(
         detect_changes_func,
         base=base, changed_files=changed_files,
         include_source=include_source, max_depth=max_depth,
         repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
+    tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
+    if tool_timeout > 0:
+        try:
+            return await asyncio.wait_for(coro, timeout=tool_timeout)
+        except asyncio.TimeoutError:
+            message = (
+                f"detect_changes_tool timed out after {tool_timeout}s. "
+                "Reduce scope with CRG_MAX_CHANGED_FUNCS / CRG_MAX_TRANSITIVE_FRONTIER, "
+                "or increase CRG_TOOL_TIMEOUT."
+            )
+            return {
+                "status": "error",
+                "error": message,
+                "summary": message,
+            }
+    return await coro
 
 
 @mcp.tool()
@@ -934,6 +968,7 @@ def _apply_tool_filter(tools: str | None = None) -> None:
         # via env var
         CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool
     """
+    import asyncio
     import os
 
     raw = tools or os.environ.get("CRG_TOOLS")
@@ -942,16 +977,38 @@ def _apply_tool_filter(tools: str | None = None) -> None:
     allowed = {t.strip() for t in raw.split(",") if t.strip()}
     if not allowed:
         return
-    registered = list(mcp._tool_manager._tools.keys())
-    for name in registered:
+    # FastMCP >=3 exposes tool enumeration via the async ``list_tools``
+    # method.  ``_apply_tool_filter`` is typically called from
+    # ``main()`` before the MCP event loop starts, but tests may invoke
+    # it from within a running event loop — in that case ``asyncio.run``
+    # raises ``RuntimeError``.  Fall back to running the coroutine on a
+    # dedicated short-lived loop in a worker thread.  Earlier code path
+    # relied on ``mcp._tool_manager._tools`` which is a private
+    # attribute that was removed in fastmcp>=3.0.
+    def _list_tool_names() -> list[str]:
+        coro_factory = mcp.list_tools
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return [t.name for t in asyncio.run(coro_factory())]
+        import concurrent.futures
+
+        def _runner() -> list[str]:
+            return [t.name for t in asyncio.run(coro_factory())]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_runner).result()
+
+    for name in _list_tool_names():
         if name not in allowed:
-            mcp.remove_tool(name)
+            mcp.local_provider.remove_tool(name)
 
 
 
 def main(
     repo_root: str | None = None,
     tools: str | None = None,
+    auto_watch: bool = False,
     *,
     transport: str = "stdio",
     host: str | None = None,
@@ -972,26 +1029,50 @@ def main(
         tools: Comma-separated list of tool names to expose.
             Falls back to ``CRG_TOOLS`` env var.  When unset, all
             tools are available.
+        auto_watch: Start filesystem watcher in a background daemon thread
+            while the MCP server runs.
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
     """
     global _default_repo_root
-    _default_repo_root = repo_root
+    root = Path(repo_root) if repo_root else find_project_root()
+    _default_repo_root = str(root)
     _apply_tool_filter(tools)
+
+    watch_store: GraphStore | None = None
+    if auto_watch:
+        watch_store = GraphStore(get_db_path(root))
+        thread = start_watch_thread(root, watch_store, daemon=True)
+        if thread is None:
+            logger.warning("Auto-watch was requested but could not be started")
+
     if sys.platform == "win32":
-        import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    if transport == "stdio":
-        # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
-        # notices corrupt the handshake stream on clients like Codex CLI.
-        mcp.run(transport="stdio", show_banner=False)
-    elif transport == "streamable-http":
-        if host is None or port is None:
-            raise ValueError("streamable-http transport requires host and port")
-        mcp.run(transport="streamable-http", host=host, port=port)
-    else:
-        raise ValueError(f"unsupported transport: {transport!r}")
+        # Pre-warm sentence-transformers on the main thread before fastmcp's
+        # event loop starts. Lazy-loading ``torch`` + tokenizers inside an
+        # executor worker thread deadlocks ``semantic_search_nodes_tool`` on
+        # Windows stdio MCP (DLL init / OpenMP thread-pool registration grabs
+        # locks the loop needs). #385 added ``asyncio.to_thread`` to peer
+        # tools but cannot fix this case — the dangerous initialization has
+        # to happen on the main thread before any worker thread is spawned.
+        from .embeddings import prewarm_local_embeddings
+        prewarm_local_embeddings()
+
+    try:
+        if transport == "stdio":
+            # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
+            # notices corrupt the handshake stream on clients like Codex CLI.
+            mcp.run(transport="stdio", show_banner=False)
+        elif transport == "streamable-http":
+            if host is None or port is None:
+                raise ValueError("streamable-http transport requires host and port")
+            mcp.run(transport="streamable-http", host=host, port=port)
+        else:
+            raise ValueError(f"unsupported transport: {transport!r}")
+    finally:
+        if watch_store is not None:
+            watch_store.close()
 
 
 if __name__ == "__main__":

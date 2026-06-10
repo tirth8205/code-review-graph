@@ -7,13 +7,23 @@ optional) with a file-based grouping fallback when igraph is not installed.
 from __future__ import annotations
 
 import logging
+import random
 import re
 from collections import Counter, defaultdict
 from typing import Any
 
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
 
+# Fixed seed for igraph's RNG so Leiden community detection is reproducible
+# across runs. Without this, two builds of the same graph produce different
+# community IDs / sizes, breaking benchmark comparability. Override with
+# CRG_LEIDEN_SEED env var if you need a different seed.
+_LEIDEN_SEED = 42
+
 logger = logging.getLogger(__name__)
+
+# Stay well under SQLite's default 999-variable limit per statement.
+_SQL_BATCH = 450
 
 # ---------------------------------------------------------------------------
 # Optional igraph import
@@ -282,6 +292,11 @@ def _detect_leiden(
         g.vcount(), g.ecount(),
     )
 
+    import os
+    seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+    # Deterministic seeding for benchmark reproducibility — community
+    # detection is not a security-sensitive context. nosec B311.
+    ig.set_random_number_generator(random.Random(seed))  # nosec B311
     partition = g.community_leiden(
         objective_function="modularity",
         weights="weight",
@@ -501,6 +516,11 @@ def _split_oversized(
                 directed=False,
             )
             g.es["weight"] = ig_weights
+            import os
+            seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+            # Deterministic seeding for benchmark reproducibility — community
+            # detection is not a security-sensitive context. nosec B311.
+            ig.set_random_number_generator(random.Random(seed))  # nosec B311
             partition = g.community_leiden(
                 objective_function="modularity",
                 weights="weight",
@@ -636,13 +656,19 @@ def incremental_detect_communities(
 
     conn = store._conn
 
-    # Check if any communities are affected
-    placeholders = ",".join("?" * len(changed_files))
-    affected = conn.execute(
-        f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
-        f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
-        changed_files,
-    ).fetchone()
+    # Check if any communities are affected (batch to stay under SQLite limit)
+    affected_count = 0
+    for i in range(0, len(changed_files), _SQL_BATCH):
+        batch = changed_files[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        row = conn.execute(
+            f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
+            f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
+            batch,
+        ).fetchone()
+        if row:
+            affected_count += row[0]
+    affected = (affected_count,) if affected_count else None
 
     if not affected or affected[0] == 0:
         return 0  # No communities affected, skip
@@ -701,11 +727,12 @@ def store_communities(
 
             # Batch update community_id on member nodes
             member_qns = comm.get("members", [])
-            if member_qns:
-                placeholders = ",".join("?" * len(member_qns))
+            for j in range(0, len(member_qns), _SQL_BATCH):
+                batch = member_qns[j:j + _SQL_BATCH]
+                placeholders = ",".join("?" * len(batch))
                 conn.execute(
                     f"UPDATE nodes SET community_id = ? WHERE qualified_name IN ({placeholders})",  # nosec B608
-                    [community_id] + member_qns,
+                    [community_id] + batch,
                 )
             count += 1
 

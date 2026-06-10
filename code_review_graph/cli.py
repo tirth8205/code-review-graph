@@ -7,7 +7,8 @@ Usage:
     code-review-graph update [--base BASE]
     code-review-graph watch
     code-review-graph status
-    code-review-graph serve [--http] [--host ADDR] [--port PORT]
+    code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT]
+    code-review-graph mcp [--auto-watch]
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
@@ -18,7 +19,7 @@ Usage:
     code-review-graph daemon stop
     code-review-graph daemon restart [--foreground]
     code-review-graph daemon status
-    code-review-graph daemon logs [--repo ALIAS] [-f] [-n N]
+    code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]
     code-review-graph daemon add <path> [--alias NAME]
     code-review-graph daemon remove <path_or_alias>
 """
@@ -42,27 +43,40 @@ import os
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .graph import GraphStore
 
 logger = logging.getLogger(__name__)
 
 # Shared platform choices for install and init commands
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
-    "continue", "opencode", "antigravity", "qwen", "kiro", "qoder", "all",
+    "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
+    "copilot", "copilot-cli", "all",
 ]
 
 
 def _get_version() -> str:
-    """Get the installed package version."""
+    """Get the installed package version.
+
+    Tries ``importlib.metadata`` first (canonical source from the installed
+    dist-info), falling back to the package's ``__version__`` attribute if
+    metadata is unavailable or corrupt. This matters for editable installs
+    on filesystems where iCloud / OneDrive can leave orphan dist-info dirs
+    behind that confuse importlib.metadata's lookup.
+    """
     try:
-        return pkg_version("code-review-graph")
+        v = pkg_version("code-review-graph")
+        if v:
+            return v
     except PackageNotFoundError as exc:
-        logger.debug("Package metadata unavailable, falling back to 'dev': %s", exc)
-        return "dev"
+        logger.debug("Package metadata unavailable: %s", exc)
+    # Fallback: read __version__ directly from the package.
+    try:
+        from . import __version__ as fallback_version
+        if fallback_version:
+            return fallback_version
+    except ImportError:
+        pass
+    return "dev"
 
 
 def _supports_color() -> bool:
@@ -217,9 +231,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     else:
         print(".gitignore already contains .code-review-graph/.")
 
-    # Skills and hooks are installed by default so Claude actually uses the
-    # graph tools proactively.  Use --no-skills / --no-hooks / --no-instructions
-    # to opt out.
+    # Platform-native skills and hooks are installed by default where supported
+    # so the graph tools are used proactively. Use --no-skills / --no-hooks /
+    # --no-instructions to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
@@ -229,7 +243,10 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_codex_hooks,
         install_cursor_hooks,
+        install_gemini_cli_hooks,
+        install_gemini_cli_skills,
         install_git_hook,
         install_hooks,
         install_opencode_plugin,
@@ -237,8 +254,15 @@ def _handle_init(args: argparse.Namespace) -> None:
     )
 
     if not skip_skills:
-        skills_dir = generate_skills(repo_root)
-        print(f"Generated skills in {skills_dir}")
+        # Claude Code skills are only relevant for Claude (or full install).
+        if target in ("claude", "all"):
+            skills_dir = generate_skills(repo_root)
+            print(f"Generated Claude Code skills in {skills_dir}")
+
+        # Gemini CLI skills are workspace-scoped under .gemini/.
+        if target in ("gemini-cli", "all"):
+            gemini_skills_dir = install_gemini_cli_skills(repo_root)
+            print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -266,6 +290,12 @@ def _handle_init(args: argparse.Namespace) -> None:
         qoder_skills_dir = install_qoder_skills(repo_root)
         if qoder_skills_dir:
             print(f"Installed Qoder skills to {qoder_skills_dir}")
+    if not skip_hooks and target in ("codex", "all"):
+        hooks_path = install_codex_hooks(repo_root)
+        print(f"Installed Codex hooks in {hooks_path}")
+        git_hook = install_git_hook(repo_root)
+        if git_hook:
+            print(f"Installed git pre-commit hook in {git_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
@@ -275,13 +305,20 @@ def _handle_init(args: argparse.Namespace) -> None:
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
 
-        # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
-        if target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
-            try:
-                hooks_path = install_cursor_hooks()
-                print(f"Installed Cursor hooks in {hooks_path}")
-            except Exception as exc:
-                logger.warning("Could not install Cursor hooks: %s", exc)
+    # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
+    if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
+        try:
+            hooks_path = install_cursor_hooks()
+            print(f"Installed Cursor hooks in {hooks_path}")
+        except Exception as exc:
+            logger.warning("Could not install Cursor hooks: %s", exc)
+
+    if not skip_hooks and target in ("gemini-cli", "all"):
+        try:
+            gemini_settings = install_gemini_cli_hooks(repo_root)
+            print(f"Installed Gemini CLI hooks in {gemini_settings}")
+        except Exception as exc:
+            logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
     # OpenCode plugin (user-level, gated by same detect() as MCP config)
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():
@@ -297,19 +334,18 @@ def _handle_init(args: argparse.Namespace) -> None:
     print("  2. Restart your AI coding tool to pick up the new config")
 
 
-def _cli_post_process(store: GraphStore) -> None:
-    """Run post-build pipeline and print a summary line for each step."""
-    from .postprocessing import run_post_processing
-
-    pp = run_post_processing(store)
-    if pp.get("signatures_computed"):
-        print(f"Signatures: {pp['signatures_computed']} nodes")
-    if pp.get("fts_indexed"):
-        print(f"FTS indexed: {pp['fts_indexed']} nodes")
-    if pp.get("flows_detected") is not None:
-        print(f"Flows: {pp['flows_detected']}")
-    if pp.get("communities_detected") is not None:
-        print(f"Communities: {pp['communities_detected']}")
+def _handle_data_dir_option(args, repo_root: Path) -> None:
+    """Handle --data-dir option by updating registry if specified."""
+    if hasattr(args, "data_dir") and args.data_dir:
+        try:
+            from .registry import Registry
+            data_dir_path = Path(args.data_dir).expanduser().resolve()
+            data_dir_path.mkdir(parents=True, exist_ok=True)
+            Registry().set_data_dir(str(repo_root), str(data_dir_path))
+            logging.info(f"Graph database will be stored at: {data_dir_path}")
+        except Exception as exc:
+            logging.error(f"Failed to set data directory: {exc}")
+            sys.exit(1)
 
 
 def main() -> None:
@@ -332,12 +368,12 @@ def main() -> None:
     install_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform-native skill files",
     )
     install_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform-native hooks",
     )
     install_cmd.add_argument(
         "--no-instructions",
@@ -373,12 +409,12 @@ def main() -> None:
     init_cmd.add_argument(
         "--no-skills",
         action="store_true",
-        help="Skip generating Claude Code skill files",
+        help="Skip generating platform-native skill files",
     )
     init_cmd.add_argument(
         "--no-hooks",
         action="store_true",
-        help="Skip installing Claude Code hooks",
+        help="Skip installing platform-native hooks",
     )
     init_cmd.add_argument(
         "--no-instructions",
@@ -414,6 +450,11 @@ def main() -> None:
         action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
+    build_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -429,6 +470,29 @@ def main() -> None:
         action="store_true",
         help="Skip all post-processing (raw parse only)",
     )
+    update_cmd.add_argument(
+        "--brief",
+        action="store_true",
+        help="After re-parsing changed files into the graph, also print the "
+             "risk summary + Token Savings panel that 'detect-changes --brief' "
+             "prints. Use this after a rebase or large change set when you "
+             "want to refresh the graph AND see the impact in one command; "
+             "use 'detect-changes --brief' alone when the graph is already "
+             "up to date (analysis only, no re-parse).",
+    )
+    update_cmd.add_argument(
+        "--verify",
+        action="store_true",
+        help="Calibrate the estimated savings against tiktoken's "
+             "cl100k_base tokenizer (the GPT-4 family tokenizer). Adds a "
+             "second row to the panel with the real token counts. Requires "
+             "`pip install tiktoken`.",
+    )
+    update_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -439,14 +503,53 @@ def main() -> None:
     pp_cmd.add_argument("--no-flows", action="store_true", help="Skip flow detection")
     pp_cmd.add_argument("--no-communities", action="store_true", help="Skip community detection")
     pp_cmd.add_argument("--no-fts", action="store_true", help="Skip FTS rebuild")
+    pp_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
+
+    # embed
+    embed_cmd = sub.add_parser(
+        "embed",
+        help="Compute vector embeddings for semantic search",
+    )
+    embed_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    embed_cmd.add_argument(
+        "--provider",
+        choices=["local", "openai", "google", "minimax"],
+        default=None,
+        help="Embedding provider (default: local, needs code-review-graph[embeddings])",
+    )
+    embed_cmd.add_argument(
+        "--model",
+        default=None,
+        help="Embedding model. For local: HuggingFace ID (default all-MiniLM-L6-v2); "
+             "for openai/google/minimax: provider-specific model ID.",
+    )
+    embed_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # watch
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
     watch_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    watch_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
     status_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    status_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # visualize
     vis_cmd = sub.add_parser("visualize", help="Generate interactive HTML graph visualization")
@@ -468,6 +571,11 @@ def main() -> None:
         default="html",
         help="Export format (default: html)",
     )
+    vis_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
 
     # wiki
     wiki_cmd = sub.add_parser("wiki", help="Generate markdown wiki from community structure")
@@ -476,6 +584,11 @@ def main() -> None:
         "--force",
         action="store_true",
         help="Regenerate all pages even if content unchanged",
+    )
+    wiki_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
     )
 
     # register
@@ -500,7 +613,8 @@ def main() -> None:
         "--benchmark",
         default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
-        "flow_completeness, search_quality, build_performance)",
+        "agent_baseline, flow_completeness, search_quality, build_performance, "
+        "multi_hop_retrieval)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
@@ -508,17 +622,39 @@ def main() -> None:
     eval_cmd.add_argument("--output-dir", default=None, help="Output directory for results")
 
     # detect-changes
-    detect_cmd = sub.add_parser("detect-changes", help="Analyze change impact")
+    detect_cmd = sub.add_parser(
+        "detect-changes",
+        help="Analyze change impact against the existing graph (read-only). "
+             "Does NOT re-parse files — for that, use 'update --brief'.",
+    )
     detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
-    detect_cmd.add_argument("--brief", action="store_true", help="Show brief summary only")
+    detect_cmd.add_argument(
+        "--brief",
+        action="store_true",
+        help="Show the risk summary + Token Savings panel instead of the "
+             "full JSON. Read-only against the existing graph.",
+    )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    detect_cmd.add_argument(
+        "--verify",
+        action="store_true",
+        help="Calibrate the estimated savings against tiktoken's "
+             "cl100k_base tokenizer (the GPT-4 family tokenizer). Adds a "
+             "second row to the panel with the real token counts. Requires "
+             "`pip install tiktoken`.",
+    )
 
-    # serve
+    # serve / mcp
     serve_cmd = sub.add_parser(
         "serve",
         help="Start MCP server (stdio by default, or HTTP on localhost with --http)",
     )
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    serve_cmd.add_argument(
+        "--auto-watch",
+        action="store_true",
+        help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
     serve_cmd.add_argument(
         "--tools", default=None,
         help=(
@@ -545,6 +681,14 @@ def main() -> None:
         default=None,
         metavar="PORT",
         help="Port for --http (default: 5555)",
+    )
+
+    mcp_cmd = sub.add_parser("mcp", help="Alias for serve")
+    mcp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    mcp_cmd.add_argument(
+        "--auto-watch",
+        action="store_true",
+        help="Start filesystem watch in a daemon thread while MCP server runs",
     )
 
     # daemon
@@ -632,25 +776,30 @@ def main() -> None:
         _print_banner()
         return
 
-    if args.command == "serve":
+    if args.command in ("serve", "mcp"):
         from .main import main as serve_main
 
-        if args.port is not None and not args.http:
-            serve_cmd.error("--port requires --http")
-        if args.host is not None and not args.http:
-            serve_cmd.error("--host requires --http")
-        if args.http:
-            host = args.host if args.host is not None else "127.0.0.1"
-            port = args.port if args.port is not None else 5555
-            serve_main(
-                repo_root=args.repo,
-                transport="streamable-http",
-                host=host,
-                port=port,
-                tools=args.tools,
-            )
+        auto_watch = getattr(args, "auto_watch", False)
+        if args.command == "serve":
+            if args.port is not None and not args.http:
+                serve_cmd.error("--port requires --http")
+            if args.host is not None and not args.http:
+                serve_cmd.error("--host requires --http")
+            if args.http:
+                host = args.host if args.host is not None else "127.0.0.1"
+                port = args.port if args.port is not None else 5555
+                serve_main(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    transport="streamable-http",
+                    host=host,
+                    port=port,
+                    tools=args.tools,
+                )
+            else:
+                serve_main(repo_root=args.repo, auto_watch=auto_watch, tools=args.tools)
         else:
-            serve_main(repo_root=args.repo, tools=args.tools)
+            serve_main(repo_root=args.repo, auto_watch=auto_watch)
         return
 
     if args.command == "daemon":
@@ -766,6 +915,7 @@ def main() -> None:
 
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
+        _handle_data_dir_option(args, repo_root)
         db_path = get_db_path(repo_root)
         store = GraphStore(db_path)
         try:
@@ -789,6 +939,22 @@ def main() -> None:
             store.close()
         return
 
+    if args.command == "embed":
+        repo_root = Path(args.repo) if args.repo else find_project_root()
+        _handle_data_dir_option(args, repo_root)
+        from .tools.docs import embed_graph
+
+        result = embed_graph(
+            repo_root=str(repo_root),
+            model=args.model,
+            provider=args.provider,
+        )
+        if result.get("status") == "error":
+            logging.error(result.get("error", "embed_graph failed"))
+            sys.exit(1)
+        print(result.get("summary", "Embedding done."))
+        return
+
     if args.command in ("update", "detect-changes"):
         # update and detect-changes require git for diffing
         repo_root = Path(args.repo) if args.repo else find_repo_root()
@@ -801,6 +967,11 @@ def main() -> None:
             sys.exit(1)
     else:
         repo_root = Path(args.repo) if args.repo else find_project_root()
+
+    # Handle --data-dir for commands that support it
+    _data_dir_cmds = ("build", "update", "detect-changes", "status", "watch", "visualize", "wiki")
+    if args.command in _data_dir_cmds:
+        _handle_data_dir_option(args, repo_root)
 
     db_path = get_db_path(repo_root)
     store = GraphStore(db_path)
@@ -825,7 +996,6 @@ def main() -> None:
             print(f"Full build: {parsed} files, {nodes} nodes, {edges} edges (postprocess={pp})")
             if result.get("errors"):
                 print(f"Errors: {len(result['errors'])}")
-            _cli_post_process(store)
 
         elif args.command == "update":
             pp = (
@@ -849,8 +1019,60 @@ def main() -> None:
                 f"{nodes} nodes, {edges} edges"
                 f" (postprocess={pp})"
             )
-            if result.get("files_updated", 0) > 0:
-                _cli_post_process(store)
+
+            # --brief: append a one-line change-impact summary with the same
+            # estimated context-savings approximation that detect-changes uses.
+            # Same baseline (changed files vs analysis response), so the two
+            # commands are directly comparable.
+            if getattr(args, "brief", False):
+                from .changes import analyze_changes
+                from .context_savings import (
+                    attach_context_savings,
+                    estimate_file_tokens,
+                    format_context_savings_panel,
+                )
+                from .incremental import (
+                    get_changed_files,
+                    get_staged_and_unstaged,
+                )
+
+                changed = get_changed_files(repo_root, args.base)
+                if not changed:
+                    changed = get_staged_and_unstaged(repo_root)
+                if changed:
+                    impact = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=args.base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        impact,
+                        original_tokens=original_tokens,
+                    )
+                    summary = impact.get("summary", "")
+                    if summary:
+                        print(summary)
+                    verified = None
+                    if getattr(args, "verify", False):
+                        from .context_savings import verify_with_tiktoken
+                        verified = verify_with_tiktoken(
+                            repo_root, changed, impact,
+                        )
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        impact.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=impact,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
 
         elif args.command == "status":
             stats = store.get_stats()
@@ -887,7 +1109,11 @@ def main() -> None:
         elif args.command == "watch":
             from .postprocessing import run_post_processing
 
-            watch(repo_root, store, on_files_updated=run_post_processing)
+            try:
+                watch(repo_root, store, on_files_updated=run_post_processing)
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
 
         elif args.command == "visualize":
             from .incremental import get_data_dir
@@ -932,13 +1158,13 @@ def main() -> None:
 
                     serve_dir = html_path.parent
                     port = 8765
-                    handler = functools.partial(
+                    http_handler = functools.partial(
                         http.server.SimpleHTTPRequestHandler,
                         directory=str(serve_dir),
                     )
                     print(f"Serving at http://localhost:{port}/graph.html")
                     print("Press Ctrl+C to stop.")
-                    with http.server.HTTPServer(("localhost", port), handler) as httpd:
+                    with http.server.HTTPServer(("localhost", port), http_handler) as httpd:
                         try:
                             httpd.serve_forever()
                         except KeyboardInterrupt:
@@ -963,6 +1189,10 @@ def main() -> None:
 
         elif args.command == "detect-changes":
             from .changes import analyze_changes
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+            )
             from .incremental import get_changed_files, get_staged_and_unstaged
 
             base = args.base
@@ -979,8 +1209,33 @@ def main() -> None:
                     repo_root=str(repo_root),
                     base=base,
                 )
+                original_tokens = estimate_file_tokens(repo_root, changed)
+                attach_context_savings(
+                    result,
+                    original_tokens=original_tokens,
+                )
                 if args.brief:
+                    from .context_savings import (
+                        format_context_savings_panel,
+                        verify_with_tiktoken,
+                    )
                     print(result.get("summary", "No summary available."))
+                    verified = None
+                    if getattr(args, "verify", False):
+                        verified = verify_with_tiktoken(repo_root, changed, result)
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        result.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=result,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
                 else:
                     print(json.dumps(result, indent=2, default=str))
 

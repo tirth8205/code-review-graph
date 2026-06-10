@@ -648,6 +648,134 @@ class TestCodeParser:
             f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
         )
 
+    # --- Python callback REFERENCES (#363) ---
+    # Functions passed as bare-identifier arguments (executor.submit(fn),
+    # filter(fn, xs), map(fn, xs), df.apply(fn), ...) should produce
+    # REFERENCES edges so dead-code detection does not flag them as unused.
+    # Pre-fix: only the JS/TS `arguments` node type triggered the
+    # _ref_from_arguments dispatcher; Python's `argument_list` was ignored.
+
+    def test_python_callback_references_emitted(self):
+        """A function passed as a bare identifier to another call should
+        produce a REFERENCES edge from the calling function to it."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_callback_refs.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_target_names = {e.target.rsplit("::", 1)[-1] for e in refs}
+        for callback in ("executor_callback", "filter_callback", "map_callback"):
+            assert callback in ref_target_names, (
+                f"Expected REFERENCES edge to {callback}, got targets: "
+                f"{ref_target_names}"
+            )
+
+    def test_python_callback_references_not_treated_as_dead(self):
+        """End-to-end: with REFERENCES edges in place, find_dead_code
+        should not flag callback functions as dead."""
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "graph.db"
+            store = GraphStore(db_path)
+            try:
+                nodes, edges = self.parser.parse_file(
+                    FIXTURES / "sample_callback_refs.py"
+                )
+                store.store_file_nodes_edges(
+                    str(FIXTURES / "sample_callback_refs.py"),
+                    nodes, edges, "",
+                )
+                dead = find_dead_code(store)
+                dead_names = {d["name"] for d in dead}
+                for callback in (
+                    "executor_callback", "filter_callback", "map_callback",
+                ):
+                    assert callback not in dead_names, (
+                        f"{callback} was flagged as dead but is used as a "
+                        f"callback. Dead names: {dead_names}"
+                    )
+            finally:
+                store.close()
+
+    # --- Bun test detection (regression: bun:test uses identical runner names) ---
+
+    def test_bun_test_detection(self):
+        """A .test.ts file importing from 'bun:test' should produce Test nodes."""
+        nodes, _ = self.parser.parse_file(FIXTURES / "sample_bun.test.ts")
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
+            f"Expected describe Test node, got: {test_names}"
+        )
+        assert any(n.startswith("it:") or n.startswith("test:") for n in test_names), (
+            f"Expected it/test Test node, got: {test_names}"
+        )
+
+    def test_bun_tested_by_edges(self):
+        """TESTED_BY edges should be generated from bun tests to production code."""
+        _, edges = self.parser.parse_file(FIXTURES / "sample_bun.test.ts")
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges, got none. "
+            f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
+    # --- __tests__/ directory recognition (Jest convention) ---
+    # Consistency fix: flows.py and refactor.py already recognize __tests__/
+    # but parser.py did not, so files there did not produce Test nodes.
+
+    def test_jest_tests_dir_detected_as_test_file(self):
+        """A file under __tests__/ should be classified as a test file even
+        when the filename itself has no .test./.spec. marker."""
+        from code_review_graph.parser import _is_test_file
+        assert _is_test_file("src/__tests__/UserService.ts")
+        assert _is_test_file("src\\__tests__\\UserService.ts")
+        # Negative: __tests__ as a substring without path separators must not match
+        assert not _is_test_file("my__tests__notdir.ts")
+
+    def test_jest_tests_dir_produces_test_nodes(self):
+        """A vitest-style file under __tests__/ should yield Test nodes
+        and TESTED_BY edges, the same as a *.test.ts file."""
+        fixture_path = FIXTURES / "__tests__" / "UserService.ts"
+        fixture_code = fixture_path.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "src" / "__tests__" / "UserService.ts"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(fixture_code, encoding="utf-8")
+            nodes, edges = self.parser.parse_file(path)
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
+            f"Expected describe Test node, got: {test_names}"
+        )
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges from __tests__/ file, got none. "
+            f"Edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
+    # --- Mocha TDD interface (suite/test) ---
+    # Mocha's TDD UI uses `suite()` instead of `describe()`. The `test()`
+    # function is already recognized; this verifies `suite()` is too.
+
+    def test_mocha_tdd_suite_produces_test_nodes(self):
+        """A *.test.ts file using `suite()` should produce Test nodes
+        and TESTED_BY edges, the same as a describe()-based file."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_mocha.test.ts")
+        tests = [n for n in nodes if n.kind == "Test"]
+        test_names = {t.name for t in tests}
+        assert any(n.startswith("suite") or n.startswith("suite:") for n in test_names), (
+            f"Expected suite Test node, got: {test_names}"
+        )
+        assert any(n.startswith("test:") for n in test_names), (
+            f"Expected test Test node, got: {test_names}"
+        )
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, (
+            f"Expected TESTED_BY edges, got none. "
+            f"Edges: {[(e.kind, e.source, e.target) for e in edges]}"
+        )
+
+
     def test_non_test_file_describe_not_special(self):
         """describe() in a non-test file should NOT create Test nodes."""
         import tempfile
@@ -1209,3 +1337,124 @@ class TestModuleScopeCalls:
             and e.target.endswith("puts")
         ]
         assert len(top_level) == 1
+
+    def test_cpp_scoped_method_names(self, tmp_path):
+        """C++ scoped method definitions must extract the leaf method name,
+        not the return-type identifier.
+
+        Regression: previously ``Ret Class::method()`` indexed as ``Ret``
+        (return type) and ``void Class::method()`` was silently dropped
+        because _get_name() fell through to the generic identifier loop,
+        which did not recognise qualified_identifier, destructor_name, or
+        operator_name nodes inside function_declarator.
+        """
+        src = b"""
+void PlaybackExtension::resetStateForPool() {}
+quint64 PlaybackExtension::startTimestamp() const { return 0; }
+PlaybackExtension::~PlaybackExtension() {}
+~PlaybackExtension() {}
+bool operator==(const A& a, const B& b) { return true; }
+bool MyClass::operator<(const MyClass& o) const { return true; }
+void foo() {}
+int SnapshotController::getHandleIndex() { return 0; }
+bool PlaybackWidget::AllocateResourceStrategy::allocateExtensionResource(int i) { return true; }
+void A::B::C::deep() {}
+ExtensionID PlaybackExtension::ID() const { return {}; }
+"""
+        p = tmp_path / "x.cpp"
+        p.write_bytes(src)
+        nodes, _ = self.parser.parse_file(p)
+        names = [n.name for n in nodes if n.kind == "Function"]
+        assert names == [
+            "resetStateForPool",
+            "startTimestamp",
+            "~PlaybackExtension",
+            "~PlaybackExtension",
+            "operator==",
+            "operator<",
+            "foo",
+            "getHandleIndex",
+            "allocateExtensionResource",
+            "deep",
+            "ID",
+        ]
+
+
+
+
+class TestCppScopedFunctionName:
+    """Regression tests for C++ scoped function name extraction.
+
+    See: https://github.com/tirth8205/code-review-graph/issues/395
+    """
+
+    def test_scoped_function_with_type_identifier_return(self, tmp_path):
+        """bufferlist OSDService::get_inc_map(...) should extract 'get_inc_map'."""
+        src = tmp_path / "osd_service.cpp"
+        src.write_text(
+            "bufferlist OSDService::get_inc_map(epoch_t e) {\n"
+            "  bufferlist bl;\n"
+            "  return bl;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_inc_map"
+
+    def test_scoped_function_with_qualified_return(self, tmp_path):
+        """std::string OSDMap::get_pool_name(...) should extract 'get_pool_name'."""
+        src = tmp_path / "osd_map.cpp"
+        src.write_text(
+            "std::string OSDMap::get_pool_name(int64_t pool_id) const {\n"
+            '  return "";\n'
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_pool_name"
+
+    def test_scoped_function_with_primitive_return_still_works(self, tmp_path):
+        """int OSD::handle_osd_map(...) was already correct; verify no regression."""
+        src = tmp_path / "osd.cpp"
+        src.write_text(
+            "int OSD::handle_osd_map(MOSDMap *m) {\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "handle_osd_map"
+
+    def test_unscoped_function_with_type_identifier_return(self, tmp_path):
+        """static std::string _make_key(...) should extract '_make_key'."""
+        src = tmp_path / "util.cpp"
+        src.write_text(
+            "static std::string _make_key(const std::string& prefix) {\n"
+            "  return prefix;\n"
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "_make_key"
+
+    def test_scoped_function_string_return(self, tmp_path):
+        """string RGWDedupProcessor::get_obj_fingerprint(...) should extract the method name."""
+        src = tmp_path / "rgw_dedup.cpp"
+        src.write_text(
+            "string RGWDedupProcessor::get_obj_fingerprint(const rgw_obj& obj) {\n"
+            '  return "";\n'
+            "}\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].name == "get_obj_fingerprint"

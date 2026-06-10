@@ -1,0 +1,127 @@
+# Composite GitHub Action: risk-scored, graph-aware PR review comments.
+# Local-first — the analysis runs entirely on the runner; no source code is
+# sent to any external service. See docs/GITHUB_ACTION.md for usage.
+name: "code-review-graph PR Review"
+description: >-
+  Post a risk-scored, graph-aware review comment on pull requests.
+  Local-first: builds a Tree-sitter knowledge graph on the runner and
+  analyzes change impact without sending code to external services.
+author: "Tirth"
+branding:
+  icon: "git-pull-request"
+  color: "purple"
+
+inputs:
+  github-token:
+    description: >-
+      Token used to post the sticky PR comment via the GitHub API.
+      Needs `pull-requests: write` (the default GITHUB_TOKEN works).
+    required: true
+  comment:
+    description: "Post (and keep updated) a sticky PR comment with the report."
+    required: false
+    default: "true"
+  fail-on-risk:
+    description: >-
+      Fail the job when the overall risk score reaches this level:
+      none (never fail), high (risk >= 0.70), or critical (risk >= 0.85).
+    required: false
+    default: "none"
+  python-version:
+    description: "Python version used to run code-review-graph."
+    required: false
+    default: "3.12"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install code-review-graph
+      shell: bash
+      run: python -m pip install --quiet code-review-graph
+
+    # Cache the SQLite knowledge graph between runs. The "schema9" segment
+    # tracks LATEST_VERSION in code_review_graph/migrations.py — bump it when
+    # the database schema changes so stale caches are not restored.
+    - name: Cache knowledge graph
+      uses: actions/cache@v4
+      with:
+        path: .code-review-graph
+        key: code-review-graph-schema9-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
+        restore-keys: |
+          code-review-graph-schema9-${{ runner.os }}-
+
+    - name: Resolve diff base
+      shell: bash
+      env:
+        BASE_REF: ${{ github.base_ref }}
+      run: |
+        if [ -n "${BASE_REF}" ]; then
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          echo "CRG_BASE=origin/${BASE_REF}" >> "${GITHUB_ENV}"
+        else
+          # Not a pull_request event — fall back to the previous commit.
+          echo "CRG_BASE=HEAD~1" >> "${GITHUB_ENV}"
+        fi
+
+    - name: Build or update the graph
+      shell: bash
+      run: |
+        if [ -f .code-review-graph/graph.db ]; then
+          # Cache hit: re-parse only the files that differ from the base ref.
+          # If the restored database is unusable, fall back to a full build.
+          code-review-graph update --base "${CRG_BASE}" || code-review-graph build
+        else
+          code-review-graph build
+        fi
+
+    - name: Run risk-scored change analysis
+      shell: bash
+      run: |
+        code-review-graph detect-changes --base "${CRG_BASE}" \
+          > "${RUNNER_TEMP}/crg-report.json"
+
+    - name: Render markdown report
+      shell: bash
+      run: |
+        python "${GITHUB_ACTION_PATH}/scripts/render_pr_comment.py" \
+          --input "${RUNNER_TEMP}/crg-report.json" \
+          --output "${RUNNER_TEMP}/crg-comment.md"
+
+    - name: Upsert sticky PR comment
+      if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        marker='<!-- code-review-graph-report -->'
+        comment_id=$(gh api \
+          "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+          --paginate \
+          --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | head -n 1)
+        if [ -n "${comment_id}" ]; then
+          gh api --method PATCH --silent \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+            -F body=@"${RUNNER_TEMP}/crg-comment.md"
+        else
+          gh api --method POST --silent \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -F body=@"${RUNNER_TEMP}/crg-comment.md"
+        fi
+
+    - name: Enforce risk gate
+      if: ${{ inputs.fail-on-risk != 'none' }}
+      shell: bash
+      env:
+        FAIL_ON_RISK: ${{ inputs.fail-on-risk }}
+      run: |
+        python "${GITHUB_ACTION_PATH}/scripts/render_pr_comment.py" \
+          --input "${RUNNER_TEMP}/crg-report.json" \
+          --fail-on-risk "${FAIL_ON_RISK}" \
+          --quiet

@@ -1,0 +1,4 @@
+repo,commit,predicted_files,actual_files,true_positives,precision,recall,f1
+gin,052d1a79aafe3f04078a2716f8e77d4340308383,12,5,5,0.417,1.0,0.588
+gin,472d086af2acd924cb4b9d7be0525f7d790f69bc,5,2,2,0.4,1.0,0.571
+gin,5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a,4,2,2,0.5,1.0,0.667

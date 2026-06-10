@@ -72,18 +72,49 @@ def rebuild_fts_index(store: GraphStore) -> int:
 # ---------------------------------------------------------------------------
 
 
-def detect_query_kind_boost(query: str) -> dict[str, float]:
-    """Detect query patterns and return kind-specific boost multipliers.
+_DOTTED_IDENT_RE = re.compile(r'\b[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)+\b')
+_SNAKE_IDENT_RE = re.compile(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b')
+_PASCAL_IDENT_RE = re.compile(r'\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b')
+
+
+def extract_query_identifiers(query: str) -> list[str]:
+    """Pull out identifier-shaped tokens from anywhere in a query.
+
+    Catches dotted forms (``Context.Next``), snake_case (``get_dependant``),
+    and CamelCase (``APIRoute``) even when they're embedded in a natural-
+    language sentence. Used to boost search hits whose qualified_name
+    contains any of these tokens, so an LLM asking "Who advances the gin
+    middleware chain via Context.Next" lands on ``Context.Next`` instead of
+    the bare ``Context`` class.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for pat in (_DOTTED_IDENT_RE, _SNAKE_IDENT_RE, _PASCAL_IDENT_RE):
+        for match in pat.findall(query):
+            lo = match.lower()
+            if lo not in seen and len(lo) >= 3:
+                seen.add(lo)
+                found.append(lo)
+    return found
+
+
+def detect_query_kind_boost(query: str) -> dict[str, Any]:
+    """Detect query patterns and return per-node boost multipliers.
 
     Heuristics:
     - PascalCase queries (e.g. ``MyClass``) boost Class/Type by 1.5x
     - snake_case queries (e.g. ``get_users``) boost Function by 1.5x
     - Queries containing ``.`` boost qualified name matches by 2.0x
+    - Identifier-shaped tokens *anywhere* in the query (dotted, snake_case,
+      CamelCase) boost results whose qualified_name contains them by 2.0x.
+      See ``extract_query_identifiers``.
 
     Returns:
-        Dict mapping node kind strings to boost multipliers.
+        Dict whose keys are either node kind strings (mapped to float
+        multipliers) or one of the special keys ``_qualified``,
+        ``_qualified_identifiers``.
     """
-    boosts: dict[str, float] = {}
+    boosts: dict[str, Any] = {}
 
     if not query or not query.strip():
         return boosts
@@ -102,6 +133,11 @@ def detect_query_kind_boost(query: str) -> dict[str, float]:
     # Dotted path: boost qualified name matches
     if '.' in q:
         boosts["_qualified"] = 2.0
+
+    # Identifiers extracted from anywhere in the query
+    idents = extract_query_identifiers(q)
+    if idents:
+        boosts["_qualified_identifiers"] = idents
 
     return boosts
 
@@ -368,6 +404,11 @@ def hybrid_search(
         if "_qualified" in kind_boosts and '.' in query:
             if query.lower() in qualified_name.lower():
                 boost *= kind_boosts["_qualified"]
+        idents = kind_boosts.get("_qualified_identifiers")
+        if idents:
+            qn_lo = qualified_name.lower()
+            if any(ident in qn_lo for ident in idents):
+                boost *= 2.0
         if context_set and file_path in context_set:
             boost *= 1.5
 

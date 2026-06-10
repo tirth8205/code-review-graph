@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import stat
 import sys
 from pathlib import Path
@@ -17,28 +18,26 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
-    _build_server_entry,
     _cursor_hook_scripts,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
     _opencode_plugin_content,
+    generate_codex_hooks_config,
     generate_cursor_hooks_config,
     generate_hooks_config,
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_codex_hooks,
+    install_gemini_cli_hooks,
+    install_gemini_cli_skills,
     install_cursor_hooks,
     install_git_hook,
     install_hooks,
     install_opencode_plugin,
     install_platform_configs,
 )
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    tomllib = None  # type: ignore[assignment]
 
 _needs_tomllib = pytest.mark.skipif(
     tomllib is None, reason="tomllib requires Python 3.11+",
@@ -51,19 +50,22 @@ class TestGenerateSkills:
         assert result.is_dir()
         assert result == tmp_path / ".claude" / "skills"
 
-    def test_creates_four_skill_files(self, tmp_path):
+    def test_creates_four_skill_subdirs(self, tmp_path):
         skills_dir = generate_skills(tmp_path)
-        files = sorted(f.name for f in skills_dir.iterdir())
-        assert files == [
-            "debug-issue.md",
-            "explore-codebase.md",
-            "refactor-safely.md",
-            "review-changes.md",
+        subdirs = sorted(f.name for f in skills_dir.iterdir() if f.is_dir())
+        assert subdirs == [
+            "debug-issue",
+            "explore-codebase",
+            "refactor-safely",
+            "review-changes",
         ]
+        for d in skills_dir.iterdir():
+            assert (d / "skill.md").is_file()
 
     def test_skill_files_have_frontmatter(self, tmp_path):
         skills_dir = generate_skills(tmp_path)
-        for path in skills_dir.iterdir():
+        for subdir in skills_dir.iterdir():
+            path = subdir / "skill.md"
             content = path.read_text()
             assert content.startswith("---\n")
             assert "name:" in content
@@ -84,18 +86,20 @@ class TestGenerateSkills:
     def test_skill_content_includes_get_minimal_context(self, tmp_path):
         """Every skill template must reference get_minimal_context."""
         skills_dir = generate_skills(tmp_path)
-        for path in skills_dir.iterdir():
-            content = path.read_text()
+        for subdir in skills_dir.iterdir():
+            content = (subdir / "skill.md").read_text()
             assert "get_minimal_context" in content, (
-                f"{path.name} missing get_minimal_context reference"
+                f"{subdir.name} missing get_minimal_context reference"
             )
 
     def test_skill_content_includes_detail_level(self, tmp_path):
         """Every skill template must reference detail_level."""
         skills_dir = generate_skills(tmp_path)
-        for path in skills_dir.iterdir():
-            content = path.read_text()
-            assert "detail_level" in content, f"{path.name} missing detail_level reference"
+        for subdir in skills_dir.iterdir():
+            content = (subdir / "skill.md").read_text()
+            assert "detail_level" in content, (
+                f"{subdir.name} missing detail_level reference"
+            )
 
     def test_idempotent(self, tmp_path):
         """Running twice should not fail and files should still be valid."""
@@ -118,6 +122,7 @@ class TestGenerateHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
@@ -128,6 +133,7 @@ class TestGenerateHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
         assert 0 < inner["timeout"] <= 600
 
     def test_does_not_emit_invalid_pre_commit_hook(self):
@@ -186,10 +192,63 @@ class TestGenerateHooksConfig:
                     assert "timeout" in hook
 
 
+class TestShippedHooksFiles:
+    """The vestigial hooks/ directory ships in the sdist (see pyproject
+    sdist includes). Its hook commands must drain stdin exactly like the
+    skills.py-generated hooks, or large hook payloads reproduce the
+    BrokenPipeError from bug #493.
+    """
+
+    HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+    STDIN_DRAIN = "cat >/dev/null || true; "
+
+    def test_hooks_json_commands_drain_stdin(self):
+        data = json.loads(
+            (self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook["command"]
+            for entries in data.values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        assert commands, "hooks/hooks.json should define at least one command hook"
+        for command in commands:
+            assert command.startswith(self.STDIN_DRAIN), (
+                f"hooks.json command lacks the stdin drain prefix: {command!r}"
+            )
+
+    def test_session_start_script_drains_stdin(self):
+        script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
+        assert "cat >/dev/null" in script, (
+            "session-start.sh must drain stdin to avoid BrokenPipeError "
+            "on large hook payloads (bug #493)"
+        )
+
+
 class TestInstallGitHook:
     def _make_git_repo(self, tmp_path: Path) -> Path:
         (tmp_path / ".git" / "hooks").mkdir(parents=True)
         return tmp_path
+
+    def _git(self, *args: str, cwd: Path) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    def _init_real_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git("init", cwd=path)
+        return path
 
     def test_creates_executable_pre_commit_hook(self, tmp_path):
         hook_path = install_git_hook(self._make_git_repo(tmp_path))
@@ -218,6 +277,48 @@ class TestInstallGitHook:
 
     def test_no_git_dir_returns_none(self, tmp_path):
         assert install_git_hook(tmp_path) is None
+
+    def test_real_repo_installs_into_git_hooks(self, tmp_path):
+        """Standard repo: unchanged behavior — hook lands in .git/hooks."""
+        repo = self._init_real_repo(tmp_path / "std")
+        hook_path = install_git_hook(repo)
+        assert hook_path is not None
+        expected = repo / ".git" / "hooks" / "pre-commit"
+        assert hook_path.resolve() == expected.resolve()
+        assert os.access(hook_path, os.X_OK)
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+
+    def test_respects_core_hooks_path(self, tmp_path):
+        """core.hooksPath (husky-style): the hook must land where git runs it."""
+        repo = self._init_real_repo(tmp_path / "husky")
+        self._git("config", "core.hooksPath", ".husky", cwd=repo)
+        hook_path = install_git_hook(repo)
+        assert hook_path is not None
+        expected = repo / ".husky" / "pre-commit"
+        assert hook_path.resolve() == expected.resolve()
+        assert os.access(hook_path, os.X_OK)
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+        # The default location must NOT be used — git would never run it.
+        assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+
+    def test_linked_worktree_installs_where_git_runs_hooks(self, tmp_path):
+        """Linked worktree: .git is a file; the hook must still be installed
+        into the hooks path git actually consults (issue #313)."""
+        main = self._init_real_repo(tmp_path / "main")
+        self._git(
+            "-c", "user.email=test@example.com", "-c", "user.name=Test",
+            "commit", "--allow-empty", "-m", "init", cwd=main,
+        )
+        worktree = tmp_path / "wt"
+        self._git("worktree", "add", str(worktree), "-b", "wt-branch", cwd=main)
+        assert (worktree / ".git").is_file()  # precondition: not a directory
+        hook_path = install_git_hook(worktree)
+        assert hook_path is not None
+        git_hooks_dir = worktree / self._git(
+            "rev-parse", "--git-path", "hooks", cwd=worktree
+        )
+        assert hook_path.resolve() == (git_hooks_dir / "pre-commit").resolve()
+        assert "code-review-graph detect-changes" in hook_path.read_text()
 
 
 class TestInstallHooks:
@@ -260,6 +361,127 @@ class TestInstallHooks:
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
+
+
+class TestGenerateCodexHooksConfig:
+    def test_returns_dict_with_hooks(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "hooks" in config
+
+    def test_has_post_tool_use(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "PostToolUse" in config["hooks"]
+        entry = config["hooks"]["PostToolUse"][0]
+        assert entry["matcher"] == "Write|Edit|Bash"
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "update" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["statusMessage"] == "Updating code-review-graph"
+
+    def test_has_session_start(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        assert "SessionStart" in config["hooks"]
+        entry = config["hooks"]["SessionStart"][0]
+        assert entry["matcher"] == "startup|resume"
+        inner = entry["hooks"][0]
+        assert inner["type"] == "command"
+        assert "status" in inner["command"]
+        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["statusMessage"] == "Checking code-review-graph status"
+
+
+    def test_post_tool_use_command_handles_large_stdin_payload(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+
+        payload = ("x" * 1024 + "\n") * 20000
+        proc = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+
+        broken_pipe = None
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except BrokenPipeError as exc:  # pragma: no cover - regression guard
+            broken_pipe = exc
+
+        proc.stdin = None
+        stdout, stderr = proc.communicate()
+        assert broken_pipe is None, f"hook command raised BrokenPipeError: {stderr}"
+        assert proc.returncode == 0, stderr
+
+    def test_commands_do_not_pin_a_specific_repo_path(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path / "repo with spaces")
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "--repo" not in post_cmd
+        assert "--repo" not in session_cmd
+        assert "code-review-graph update --skip-flows" in post_cmd
+        assert "code-review-graph status" in session_cmd
+
+
+class TestInstallCodexHooks:
+    def test_creates_hooks_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hooks_path = install_codex_hooks(tmp_path / "repo")
+        assert hooks_path == tmp_path / ".codex" / "hooks.json"
+        assert hooks_path.exists()
+        data = json.loads(hooks_path.read_text())
+        assert "hooks" in data
+        assert "PostToolUse" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
+
+    def test_merges_with_existing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir(parents=True)
+        existing = {
+            "customSetting": True,
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}],
+            },
+        }
+        (codex_dir / "hooks.json").write_text(json.dumps(existing), encoding="utf-8")
+
+        install_codex_hooks(tmp_path / "repo")
+
+        data = json.loads((codex_dir / "hooks.json").read_text())
+        assert data["customSetting"] is True
+        assert "Stop" in data["hooks"]
+        assert "PostToolUse" in data["hooks"]
+        assert "SessionStart" in data["hooks"]
+
+    def test_creates_hooks_backup(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir(parents=True)
+        existing = {"hooks": {"Stop": []}}
+        hooks_path = codex_dir / "hooks.json"
+        hooks_path.write_text(json.dumps(existing), encoding="utf-8")
+
+        install_codex_hooks(tmp_path / "repo")
+
+        backup_path = codex_dir / "hooks.json.bak"
+        assert backup_path.exists()
+        backup = json.loads(backup_path.read_text())
+        assert backup == existing
+
+    def test_idempotent_by_command(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        repo_root = tmp_path / "repo"
+        install_codex_hooks(repo_root)
+        install_codex_hooks(repo_root)
+        data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
+        assert len(data["hooks"]["PostToolUse"]) == 1
+        assert len(data["hooks"]["SessionStart"]) == 1
 
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")
@@ -329,11 +551,19 @@ class TestInjectClaudeMd:
 class TestInjectPlatformInstructionsFiltering:
     def test_all_writes_every_file(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="all")
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {
+            "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
+            "QODER.md", ".kiro/steering/code-review-graph.md",
+            ".github/code-review-graph.instruction.md",
+        }
 
     def test_default_is_all(self, tmp_path):
         updated = inject_platform_instructions(tmp_path)
-        assert set(updated) == {"AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules", "QODER.md", ".kiro/steering/code-review-graph.md"}
+        assert set(updated) == {
+            "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
+            "QODER.md", ".kiro/steering/code-review-graph.md",
+            ".github/code-review-graph.instruction.md",
+        }
 
     def test_claude_writes_nothing(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="claude")
@@ -343,6 +573,7 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / ".cursorrules").exists()
         assert not (tmp_path / ".windsurfrules").exists()
         assert not (tmp_path / "QODER.md").exists()
+        assert not (tmp_path / ".github" / "code-review-graph.instruction.md").exists()
 
     def test_cursor_writes_only_cursor_files(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="cursor")
@@ -358,6 +589,14 @@ class TestInjectPlatformInstructionsFiltering:
     def test_antigravity_writes_agents_and_gemini(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="antigravity")
         assert set(updated) == {"AGENTS.md", "GEMINI.md"}
+
+    def test_gemini_cli_writes_only_gemini_md(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="gemini-cli")
+        assert updated == ["GEMINI.md"]
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
 
     def test_opencode_writes_only_agents(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="opencode")
@@ -532,6 +771,25 @@ class TestInstallPlatformConfigs:
         assert entry["type"] == "stdio"
         assert entry["env"] == []
 
+    def test_install_gemini_cli_config(self, tmp_path):
+        gemini_config = tmp_path / ".gemini" / "settings.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "gemini-cli": {
+                    **PLATFORMS["gemini-cli"],
+                    "config_path": lambda root: gemini_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="gemini-cli")
+        assert "Gemini CLI" in configured
+        data = json.loads(gemini_config.read_text())
+        entry = data["mcpServers"]["code-review-graph"]
+        assert "type" not in entry
+        assert entry["args"][-1] == "serve"
+
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
         qwen_config = tmp_path / ".qwen" / "settings.json"
@@ -593,6 +851,7 @@ class TestInstallPlatformConfigs:
                 "zed": {**PLATFORMS["zed"], "detect": lambda: False},
                 "continue": {**PLATFORMS["continue"], "detect": lambda: False},
                 "antigravity": {**PLATFORMS["antigravity"], "detect": lambda: False},
+                "gemini-cli": {**PLATFORMS["gemini-cli"], "detect": lambda: False},
             },
         ):
             configured = install_platform_configs(tmp_path, target="all")
@@ -662,9 +921,43 @@ class TestInstallPlatformConfigs:
         assert "mcpServers" in data
         assert "code-review-graph" in data["mcpServers"]
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
-        import shutil
-        expected_cmd = "uvx" if shutil.which("uvx") else "code-review-graph"
+        expected_cmd, _ = _detect_serve_command()
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
+
+
+class TestGeminiCLIInstall:
+    def test_install_gemini_cli_hooks_creates_settings_and_scripts(self, tmp_path):
+        settings_dir = tmp_path / ".gemini"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = settings_dir / "settings.json"
+        settings_path.write_text(json.dumps({"customSetting": True}) + "\n", encoding="utf-8")
+
+        out_path = install_gemini_cli_hooks(tmp_path)
+        assert out_path == settings_path
+        assert (settings_dir / "settings.json.bak").exists()
+
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert data["customSetting"] is True
+        assert "hooks" in data
+        assert "SessionStart" in data["hooks"]
+        assert "AfterTool" in data["hooks"]
+
+        session_start = settings_dir / "hooks" / "crg-session-start.sh"
+        update = settings_dir / "hooks" / "crg-update.sh"
+        assert session_start.exists()
+        assert update.exists()
+        assert os.access(session_start, os.X_OK)
+        assert os.access(update, os.X_OK)
+
+    def test_install_gemini_cli_skills_writes_skill_dirs(self, tmp_path):
+        skills_root = install_gemini_cli_skills(tmp_path)
+        assert skills_root == tmp_path / ".gemini" / "skills"
+        skill_path = skills_root / "explore-codebase" / "SKILL.md"
+        assert skill_path.exists()
+        text = skill_path.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert "name: explore-codebase" in text
+        assert "description:" in text
 
 
 class TestCursorHooksConfig:
@@ -923,6 +1216,169 @@ class TestKiroPlatform:
         assert "Kiro" in configured
         config_path = tmp_path / ".kiro" / "settings" / "mcp.json"
         assert not config_path.exists()
+
+
+class TestCopilotPlatform:
+    """Tests for GitHub Copilot platform support."""
+
+    def test_copilot_platform_entry_exists(self):
+        """PLATFORMS dict has a 'copilot' key with correct metadata."""
+        assert "copilot" in PLATFORMS
+        copilot = PLATFORMS["copilot"]
+        assert copilot["name"] == "GitHub Copilot"
+        assert copilot["key"] == "servers"
+        assert copilot["format"] == "object"
+        assert copilot["needs_type"] is True
+
+    def test_install_copilot_config(self, tmp_path):
+        """install_platform_configs creates .vscode/mcp.json with 'servers' key."""
+        configured = install_platform_configs(tmp_path, target="copilot")
+        assert "GitHub Copilot" in configured
+        config_path = tmp_path / ".vscode" / "mcp.json"
+        assert config_path.exists()
+        data = json.loads(config_path.read_text())
+        assert "code-review-graph" in data["servers"]
+        entry = data["servers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert "serve" in entry["args"]
+
+    def test_install_copilot_preserves_existing_servers(self, tmp_path):
+        """Existing server entries are preserved when adding code-review-graph."""
+        config_path = tmp_path / ".vscode" / "mcp.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"servers": {"other-server": {"command": "other"}}}),
+            encoding="utf-8",
+        )
+        install_platform_configs(tmp_path, target="copilot")
+        data = json.loads(config_path.read_text())
+        assert "other-server" in data["servers"]
+        assert "code-review-graph" in data["servers"]
+
+    def test_install_copilot_no_duplicate(self, tmp_path):
+        """Second install skips when code-review-graph already exists."""
+        install_platform_configs(tmp_path, target="copilot")
+        config_path = tmp_path / ".vscode" / "mcp.json"
+        first_content = config_path.read_text()
+        install_platform_configs(tmp_path, target="copilot")
+        second_content = config_path.read_text()
+        assert first_content == second_content
+        data = json.loads(second_content)
+        assert list(data["servers"].keys()).count("code-review-graph") == 1
+
+    def test_copilot_instructions_file_written(self, tmp_path):
+        """inject_platform_instructions creates .github/code-review-graph.instruction.md."""
+        updated = inject_platform_instructions(tmp_path, target="copilot")
+        assert ".github/code-review-graph.instruction.md" in updated
+        instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
+        assert instructions.exists()
+        content = instructions.read_text()
+        assert _CLAUDE_MD_SECTION_MARKER in content
+
+    def test_copilot_instructions_idempotent(self, tmp_path):
+        """Running inject twice produces identical content."""
+        inject_platform_instructions(tmp_path, target="copilot")
+        first = (tmp_path / ".github" / "code-review-graph.instruction.md").read_text()
+        inject_platform_instructions(tmp_path, target="copilot")
+        second = (tmp_path / ".github" / "code-review-graph.instruction.md").read_text()
+        assert first == second
+
+    def test_copilot_dry_run(self, tmp_path):
+        """dry_run=True does not create any files."""
+        configured = install_platform_configs(tmp_path, target="copilot", dry_run=True)
+        assert "GitHub Copilot" in configured
+        config_path = tmp_path / ".vscode" / "mcp.json"
+        assert not config_path.exists()
+
+    def test_copilot_writes_only_copilot_instructions(self, tmp_path):
+        """inject_platform_instructions with target='copilot' writes only copilot file."""
+        updated = inject_platform_instructions(tmp_path, target="copilot")
+        assert updated == [".github/code-review-graph.instruction.md"]
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
+
+    def test_copilot_included_in_all_when_detected(self, tmp_path):
+        """install_platform_configs with target='all' includes Copilot when ~/.vscode exists."""
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".vscode").mkdir(parents=True)
+        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+            configured = install_platform_configs(tmp_path, target="all")
+        assert "GitHub Copilot" in configured
+        config_path = tmp_path / ".vscode" / "mcp.json"
+        assert config_path.exists()
+
+
+class TestCopilotCLIPlatform:
+    """Tests for GitHub Copilot CLI platform support."""
+
+    def test_copilot_cli_platform_entry_exists(self):
+        """PLATFORMS dict has a 'copilot-cli' key with correct metadata."""
+        assert "copilot-cli" in PLATFORMS
+        copilot_cli = PLATFORMS["copilot-cli"]
+        assert copilot_cli["name"] == "GitHub Copilot CLI"
+        assert copilot_cli["key"] == "servers"
+        assert copilot_cli["format"] == "object"
+        assert copilot_cli["needs_type"] is True
+
+    def test_install_copilot_cli_config(self, tmp_path):
+        """install_platform_configs creates ~/.copilot/mcp-config.json with 'servers' key."""
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".copilot").mkdir(parents=True)
+        config_path = fake_home / ".copilot" / "mcp-config.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "copilot-cli": {
+                    **PLATFORMS["copilot-cli"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="copilot-cli")
+        assert "GitHub Copilot CLI" in configured
+        assert config_path.exists()
+        data = json.loads(config_path.read_text())
+        assert "code-review-graph" in data["servers"]
+        entry = data["servers"]["code-review-graph"]
+        assert entry["type"] == "stdio"
+        assert "serve" in entry["args"]
+
+    def test_install_copilot_cli_preserves_existing_servers(self, tmp_path):
+        """Existing server entries are preserved when adding code-review-graph."""
+        fake_home = tmp_path / "fakehome"
+        config_path = fake_home / ".copilot" / "mcp-config.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"servers": {"other-server": {"command": "other"}}}),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "copilot-cli": {
+                    **PLATFORMS["copilot-cli"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="copilot-cli")
+        data = json.loads(config_path.read_text())
+        assert "other-server" in data["servers"]
+        assert "code-review-graph" in data["servers"]
+
+    def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
+        """inject_platform_instructions with target='copilot-cli' writes .github/code-review-graph.instruction.md."""
+        updated = inject_platform_instructions(tmp_path, target="copilot-cli")
+        assert ".github/code-review-graph.instruction.md" in updated
+        instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
+        assert instructions.exists()
+        content = instructions.read_text()
+        assert _CLAUDE_MD_SECTION_MARKER in content
 
 
 class TestDetectServeCommand:

@@ -62,10 +62,13 @@ htmlcov/
 *.excalidraw
 diagrams/export_pngs.mjs
 
-# Evaluation (generated output — test repos, results, reports)
+# Evaluation (generated output — test repos and reports are local; canonical
+# CSVs under evaluate/results/ are tracked as evidence for the numbers in
+# docs/REPRODUCING.md, so contributors can verify without rerunning).
 evaluate/test_repos/
-evaluate/results/
 evaluate/reports/
+evaluate/standalone_token_benchmark.json
+evaluate/eval-run.log
 
 # Superpowers brainstorm docs
 .superpowers/

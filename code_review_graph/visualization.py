@@ -444,24 +444,24 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   #legend h3 {
     font-size: 11px; font-weight: 700; margin-bottom: 6px;
-    color: #8b949e; text-transform: uppercase; letter-spacing: 1px;
+    color: #9eaab6; text-transform: uppercase; letter-spacing: 1px;
   }
   .legend-section { margin-bottom: 10px; }
   .legend-section:last-child { margin-bottom: 0; }
   .legend-item { display: flex; align-items: center; gap: 10px; padding: 2px 0; cursor: default; }
   .legend-item[data-edge-kind] { cursor: pointer; user-select: none; }
   .legend-item[data-edge-kind].dimmed { opacity: 0.3; }
-  .legend-circle { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .legend-item svg { flex-shrink: 0; }
   .legend-line { width: 24px; height: 0; flex-shrink: 0; border-top-width: 2px; }
   .l-calls    { border-top: 2px solid #3fb950; }
   .l-imports  { border-top: 2px dashed #f0883e; }
   .l-inherits { border-top: 2.5px dotted #d2a8ff; }
-  .l-contains { border-top: 1.5px solid rgba(139,148,158,0.3); }
+  .l-contains { border-top: 1px solid rgba(139,148,158,0.3); }
   #stats-bar {
     position: absolute; bottom: 0; left: 0; right: 0;
     background: rgba(13,17,23,0.95); border-top: 1px solid #21262d;
     padding: 8px 24px; display: flex; gap: 32px; justify-content: center;
-    font-size: 12px; color: #8b949e; backdrop-filter: blur(12px);
+    font-size: 12px; color: #9eaab6; backdrop-filter: blur(12px);
   }
   .stat-item { display: flex; gap: 6px; align-items: center; }
   .stat-value { color: #e6edf3; font-weight: 600; }
@@ -483,7 +483,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     text-transform: uppercase; letter-spacing: 0.5px;
   }
   .tt-row { margin-top: 4px; }
-  .tt-label { color: #8b949e; }
+  .tt-label { color: #9eaab6; }
   .tt-file { color: #58a6ff; font-size: 11px; }
   #controls {
     position: absolute; top: 16px; right: 16px;
@@ -507,7 +507,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     outline: none; backdrop-filter: blur(12px);
   }
   #search:focus { border-color: #58a6ff; }
-  #search::placeholder { color: #484f58; }
+  #search::placeholder { color: #6e7681; }
   #search-results {
     position: absolute; top: 52px; right: 16px;
     background: rgba(22,27,34,0.97); border: 1px solid #30363d;
@@ -523,28 +523,31 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   .sr-item:last-child { border-bottom: none; }
   .sr-kind { font-size: 9px; padding: 2px 6px; border-radius: 8px; text-transform: uppercase; font-weight: 700; }
   #detail-panel {
-    position: absolute; top: 16px; right: 16px;
+    position: absolute; top: 16px; left: 16px;
     width: 320px; max-height: calc(100vh - 80px);
     background: rgba(22,27,34,0.97); border: 1px solid #30363d;
     border-radius: 10px; padding: 20px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-    backdrop-filter: blur(12px); z-index: 20;
+    backdrop-filter: blur(12px); z-index: 15;
     overflow-y: auto; display: none; font-size: 12px;
   }
   #detail-panel.visible { display: block; }
   #detail-panel h2 { font-size: 16px; color: #e6edf3; margin-bottom: 4px; word-break: break-all; }
   #detail-panel .dp-close {
     position: absolute; top: 12px; right: 14px;
-    cursor: pointer; color: #8b949e; font-size: 18px; line-height: 1;
-    border: none; background: none;
+    cursor: pointer; color: #8b949e; font-size: 14px; line-height: 1;
+    border: 1px solid #30363d; background: rgba(22,27,34,0.95);
+    border-radius: 6px; width: 28px; height: 28px;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.15s;
   }
-  #detail-panel .dp-close:hover { color: #e6edf3; }
+  #detail-panel .dp-close:hover { color: #e6edf3; border-color: #8b949e; background: #30363d; }
   .dp-section { margin-top: 14px; }
-  .dp-section h4 { color: #8b949e; font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
+  .dp-section h4 { color: #9eaab6; font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 6px; }
   .dp-list { list-style: none; }
   .dp-list li { padding: 3px 0; color: #c9d1d9; cursor: pointer; }
   .dp-list li:hover { color: #58a6ff; text-decoration: underline; }
-  .dp-meta { color: #8b949e; }
+  .dp-meta { color: #9eaab6; }
   .dp-meta span { color: #e6edf3; font-weight: 600; }
   #filter-panel {
     position: absolute; bottom: 50px; left: 16px;
@@ -555,10 +558,61 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   }
   #filter-panel h3 {
     font-size: 11px; font-weight: 700; margin-bottom: 8px;
-    color: #8b949e; text-transform: uppercase; letter-spacing: 1px;
+    color: #9eaab6; text-transform: uppercase; letter-spacing: 1px;
   }
   .filter-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; cursor: pointer; user-select: none; }
   .filter-item input { accent-color: #58a6ff; cursor: pointer; }
+  :focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+  .filter-item input:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+  .dp-close:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+  .filter-item:focus-within { outline: 2px solid #58a6ff; outline-offset: 2px; border-radius: 4px; }
+  #help-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center; z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+  #help-overlay.hidden { display: none; }
+  .help-content {
+    position: relative; background: #161b22; border: 1px solid #30363d;
+    border-radius: 12px; padding: 28px 32px; max-width: 420px; width: 90%;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+  }
+  .help-content h2 { font-size: 16px; color: #e6edf3; margin-bottom: 16px; }
+  .help-content .help-close { position: absolute; top: 12px; right: 14px; }
+  .help-content table { width: 100%; border-collapse: collapse; }
+  .help-content td { padding: 6px 8px; color: #c9d1d9; font-size: 13px; border-bottom: 1px solid #21262d; }
+  .help-content td:first-child { white-space: nowrap; width: 1%; }
+  kbd {
+    display: inline-block; background: #21262d; border: 1px solid #30363d;
+    border-radius: 5px; padding: 2px 7px; font-size: 11px; font-family: inherit;
+    color: #e6edf3; box-shadow: inset 0 -1px 0 #0d1117; line-height: 1.6;
+  }
+  .help-dismiss {
+    margin-top: 16px; display: block; text-align: center;
+    color: #8b949e; font-size: 12px; cursor: pointer;
+  }
+  .help-dismiss:hover { color: #e6edf3; }
+  #loading-overlay {
+    position: fixed; inset: 0; display: flex; align-items: center;
+    justify-content: center; z-index: 50; background: rgba(13,17,23,0.85);
+    backdrop-filter: blur(6px); transition: opacity 0.4s ease;
+  }
+  #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+  .loading-spinner {
+    width: 36px; height: 36px; border: 3px solid #30363d;
+    border-top-color: #58a6ff; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading-text { color: #9eaab6; font-size: 13px; margin-top: 14px; text-align: center; }
+  #empty-state {
+    position: fixed; inset: 0; display: none; align-items: center;
+    justify-content: center; z-index: 50; flex-direction: column; gap: 12px;
+  }
+  #empty-state.visible { display: flex; }
+  .empty-icon { font-size: 48px; opacity: 0.4; }
+  .empty-title { color: #e6edf3; font-size: 18px; font-weight: 600; }
+  .empty-desc { color: #9eaab6; font-size: 13px; max-width: 320px; text-align: center; line-height: 1.6; }
   #community-legend {
     position: absolute; bottom: 50px; right: 16px;
     background: rgba(22,27,34,0.95);
@@ -589,26 +643,43 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     border-radius: 50%; flex-shrink: 0;
   }
   marker { overflow: visible; }
+  g.node-g:focus { outline: none; }
+  g.node-g:focus-visible .node-shape { stroke: #58a6ff !important; stroke-width: 3 !important; }
+  g.node-g:focus-visible .glow-ring { stroke: #58a6ff !important; opacity: 0.6 !important; }
+  button.legend-edge { background: none; border: none; color: #c9d1d9; font-size: 12px; font-family: inherit; }
+  button.legend-edge:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; border-radius: 4px; }
+  .sr-item.sr-active { background: #30363d; }
+  .skip-link {
+    position: absolute; top: -40px; left: 16px; z-index: 100;
+    background: #1f6feb; color: #fff; padding: 8px 16px;
+    border-radius: 0 0 8px 8px; text-decoration: none; font-weight: 600;
+    transition: top 0.2s;
+  }
+  .skip-link:focus { top: 0; }
 </style>
 </head>
 <body>
-<div id="legend" role="complementary" aria-label="Graph legend">
+<a href="#graph-svg" class="skip-link">Skip to graph</a>
+<nav id="legend" aria-label="Graph legend">
   <h3>Nodes</h3>
   <div class="legend-section">
-    <div class="legend-item"><span class="legend-circle" style="background:#58a6ff"></span> File</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#f0883e"></span> Class</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#3fb950"></span> Function</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#d2a8ff"></span> Test</div>
-    <div class="legend-item"><span class="legend-circle" style="background:#8b949e"></span> Type</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="6" fill="#58a6ff"/></svg> File</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><rect x="-5" y="-5" width="10" height="10" fill="#f0883e"/></svg> Class</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,5 -6,5" fill="#3fb950"/></svg> Function</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
   </div>
   <h3>Edges</h3>
   <div class="legend-section">
-    <div class="legend-item" data-edge-kind="CALLS"><span class="legend-line l-calls"></span> Calls</div>
-    <div class="legend-item" data-edge-kind="IMPORTS_FROM"><span class="legend-line l-imports"></span> Imports</div>
-    <div class="legend-item" data-edge-kind="INHERITS"><span class="legend-line l-inherits"></span> Inherits</div>
-    <div class="legend-item" data-edge-kind="CONTAINS"><span class="legend-line l-contains"></span> Contains</div>
+    <button class="legend-item legend-edge" data-edge-kind="CALLS" aria-pressed="true"><span class="legend-line l-calls"></span> Calls</button>
+    <button class="legend-item legend-edge" data-edge-kind="IMPORTS_FROM" aria-pressed="true"><span class="legend-line l-imports"></span> Imports</button>
+    <button class="legend-item legend-edge" data-edge-kind="INHERITS" aria-pressed="true"><span class="legend-line l-inherits"></span> Inherits</button>
+    <button class="legend-item legend-edge" data-edge-kind="CONTAINS" aria-pressed="true"><span class="legend-line l-contains"></span> Contains</button>
+    <button class="legend-item legend-edge" data-edge-kind="IMPLEMENTS" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #f9e2af"></span> Implements</button>
+    <button class="legend-item legend-edge" data-edge-kind="TESTED_BY" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f38ba8"></span> Tested By</button>
+    <button class="legend-item legend-edge" data-edge-kind="DEPENDS_ON" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #fab387"></span> Depends On</button>
   </div>
-</div>
+</nav>
 <div id="filter-panel">
   <h3>Filter by Kind</h3>
   <label class="filter-item"><input type="checkbox" data-kind="File" checked> File</label>
@@ -618,24 +689,64 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
   <label class="filter-item"><input type="checkbox" data-kind="Type" checked> Type</label>
 </div>
 <div id="controls">
-  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name">
+  <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name" aria-controls="search-results" aria-expanded="false">
   <select id="flow-select" aria-label="Select execution flow to highlight"><option value="">Flows</option></select>
-  <button id="btn-community" title="Toggle community coloring" aria-label="Toggle community coloring">Communities</button>
+  <button id="btn-community" title="Toggle community coloring" aria-label="Toggle community coloring" aria-pressed="false">Communities</button>
   <button id="btn-fit" title="Fit to screen" aria-label="Fit graph to screen">Fit</button>
   <button id="btn-labels" title="Toggle labels" class="active" aria-label="Toggle node labels" aria-pressed="true">Labels</button>
+  <button id="btn-help" title="Keyboard shortcuts" aria-label="Show keyboard shortcuts">?</button>
 </div>
-<div id="search-results"></div>
-<div id="detail-panel"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content"></div></div>
+<div id="search-results" role="listbox" aria-label="Search results"></div>
+<div id="detail-panel" role="dialog" aria-label="Node detail" aria-modal="false"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content" tabindex="-1"></div></div>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
 <div id="community-legend" aria-label="Community legend"></div>
-<div id="tooltip"></div>
-<svg role="img" aria-label="Interactive code knowledge graph visualization. Use search to find nodes, click files to expand."></svg>
+<div id="tooltip" role="tooltip" aria-live="polite"></div>
+<div id="help-overlay" class="hidden" role="dialog" aria-label="Help overlay" aria-modal="true">
+  <div class="help-content">
+    <h2>Graph Interactions</h2>
+    <button class="dp-close help-close" aria-label="Close help">&times;</button>
+    <table>
+      <tr><td>Click a file</td><td>Expand/collapse contained symbols</td></tr>
+      <tr><td>Click symbol</td><td>Show detail panel with callers/callees</td></tr>
+      <tr><td>Shift+click file</td><td>Show detail panel without toggling collapse</td></tr>
+      <tr><td>Hover</td><td>Highlight connected nodes and edges</td></tr>
+      <tr><td>Drag</td><td>Pin a node in place</td></tr>
+      <tr><td>Scroll</td><td>Zoom in/out</td></tr>
+      <tr><td>Click+drag background</td><td>Pan the view</td></tr>
+      <tr><td>Search</td><td>Type to filter &mdash; matching nodes stay bright</td></tr>
+      <tr><td>Legend edges</td><td>Click edge types in the legend to toggle visibility</td></tr>
+    </table>
+    <h2 style="margin-top:16px">Keyboard Shortcuts</h2>
+    <table>
+      <tr><td><kbd>/</kbd></td><td>Focus search</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Toggle this help</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Close panel / search / help</td></tr>
+      <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Activate focused node</td></tr>
+      <tr><td><kbd>Arrow keys</kbd></td><td>Navigate between nodes</td></tr>
+    </table>
+    <span class="help-dismiss">Click anywhere outside to dismiss</span>
+  </div>
+</div>
+<div id="loading-overlay" aria-live="polite">
+  <div>
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Laying out graph&hellip;</div>
+  </div>
+</div>
+<div id="empty-state" role="status">
+  <div class="empty-icon">&#x1F50D;</div>
+  <div class="empty-title">No nodes to display</div>
+  <div class="empty-desc">The graph is empty. Run <strong>code-review-graph build</strong> to index your codebase, then regenerate the visualization.</div>
+</div>
+<svg id="graph-svg" tabindex="-1" role="img" aria-label="Interactive code knowledge graph visualization. Use search to find nodes, click files to expand."></svg>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
 var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
 var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)" };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -756,7 +867,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -776,10 +887,13 @@ var simulation = d3.forceSimulation(nodes)
   .alphaDecay(isLarge ? 0.04 : 0.025)
   .velocityDecay(0.4);
 var EDGE_CFG = {
-  CONTAINS:     { dash:null, width:1, opacity:0.08, marker:"" },
-  CALLS:        { dash:null, width:1.5, opacity:0.7, marker:"url(#arrow-calls)" },
-  IMPORTS_FROM: { dash:"6,3", width:1.5, opacity:0.65, marker:"url(#arrow-imports)" },
-  INHERITS:     { dash:"3,4", width:2, opacity:0.7, marker:"url(#arrow-inherits)" },
+  CONTAINS:     { dash:null, width:1, opacity:0.14, marker:"" },
+  CALLS:        { dash:null, width:2, opacity:0.7, marker:"url(#arrow-calls)" },
+  IMPORTS_FROM: { dash:"8,4", width:2, opacity:0.65, marker:"url(#arrow-imports)" },
+  INHERITS:     { dash:"2,6", width:2.5, opacity:0.7, marker:"url(#arrow-inherits)" },
+  IMPLEMENTS:   { dash:"4,3", width:1.5, opacity:0.65, marker:"url(#arrow-implements)" },
+  TESTED_BY:    { dash:"2,4", width:1.5, opacity:0.6, marker:"url(#arrow-tested_by)" },
+  DEPENDS_ON:   { dash:"8,4", width:1, opacity:0.6, marker:"url(#arrow-depends_on)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -825,8 +939,8 @@ function updateNodes() {
     .attr("fill","none")
     .attr("stroke", function(d) { return nodeColor(d); })
     .attr("stroke-width", 1.5).attr("opacity", 0.3).attr("filter","url(#glow)");
-  enter.append("circle").attr("class","node-circle")
-    .attr("r", function(d) { return degreeRadius(d); })
+  enter.append("path").attr("class","node-shape")
+    .attr("d", function(d) { return d3.symbol().type(KIND_SHAPE[d.kind] || d3.symbolCircle).size(KIND_AREA[d.kind] || 113)(); })
     .attr("fill", function(d) { return nodeColor(d); })
     .attr("stroke", function(d) { return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
     .attr("stroke-width", function(d) { return d.kind === "File" ? 2 : 1; })
@@ -841,13 +955,47 @@ function updateNodes() {
       showDetailPanel(d);
     })
     .call(d3.drag().on("start", dragS).on("drag", dragD).on("end", dragE));
+  enter.attr("tabindex", 0).attr("role", "button")
+    .attr("aria-label", function(d) { return d.kind + ": " + d.label; })
+    .on("keydown", function(ev, d) {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        if (d.kind === "File" && !ev.shiftKey) toggleCollapse(d.qualified_name);
+        showDetailPanel(d);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        detailPanel.classList.remove("visible");
+        hideTooltip();
+      } else if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].indexOf(ev.key) !== -1) {
+        ev.preventDefault();
+        var vis = nodes.filter(function(n) { return !n._hidden; });
+        var best = null, bestDist = Infinity;
+        vis.forEach(function(n) {
+          if (n.qualified_name === d.qualified_name) return;
+          var dx = n.x - d.x, dy = n.y - d.y;
+          var dist = Math.sqrt(dx*dx + dy*dy);
+          var ok = false;
+          if (ev.key === "ArrowRight" && dx > 0 && Math.abs(dy) < Math.abs(dx)) ok = true;
+          if (ev.key === "ArrowLeft"  && dx < 0 && Math.abs(dy) < Math.abs(dx)) ok = true;
+          if (ev.key === "ArrowDown"  && dy > 0 && Math.abs(dx) < Math.abs(dy)) ok = true;
+          if (ev.key === "ArrowUp"    && dy < 0 && Math.abs(dx) < Math.abs(dy)) ok = true;
+          if (ok && dist < bestDist) { best = n; bestDist = dist; }
+        });
+        if (best) {
+          var target = nodeGroup.selectAll("g.node-g").filter(function(n) { return n.qualified_name === best.qualified_name; }).node();
+          if (target) target.focus();
+        }
+      }
+    })
+    .on("focus", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
+    .on("blur",  function(ev, d) { highlightConnected(d, false); hideTooltip(); });
   nodeSel = enter.merge(nodeSel);
   labelSel = labelGroup.selectAll("text.node-label").data(vis, function(d) { return d.qualified_name; });
   labelSel.exit().remove();
   var lEnter = labelSel.enter().append("text").attr("class","node-label")
     .attr("text-anchor","start").attr("dy","0.35em")
     .text(function(d) { return d.label; })
-    .attr("fill", function(d) { return d.kind === "File" ? "#e6edf3" : d.kind === "Class" ? "#f0883e" : "#8b949e"; })
+    .attr("fill", function(d) { return d.kind === "File" ? "#e6edf3" : d.kind === "Class" ? "#f0883e" : "#9eaab6"; })
     .attr("font-size", function(d) { return d.kind === "File" ? "12px" : d.kind === "Class" ? "11px" : "10px"; })
     .attr("font-weight", function(d) { return d.kind === "File" ? 700 : d.kind === "Class" ? 600 : 400; });
   labelSel = lEnter.merge(labelSel);
@@ -873,7 +1021,7 @@ function highlightConnected(d, on) {
       if (s === d.qualified_name) connected.add(t);
       if (t === d.qualified_name) connected.add(s);
     });
-    nodeGroup.selectAll("g.node-g").select(".node-circle")
+    nodeGroup.selectAll("g.node-g").select(".node-shape")
       .transition().duration(150).attr("opacity", function(n) { return connected.has(n.qualified_name) ? 1 : 0.15; });
     linkSel.transition().duration(150)
       .attr("opacity", function(e) {
@@ -888,7 +1036,7 @@ function highlightConnected(d, on) {
       });
     labelSel.transition().duration(150).attr("opacity", function(n) { return connected.has(n.qualified_name) ? 1 : 0.1; });
   } else {
-    nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300).attr("opacity", 1);
+    nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
     linkSel.transition().duration(300)
       .attr("opacity", function(e) { return eStyle(e).opacity; })
       .attr("stroke-width", function(e) { return eStyle(e).width; });
@@ -932,7 +1080,16 @@ function fitGraph() {
   var tx = W/2 - (b.x + b.width/2)*s, ty = H/2 - (b.y + b.height/2)*s;
   svg.transition().duration(600).call(zoomBehavior.transform, d3.zoomIdentity.translate(tx, ty).scale(s));
 }
-simulation.on("end", fitGraph);
+var loadingOverlay = document.getElementById("loading-overlay");
+var emptyState = document.getElementById("empty-state");
+if (nodes.length === 0) {
+  loadingOverlay.classList.add("hidden");
+  emptyState.classList.add("visible");
+}
+simulation.on("end", function() {
+  loadingOverlay.classList.add("hidden");
+  fitGraph();
+});
 function zoomToNode(qn) {
   var nd = nodeById.get(qn);
   if (!nd || nd.x == null) return;
@@ -952,6 +1109,7 @@ document.querySelectorAll(".legend-item[data-edge-kind]").forEach(function(el) {
     var kind = this.dataset.edgeKind;
     if (hiddenEdgeKinds.has(kind)) { hiddenEdgeKinds.delete(kind); this.classList.remove("dimmed"); }
     else { hiddenEdgeKinds.add(kind); this.classList.add("dimmed"); }
+    this.setAttribute("aria-pressed", !hiddenEdgeKinds.has(kind));
     updateLinks();
   });
 });
@@ -966,8 +1124,8 @@ document.querySelectorAll("#filter-panel input[data-kind]").forEach(function(el)
 document.getElementById("btn-community").addEventListener("click", function() {
   communityColoringOn = !communityColoringOn;
   this.classList.toggle("active");
-  nodeGroup.selectAll("g.node-g").select(".node-circle")
-    .transition().duration(300)
+  this.setAttribute("aria-pressed", communityColoringOn);
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300)
     .attr("fill", function(d) { return nodeColor(d); });
   nodeGroup.selectAll("g.node-g").select(".glow-ring")
     .transition().duration(300)
@@ -1052,7 +1210,7 @@ flowSelect.addEventListener("change", function() {
 });
 function applyFlowHighlight() {
   if (!activeFlowQns || activeFlowQns.size === 0) { clearFlowHighlight(); return; }
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(200)
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(200)
     .attr("opacity", function(d) { return activeFlowQns.has(d.qualified_name) ? 1 : 0.2; });
   if (labelSel) labelSel.transition().duration(200)
     .attr("opacity", function(d) { return activeFlowQns.has(d.qualified_name) ? 1 : 0.1; });
@@ -1064,18 +1222,26 @@ function applyFlowHighlight() {
     });
 }
 function clearFlowHighlight() {
-  nodeGroup.selectAll("g.node-g").select(".node-circle").transition().duration(300).attr("opacity", 1);
+  nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
   if (linkSel) linkSel.transition().duration(300).attr("opacity", function(e) { return eStyle(e).opacity; });
   if (labelSel) labelSel.transition().duration(300).attr("opacity", 1);
   updateLabelVisibility();
 }
 var detailPanel = document.getElementById("detail-panel");
 var dpContent = document.getElementById("dp-content");
+var detailTrigger = null;
 document.querySelector("#detail-panel .dp-close").addEventListener("click", function() {
   detailPanel.classList.remove("visible");
+  document.getElementById("legend").style.display = "";
+  if (detailTrigger) detailTrigger.focus();
 });
-svg.on("click", function() { detailPanel.classList.remove("visible"); });
+svg.on("click", function() {
+  detailPanel.classList.remove("visible");
+  document.getElementById("legend").style.display = "";
+  if (detailTrigger) detailTrigger.focus();
+});
 function showDetailPanel(d) {
+  detailTrigger = document.activeElement;
   var callers = [], callees = [];
   edges.forEach(function(e) {
     var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
@@ -1107,6 +1273,8 @@ function showDetailPanel(d) {
   dpContent.textContent = "";
   dpContent.insertAdjacentHTML("beforeend", h);
   detailPanel.classList.add("visible");
+  document.getElementById("legend").style.display = "none";
+  detailPanel.querySelector(".dp-close").focus();
   dpContent.querySelectorAll("li[data-qn]").forEach(function(li) {
     li.addEventListener("click", function() {
       var qn = li.dataset.qn;
@@ -1125,23 +1293,50 @@ searchInput.addEventListener("input", function() {
   showSearchResults();
 });
 searchInput.addEventListener("focus", showSearchResults);
+searchInput.addEventListener("keydown", function(ev) {
+  var items = searchResults.querySelectorAll(".sr-item");
+  if (!items.length) return;
+  var active = searchResults.querySelector(".sr-item.sr-active");
+  var idx = active ? Array.from(items).indexOf(active) : -1;
+  if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    if (active) active.classList.remove("sr-active");
+    idx = (idx + 1) % items.length;
+    items[idx].classList.add("sr-active");
+    items[idx].scrollIntoView({ block: "nearest" });
+    searchInput.setAttribute("aria-activedescendant", items[idx].id);
+  } else if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    if (active) active.classList.remove("sr-active");
+    idx = idx <= 0 ? items.length - 1 : idx - 1;
+    items[idx].classList.add("sr-active");
+    items[idx].scrollIntoView({ block: "nearest" });
+    searchInput.setAttribute("aria-activedescendant", items[idx].id);
+  } else if (ev.key === "Enter" && active) {
+    ev.preventDefault();
+    active.click();
+  }
+});
 document.addEventListener("click", function(ev) {
   if (!searchResults.contains(ev.target) && ev.target !== searchInput) searchResults.style.display = "none";
 });
 function showSearchResults() {
-  if (!searchTerm) { searchResults.style.display = "none"; return; }
+  if (!searchTerm) { searchResults.style.display = "none"; searchInput.setAttribute("aria-expanded", "false"); return; }
   var matched = [];
   nodes.forEach(function(n) {
     if (n._hidden) return;
     var hay = (n.label + " " + n.qualified_name).toLowerCase();
     if (hay.indexOf(searchTerm) !== -1) matched.push(n);
   });
-  if (!matched.length) { searchResults.style.display = "none"; return; }
+  if (!matched.length) { searchResults.style.display = "none"; searchInput.setAttribute("aria-expanded", "false"); return; }
   searchResults.textContent = "";
-  matched.slice(0, 15).forEach(function(n) {
+  matched.slice(0, 15).forEach(function(n, i) {
     var bg = KIND_COLOR[n.kind] || "#555";
     var div = document.createElement("div");
     div.className = "sr-item";
+    div.setAttribute("role", "option");
+    div.setAttribute("tabindex", "-1");
+    div.id = "sr-" + i;
     var kindSpan = document.createElement("span");
     kindSpan.className = "sr-kind";
     kindSpan.style.background = bg;
@@ -1157,10 +1352,11 @@ function showSearchResults() {
     searchResults.appendChild(div);
   });
   searchResults.style.display = "block";
+  searchInput.setAttribute("aria-expanded", "true");
 }
 function applySearchFilter() {
   if (!searchTerm) {
-    nodeGroup.selectAll("g.node-g").select(".node-circle").attr("opacity", 1);
+    nodeGroup.selectAll("g.node-g").select(".node-shape").attr("opacity", 1);
     if (labelSel) labelSel.attr("opacity", 1);
     if (linkSel) linkSel.attr("opacity", function(e) { return eStyle(e).opacity; });
     updateLabelVisibility();
@@ -1172,7 +1368,7 @@ function applySearchFilter() {
     var hay = (n.label + " " + n.qualified_name).toLowerCase();
     if (hay.indexOf(searchTerm) !== -1) matched.add(n.qualified_name);
   });
-  nodeGroup.selectAll("g.node-g").select(".node-circle")
+  nodeGroup.selectAll("g.node-g").select(".node-shape")
     .attr("opacity", function(d) { return matched.has(d.qualified_name) ? 1 : 0.08; });
   if (labelSel) labelSel
     .attr("opacity", function(d) { return matched.has(d.qualified_name) ? 1 : 0.05; })
@@ -1183,6 +1379,42 @@ function applySearchFilter() {
     return (matched.has(s) || matched.has(t)) ? eStyle(e).opacity : 0.02;
   });
 }
+var helpOverlay = document.getElementById("help-overlay");
+function toggleHelp() {
+  helpOverlay.classList.toggle("hidden");
+  if (!helpOverlay.classList.contains("hidden")) {
+    helpOverlay.querySelector(".help-close").focus();
+  }
+}
+document.getElementById("btn-help").addEventListener("click", toggleHelp);
+helpOverlay.querySelector(".help-close").addEventListener("click", toggleHelp);
+helpOverlay.addEventListener("click", function(ev) {
+  if (ev.target === helpOverlay) toggleHelp();
+});
+document.addEventListener("keydown", function(ev) {
+  var tag = (ev.target.tagName || "").toLowerCase();
+  var inInput = tag === "input" || tag === "textarea" || tag === "select" || ev.target.isContentEditable;
+  if (ev.key === "Escape") {
+    if (detailPanel.classList.contains("visible")) {
+      detailPanel.classList.remove("visible");
+      if (detailTrigger) detailTrigger.focus();
+    } else if (searchResults.style.display === "block") {
+      searchResults.style.display = "none";
+      searchInput.focus();
+    } else if (!helpOverlay.classList.contains("hidden")) {
+      toggleHelp();
+    }
+    return;
+  }
+  if (inInput) return;
+  if (ev.key === "/") {
+    ev.preventDefault();
+    searchInput.focus();
+  } else if (ev.key === "?") {
+    ev.preventDefault();
+    toggleHelp();
+  }
+});
 </script>
 </body>
 </html>

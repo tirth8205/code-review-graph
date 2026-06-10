@@ -20,6 +20,7 @@ from code_review_graph.incremental import (
     get_db_path,
     get_staged_and_unstaged,
     incremental_update,
+    start_watch_thread,
 )
 
 
@@ -335,6 +336,101 @@ class TestDataDir:
         result = find_project_root(tmp_path)
         # Should NOT equal the bogus env value
         assert result != tmp_path / "does-not-exist-123"
+
+
+class TestDataDirRegistry:
+    """Tests for registry-based data_dir resolution."""
+
+    def test_registry_data_dir_overrides_default(self, tmp_path, monkeypatch):
+        """Registry data_dir should override default .code-review-graph."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        external = tmp_path / "external"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        # Set in registry
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(external))
+
+        result = get_data_dir(repo)
+        assert result == external.resolve()
+        assert result.is_dir()
+        assert not (repo / ".code-review-graph").exists()
+
+    def test_registry_data_dir_overrides_env_var(self, tmp_path, monkeypatch):
+        """Registry data_dir should override CRG_DATA_DIR."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        registry_dir = tmp_path / "registry-data"
+        env_dir = tmp_path / "env-data"
+
+        monkeypatch.setenv("CRG_DATA_DIR", str(env_dir))
+
+        # Set in registry
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(registry_dir))
+
+        result = get_data_dir(repo)
+        # Registry should win over env var
+        assert result == registry_dir.resolve()
+        assert not env_dir.exists()
+
+    def test_registry_fallback_to_env_var(self, tmp_path, monkeypatch):
+        """Fall back to CRG_DATA_DIR when registry has no entry."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        env_dir = tmp_path / "env-data"
+
+        monkeypatch.setenv("CRG_DATA_DIR", str(env_dir))
+
+        # Don't set in registry
+        result = get_data_dir(repo)
+        assert result == env_dir.resolve()
+        assert result.is_dir()
+
+    def test_registry_fallback_to_default(self, tmp_path, monkeypatch):
+        """Fall back to default when neither registry nor env var is set."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        # Don't set in registry
+        result = get_data_dir(repo)
+        assert result == repo / ".code-review-graph"
+        assert result.is_dir()
+
+    def test_data_dir_auto_creates_directory(self, tmp_path, monkeypatch):
+        """get_data_dir should auto-create the data directory."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        data_dir = tmp_path / "nonexistent" / "nested" / "path"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        registry = Registry()
+        registry.set_data_dir(str(repo), str(data_dir))
+
+        result = get_data_dir(repo)
+        assert result.exists()
+        assert result.is_dir()
+        assert result == data_dir.resolve()
 
 
 class TestIsBinary:
@@ -740,5 +836,35 @@ class TestMultiHopDependents:
                 "DependentList.truncated should be False when the "
                 "expansion completed without hitting the cap"
             )
+        finally:
+            store.close()
+
+
+class TestStartWatchThread:
+    @patch("code_review_graph.incremental.watch")
+    def test_starts_background_thread(self, mock_watch, tmp_path):
+        """start_watch_thread returns a running thread when watchdog is available."""
+        import threading
+        barrier = threading.Event()
+        mock_watch.side_effect = lambda *a, **kw: barrier.wait(timeout=5)
+        db_path = tmp_path / "graph.db"
+        store = GraphStore(db_path)
+        try:
+            thread = start_watch_thread(tmp_path, store, daemon=True)
+            assert thread is not None
+            assert thread.daemon is True
+            assert thread.is_alive()
+        finally:
+            barrier.set()
+            store.close()
+
+    def test_returns_none_when_watchdog_unavailable(self, tmp_path):
+        """start_watch_thread returns None when watchdog is not installed."""
+        db_path = tmp_path / "graph.db"
+        store = GraphStore(db_path)
+        try:
+            with patch.dict("sys.modules", {"watchdog": None}):
+                thread = start_watch_thread(tmp_path, store, daemon=True)
+            assert thread is None
         finally:
             store.close()
