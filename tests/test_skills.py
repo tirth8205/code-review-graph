@@ -192,6 +192,41 @@ class TestGenerateHooksConfig:
                     assert "timeout" in hook
 
 
+class TestShippedHooksFiles:
+    """The vestigial hooks/ directory ships in the sdist (see pyproject
+    sdist includes). Its hook commands must drain stdin exactly like the
+    skills.py-generated hooks, or large hook payloads reproduce the
+    BrokenPipeError from bug #493.
+    """
+
+    HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+    STDIN_DRAIN = "cat >/dev/null || true; "
+
+    def test_hooks_json_commands_drain_stdin(self):
+        data = json.loads(
+            (self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook["command"]
+            for entries in data.values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        assert commands, "hooks/hooks.json should define at least one command hook"
+        for command in commands:
+            assert command.startswith(self.STDIN_DRAIN), (
+                f"hooks.json command lacks the stdin drain prefix: {command!r}"
+            )
+
+    def test_session_start_script_drains_stdin(self):
+        script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
+        assert "cat >/dev/null" in script, (
+            "session-start.sh must drain stdin to avoid BrokenPipeError "
+            "on large hook payloads (bug #493)"
+        )
+
+
 class TestInstallGitHook:
     def _make_git_repo(self, tmp_path: Path) -> Path:
         (tmp_path / ".git" / "hooks").mkdir(parents=True)
