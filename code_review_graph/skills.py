@@ -349,13 +349,30 @@ def install_platform_configs(
             # for editors like Zed that allow non-standard JSON).
             stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
             stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
-            try:
-                existing = json.loads(stripped)
-            except (json.JSONDecodeError, OSError):
-                print(f"  {plat['name']}: {config_path} contains "
-                      f"unparseable JSON — skipping to avoid data loss. "
-                      f"Please add the MCP config manually.")
-                continue
+            if not stripped.strip():
+                # An empty (or comment-only) file is a valid empty config,
+                # not a parse failure — proceed and write a fresh one rather
+                # than mis-flagging it "unparseable" and skipping. See #344.
+                existing = {}
+            else:
+                try:
+                    parsed = json.loads(stripped)
+                except (json.JSONDecodeError, OSError):
+                    print(f"  {plat['name']}: {config_path} contains "
+                          f"unparseable JSON — skipping to avoid data loss. "
+                          f"Please add the MCP config manually.")
+                    continue
+                if not isinstance(parsed, dict):
+                    # Valid JSON, but the top level is a list/scalar rather
+                    # than an object. Writing our server object would clobber
+                    # the user's data, and the ``.get()`` calls below would
+                    # raise AttributeError. Refuse and skip. See #344.
+                    print(f"  {plat['name']}: {config_path} is valid JSON but "
+                          f"not a top-level object "
+                          f"({type(parsed).__name__}) — skipping to avoid "
+                          f"data loss. Please add the MCP config manually.")
+                    continue
+                existing = parsed
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])

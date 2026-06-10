@@ -1647,3 +1647,154 @@ class TestInstallOpenCodePlugin:
         # Should be readable as UTF-8 without errors
         content = result.read_text(encoding="utf-8")
         assert len(content) > 0
+
+
+class TestInstallConfigDataLoss:
+    """Regression tests for #344: ``install_platform_configs`` must never
+    destroy a user's existing platform config. Two residual bugs remained
+    on main even after the JSONC-stripping fix:
+
+    * a top-level JSON *array* hit ``existing.get(...)`` and crashed with
+      AttributeError before writing;
+    * an *empty* settings file was mis-flagged "unparseable" and skipped,
+      so a fresh install on an empty file silently did nothing.
+    """
+
+    def _run_zed(self, settings_path: Path, root: Path):
+        with patch.dict(
+            PLATFORMS,
+            {
+                "zed": {
+                    **PLATFORMS["zed"],
+                    "config_path": lambda r: settings_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            return install_platform_configs(root, target="zed")
+
+    def test_malformed_json_is_preserved_not_overwritten(self, tmp_path, capsys):
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = "{ this is not valid json }\n"
+        settings.write_text(original, encoding="utf-8")
+
+        configured = self._run_zed(settings, tmp_path)
+
+        assert "Zed" not in configured
+        assert settings.read_text(encoding="utf-8") == original
+        assert "unparseable" in capsys.readouterr().out
+
+    def test_top_level_array_does_not_crash_and_is_preserved(self, tmp_path, capsys):
+        """The actual residual bug: a top-level array crashed install with
+        ``AttributeError: 'list' object has no attribute 'get'``."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = '["not", "an", "object"]'
+        settings.write_text(original, encoding="utf-8")
+
+        # Must not raise.
+        configured = self._run_zed(settings, tmp_path)
+
+        assert "Zed" not in configured
+        assert settings.read_text(encoding="utf-8") == original
+        out = capsys.readouterr().out
+        assert "not a top-level object" in out
+
+    def test_empty_file_is_treated_as_fresh_config(self, tmp_path):
+        """An empty settings.json is a valid empty config, not a parse
+        failure — install should write a fresh config rather than skip."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text("", encoding="utf-8")
+
+        configured = self._run_zed(settings, tmp_path)
+
+        assert "Zed" in configured
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        assert "code-review-graph" in data["context_servers"]
+
+    def test_jsonc_comments_still_supported(self, tmp_path):
+        """Guard: the empty-file / array checks must not regress main's
+        JSONC support — a comment-bearing Zed config must still merge."""
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            "{\n"
+            '  // user theme preference\n'
+            '  "theme": "One Dark",\n'
+            "}\n",
+            encoding="utf-8",
+        )
+
+        configured = self._run_zed(settings, tmp_path)
+
+        assert "Zed" in configured
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        # User's existing setting preserved AND our server added.
+        assert data["theme"] == "One Dark"
+        assert "code-review-graph" in data["context_servers"]
+
+
+class TestGeneratedHooksGuardGitRepo:
+    """Regression coverage for #312: generated Claude Code hooks must guard
+    the ``update`` / ``status`` commands behind a git-repo check so that, in
+    a monorepo whose workspace root has no ``.git``, the PostToolUse hook
+    no-ops silently instead of erroring on every tool call.
+    """
+
+    def test_post_tool_use_command_guarded_by_git_check(self):
+        config = generate_hooks_config(Path("/repo"))
+        cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        # Must short-circuit on the git check before calling update.
+        assert "git rev-parse --git-dir" in cmd
+        idx_guard = cmd.index("git rev-parse --git-dir")
+        idx_update = cmd.index("code-review-graph update")
+        assert idx_guard < idx_update, "git guard must precede the update call"
+
+    def test_session_start_command_guarded_by_git_check(self):
+        config = generate_hooks_config(Path("/repo"))
+        cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "git rev-parse --git-dir" in cmd
+        idx_guard = cmd.index("git rev-parse --git-dir")
+        idx_status = cmd.index("code-review-graph status")
+        assert idx_guard < idx_status
+
+
+class TestInstallSkillsRespectTargetPlatform:
+    """Regression coverage for #350: ``install --platform cursor`` must NOT
+    generate Claude Code skills under ``.claude/skills/`` — that directory
+    is only read by Claude Code, and creating it for other platforms
+    confused users into thinking the tool wrote Claude config unprompted.
+    """
+
+    def _run_install(self, tmp_path, platform: str) -> bool:
+        import argparse
+
+        from code_review_graph import cli as crg_cli
+
+        args = argparse.Namespace(
+            command="install",
+            repo=str(tmp_path),
+            platform=platform,
+            yes=True,
+            dry_run=False,
+            no_skills=False,
+            no_hooks=True,
+            no_instructions=True,
+        )
+        with patch("builtins.input", return_value="n"):
+            crg_cli._handle_init(args)
+        return (tmp_path / ".claude" / "skills").is_dir()
+
+    def test_cursor_install_does_not_create_claude_skills(self, tmp_path):
+        assert self._run_install(tmp_path, "cursor") is False
+
+    def test_windsurf_install_does_not_create_claude_skills(self, tmp_path):
+        assert self._run_install(tmp_path, "windsurf") is False
+
+    def test_claude_install_creates_skills(self, tmp_path):
+        assert self._run_install(tmp_path, "claude") is True
+
+    def test_all_target_creates_skills(self, tmp_path):
+        assert self._run_install(tmp_path, "all") is True
