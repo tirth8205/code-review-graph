@@ -36,3 +36,10 @@ multi_hop_tasks:
     traversal_pattern: callees_of
     expected_neighbor_names: ["mixin", "create", "init"]
     k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does app.handle process the middleware stack"
+  - "Where does res.send write the response body"
+  - "How does createApplication initialize an app"

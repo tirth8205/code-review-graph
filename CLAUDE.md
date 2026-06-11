@@ -8,7 +8,7 @@
 When using code-review-graph MCP tools, follow these rules:
 1. First call: `get_minimal_context(task="<description>")` — costs ~100 tokens, gives you the full picture.
 2. All subsequent calls: use `detail_level="minimal"` unless you need more.
-3. Prefer `query_graph` with a specific target over broad `list_*` calls.
+3. Prefer `query_graph_tool` with a specific target over broad `list_*` calls.
 4. The `next_tool_suggestions` field in every response tells you the optimal next step.
 5. Target: ≤5 tool calls per task, ≤800 total tokens of graph context.
 
@@ -16,13 +16,14 @@ When using code-review-graph MCP tools, follow these rules:
 
 - **Core Package**: `code_review_graph/` (Python 3.10+)
   - `parser.py` — Tree-sitter multi-language AST parser plus targeted fallbacks for broad source-language and notebook support
+  - `custom_languages.py` — Config-driven custom language support (`.code-review-graph/languages.toml`, see docs/CUSTOM_LANGUAGES.md)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
   - `tools/` — 30 MCP tool implementations split by domain
   - `main.py` — FastMCP server entry point, registers 30 tools + 5 prompts
   - `incremental.py` — Git-based change detection, file watching
   - `embeddings.py` — Optional vector embeddings (local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax)
   - `visualization.py` — D3.js interactive HTML graph generator
-  - `cli.py` — CLI entry point (install, build, update, postprocess, watch, status, visualize, serve/mcp, wiki, detect-changes, register, unregister, repos, eval, daemon)
+  - `cli.py` — CLI entry point (install/init, build, update, postprocess, embed, watch, status, visualize, serve/mcp, wiki, detect-changes, register, unregister, repos, eval, daemon)
   - `flows.py` — Execution flow detection and criticality scoring
   - `communities.py` — Community detection (Leiden algorithm or file-based grouping) and architecture overview
   - `search.py` — FTS5 hybrid search (keyword + vector)
@@ -90,6 +91,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_visualization.py` — Export, HTML generation, C++ resolution
 - `tests/test_incremental.py` — Build, update, migration, git ops
 - `tests/test_multilang.py` — Broad language parsing tests, including SFCs, notebooks, SQL, Perl XS, and modern systems/web languages
+- `tests/test_custom_languages.py` — Config-driven custom languages (languages.toml loader + end-to-end Erlang parse)
 - `tests/test_embeddings.py` — Vector encode/decode, similarity, store
 - `tests/test_flows.py` — Execution flow detection and criticality
 - `tests/test_communities.py` — Community detection, architecture overview
@@ -106,6 +108,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_eval.py` — Evaluation framework
 - `tests/test_tsconfig_resolver.py` — TypeScript path resolution
 - `tests/test_integration_v2.py` — v2 pipeline integration test
+- `tests/test_action_render.py` — GitHub Action PR comment renderer (`scripts/render_pr_comment.py`)
 - `tests/fixtures/` — Sample files for each supported language
 
 ## CI Pipeline

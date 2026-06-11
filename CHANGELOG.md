@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-06-10
+
+**Community-response release.** Built from a full audit of every open PR,
+issue, and discussion: community fixes merged with credit, verified defects
+fixed (including two open Windows bugs), benchmark claims made independently
+checkable, and the project's first self-hosted PR review bot — this repo now
+reviews its own pull requests with its own graph. No breaking changes.
+
+### Added
+
+- **Custom languages without forking** (#320): drop a
+  `.code-review-graph/languages.toml` into your repo to index any grammar
+  shipped by tree-sitter-language-pack (extension map + node-type lists,
+  validated and capped, built-ins always win). See docs/CUSTOM_LANGUAGES.md.
+- **GitHub Action** for risk-scored PR review comments: composite `action.yml`
+  builds/restores the graph from CI cache, runs `detect-changes` against the
+  PR base, and upserts a sticky comment with risk table, affected flows, test
+  gaps, and the Token Savings line. Dogfooded on this repo via
+  `.github/workflows/pr-review.yml`. See docs/GITHUB_ACTION.md.
+- **`agent_baseline` eval benchmark**: compares graph queries against a
+  realistic grep-and-read-top-k agent baseline instead of the whole-corpus
+  strawman; wired into all six pinned eval configs.
+- **Co-change ground truth for `impact_accuracy`**: predictions are now also
+  graded against files actually co-changed in the same commit; the legacy
+  metric is explicitly labelled "graph-derived (circular — upper bound)".
+- **Weekly eval CI** (`.github/workflows/eval.yml`): report-only cron run of
+  the two smallest pinned configs with CSV artifacts and a job summary.
+- **docs/FAQ.md**: how CRG compares to LSP, RAG, grep/agentic search, and
+  adjacent tools; when NOT to use it; verification steps; monorepo/worktree
+  and registry guidance. Linked from the README.
+- GitHub issue forms (bug/feature/platform), a PR template mirroring the
+  CONTRIBUTING checklist, and dependabot config for pip + GitHub Actions.
+
+### Fixed
+
+- `store_file_batch` is now guarded against open transactions like its sibling
+  (#489, merged from community PR #529 by @Devilthelegend — thank you).
+- **Windows: `daemon status` no longer crashes with WinError 87** (#511):
+  PID liveness now uses `OpenProcess`/`WaitForSingleObject` on win32 instead
+  of `os.kill(pid, 0)`.
+- **Windows: CLI `detect-changes` mapped 0 functions** (#528): diff paths are
+  now remapped to absolute native paths before node lookup, matching the MCP
+  tool's behavior; also prevents the misleading "~100% token savings" line on
+  an empty result.
+- Eval benchmarks no longer record failed runs as inflated wins: thrown
+  `get_review_context`/`analyze_changes` calls are marked `status=error` and
+  excluded from aggregates instead of producing naive/1 ratios or recall=1.0.
+- Unknown embedding provider names now raise a clear error listing valid
+  providers instead of silently falling back to the local model.
+- The five analysis MCP tools and the wiki-page tool no longer leak SQLite
+  connections (try/finally `store.close()`).
+- `install` git hooks now resolve the real hooks directory via
+  `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath`
+  (husky) setups get a working pre-commit hook (#313 residue).
+- Shipped `hooks/hooks.json` and `hooks/session-start.sh` now drain stdin,
+  matching the generated configs (#493 class).
+- `fastmcp` is now capped `<4` so the next major cannot silently break the
+  server (the #488 failure mode).
+
+### Changed
+
+- README benchmarks section now leads with the ~82x median per-question
+  reduction (528x presented as the best case, not the headline), the
+  limitations block is visible instead of collapsed, and "100% impact recall"
+  is reframed as a graph-derived upper bound alongside the new co-change
+  metric.
+- Stale translated READMEs (zh-CN, ja-JP, ko-KR, hi-IN) carry a staleness
+  banner; the zh-CN benchmark captions and docs/USAGE.md no longer contradict
+  the English README.
+- SECURITY.md now points to GitHub private vulnerability reporting as the
+  canonical channel.
+
 ## [2.3.5] - 2026-05-25
 
 **Real-time token savings, visible to humans.** The estimated context-savings

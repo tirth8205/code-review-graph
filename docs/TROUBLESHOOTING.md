@@ -16,7 +16,7 @@ cd /path/to/your/project
 code-review-graph install                 # rewrites .claude/settings.json
 ```
 
-The re-install merge-replaces the entire broken `hooks` block with the new nested format and drops a real git pre-commit hook into `.git/hooks/pre-commit` (that's where "check before commit" lives in v2.2.3+, not in Claude Code settings).
+The re-install merge-replaces the entire broken `hooks` block with the new nested format and drops a real git pre-commit hook into the hooks directory resolved via `git rev-parse --git-path hooks` — typically `.git/hooks/pre-commit`, but linked worktrees and `core.hooksPath` (husky) setups are handled too. That's where "check before commit" lives in v2.2.3+, not in Claude Code settings.
 
 Valid Claude Code hook events are: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `SubagentStop`, `SessionStart`, `SessionEnd`, `PreCompact`, `Notification`. There is no `PreCommit`.
 
@@ -159,6 +159,7 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 
 ## Windows / WSL
 
+- Upgrade to v2.3.6+ if `daemon status` crashes with WinError 87 (#511) or CLI `detect-changes` maps 0 functions on Windows (#528) — both are fixed there
 - Use forward slashes in paths when passing `repo_root` to MCP tools
 - In WSL, ensure `uv` is installed inside WSL (not the Windows version): `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - If `uv` is not found after install, add `~/.cargo/bin` to your PATH

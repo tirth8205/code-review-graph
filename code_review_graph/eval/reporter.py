@@ -112,15 +112,25 @@ def generate_full_report(results_dir: str | Path) -> str:
     lines.append("")
     lines.append("Benchmarks are run against real open-source repositories.")
     lines.append("Token counts use a consistent `len(text) // 4` approximation.")
-    lines.append("Impact accuracy uses graph edges as ground truth.")
+    lines.append(
+        "Impact accuracy reports two ground-truth modes: "
+        "graph-derived (circular — upper bound) and co-change "
+        "(files co-changed in the same commit, seed excluded)."
+    )
+    lines.append(
+        "Rows with `status=error` are kept for forensics but excluded "
+        "from all aggregates."
+    )
     lines.append("")
 
     benchmark_types = [
         "token_efficiency",
         "impact_accuracy",
+        "agent_baseline",
         "flow_completeness",
         "search_quality",
         "build_performance",
+        "multi_hop_retrieval",
     ]
 
     for btype in benchmark_types:
@@ -192,12 +202,26 @@ def generate_readme_tables(results_dir: str | Path) -> str:
     if ia_rows or fc_rows or sq_rows:
         lines.append("### Accuracy & Quality")
         lines.append("")
-        headers = ["Repo", "Impact F1", "Flow Recall", "Search MRR"]
+        headers = ["Repo", "Impact F1 (graph-derived)", "Flow Recall", "Search MRR"]
         # Build a per-repo summary
         repo_data: dict[str, dict[str, object]] = {}
         mrr_accum: dict[str, list[float]] = {}
+        f1_accum: dict[str, list[float]] = {}
         for r in ia_rows:
-            repo_data.setdefault(r.get("repo", "?"), {})["f1"] = r.get("f1", "-")
+            # Failed rows are kept in the CSV for forensics but must never
+            # contribute to a headline number; co-change rows are a
+            # different metric and get their own reporting.
+            if r.get("status", "ok") not in ("", "ok"):
+                continue
+            mode = r.get("ground_truth_mode", "")
+            if mode and not mode.startswith("graph-derived"):
+                continue
+            repo = r.get("repo", "?")
+            repo_data.setdefault(repo, {})
+            try:
+                f1_accum.setdefault(repo, []).append(float(r.get("f1", "")))
+            except (ValueError, TypeError):
+                pass
         for r in fc_rows:
             repo_data.setdefault(r.get("repo", "?"), {})["recall"] = r.get("recall", "-")
         for r in sq_rows:
@@ -216,11 +240,39 @@ def generate_readme_tables(results_dir: str | Path) -> str:
                 if mrr_vals
                 else "-"
             )
+            f1_vals = f1_accum.get(repo, [])
+            f1 = (
+                str(round(sum(f1_vals) / len(f1_vals), 3))
+                if f1_vals
+                else "-"
+            )
             table_rows.append([
                 repo,
-                str(d.get("f1", "-")),
+                f1,
                 str(d.get("recall", "-")),
                 mrr,
+            ])
+        lines.append(_md_table(headers, table_rows))
+        lines.append("")
+
+    # Table B2: Agent Baseline (grep top-k vs graph query)
+    ab_rows = _read_csvs(results_dir, "agent_baseline")
+    if ab_rows:
+        lines.append("### Agent Baseline (grep top-k vs graph query)")
+        lines.append("")
+        headers = [
+            "Repo", "Question", "Baseline Tokens", "Graph Tokens",
+            "Baseline/Graph", "Status",
+        ]
+        table_rows = []
+        for r in ab_rows:
+            table_rows.append([
+                r.get("repo", "-"),
+                r.get("question", "-"),
+                r.get("baseline_tokens", "-"),
+                r.get("graph_tokens", "-"),
+                r.get("baseline_to_graph_ratio", "-"),
+                r.get("status", "ok") or "ok",
             ])
         lines.append(_md_table(headers, table_rows))
         lines.append("")

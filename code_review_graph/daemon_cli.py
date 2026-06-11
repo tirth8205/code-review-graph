@@ -103,7 +103,7 @@ def _handle_restart(args: argparse.Namespace) -> None:
 
 def _handle_status(_args: argparse.Namespace) -> None:
     """Show daemon status and configuration."""
-    from .daemon import is_daemon_running, load_config, load_state, read_pid
+    from .daemon import is_daemon_running, load_config, load_state, pid_alive, read_pid
 
     config = load_config()
     running = is_daemon_running()
@@ -135,15 +135,7 @@ def _handle_status(_args: argparse.Namespace) -> None:
         for repo in config.repos:
             entry = state.get(repo.alias, {})
             child_pid: int | None = entry.get("pid")
-            alive = False
-            if child_pid is not None:
-                try:
-                    os.kill(child_pid, 0)
-                    alive = True
-                except ProcessLookupError:
-                    alive = False
-                except PermissionError:
-                    alive = True
+            alive = child_pid is not None and pid_alive(child_pid)
             status_str = "alive" if alive else "dead"
             pid_str = str(child_pid) if child_pid is not None else "-"
             print(f"  {repo.alias:<{alias_width}}  {status_str:<8}  {pid_str:<8}  {repo.path}")

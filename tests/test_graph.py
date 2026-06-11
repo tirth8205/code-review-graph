@@ -154,6 +154,28 @@ class TestGraphStore:
         assert self.store.get_node(new_path) is not None
         assert self.store.get_node("/test/file_0.py") is None
 
+    def test_store_with_open_transaction_no_error(self):
+        """Regression test for #489: store_file_nodes_edges and
+        store_file_batch must not raise 'cannot start a transaction
+        within a transaction' when the caller has an explicit BEGIN open.
+        """
+        node_a = self._make_file_node("/test/a.py")
+        node_b = self._make_file_node("/test/b.py")
+
+        # Force an open transaction on the shared connection.
+        self.store._conn.execute("BEGIN")
+        assert self.store._conn.in_transaction
+
+        # Must not raise sqlite3.OperationalError.
+        self.store.store_file_nodes_edges("/test/a.py", [node_a], [])
+        assert self.store.get_node("/test/a.py") is not None
+
+        # Re-open the transaction and verify the batch path is guarded too.
+        self.store._conn.execute("BEGIN")
+        assert self.store._conn.in_transaction
+        self.store.store_file_batch([("/test/b.py", [node_b], [], "")])
+        assert self.store.get_node("/test/b.py") is not None
+
     def test_search_nodes(self):
         self.store.upsert_node(self._make_func_node("authenticate"))
         self.store.upsert_node(self._make_func_node("authorize"))
