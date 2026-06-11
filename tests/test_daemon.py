@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -281,6 +283,139 @@ class TestPIDManagement:
         assert is_daemon_running(pid_path) is False
         # Stale PID file should be cleaned up
         assert not pid_path.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
+    @patch("os.kill", side_effect=OSError(87, "The parameter is incorrect"))
+    def test_is_daemon_running_oserror_treated_as_not_alive(self, mock_kill, pid_path):
+        """Regression #511: a bare OSError must not propagate out.
+
+        On Windows ``os.kill(pid, 0)`` raises OSError(WinError 87) for alive
+        PIDs outside the caller's console group; the liveness helper must
+        swallow unexpected OSErrors instead of crashing ``daemon status``.
+        """
+        write_pid(4321, pid_path)
+        assert is_daemon_running(pid_path) is False
+        # Treated as not-alive — stale PID file cleaned up
+        assert not pid_path.exists()
+
+
+# ===========================================================================
+# pid_alive Tests (#511)
+# ===========================================================================
+
+
+class TestPidAlive:
+    def test_pid_alive_for_live_pid(self):
+        """The current process is always alive."""
+        from code_review_graph.daemon import pid_alive
+
+        assert pid_alive(os.getpid()) is True
+
+    def test_pid_alive_for_dead_pid(self):
+        """A reaped child process is reported dead."""
+        import subprocess
+
+        from code_review_graph.daemon import pid_alive
+
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        proc.wait(timeout=30)
+        assert pid_alive(proc.pid) is False
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
+    @patch("os.kill", side_effect=PermissionError)
+    def test_pid_alive_permission_error_means_alive(self, mock_kill):
+        """EPERM means the process exists but is owned by another user."""
+        from code_review_graph.daemon import pid_alive
+
+        assert pid_alive(12345) is True
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
+    @patch("os.kill", side_effect=OSError(87, "The parameter is incorrect"))
+    def test_pid_alive_unexpected_oserror_means_not_alive(self, mock_kill):
+        """Regression #511: unexpected OSError is not-alive-safe, no crash."""
+        from code_review_graph.daemon import pid_alive
+
+        assert pid_alive(12345) is False
+
+
+class _FakeKernel32:
+    """Drives the win32 liveness logic without a real kernel32."""
+
+    def __init__(self, handle=0, wait_result=0x102, last_error=0):
+        self._handle = handle
+        self._wait_result = wait_result
+        self._last_error = last_error
+        self.open_calls: list[tuple] = []
+        self.wait_calls: list[tuple] = []
+        self.closed: list = []
+
+    def OpenProcess(self, access, inherit, pid):  # noqa: N802 - Win32 name
+        self.open_calls.append((access, inherit, pid))
+        return self._handle
+
+    def WaitForSingleObject(self, handle, timeout_ms):  # noqa: N802
+        self.wait_calls.append((handle, timeout_ms))
+        return self._wait_result
+
+    def CloseHandle(self, handle):  # noqa: N802
+        self.closed.append(handle)
+        return 1
+
+    def GetLastError(self):  # noqa: N802
+        return self._last_error
+
+
+class TestPidAliveWindows:
+    """Unit tests for the factored win32 branch (runs on any platform)."""
+
+    def test_alive_when_wait_times_out(self):
+        """Valid handle + WAIT_TIMEOUT (0x102) means the process is alive."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=1234, wait_result=0x102)
+        assert _pid_alive_windows(4242, kernel32) is True
+        # PROCESS_QUERY_LIMITED_INFORMATION, no inherit, the pid
+        assert kernel32.open_calls == [(0x1000, False, 4242)]
+        assert kernel32.wait_calls == [(1234, 0)]
+        # The handle must always be closed
+        assert kernel32.closed == [1234]
+
+    def test_dead_when_handle_is_signaled(self):
+        """Valid handle + WAIT_OBJECT_0 (0x0) means the process exited."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=1234, wait_result=0x0)
+        assert _pid_alive_windows(4242, kernel32) is False
+        assert kernel32.closed == [1234]
+
+    def test_alive_on_access_denied(self):
+        """NULL handle + ERROR_ACCESS_DENIED (5) means alive (other user)."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=0, last_error=5)
+        assert _pid_alive_windows(4242, kernel32) is True
+        # Nothing to close when OpenProcess failed
+        assert kernel32.closed == []
+
+    def test_dead_on_other_open_error(self):
+        """NULL handle + ERROR_INVALID_PARAMETER (87) means the PID is gone."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=0, last_error=87)
+        assert _pid_alive_windows(4242, kernel32) is False
+        assert kernel32.closed == []
+
+    def test_injected_get_last_error_wins(self):
+        """An explicit get_last_error callable overrides kernel32.GetLastError."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=0, last_error=87)
+        assert _pid_alive_windows(4242, kernel32, get_last_error=lambda: 5) is True
 
 
 # ===========================================================================
@@ -869,6 +1004,55 @@ class TestDaemonCLI:
             printed = " ".join(str(c) for c in mock_print.call_args_list)
             assert "alive" in printed
             assert "dead" not in printed
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
+    def test_handle_status_survives_oserror_from_liveness_check(self, tmp_path):
+        """Regression #511: 'daemon status' must not crash on OSError.
+
+        Before the fix, the child-liveness loop used bare ``os.kill(pid, 0)``
+        catching only ProcessLookupError/PermissionError, so the OSError
+        (WinError 87) Windows raises for alive PIDs crashed the command.
+        """
+        from code_review_graph.daemon_cli import _handle_status
+
+        repo = tmp_path / "my-repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+
+        args = MagicMock()
+        cfg = DaemonConfig(
+            repos=[WatchRepo(path=str(repo), alias="myrepo")],
+            log_dir=tmp_path / "logs",
+        )
+        state = {"myrepo": {"pid": 4242, "path": str(repo)}}
+
+        with (
+            patch(
+                "code_review_graph.daemon.is_daemon_running",
+                return_value=True,
+            ),
+            patch(
+                "code_review_graph.daemon.load_config",
+                return_value=cfg,
+            ),
+            patch(
+                "code_review_graph.daemon.read_pid",
+                return_value=os.getpid(),
+            ),
+            patch(
+                "code_review_graph.daemon.load_state",
+                return_value=state,
+            ),
+            patch(
+                "os.kill",
+                side_effect=OSError(87, "The parameter is incorrect"),
+            ),
+            patch("builtins.print") as mock_print,
+        ):
+            _handle_status(args)  # must not raise
+            printed = " ".join(str(c) for c in mock_print.call_args_list)
+            # OSError is not-alive-safe on POSIX, so the child shows dead
+            assert "dead" in printed
 
     def test_handle_start_already_running(self):
         """_handle_start exits with error when daemon is already running."""

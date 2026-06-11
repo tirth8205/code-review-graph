@@ -90,7 +90,7 @@ def refactor_func(
 
         elif mode == "dead_code":
             dead = find_dead_code(
-                store, kind=kind, file_pattern=file_pattern
+                store, kind=kind, file_pattern=file_pattern, root=root
             )
             result = {
                 "status": "ok",

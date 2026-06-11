@@ -168,6 +168,26 @@ class TestLongRunningToolsAreAsync:
                 f"See #46, #136."
             )
 
+    @pytest.mark.asyncio
+    async def test_detect_changes_timeout_uses_error_response_shape(
+        self, monkeypatch
+    ):
+        async def fake_wait_for(coro, timeout):
+            coro.close()
+            raise asyncio.TimeoutError
+
+        monkeypatch.setenv("CRG_TOOL_TIMEOUT", "1")
+        monkeypatch.setattr(crg_main.asyncio, "wait_for", fake_wait_for)
+
+        tool = getattr(crg_main.detect_changes_tool, "fn", None)
+        underlying = tool or crg_main.detect_changes_tool
+
+        result = await underlying()
+
+        assert result["status"] == "error"
+        assert "timed out after 1s" in result["error"]
+        assert result["summary"] == result["error"]
+
     def test_regression_guard_does_not_depend_on_fastmcp_internals(self):
         """Regression guard for #239 bug 3: ensure the async guards above
         resolve heavy tools by module attribute lookup, NOT through a
@@ -307,4 +327,3 @@ class TestApplyToolFilter:
         crg_main._apply_tool_filter(" query_graph_tool , semantic_search_nodes_tool ")
         remaining = await self._tool_names()
         assert remaining == {"query_graph_tool", "semantic_search_nodes_tool"}
-

@@ -7,10 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from ..changes import analyze_changes, parse_diff_ranges, parse_git_diff_ranges  # noqa: F401
+from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ._common import _get_store, resolve_changed_files
+from ..incremental import get_changed_files, get_staged_and_unstaged
+from ._common import _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +76,9 @@ def get_review_context(
                 "context": {},
             }
 
-        abs_files = [str(root / f) for f in changed_files]
-        impact = store.get_impact_radius(abs_files, max_depth=max_depth)
+        graph_files = _resolve_graph_file_paths(store, root, changed_files)
+        original_tokens = estimate_file_tokens(root, changed_files)
+        impact = store.get_impact_radius(graph_files, max_depth=max_depth)
 
         if detail_level == "minimal":
             impacted_count = len(impact["impacted_nodes"])
@@ -110,7 +114,7 @@ def get_review_context(
                 f" in {len(impact['impacted_files'])} files",
             ]
 
-            return {
+            result = {
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
@@ -124,6 +128,8 @@ def get_review_context(
                     "get_impact_radius",
                 ],
             }
+            attach_context_savings(result, original_tokens=original_tokens)
+            return result
 
         # Build review context
         context: dict[str, Any] = {
@@ -181,11 +187,13 @@ def get_review_context(
             guidance,
         ]
 
-        return {
+        result = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
             "context": context,
         }
+        attach_context_savings(result, original_tokens=original_tokens)
+        return result
     finally:
         store.close()
 
@@ -428,6 +436,8 @@ def detect_changes_func(
                 "review_priorities": [],
             }
 
+        original_tokens = estimate_file_tokens(root, changed_files)
+
         # Convert to absolute paths for graph lookup.
         abs_files = [str(root / f) for f in changed_files]
 
@@ -492,6 +502,7 @@ def detect_changes_func(
         result["_hints"] = generate_hints(
             "detect_changes", result, get_session()
         )
+        attach_context_savings(result, original_tokens=original_tokens)
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

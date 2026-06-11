@@ -1,0 +1,65 @@
+name: Weekly Eval
+
+# Report-only benchmark run. This workflow surfaces benchmark drift in the
+# job summary and the uploaded CSV artifact, but it must NOT fail the default
+# branch on regressions (yet) — eval failures are informational until the
+# co-change baseline has enough history to set thresholds against.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"  # Mondays 06:23 UTC (off-minute to dodge load spikes)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install with eval extras
+        run: pip install -e ".[eval]"
+
+      - name: Run benchmarks (2 smallest pinned configs)
+        # httpx (~60 files) and flask (~83 files) are the two smallest
+        # pinned repos. Report-only: `|| true` keeps regressions and
+        # transient clone failures from failing the default branch.
+        run: |
+          code-review-graph eval \
+            --repo httpx,flask \
+            --benchmark token_efficiency,impact_accuracy,agent_baseline \
+            --output-dir evaluate/results || true
+
+      - name: Upload result CSVs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-results-${{ github.run_id }}
+          path: evaluate/results/*.csv
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Write job summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          from code_review_graph.eval.reporter import generate_full_report
+
+          print("# Weekly eval (report-only)")
+          print()
+          print(
+              "Configs: `httpx`, `flask` (the two smallest pinned repos). "
+              "Regressions are reported here and in the CSV artifact but do "
+              "not fail CI."
+          )
+          print()
+          print(generate_full_report("evaluate/results"))
+          PY

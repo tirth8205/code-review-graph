@@ -1,0 +1,50 @@
+name: code-review-graph
+url: https://github.com/tirth8205/code-review-graph
+# Pinned to the latest test_commit SHA so the snapshot is deterministic and
+# every test_commit below is reachable as an ancestor. (This config replaces
+# the historical "nextjs" entry, which used the same URL but mis-labelled the
+# target as a Next.js monorepo.)
+commit: 84bde35459c52e1e0c4b25c6c4799743021e0fc7
+language: python
+size_category: medium
+
+test_commits:
+  - sha: 528801f841e519567ef54d6e52e9b9831d162e1b
+    description: "feat: add multi-platform MCP server installation support"
+    changed_files: 3
+  - sha: 84bde35459c52e1e0c4b25c6c4799743021e0fc7
+    description: "feat: add Google Antigravity platform support for MCP install"
+    changed_files: 2
+
+entry_points:
+  - "code_review_graph/cli.py::cli"
+  - "code_review_graph/main.py::main"
+
+search_queries:
+  - query: "GraphStore nodes"
+    expected: "code_review_graph/graph.py::GraphStore"
+  - query: "parse AST"
+    expected: "code_review_graph/parser.py::CodeParser"
+  - query: "full build"
+    expected: "code_review_graph/incremental.py::full_build"
+
+multi_hop_tasks:
+  - id: crg-parse-file-callers
+    nl_query: "Who invokes the parser entry point on a single source file"
+    anchor_qualified_suffix: "code_review_graph/parser.py::codeparser.parse_file"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["setup_method"]
+    k: 10
+  - id: crg-upsert-node-callers
+    nl_query: "Where the graph store inserts or updates a node"
+    anchor_qualified_suffix: "code_review_graph/graph.py::graphstore.upsert_node"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["store_file_nodes_edges"]
+    k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does GraphStore upsert_node store a node"
+  - "Where does full_build parse the repository"
+  - "How does hybrid_search rank search results"

@@ -113,6 +113,26 @@ class TestRustParsing:
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 3
 
+    def test_detects_test_attribute(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        names = {t.name for t in tests}
+        assert "new_repo_is_empty" in names
+        assert "create_user_saves_to_repo" in names
+        assert all(t.is_test for t in tests)
+
+    def test_detects_tokio_test_attribute(self):
+        tests = {n.name for n in self.nodes if n.kind == "Test"}
+        assert "async_test_is_detected" in tests
+
+    def test_non_test_functions_not_misclassified(self):
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "create_user" in funcs
+        assert "new" in funcs
+        # `create_user` carries no `#[test]` — must stay Function.
+        for n in self.nodes:
+            if n.name == "create_user":
+                assert not n.is_test
+
 
 class TestJavaParsing:
     def setup_method(self):

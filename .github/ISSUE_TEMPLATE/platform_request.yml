@@ -1,0 +1,62 @@
+name: Platform support request
+description: Request support for a new AI coding tool (MCP config, hooks, or skills)
+title: "[Platform]: "
+labels: ["enhancement", "platform-support"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        code-review-graph already configures Claude Code, Codex, Cursor, Windsurf, Zed,
+        Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Kiro, Qoder, and GitHub
+        Copilot. Use this form to request support for another AI coding tool.
+  - type: input
+    id: platform-name
+    attributes:
+      label: Platform name
+      description: The AI coding tool you want supported.
+      placeholder: "e.g. Aider"
+    validations:
+      required: true
+  - type: input
+    id: platform-docs
+    attributes:
+      label: Link to the platform's MCP / configuration docs
+      description: Official documentation describing how the tool consumes MCP servers.
+      placeholder: "https://..."
+    validations:
+      required: true
+  - type: dropdown
+    id: mcp-support
+    attributes:
+      label: Does the platform support MCP?
+      options:
+        - Yes — stdio transport
+        - Yes — HTTP / SSE transport
+        - Yes — both transports
+        - "No"
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: config-location
+    attributes:
+      label: Where does its MCP configuration live?
+      description: >-
+        Config file path(s) and format, if known — e.g. `~/.tool/mcp.json`,
+        project-level `.tool/settings.json`, TOML, etc.
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Hooks/skills support, rules-file injection points, or other details.
+    validations:
+      required: false
+  - type: checkboxes
+    id: testing
+    attributes:
+      label: Testing
+      options:
+        - label: I have this tool installed and can test a pre-release integration.
+          required: false

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -53,9 +54,31 @@ def run_token_benchmark(
 
     Compares naive full-corpus token cost vs graph query token
     cost for a set of sample questions.
+
+    The default sample questions are natural language and require semantic
+    search to match. If no embeddings are present in the graph, ``hybrid_search``
+    falls back to FTS5/LIKE matching on node names, which produces no hits for
+    questions like "how does authentication work" — every per-question ratio
+    becomes 0 and the benchmark silently appears to fail. We log a clear
+    warning when that is the case so callers know to run ``embed_graph`` first
+    (or to pass keyword-matching questions).
     """
     if questions is None:
         questions = _SAMPLE_QUESTIONS
+
+    using_default_questions = questions is _SAMPLE_QUESTIONS
+    try:
+        cur = store._conn.execute("SELECT count(*) FROM embeddings")
+        embedding_count = cur.fetchone()[0]
+    except sqlite3.OperationalError:
+        embedding_count = 0
+    if embedding_count == 0 and using_default_questions:
+        logger.warning(
+            "No embeddings found in this graph. The default sample questions "
+            "are natural language and will not match via FTS5/LIKE alone — "
+            "every reduction ratio is likely to be 0. Run "
+            "`code-review-graph embed` first, or pass keyword-matching `questions=`."
+        )
 
     naive_total = compute_naive_tokens(repo_root)
 

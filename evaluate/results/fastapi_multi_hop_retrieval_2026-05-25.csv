@@ -1,0 +1,3 @@
+repo,task_id,nl_query,anchor_found,anchor_rank,neighbor_count,expected_count,matched_count,neighbor_recall,score
+fastapi,fastapi-route-handler-callers,How fastapi binds a route handler to an APIRoute,True,6,1,1,1,1.0,1.0
+fastapi,fastapi-get-dependant-callers,Where fastapi resolves dependency declarations into a tree,False,-1,0,2,0,0.0,0.0

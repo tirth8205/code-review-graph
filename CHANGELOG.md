@@ -2,6 +2,251 @@
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-06-10
+
+**Community-response release.** Built from a full audit of every open PR,
+issue, and discussion: community fixes merged with credit, verified defects
+fixed (including two open Windows bugs), benchmark claims made independently
+checkable, and the project's first self-hosted PR review bot — this repo now
+reviews its own pull requests with its own graph. No breaking changes.
+
+### Added
+
+- **Custom languages without forking** (#320): drop a
+  `.code-review-graph/languages.toml` into your repo to index any grammar
+  shipped by tree-sitter-language-pack (extension map + node-type lists,
+  validated and capped, built-ins always win). See docs/CUSTOM_LANGUAGES.md.
+- **GitHub Action** for risk-scored PR review comments: composite `action.yml`
+  builds/restores the graph from CI cache, runs `detect-changes` against the
+  PR base, and upserts a sticky comment with risk table, affected flows, test
+  gaps, and the Token Savings line. Dogfooded on this repo via
+  `.github/workflows/pr-review.yml`. See docs/GITHUB_ACTION.md.
+- **`agent_baseline` eval benchmark**: compares graph queries against a
+  realistic grep-and-read-top-k agent baseline instead of the whole-corpus
+  strawman; wired into all six pinned eval configs.
+- **Co-change ground truth for `impact_accuracy`**: predictions are now also
+  graded against files actually co-changed in the same commit; the legacy
+  metric is explicitly labelled "graph-derived (circular — upper bound)".
+- **Weekly eval CI** (`.github/workflows/eval.yml`): report-only cron run of
+  the two smallest pinned configs with CSV artifacts and a job summary.
+- **docs/FAQ.md**: how CRG compares to LSP, RAG, grep/agentic search, and
+  adjacent tools; when NOT to use it; verification steps; monorepo/worktree
+  and registry guidance. Linked from the README.
+- GitHub issue forms (bug/feature/platform), a PR template mirroring the
+  CONTRIBUTING checklist, and dependabot config for pip + GitHub Actions.
+
+### Fixed
+
+- `store_file_batch` is now guarded against open transactions like its sibling
+  (#489, merged from community PR #529 by @Devilthelegend — thank you).
+- **Windows: `daemon status` no longer crashes with WinError 87** (#511):
+  PID liveness now uses `OpenProcess`/`WaitForSingleObject` on win32 instead
+  of `os.kill(pid, 0)`.
+- **Windows: CLI `detect-changes` mapped 0 functions** (#528): diff paths are
+  now remapped to absolute native paths before node lookup, matching the MCP
+  tool's behavior; also prevents the misleading "~100% token savings" line on
+  an empty result.
+- Eval benchmarks no longer record failed runs as inflated wins: thrown
+  `get_review_context`/`analyze_changes` calls are marked `status=error` and
+  excluded from aggregates instead of producing naive/1 ratios or recall=1.0.
+- Unknown embedding provider names now raise a clear error listing valid
+  providers instead of silently falling back to the local model.
+- The five analysis MCP tools and the wiki-page tool no longer leak SQLite
+  connections (try/finally `store.close()`).
+- `install` git hooks now resolve the real hooks directory via
+  `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath`
+  (husky) setups get a working pre-commit hook (#313 residue).
+- Shipped `hooks/hooks.json` and `hooks/session-start.sh` now drain stdin,
+  matching the generated configs (#493 class).
+- `fastmcp` is now capped `<4` so the next major cannot silently break the
+  server (the #488 failure mode).
+
+### Changed
+
+- README benchmarks section now leads with the ~82x median per-question
+  reduction (528x presented as the best case, not the headline), the
+  limitations block is visible instead of collapsed, and "100% impact recall"
+  is reframed as a graph-derived upper bound alongside the new co-change
+  metric.
+- Stale translated READMEs (zh-CN, ja-JP, ko-KR, hi-IN) carry a staleness
+  banner; the zh-CN benchmark captions and docs/USAGE.md no longer contradict
+  the English README.
+- SECURITY.md now points to GitHub private vulnerability reporting as the
+  canonical channel.
+
+## [2.3.5] - 2026-05-25
+
+**Real-time token savings, visible to humans.** The estimated context-savings
+metric introduced in 2.3.4 was JSON-only. In 2.3.5 it surfaces as a clean
+boxed panel on the CLI and is verifiable against a real tokenizer in one
+flag — so when you reach for `code-review-graph` to review a change, you
+can immediately *see* how much of your context window the graph just kept
+out. No breaking changes.
+
+### Added — Token Savings (headline feature)
+
+- **Boxed `Token Savings` panel on every `--brief` CLI call.** Both
+  `code-review-graph detect-changes --brief` and the new
+  `code-review-graph update --brief` print a four-line panel: the full-context
+  baseline, the graph response size, total saved tokens with percent, and a
+  per-category breakdown (Functions / Tests / Risk / Other) that **sums
+  exactly** to the graph response size — no padding, no rounding magic.
+
+  ```text
+  ┌─────────────────────── Token Savings ────────────────────────┐
+  │ Full context would be:     12,921 tokens                     │
+  │ Graph context used:           762 tokens                     │
+  │ Saved:                     12,159 tokens (~94%)              │
+  │ Breakdown: Functions 244 · Tests 191 · Risk 244 · Other 83   │
+  └──────────────────────────────────────────────────────────────┘
+  ```
+
+- **`--verify` flag** cross-checks the displayed numbers against OpenAI's
+  `cl100k_base` tokenizer (the GPT-4 family). Adds a second
+  `Verified (tiktoken)` row to the panel showing the real token counts.
+  Requires `pip install tiktoken`. A one-time calibration across 222 mixed
+  source files (Python/JS/TS/Go/Rust/RST/MD) committed in
+  `docs/REPRODUCING.md` shows the `chars/4` approximation stays within
+  **+0.5%** of real tokens in aggregate; per-repo bias is bounded to ±12%
+  and the **ratio** stays stable because both sides of the divide are
+  equally biased.
+
+- **`code-review-graph update --brief`** — incremental update plus the same
+  risk + Token Savings panel in one command. Distinct from
+  `detect-changes --brief` (which is read-only against the existing graph).
+  Use `update --brief` when the graph might be stale (post-rebase, large
+  change set); use `detect-changes --brief` when hooks/`crg-daemon` have
+  already kept the graph fresh.
+
+### Added — Reproducible benchmarks
+
+- **`docs/REPRODUCING.md`** — end-to-end reproduction recipe with canonical
+  numbers, the tiktoken calibration table, and an explicit explanation of
+  the three different "token" benchmarks in the codebase and what each
+  measures. Two people running the recipe on different machines on
+  different days now produce **identical** numbers, within float rounding.
+- **`multi_hop_retrieval` benchmark** — 11 hand-curated 2-step tool-chain
+  tasks (semantic_search → query_graph) across the 6 test repos. Average
+  score **0.909**. Per-task CSV in `evaluate/results/`.
+- **`code-review-graph embed` CLI subcommand** — explicit shell-level access
+  to embedding generation. Previously only reachable via MCP, which made
+  the benchmark recipe awkward.
+
+### Changed — Deterministic eval pipeline
+
+- **Every config under `code_review_graph/eval/configs/*.yaml` now pins an
+  upstream SHA.** Previously every config used `commit: HEAD`, which made
+  benchmarks drift whenever upstream pushed. Pinned SHAs: express
+  `b4ab7d65`, fastapi `0227991a`, flask `a29f88ce`, gin `5c00df8a`, httpx
+  `b55d4635`, code-review-graph `84bde354`.
+- **`nextjs.yaml` renamed to `code-review-graph.yaml`.** The historical
+  "nextjs" entry pointed at this repo, not a Next.js codebase. Renamed to
+  match reality.
+- **`eval/runner.py` uses full clones with explicit `returncode` checks.**
+  Previously `--depth 50` silently fell back to `HEAD~1..HEAD` whenever a
+  pinned test-commit SHA was past the shallow window, producing benchmark
+  numbers tied to whichever HEAD the clone happened to grab.
+- **Leiden community detection seeded** (`CRG_LEIDEN_SEED`, default `42`).
+  Previously unseeded — community IDs and sizes drifted run-to-run on the
+  same graph, breaking benchmark comparability.
+- **`eval/runner.py` resolves repo paths absolutely before storing.** The
+  parser previously stored file_path as the path you passed in, so eval
+  builds and CLI/MCP builds could disagree, producing duplicate nodes for
+  the same source location. Fixed by `.resolve()` in the runner.
+- **`eval/runner.py` calls `run_post_processing` after `full_build`.**
+  Previously the eval framework left FTS5 unpopulated (shadow tables
+  `nodes_fts_idx` and `nodes_fts_docsize` empty), so downstream search and
+  multi-hop benchmarks silently returned no results.
+
+### Changed — Search and embeddings
+
+- **`embeddings._node_to_text` is richer.** Embedded text per node now
+  includes the dotted form (`Parent.name`, e.g. `APIRoute.get_route_handler`),
+  the identifier split into words (`get route handler`), and the enclosing
+  module directory (`routing`, `dependencies`). Forces an automatic
+  re-embedding because the text hash changes. Lifts multi-hop benchmark
+  accuracy from **0.545 → 0.818**.
+- **Identifier-aware search boost** (`search.extract_query_identifiers`).
+  Natural-language queries like *"Who advances the gin middleware chain
+  via Context.Next"* now have their dotted / snake_case / CamelCase tokens
+  extracted and used to boost matching qualified-names by 2.0× in hybrid
+  search. Combined with the richer embed text, multi-hop accuracy reaches
+  **0.909** (10 of 11 tasks pass).
+
+### Fixed
+
+- **Test-gap dedup in the brief summary.** If duplicate `qualified_names`
+  ever slip into the graph (e.g. after a path-normalization mismatch),
+  the `Untested:` line in the human summary now collapses to unique names.
+  The underlying `test_gaps` list still carries every entry.
+- **`token_benchmark.py` warns when embeddings are missing.** The standalone
+  benchmark's default NL questions need semantic search to match anything;
+  without embeddings the benchmark used to silently report 0× reduction
+  ratios. Now logs an explicit warning pointing users to `embed`.
+
+### Documentation
+
+- **`docs/REPRODUCING.md`** (new). End-to-end recipe, canonical numbers,
+  the tiktoken calibration table, and a side-by-side explanation of the
+  three "token" benchmarks in the codebase.
+- **`README.md` Token Savings section** (new collapsible block under
+  Usage). Plain-English explanation of `detect-changes --brief` vs
+  `update --brief` — read-only vs re-parses-first — with a side-by-side
+  decision table.
+- **`docs/COMMANDS.md`** lists the new `--brief`, `--verify`, and `embed`
+  forms with an inline "which one?" comment block on the analysis pair.
+- **Updated benchmark headline** to reflect today's pinned-SHA snapshot:
+  range **38× – 528×** (median ~82×) across the 6 repos, **100% impact
+  recall**, **F1 0.71** across 13 commits. Old numbers (73× – 895×)
+  reflected pre-fix conditions (leftover build artifacts, smaller graph
+  responses) and have been superseded.
+- **9 Excalidraw diagrams** regenerated with current canonical numbers
+  (`diagrams/*.excalidraw`, source kept locally; PNG re-exports manual).
+
+### Demo
+
+- **`diagrams/context-savings-demo.gif`** — 44 s screencast showing both
+  CLI surfaces and the `--verify` cross-check. Rendered from
+  `diagrams/context-savings-demo.tape` (regenerable with `vhs`).
+
+## [2.3.4] - 2026-05-25
+
+Focused reliability and token-efficiency release for MCP/CLI review workflows. No breaking changes.
+
+### Added
+
+- **Estimated context savings metadata** for graph-filtered review/impact/architecture responses. The new `context_savings` field is intentionally compact (`estimated`, `saved_tokens`, `saved_percent`) and uses the existing conservative character-count approximation rather than claiming exact tokenization.
+- **CLI estimated savings line** for `code-review-graph detect-changes --brief`; full JSON output includes the same compact `context_savings` metadata.
+
+### Changed
+
+- **Architecture overview is compact by default**: `get_architecture_overview_tool` now defaults to `detail_level="minimal"`, dropping per-community member lists and aggregating cross-community edges by community pair. Full per-edge output remains available with `detail_level="standard"`.
+- **Bounded change analysis**: `detect_changes_tool` can now cap very large changed-function and transitive-test frontiers with `CRG_MAX_CHANGED_FUNCS` and `CRG_MAX_TRANSITIVE_FRONTIER`, and can return a structured timeout error via `CRG_TOOL_TIMEOUT`.
+
+### Fixed
+
+- **Windows semantic search deadlock** (#508/#507): local embedding models are pre-warmed on the main thread on Windows before FastMCP starts worker dispatch.
+- **Rust test detection** (#503/#502): Rust `#[test]` and common async test attributes now produce `Test` nodes.
+- **Generated hook stdin handling** (#494/#493): Codex and Claude hook commands drain stdin to avoid caller-side broken pipes on large hook payloads.
+- **Cross-file callers** (#486/#472): `callers_of` now returns cross-file callers even when same-file callers exist.
+- **Graph path lookup** (#469): review, impact, and file-summary tools resolve user-facing paths to the path format stored in the graph.
+- **Bundled MCP docs** (#485/#480): `get_docs_section` can load the packaged `LLM-OPTIMIZED-REFERENCE.md` from installed wheels.
+- **Local embedding provider availability** (#484/#448): missing `sentence-transformers` now reports local provider unavailability instead of silently producing zero embeddings.
+- **Dead-code response fields** (#481/#447): dead-code results now include `file_path`, `relative_path`, and `language` while preserving the legacy `file` key.
+- **SVN root validation** (#456): MCP/daemon/registry root validation now accepts `.svn` working copies consistently.
+- **CLI postprocess flags** (#487): `build --skip-postprocess` and `update --skip-flows` no longer run an extra full post-processing pass.
+
+### Documentation
+
+- Updated stale release-facing version references for 2.3.4.
+- Replaced fragile language-count wording with current broad language and notebook support wording.
+- Added the missing VS Code extension `0.2.2` changelog entry without changing the extension package version.
+
+### Tests
+
+- Added regression coverage for compact architecture overview output and #476 mitigation.
+- Added tests for estimated context savings calculation, compact metadata shape, MCP metadata, CLI brief/JSON output, Rust test parsing, hook stdin draining, graph path resolution, dead-code fields, SVN root validation, CLI postprocess flags, embedding availability, and bounded detect-changes behavior.
+
 ## [2.3.3] - 2026-05-08
 
 Large additive release accumulated since v2.3.2 — 141 non-merge commits, 8 new languages/extensions, 5 new platform install targets, 6 new framework call resolvers, comprehensive Windows hardening, VS Code accessibility pass, and a full sweep of community PRs.

@@ -66,12 +66,17 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 
 | Setting | Default | Description |
 |---|---|---|
-| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to auto-detect. |
+| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to use the bundled version or one found on `PATH`. |
 | `codeReviewGraph.autoUpdate` | `true` | Auto-update the graph on file save. |
 | `codeReviewGraph.blastRadiusDepth` | `2` | Max traversal depth for blast radius (1--10). |
 | `codeReviewGraph.graphTheme` | `"auto"` | Graph color theme: `auto`, `light`, or `dark`. |
 | `codeReviewGraph.graph.maxNodes` | `500` | Max nodes in the graph visualization (10--5000). |
 | `codeReviewGraph.graph.defaultEdges` | All except CONTAINS | Edge types shown by default. |
+| `codeReviewGraph.treeView.showFiles` | `true` | Show file nodes in the tree view. |
+| `codeReviewGraph.treeView.showClasses` | `true` | Show class nodes in the tree view. |
+| `codeReviewGraph.treeView.showFunctions` | `true` | Show function nodes in the tree view. |
+| `codeReviewGraph.treeView.showTypes` | `true` | Show type nodes in the tree view. |
+| `codeReviewGraph.treeView.showTests` | `true` | Show test nodes in the tree view. |
 
 ## Requirements
 

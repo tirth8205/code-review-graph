@@ -47,9 +47,10 @@ Same schema as Function, but `kind = "Test"` and `is_test = true`. Identified by
 - Name starts with `test_` or `Test`
 - Name ends with `_test` or `_spec`
 - File matches test file patterns (`test_*.py`, `*.test.ts`, `*_test.go`, etc.)
+- Language-specific test markers where supported, such as common Rust test attributes
 
 ### Type
-Represents a type alias, interface, or enum definition (primarily for TypeScript, Go, Rust).
+Represents a type alias, interface, enum, struct-like type, or parser-specific type construct where the language exposes one.
 
 | Property | Type | Description |
 |----------|------|-------------|
@@ -116,6 +117,18 @@ A function is tested by a test function.
 ### DEPENDS_ON
 General dependency relationship (used for non-specific dependencies).
 
+### REFERENCES
+A value-level reference to another symbol, often used for function-as-value patterns such as callback maps, arrays, or assignment.
+
+### INJECTS
+A dependency-injection relationship, currently used by Java/Spring enrichment for injected fields and constructor parameters.
+
+### CONSUMES / PRODUCES
+Data or event flow relationships emitted by specialised parsers when a source consumes or produces a named resource.
+
+### TEMPORAL_STUB
+Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.
+
 ## Qualified Name Format
 
 Nodes are uniquely identified by qualified names:
@@ -154,6 +167,7 @@ CREATE TABLE nodes (
     is_test INTEGER DEFAULT 0,
     file_hash TEXT,
     extra TEXT DEFAULT '{}',
+    community_id INTEGER,
     updated_at REAL NOT NULL
 );
 
@@ -166,6 +180,8 @@ CREATE TABLE edges (
     file_path TEXT NOT NULL,
     line INTEGER DEFAULT 0,
     extra TEXT DEFAULT '{}',
+    confidence REAL DEFAULT 1.0,
+    confidence_tier TEXT DEFAULT 'EXTRACTED',
     updated_at REAL NOT NULL
 );
 
@@ -216,6 +232,45 @@ CREATE VIRTUAL TABLE nodes_fts USING fts5(
     content='nodes', content_rowid='rowid',
     tokenize='porter unicode61'
 );
+
+-- Token-efficient summary tables (v6)
+CREATE TABLE community_summaries (
+    community_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    purpose TEXT DEFAULT '',
+    key_symbols TEXT DEFAULT '[]',
+    risk TEXT DEFAULT 'unknown',
+    size INTEGER DEFAULT 0,
+    dominant_language TEXT DEFAULT ''
+);
+
+CREATE TABLE flow_snapshots (
+    flow_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    entry_point TEXT NOT NULL,
+    critical_path TEXT DEFAULT '[]',
+    criticality REAL DEFAULT 0.0,
+    node_count INTEGER DEFAULT 0,
+    file_count INTEGER DEFAULT 0
+);
+
+CREATE TABLE risk_index (
+    node_id INTEGER PRIMARY KEY,
+    qualified_name TEXT NOT NULL,
+    risk_score REAL DEFAULT 0.0,
+    caller_count INTEGER DEFAULT 0,
+    test_coverage TEXT DEFAULT 'unknown',
+    security_relevant INTEGER DEFAULT 0,
+    last_computed TEXT DEFAULT ''
+);
+
+-- Embeddings table, stored in the embeddings database
+CREATE TABLE embeddings (
+    qualified_name TEXT PRIMARY KEY,
+    vector BLOB NOT NULL,
+    text_hash TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT 'unknown'
+);
 ```
 
-The `nodes` table also has a `community_id INTEGER` column (added via migration v4) linking nodes to their detected community.
+Indexes include qualified-name, file-path, node-kind, edge source/target/kind, community, flow criticality, risk score, compound edge lookup indexes, and the composite edge upsert index.

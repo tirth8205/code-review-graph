@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate 6 Excalidraw diagrams for code-review-graph Medium article.
+"""Generate 9 Excalidraw diagrams for code-review-graph Medium article.
 
 All statistics match repo benchmarks exactly. No invented features or numbers.
 """
@@ -142,7 +142,7 @@ def d1():
 
     # Red badge
     els.append(R(295, 565, 250, 48, bg=RED_BG, fs="solid", sc=RED))
-    els.append(TC(LC, 575, "12,044 tokens", 22, sc=RED))
+    els.append(TC(LC, 575, "125,022 tokens", 22, sc=RED))
 
     # Impact detection
     els.append(TC(LC, 630, "Impact detection: unknown", 16, sc=GRY))
@@ -181,14 +181,14 @@ def d1():
 
     # Green badge
     els.append(R(1295, 565, 250, 48, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(RC, 575, "1,728 tokens", 22, sc=GRN))
+    els.append(TC(RC, 575, "1,986 tokens", 22, sc=GRN))
 
     # Impact detection
     els.append(TC(RC, 630, "100% recall on impact detection", 16, sc=GRN))
 
     # ── BOTTOM BANNER ──
     els.append(R(600, 700, 640, 52, bg=BLU_BG, fs="solid", sc=BLU))
-    els.append(TC(920, 710, "8.2\u00d7 fewer tokens \u00b7 100% impact recall", 24, sc=BLU))
+    els.append(TC(920, 710, "71.4\u00d7 fewer tokens \u00b7 100% impact recall (flask)", 22, sc=BLU))
 
     return els
 
@@ -202,7 +202,7 @@ def d2():
 
     boxes = [
         ("Repository",       "your code",              BLU_BG, BLU, 60),
-        ("Tree-sitter Parser","19 languages + notebooks", ORG_BG, ORG, 380),
+        ("Tree-sitter Parser","30+ languages + notebooks", ORG_BG, ORG, 380),
         ("SQLite Graph",     "nodes + edges\nflows + communities",  PRP_BG, PRP, 700),
         ("Blast Radius",     "BFS traversal",           YLW_BG, YLW, 1020),
         ("Minimal Review Set","only what matters",        GRN_BG, GRN, 1380),
@@ -402,23 +402,24 @@ def d5():
     els.append(TC(800, 15, "Benchmarks Across Real Repos", 36))
 
     # Header: range number left, quality badge right
-    els.append(TC(500, 75, "6.9\u00d7 \u2013 16.4\u00d7", 64, sc=BLU))
-    els.append(TC(500, 160, "fewer tokens across tested repos", 20, sc=GRY))
+    els.append(TC(500, 75, "38\u00d7 \u2013 528\u00d7", 64, sc=BLU))
+    els.append(TC(500, 160, "fewer tokens across 6 tested repos", 20, sc=GRY))
 
     els.append(R(820, 85, 340, 80, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(990, 100, "100% recall, 0.54 F1", 22, sc=GRN))
-    els.append(TC(990, 132, "on impact detection", 16, sc=GRN))
+    els.append(TC(990, 100, "100% recall, 0.71 F1", 22, sc=GRN))
+    els.append(TC(990, 132, "on impact detection (13 commits)", 14, sc=GRN))
 
-    # 3 repo cards
+    # 3 repo cards \u2014 naive_corpus_tokens \u2192 avg graph_tokens across 5 questions
+    # Pinned SHAs: gin@5c00df8a, flask@a29f88ce, fastapi@0227991a
     cards = [
-        {"name":"gin",     "files":"99 files",      "red":"16.4\u00d7",
-         "tok":"21,972 \u2192 1,153 tokens",
+        {"name":"gin",     "files":"Go web framework",   "red":"92\u00d7",
+         "tok":"166,868 \u2192 1,990 tokens",
          "c":BLU, "bg":BLU_BG},
-        {"name":"flask",   "files":"83 files",      "red":"9.1\u00d7",
-         "tok":"44,751 \u2192 4,252 tokens",
+        {"name":"flask",   "files":"Python web framework",      "red":"71\u00d7",
+         "tok":"125,022 \u2192 1,986 tokens",
          "c":ORG, "bg":ORG_BG},
-        {"name":"fastapi", "files":"1,122 files",   "red":"8.1\u00d7",
-         "tok":"4,944 \u2192 614 tokens",
+        {"name":"fastapi", "files":"Python web framework",   "red":"528\u00d7",
+         "tok":"951,071 \u2192 2,169 tokens",
          "c":GRN, "bg":GRN_BG},
     ]
     cw, ch = 370, 200
@@ -439,7 +440,7 @@ def d5():
     # Footnote — styled as a subtle callout
     fn_y = cy + ch + 20
     els.append(LN(x0+80, fn_y, [[0,0],[total-160,0]], sc=GRY, sw=1, op=30))
-    els.append(TC(800, fn_y+10, "Reproducible: code-review-graph eval --all", 18, sc=GRY))
+    els.append(TC(800, fn_y+10, "Reproducible: see docs/REPRODUCING.md (pinned SHAs, Leiden seed=42)", 16, sc=GRY))
 
     return els
 
@@ -449,7 +450,7 @@ def d5():
 # ════════════════════════════════════════════
 def d6():
     els = []
-    els.append(TC(700, 15, "The Monorepo Problem, Solved", 40))
+    els.append(TC(700, 15, "Whole Codebase or Targeted Answer?", 40))
 
     # ── LEFT: dense grid ──
     gx, gy = 40, 110
@@ -465,9 +466,9 @@ def d6():
             els.append(R(fx, fy, dw, dh, bg=shade, fs="solid", sc=GRY, sw=1, rough=0))
 
     gcx = gx + (cols*gapx)/2
-    els.append(TC(gcx, gy-35, "Next.js Repo", 22, sc=DRK))
-    els.append(TC(gcx, gy+rows*gapy+8,  "98 files",        16, sc=GRY))
-    els.append(TC(gcx, gy+rows*gapy+30, "9,882 tokens",    14, sc=RED))
+    els.append(TC(gcx, gy-35, "code-review-graph", 22, sc=DRK))
+    els.append(TC(gcx, gy+rows*gapy+8,  "1,326 nodes",     16, sc=GRY))
+    els.append(TC(gcx, gy+rows*gapy+30, "208,821 source tokens", 14, sc=RED))
 
     # ── CENTER: funnel (rounded rect) ──
     fx, fy, fw, fh = 470, 120, 210, 180
@@ -495,15 +496,15 @@ def d6():
         els.append(R(rf_x, fy2, file_w, file_h, bg=GRN_BG, fs="solid", sc=GRN))
 
     lbl_x = rf_x + file_w + 20
-    els.append(T(lbl_x, rf_y,    "Minimal",         17, sc=GRN))
-    els.append(T(lbl_x, rf_y+22, "Review Set",      17, sc=GRN))
-    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~3 files",       16, sc=GRN))
-    els.append(T(lbl_x, rf_y + 4*file_gap + 26, "1,249 tokens",   14, sc=GRN))
+    els.append(T(lbl_x, rf_y,    "Graph answer",    17, sc=GRN))
+    els.append(T(lbl_x, rf_y+22, "5 hits + edges",  14, sc=GRN))
+    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~2,495 tokens",  16, sc=GRN))
+    els.append(T(lbl_x, rf_y + 4*file_gap + 26, "avg over 5 questions",   12, sc=GRN))
 
     # Big number at bottom
-    els.append(TC(550, 400, "8.0\u00d7", 80, sc=BLU))
-    els.append(TC(550, 490, "fewer tokens", 26, sc=BLU))
-    els.append(TC(550, 525, "95 files excluded from review context", 18, sc=GRY))
+    els.append(TC(550, 400, "93\u00d7", 80, sc=BLU))
+    els.append(TC(550, 490, "fewer tokens per question", 24, sc=BLU))
+    els.append(TC(550, 525, "answer-shaped context, not file dumps", 18, sc=GRY))
 
     return els
 
@@ -549,7 +550,7 @@ def d7():
 
     # Right annotation: what gets called
     els.append(R(rx, y-5, 380, 75, bg="#fff4e6", fs="solid", sc=ORG, op=60))
-    els.append(T(rx+15, y+5, "22 tools available:", 14, sc=ORG))
+    els.append(T(rx+15, y+5, "30 tools available:", 14, sc=ORG))
     els.append(T(rx+15, y+25, "detect_changes \u2192 get_review_context\n\u2192 get_impact_radius \u2192 query_graph", 13, sc=ORG))
 
     els.append(A(sx+bw/2, y+bh+5, [[0,0],[0,30]], sc=ORG))
@@ -587,51 +588,69 @@ def d8():
     els.append(TC(600, 20, "One Install, Every Platform", 36))
     els.append(TC(600, 70, "code-review-graph install", 20, sc=PRP, ff=3))
 
+    # 14 platforms \u2014 matches code_review_graph/skills.py PLATFORMS dict
     platforms = [
-        ("Claude Code",  ".mcp.json",                            BLU, BLU_BG),
-        ("Cursor",       ".cursor/mcp.json",                     PRP, PRP_BG),
-        ("Windsurf",     "~/.codeium/windsurf/mcp_config.json",  ORG, ORG_BG),
-        ("Zed",          "Zed settings.json",                    GRN, GRN_BG),
-        ("Continue",     "~/.continue/config.json",              YLW, YLW_BG),
-        ("OpenCode",     ".opencode.json",                       RED, RED_BG),
-        ("Antigravity",  "~/.gemini/antigravity/mcp_config.json",GRY, GRY_BG),
-        ("Qwen Code",    "~/.qwen/settings.json",                BLU, PRP_BG),  # blue-purple
-        ("Qoder",        ".qoder/mcp.json",                      GRN, ORG_BG),  # green-orange
-        ("Kiro",         ".kiro/settings/mcp.json",              BLU, BLU_BG),
+        # Row 1 (7)
+        ("Claude Code",     ".mcp.json",                                BLU, BLU_BG),
+        ("Codex",           "~/.codex/config.toml",                     PRP, PRP_BG),
+        ("Cursor",          ".cursor/mcp.json",                         ORG, ORG_BG),
+        ("Windsurf",        "~/.codeium/windsurf/mcp_config.json",      GRN, GRN_BG),
+        ("Zed",             "Zed settings.json",                        YLW, YLW_BG),
+        ("Continue",        "~/.continue/config.json",                  RED, RED_BG),
+        ("OpenCode",        ".opencode.json",                           BLU, PRP_BG),
+        # Row 2 (7)
+        ("Antigravity",     "~/.gemini/antigravity/mcp_config.json",    GRY, GRY_BG),
+        ("Gemini CLI",      ".gemini/settings.json",                    PRP, BLU_BG),
+        ("Qwen Code",       "~/.qwen/settings.json",                    ORG, YLW_BG),
+        ("Kiro",            ".kiro/settings/mcp.json",                  GRN, ORG_BG),
+        ("Qoder",           ".qoder/mcp.json",                          YLW, GRN_BG),
+        ("GitHub Copilot",  ".vscode/mcp.json",                         RED, RED_BG),
+        ("Copilot CLI",     "~/.copilot/mcp-config.json",               PRP, GRN_BG),
     ]
 
     # Central "install" node
-    center_x, center_y = 600, 240
-    els.append(E(center_x-60, center_y-30, 120, 60, bg=PRP_BG, fs="solid", sc=PRP))
-    els.append(TC(center_x, center_y-10, "auto-detect", 15, sc=PRP))
+    center_x, center_y = 600, 215
+    els.append(E(center_x-75, center_y-30, 150, 60, bg=PRP_BG, fs="solid", sc=PRP))
+    els.append(TC(center_x, center_y-10, "auto-detect", 16, sc=PRP))
 
-    # Fan out to platforms
-    cols = len(platforms)
-    card_w, card_h = 120, 80  # narrower cards for 9 platforms
-    total_w = cols * card_w + (cols-1) * 15  # tighter spacing
+    # Two rows of 7 cards each
+    cols, rows = 7, 2
+    card_w, card_h = 135, 85
+    gap_x, gap_y = 18, 35
+    total_w = cols * card_w + (cols - 1) * gap_x  # 7*135 + 6*18 = 1053
     x0 = center_x - total_w/2
-    card_y = 360
+    row_y = [330, 330 + card_h + gap_y]
 
     for i, (name, cfg, sc, bg) in enumerate(platforms):
-        cx = x0 + i * (card_w + 20) + card_w/2
+        row = i // cols
+        col = i % cols
+        cx = x0 + col * (card_w + gap_x) + card_w/2
+        cy = row_y[row]
 
-        # Arrow from center
-        dx, dy = cx - center_x, card_y - center_y - 30
-        dist = math.sqrt(dx*dx + dy*dy)
-        sf = 35/dist
-        els.append(A(center_x + dx*sf, center_y + dy*sf,
-                     [[0,0], [dx*(1-sf*2), dy*(1-sf*2)]],
-                     sc=sc, sw=1, op=60))
+        # Light arrow from center node only to the first row, to keep things readable.
+        # Skip the center column (dx≈0): a width=0 arrow renders as nothing
+        # anyway, and the Excalidraw VS Code extension rejects the file if
+        # any arrow has width=0 OR height=0 (the excalidraw.com web app is
+        # more lenient and accepts them).
+        if row == 0:
+            dx = cx - center_x
+            dy = cy - center_y - 30
+            dist = math.sqrt(dx*dx + dy*dy)
+            if dist > 0 and abs(dx) > 1.0:
+                sf = 35/dist
+                els.append(A(center_x + dx*sf, center_y + 30 + dy*sf*0.1,
+                             [[0,0], [dx*(1-sf*2), dy*(1-sf*1.5)]],
+                             sc=sc, sw=1, op=45))
 
         # Platform card
-        els.append(R(cx-card_w/2, card_y, card_w, card_h, bg=bg, fs="solid", sc=sc))
-        els.append(TC(cx, card_y+15, name, 15, sc=sc))
-        # Config path (truncated)
-        short_cfg = cfg if len(cfg) < 22 else "..." + cfg[-18:]
-        els.append(TC(cx, card_y+42, short_cfg, 9, sc=GRY, ff=3))
+        els.append(R(cx-card_w/2, cy, card_w, card_h, bg=bg, fs="solid", sc=sc))
+        els.append(TC(cx, cy+14, name, 14, sc=sc))
+        short_cfg = cfg if len(cfg) < 26 else "..." + cfg[-22:]
+        els.append(TC(cx, cy+45, short_cfg, 9, sc=GRY, ff=3))
 
     # Footer
-    els.append(TC(600, 475, "Auto-detects installed platforms \u00b7 Detects pip vs uvx \u00b7 Writes correct config", 14, sc=GRY))
+    footer_y = row_y[1] + card_h + 30
+    els.append(TC(600, footer_y, "Auto-detects installed platforms \u00b7 Poetry / uv / uvx aware \u00b7 Writes correct config", 14, sc=GRY))
 
     return els
 
@@ -641,23 +660,24 @@ def d8():
 # ════════════════════════════════════════════
 def d9():
     els = []
-    els.append(TC(550, 15, "20 Languages + Notebook Support", 34))
+    els.append(TC(700, 15, "30+ Languages + Notebook Support", 34))
 
-    # Group languages by ecosystem
+    # Group languages by ecosystem \u2014 verified against parser.py EXTENSION_TO_LANGUAGE
     groups = [
-        ("Web",       ["TypeScript", "JavaScript", "TSX", "Vue"],                  BLU, BLU_BG),
-        ("Backend",   ["Python", "Go", "Rust", "Java", "Scala"],                   GRN, GRN_BG),
-        ("Systems",   ["C", "C++", "C#"],                                          ORG, ORG_BG),
-        ("Mobile",    ["Kotlin", "Swift", "Dart"],                                 PRP, PRP_BG),
-        ("Scripting", ["Ruby", "PHP", "Perl", "Lua", "R"],                         YLW, YLW_BG),
-        ("Config",    ["Nix"],                                                     GRY, GRY_BG),
-        ("Other",     ["Solidity", "Jupyter/.ipynb"],                              GRY, GRY_BG),
+        ("Web",        ["TypeScript", "JavaScript", "TSX", "Vue", "Svelte"],         BLU, BLU_BG),
+        ("Backend",    ["Python", "Go", "Rust", "Java", "Scala", "Elixir"],          GRN, GRN_BG),
+        ("Systems",    ["C", "C++", "C#", "Objective-C", "Zig"],                     ORG, ORG_BG),
+        ("Mobile",     ["Kotlin", "Swift", "Dart"],                                  PRP, PRP_BG),
+        ("Scripting",  ["Ruby", "PHP", "Perl", "Lua", "R", "Julia"],                 YLW, YLW_BG),
+        ("Shells",     ["Bash", "PowerShell"],                                       RED, RED_BG),
+        ("Domain",     ["Solidity", "SQL", "Verilog", "GDScript", "Nix"],            GRY, GRY_BG),
+        ("Other",      ["ReScript", "Jupyter/.ipynb"],                               PRP, PRP_BG),
     ]
 
-    gw = 155  # group width
-    gap = 20
-    total_w = len(groups) * gw + (len(groups)-1) * gap
-    x0 = (1100 - total_w) / 2
+    gw = 130  # group width \u2014 narrower to fit 8 groups
+    gap = 18
+    total_w = len(groups) * gw + (len(groups)-1) * gap  # 8*130 + 7*18 = 1166
+    x0 = (1400 - total_w) / 2  # center on 700
     gy = 75
 
     for gi, (group_name, langs, sc, bg) in enumerate(groups):
@@ -674,7 +694,7 @@ def d9():
             pw = gw - 20
             els.append(R(gx+10, ly, pw, 24, bg="#ffffff", fs="solid",
                          sc=sc, sw=1, rough=0, op=80))
-            els.append(TC(gx+gw/2, ly+4, lang, 13, sc=sc))
+            els.append(TC(gx+gw/2, ly+4, lang, 12, sc=sc))
 
     # Bottom: what each language gets
     max_gh = max(55 + len(g[1]) * 32 for g in groups)
@@ -685,7 +705,7 @@ def d9():
         fx = x0 + i * feat_w + feat_w/2
         els.append(TC(fx, fy, "\u2713 " + feat, 13, sc=GRN))
 
-    els.append(TC(550, fy+28, "Full Tree-sitter grammar support for every language", 14, sc=GRY))
+    els.append(TC(700, fy+28, "Tree-sitter grammars + ReScript regex pass + Jupyter / Databricks notebook handling", 13, sc=GRY))
 
     return els
 

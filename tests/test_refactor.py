@@ -162,6 +162,22 @@ class TestFindDeadCode:
         dead_names = {d["name"] for d in dead}
         assert "dead_func" in dead_names
 
+    def test_find_dead_code_response_fields(self):
+        """dead_code entries include file_path, relative_path, and language."""
+        dead = find_dead_code(self.store, root="/repo")
+        entry = next(d for d in dead if d["name"] == "dead_func")
+        assert entry["file_path"] == "/repo/app.py"
+        assert entry["relative_path"] == "app.py"
+        assert entry["language"] == "python"
+        # backward compat: 'file' key still present
+        assert entry["file"] == "/repo/app.py"
+
+    def test_find_dead_code_relative_path_without_root(self):
+        """Without root, relative_path falls back to file_path."""
+        dead = find_dead_code(self.store)
+        entry = next(d for d in dead if d["name"] == "dead_func")
+        assert entry["relative_path"] == "/repo/app.py"
+
     def test_find_dead_code_excludes_called(self):
         """find_dead_code does NOT include functions with callers."""
         dead = find_dead_code(self.store)

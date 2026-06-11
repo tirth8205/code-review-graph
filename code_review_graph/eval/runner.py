@@ -14,9 +14,11 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 from code_review_graph.eval.benchmarks import (
+    agent_baseline,
     build_performance,
     flow_completeness,
     impact_accuracy,
+    multi_hop_retrieval,
     search_quality,
     token_efficiency,
 )
@@ -29,6 +31,8 @@ BENCHMARK_REGISTRY = {
     "flow_completeness": flow_completeness.run,
     "search_quality": search_quality.run,
     "build_performance": build_performance.run,
+    "multi_hop_retrieval": multi_hop_retrieval.run,
+    "agent_baseline": agent_baseline.run,
 }
 
 CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -60,30 +64,56 @@ def load_all_configs() -> list[dict]:
 
 
 def clone_or_update(config: dict, repos_dir: Path | None = None) -> Path:
-    """Clone or update a repository for benchmarking."""
+    """Clone or update a repository at the config's pinned ``commit`` SHA.
+
+    Full clones (no ``--depth``) are required: the pinned ``test_commits`` are
+    often older than any reasonable shallow-clone window, and a missed SHA
+    used to silently fall back to ``git diff HEAD~1 HEAD`` — producing
+    benchmark numbers tied to whatever upstream HEAD looked like that day.
+
+    Every subprocess call's exit status is checked; failures raise
+    ``RuntimeError`` so reproducibility issues surface immediately instead of
+    yielding garbage results.
+    """
     repos_dir = repos_dir or DEFAULT_REPOS
     repos_dir.mkdir(parents=True, exist_ok=True)
     repo_path = repos_dir / config["name"]
 
     if repo_path.exists():
-        subprocess.run(
-            ["git", "fetch", "--all"],
+        proc = subprocess.run(
+            ["git", "fetch", "--all", "--tags"],
             cwd=str(repo_path),
             capture_output=True,
+            text=True,
         )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git fetch failed in {repo_path}: {proc.stderr.strip()}"
+            )
     else:
-        subprocess.run(
-            ["git", "clone", "--depth", "50", config["url"], str(repo_path)],
+        proc = subprocess.run(
+            ["git", "clone", config["url"], str(repo_path)],
             capture_output=True,
+            text=True,
         )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git clone failed for {config['url']}: {proc.stderr.strip()}"
+            )
 
     commit = config.get("commit", "HEAD")
     if commit != "HEAD":
-        subprocess.run(
+        proc = subprocess.run(
             ["git", "checkout", commit],
             cwd=str(repo_path),
             capture_output=True,
+            text=True,
         )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git checkout {commit} failed in {repo_path}: "
+                f"{proc.stderr.strip()}"
+            )
 
     return repo_path
 
@@ -131,16 +161,32 @@ def run_eval(
         name = config["name"]
         logger.info("Evaluating %s...", name)
 
-        repo_path = clone_or_update(config)
+        # Resolve the repo path to an absolute Path before handing it to
+        # full_build / get_db_path so the stored qualified_names match what
+        # the CLI/MCP layer produces (those paths go through _get_store ->
+        # _validate_repo_root which .resolve()s). Without this, a later
+        # ``code-review-graph update --repo <relative>`` writes the same
+        # function under a new absolute-prefixed qualified_name, leaving the
+        # graph with duplicate nodes for the same source location.
+        repo_path = clone_or_update(config).resolve()
 
         # Build graph
         from code_review_graph.graph import GraphStore
         from code_review_graph.incremental import full_build, get_db_path
+        from code_review_graph.postprocessing import run_post_processing
 
         db_path = get_db_path(repo_path)
         store = GraphStore(db_path)
 
         full_build(repo_path, store)
+        # full_build is the parsing-only primitive; the higher-level CLI/MCP
+        # wrappers run postprocessing on top. The eval framework bypasses
+        # those, so call it directly here. Without this, FTS5 stays empty
+        # and downstream benchmarks (token_efficiency, search_quality)
+        # silently produce useless results. See: search.rebuild_fts_index.
+        pp_result = run_post_processing(store)
+        for warning in pp_result.get("warnings", []):
+            logger.warning("  postprocessing: %s", warning)
 
         for bench_name in benchmark_names:
             if bench_name not in BENCHMARK_REGISTRY:

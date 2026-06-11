@@ -7,11 +7,18 @@ optional) with a file-based grouping fallback when igraph is not installed.
 from __future__ import annotations
 
 import logging
+import random
 import re
 from collections import Counter, defaultdict
 from typing import Any
 
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
+
+# Fixed seed for igraph's RNG so Leiden community detection is reproducible
+# across runs. Without this, two builds of the same graph produce different
+# community IDs / sizes, breaking benchmark comparability. Override with
+# CRG_LEIDEN_SEED env var if you need a different seed.
+_LEIDEN_SEED = 42
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +292,11 @@ def _detect_leiden(
         g.vcount(), g.ecount(),
     )
 
+    import os
+    seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+    # Deterministic seeding for benchmark reproducibility — community
+    # detection is not a security-sensitive context. nosec B311.
+    ig.set_random_number_generator(random.Random(seed))  # nosec B311
     partition = g.community_leiden(
         objective_function="modularity",
         weights="weight",
@@ -504,6 +516,11 @@ def _split_oversized(
                 directed=False,
             )
             g.es["weight"] = ig_weights
+            import os
+            seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+            # Deterministic seeding for benchmark reproducibility — community
+            # detection is not a security-sensitive context. nosec B311.
+            ig.set_random_number_generator(random.Random(seed))  # nosec B311
             partition = g.community_leiden(
                 objective_function="modularity",
                 weights="weight",

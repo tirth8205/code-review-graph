@@ -1,6 +1,8 @@
 name: httpx
 url: https://github.com/encode/httpx
-commit: HEAD
+# Pinned to the latest test_commit SHA so the snapshot is deterministic and
+# every test_commit below is reachable as an ancestor.
+commit: b55d4635701d9dc22928ee647880c76b078ba3f2
 language: python
 size_category: small
 
@@ -23,3 +25,24 @@ search_queries:
     expected: "httpx/_models.py::Response"
   - query: "BaseClient"
     expected: "httpx/_client.py::BaseClient"
+
+multi_hop_tasks:
+  - id: httpx-client-request-callers
+    nl_query: "Which HTTP verbs route through the httpx Client.request"
+    anchor_qualified_suffix: "httpx/_client.py::client.request"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["get", "options", "head", "post", "put", "patch"]
+    k: 10
+  - id: httpx-async-request-tests
+    nl_query: "Tests covering the httpx async client request method"
+    anchor_qualified_suffix: "httpx/_client.py::asyncclient.request"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["test_raise_for_status"]
+    k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does Client.request send an HTTP request"
+  - "Where are Response headers parsed and decoded"
+  - "How does BaseClient build request URLs"

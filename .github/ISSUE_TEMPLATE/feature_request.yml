@@ -1,0 +1,54 @@
+name: Feature request
+description: Suggest a new capability or an improvement to code-review-graph
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! For requests to support a new AI coding tool,
+        please use the **Platform support request** template instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: >-
+        What problem are you trying to solve? What is painful or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: How would you like this to work? CLI flags, MCP tool shape, etc.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Parser / language support
+        - Graph store / SQLite
+        - MCP tools / server
+        - CLI
+        - Visualization
+        - Embeddings / search
+        - Docs
+        - Other
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches or workarounds you have tried or considered.
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links, examples from other tools, or anything else that helps.
+    validations:
+      required: false
