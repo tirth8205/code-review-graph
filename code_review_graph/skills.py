@@ -403,11 +403,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
             "1. Run `list_graph_stats` to see overall codebase metrics.\n"
-            "2. Run `get_architecture_overview` for high-level community structure.\n"
-            "3. Use `list_communities` to find major modules, then `get_community` "
+            "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
+            "3. Use `list_communities_tool` to find major modules, then `get_community` "
             "for details.\n"
-            "4. Use `semantic_search_nodes` to find specific functions or classes.\n"
-            "5. Use `query_graph` with patterns like `callers_of`, `callees_of`, "
+            "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
+            "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
             "`imports_of` to trace relationships.\n"
             "6. Use `list_flows` and `get_flow` to understand execution paths.\n\n"
             "### Tips\n\n"
@@ -430,11 +430,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Review Changes\n\n"
             "Perform a thorough, risk-aware code review using the knowledge graph.\n\n"
             "### Steps\n\n"
-            "1. Run `detect_changes` to get risk-scored change analysis.\n"
-            "2. Run `get_affected_flows` to find impacted execution paths.\n"
-            "3. For each high-risk function, run `query_graph` with "
+            "1. Run `detect_changes_tool` to get risk-scored change analysis.\n"
+            "2. Run `get_affected_flows_tool` to find impacted execution paths.\n"
+            "3. For each high-risk function, run `query_graph_tool` with "
             'pattern="tests_for" to check test coverage.\n'
-            "4. Run `get_impact_radius` to understand the blast radius.\n"
+            "4. Run `get_impact_radius_tool` to understand the blast radius.\n"
             "5. For any untested changes, suggest specific test cases.\n\n"
             "### Output Format\n\n"
             "Provide findings grouped by risk level (high/medium/low) with:\n"
@@ -458,12 +458,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Debug Issue\n\n"
             "Use the knowledge graph to systematically trace and debug issues.\n\n"
             "### Steps\n\n"
-            "1. Use `semantic_search_nodes` to find code related to the issue.\n"
-            "2. Use `query_graph` with `callers_of` and `callees_of` to trace "
+            "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
+            "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
             "3. Use `get_flow` to see full execution paths through suspected areas.\n"
-            "4. Run `detect_changes` to check if recent changes caused the issue.\n"
-            "5. Use `get_impact_radius` on suspected files to see what else is affected.\n\n"
+            "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
+            "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
             "### Tips\n\n"
             "- Check both callers and callees to understand the full context.\n"
             "- Look at affected flows to find the entry point that triggers the bug.\n"
@@ -490,11 +490,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             '3. For renames, use `refactor_tool` with mode="rename" to preview all '
             "affected locations.\n"
             "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
-            "5. After changes, run `detect_changes` to verify the refactoring impact.\n\n"
+            "5. After changes, run `detect_changes_tool` to verify the refactoring impact.\n\n"
             "### Safety Checks\n\n"
             "- Always preview before applying (rename mode gives you an edit list).\n"
-            "- Check `get_impact_radius` before major refactors.\n"
-            "- Use `get_affected_flows` to ensure no critical paths are broken.\n"
+            "- Check `get_impact_radius_tool` before major refactors.\n"
+            "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
             '- ALWAYS start with `get_minimal_context(task="<your task>")` '
@@ -827,11 +827,11 @@ scanning cannot.
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
 Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
@@ -839,21 +839,21 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
 | Tool | Use when |
 | ------ | ---------- |
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of a change |
-| `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
 | `refactor_tool` | Planning renames, finding dead code |
 
 ### Workflow
 
 1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
 """
 
 # Copilot-specific instruction file content: uses VS Code tool references and
@@ -876,11 +876,11 @@ test coverage) that file scanning cannot.
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph`
-- **Understanding impact**: `get_impact_radius`
-- **Code review**: `detect_changes` + `get_review_context`
-- **Finding relationships**: `query_graph` callers_of/callees_of
-- **Architecture questions**: `get_architecture_overview`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool`
+- **Understanding impact**: `get_impact_radius_tool`
+- **Code review**: `detect_changes_tool` + `get_review_context_tool`
+- **Finding relationships**: `query_graph_tool` callers_of/callees_of
+- **Architecture questions**: `get_architecture_overview_tool`
 
 Fall back to file/search tools **only** when the graph doesn't
 cover what you need.
@@ -889,21 +889,21 @@ cover what you need.
 
 | Tool | Use when |
 | ------ | ---------- |
-| `detect_changes` | Risk-scored change analysis |
-| `get_review_context` | Token-efficient source snippets |
-| `get_impact_radius` | Blast radius of a change |
-| `get_affected_flows` | Impacted execution paths |
-| `query_graph` | Trace callers, callees, imports, tests |
-| `semantic_search_nodes` | Find functions/classes by keyword |
-| `get_architecture_overview` | High-level structure |
+| `detect_changes_tool` | Risk-scored change analysis |
+| `get_review_context_tool` | Token-efficient source snippets |
+| `get_impact_radius_tool` | Blast radius of a change |
+| `get_affected_flows_tool` | Impacted execution paths |
+| `query_graph_tool` | Trace callers, callees, imports, tests |
+| `semantic_search_nodes_tool` | Find functions/classes by keyword |
+| `get_architecture_overview_tool` | High-level structure |
 | `refactor_tool` | Rename planning, dead code |
 
 ### Workflow
 
 1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
 """
 
 # Maps instruction file path → (marker, section) for files that need content

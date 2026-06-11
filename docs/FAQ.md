@@ -99,11 +99,11 @@ another round of grep + read + reasoning, and token spend compounds:
 The graph also persists: agentic search re-derives the same structure from scratch
 every session, while CRG keeps it in SQLite and updates incrementally.
 
-One honest caveat on the numbers: the headline 38x–528x token reduction compares graph
-responses against reading the **whole corpus**, not against a skilled agentic-grep
-session (see [REPRODUCING.md](REPRODUCING.md) for what each benchmark measures). For
-single-hop lookups in a small repo, grep is cheap and good. The multi-hop review
-workflow is where the graph earns its keep.
+One honest caveat on the numbers: the whole-corpus token-reduction numbers (~82x median,
+38x–528x range) compare graph responses against reading the **whole corpus**, not
+against a skilled agentic-grep session (see [REPRODUCING.md](REPRODUCING.md) for what
+each benchmark measures). For single-hop lookups in a small repo, grep is cheap and
+good. The multi-hop review workflow is where the graph earns its keep.
 
 ## How does it compare to Serena, codegraph, claude-context, and repomix?
 

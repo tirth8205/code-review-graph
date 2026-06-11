@@ -1,6 +1,6 @@
 # Code Review Graph — User Guide
 
-**Applies to:** v2.3.5
+**Applies to:** v2.3.6
 
 ## Installation
 
@@ -51,7 +51,7 @@ Parses your entire codebase. Takes ~10s for 500 files.
 ```
 /code-review-graph:review-delta
 ```
-Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use 38x–528x fewer tokens per question than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
+Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use ~82x fewer tokens per question (median; range 38x–528x) than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
 
 ### 3. Review a PR
 ```
@@ -119,6 +119,8 @@ Since v2.3.4, review and impact tools include compact `context_savings` metadata
 The parser currently covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte single-file components, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
 Extension-less scripts are detected by shebang for common bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
+
+Languages not covered yet can be added without a fork via a `.code-review-graph/languages.toml` config — see [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
 
 ## What Gets Indexed
 

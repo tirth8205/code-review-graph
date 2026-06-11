@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [2.3.6] - 2026-06-10
+
+**Community-response release.** Built from a full audit of every open PR,
+issue, and discussion: community fixes merged with credit, verified defects
+fixed (including two open Windows bugs), benchmark claims made independently
+checkable, and the project's first self-hosted PR review bot — this repo now
+reviews its own pull requests with its own graph. No breaking changes.
+
 ### Added
 
 - **Custom languages without forking** (#320): drop a
@@ -29,6 +37,8 @@
 
 ### Fixed
 
+- `store_file_batch` is now guarded against open transactions like its sibling
+  (#489, merged from community PR #529 by @Devilthelegend — thank you).
 - **Windows: `daemon status` no longer crashes with WinError 87** (#511):
   PID liveness now uses `OpenProcess`/`WaitForSingleObject` on win32 instead
   of `os.kill(pid, 0)`.

@@ -8,7 +8,7 @@
 When using code-review-graph MCP tools, follow these rules:
 1. First call: `get_minimal_context(task="<description>")` — costs ~100 tokens, gives you the full picture.
 2. All subsequent calls: use `detail_level="minimal"` unless you need more.
-3. Prefer `query_graph` with a specific target over broad `list_*` calls.
+3. Prefer `query_graph_tool` with a specific target over broad `list_*` calls.
 4. The `next_tool_suggestions` field in every response tells you the optimal next step.
 5. Target: ≤5 tool calls per task, ≤800 total tokens of graph context.
 
@@ -23,7 +23,7 @@ When using code-review-graph MCP tools, follow these rules:
   - `incremental.py` — Git-based change detection, file watching
   - `embeddings.py` — Optional vector embeddings (local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax)
   - `visualization.py` — D3.js interactive HTML graph generator
-  - `cli.py` — CLI entry point (install, build, update, postprocess, watch, status, visualize, serve/mcp, wiki, detect-changes, register, unregister, repos, eval, daemon)
+  - `cli.py` — CLI entry point (install/init, build, update, postprocess, embed, watch, status, visualize, serve/mcp, wiki, detect-changes, register, unregister, repos, eval, daemon)
   - `flows.py` — Execution flow detection and criticality scoring
   - `communities.py` — Community detection (Leiden algorithm or file-based grouping) and architecture overview
   - `search.py` — FTS5 hybrid search (keyword + vector)
@@ -108,6 +108,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_eval.py` — Evaluation framework
 - `tests/test_tsconfig_resolver.py` — TypeScript path resolution
 - `tests/test_integration_v2.py` — v2 pipeline integration test
+- `tests/test_action_render.py` — GitHub Action PR comment renderer (`scripts/render_pr_comment.py`)
 - `tests/fixtures/` — Sample files for each supported language
 
 ## CI Pipeline

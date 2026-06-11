@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: tirth8205/code-review-graph@main # pin to a tag or commit SHA in production
+      - uses: tirth8205/code-review-graph@v2.3.6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -49,7 +49,7 @@ sufficient — no PAT, no API key, no third-party service.
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@main # pin to a tag or commit SHA in production
+      - uses: tirth8205/code-review-graph@v2.3.6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high

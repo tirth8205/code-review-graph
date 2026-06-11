@@ -123,7 +123,7 @@ Build the code review graph for this project
   <img src="diagrams/diagram5_benchmark_board.png" alt="실제 저장소 벤치마크: 4.9배에서 27.3배 적은 토큰과 보수적인 영향 분석" width="85%" />
 </p>
 
-모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 원본 데이터는 [`evaluate/reports/summary.md`](evaluate/reports/summary.md)에 있습니다.
+모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 전체 재현 절차와 기준 수치는 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)에 있습니다.
 
 전체 벤치마크 결과는 [영문 README](README.md#benchmarks)를 참조하세요.
 

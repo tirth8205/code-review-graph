@@ -73,6 +73,8 @@ tests/                 # Test suite
 
 ## Adding Language Support
 
+If you just need a language for your own repo, you may not need to contribute at all: drop a `.code-review-graph/languages.toml` into your project mapping extensions and node types to any grammar in tree-sitter-language-pack — see [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md). To add built-in support upstream:
+
 1. Add the extension mapping to `EXTENSION_TO_LANGUAGE` in `parser.py`
 2. Add tree-sitter node types to `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES`, `_CALL_TYPES`
 3. Add a sample fixture file in `tests/fixtures/`
@@ -80,7 +82,8 @@ tests/                 # Test suite
 
 ## Reporting Issues
 
-- Use GitHub Issues: https://github.com/tirth8205/code-review-graph/issues
+- Open an issue via the issue forms: https://github.com/tirth8205/code-review-graph/issues/new/choose (bug report, feature request, or platform request — blank issues are disabled)
+- For questions and ideas, use GitHub Discussions instead: https://github.com/tirth8205/code-review-graph/discussions
 - Include: Python version, OS, steps to reproduce, error output
 
 ## License
