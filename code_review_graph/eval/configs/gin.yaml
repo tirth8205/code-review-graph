@@ -42,3 +42,10 @@ multi_hop_tasks:
     traversal_pattern: callers_of
     expected_neighbor_names: ["handleHTTPRequest", "serveError"]
     k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does Engine.ServeHTTP route an incoming request"
+  - "Where does Context.Next advance the middleware chain"
+  - "How does the node tree match wildcard routes"

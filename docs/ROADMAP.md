@@ -2,6 +2,17 @@
 
 ## Shipped
 
+### v2.3.6
+- **Custom languages without forking**: `.code-review-graph/languages.toml` maps extensions and node types to any tree-sitter-language-pack grammar (`docs/CUSTOM_LANGUAGES.md`)
+- **GitHub Action** for risk-scored PR review comments: graph built/restored on the CI runner, sticky comment upserted per push, optional `fail-on-risk` merge gate; dogfooded via `.github/workflows/pr-review.yml` (`docs/GITHUB_ACTION.md`)
+- **`agent_baseline` benchmark**: graph queries vs a realistic grep-and-read-top-k agent baseline, wired into all six pinned eval configs
+- **Co-change ground truth** for `impact_accuracy`; the legacy graph-derived metric is labelled as a circular upper bound
+- **Weekly eval CI**: report-only cron run of the two smallest configs (`.github/workflows/eval.yml`)
+- **`docs/FAQ.md`**: comparisons with LSP, RAG, grep/agentic search, and adjacent tools, plus when-not-to-use guidance
+- **Contribution scaffolding**: issue forms, PR template, dependabot config
+- **Windows fixes** for `daemon status` (#511) and `detect-changes` path mapping (#528)
+- **Reliability**: embedding provider-name validation, SQLite store-leak fixes in analysis/wiki tools, `fastmcp<4` cap, hooks installed via `git rev-parse --git-path hooks`
+
 ### v2.3.5
 - **Token Savings panel** on `detect-changes --brief` and the new `update --brief` — boxed CLI output with per-category breakdown that sums exactly to the graph response size
 - **`--verify` flag** cross-checks the displayed savings against OpenAI's `cl100k_base` tokenizer; calibration data committed in `docs/REPRODUCING.md` shows the estimate is within ~1% of real GPT-4 tokens in aggregate
@@ -93,7 +104,7 @@
 
 ## Planned
 
-- GitHub PR bot integration
+- GitHub App / bot mode beyond the shipped GitHub Action (org-wide install, check runs)
 - Team sync (shared graph via git-tracked DB)
 - Performance optimization for monorepos (>50k files)
 

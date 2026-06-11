@@ -314,20 +314,73 @@ def clear_pid(path: Path | None = None) -> None:
         pass
 
 
+# Win32 constants for the OpenProcess-based liveness check (#511).
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_ERROR_ACCESS_DENIED = 5
+_WAIT_OBJECT_0 = 0x0
+
+
+def _pid_alive_windows(
+    pid: int,
+    kernel32: Any,
+    get_last_error: Callable[[], int] | None = None,
+) -> bool:
+    """Win32 PID liveness check via OpenProcess/WaitForSingleObject.
+
+    The kernel32 interface is injected so tests can drive handle/wait
+    outcomes on non-Windows platforms. *get_last_error* defaults to
+    ``kernel32.GetLastError``; the real caller passes
+    ``ctypes.get_last_error`` (reliable with ``use_last_error=True``).
+    """
+    if get_last_error is None:
+        get_last_error = kernel32.GetLastError
+    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # NULL handle: process is dead, or we lack access. ACCESS_DENIED
+        # means it exists but is owned by another user — treat as alive.
+        return get_last_error() == _ERROR_ACCESS_DENIED
+    try:
+        # WAIT_OBJECT_0 means the process handle is signaled (it exited).
+        return kernel32.WaitForSingleObject(handle, 0) != _WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_alive(pid: int) -> bool:
+    """Cross-platform check whether a process with *pid* is running.
+
+    On Windows ``os.kill(pid, 0)`` routes to GenerateConsoleCtrlEvent and
+    raises ``OSError`` (WinError 87) for alive PIDs outside the caller's
+    console process group (#511), so the Win32 API is used instead.
+    """
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        return _pid_alive_windows(pid, kernel32, ctypes.get_last_error)
+    try:
+        os.kill(pid, 0)  # signal 0 = existence check
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # process exists but owned by another user
+    except OSError as exc:
+        # Unexpected platform quirk — treat as not alive rather than crash.
+        logger.debug("PID %d liveness check failed: %s", pid, exc)
+        return False
+
+
 def is_daemon_running(path: Path | None = None) -> bool:
     """Check whether a daemon process is alive."""
     pid = read_pid(path)
     if pid is None:
         return False
-    try:
-        os.kill(pid, 0)  # signal 0 = existence check
+    if pid_alive(pid):
         return True
-    except ProcessLookupError:
-        # Stale PID file — clean up
-        clear_pid(path)
-        return False
-    except PermissionError:
-        return True  # process exists but owned by another user
+    # Stale PID file — clean up
+    clear_pid(path)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -352,13 +405,7 @@ def load_state(path: Path | None = None) -> dict[str, Any]:
 
 def _is_pid_alive(pid: int) -> bool:
     """Check whether a process with the given PID is running."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user
+    return pid_alive(pid)
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ Usage:
     code-review-graph daemon stop
     code-review-graph daemon restart [--foreground]
     code-review-graph daemon status
-    code-review-graph daemon logs [--repo ALIAS] [-f] [-n N]
+    code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]
     code-review-graph daemon add <path> [--alias NAME]
     code-review-graph daemon remove <path_or_alias>
 """
@@ -613,7 +613,8 @@ def main() -> None:
         "--benchmark",
         default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
-        "flow_completeness, search_quality, build_performance)",
+        "agent_baseline, flow_completeness, search_quality, build_performance, "
+        "multi_hop_retrieval)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")

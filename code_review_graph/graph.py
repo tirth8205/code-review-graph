@@ -260,14 +260,20 @@ class GraphStore:
         self._conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
         self._invalidate_cache()
 
-    def store_file_nodes_edges(
-        self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
-    ) -> None:
-        """Atomically replace all data for a file."""
+    def _begin_immediate(self) -> None:
+        """Start an IMMEDIATE transaction, rolling back any prior uncommitted
+        transaction first (regression guard for #135 / #489).
+        """
         if self._conn.in_transaction:
             logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
             self._conn.rollback()
         self._conn.execute("BEGIN IMMEDIATE")
+
+    def store_file_nodes_edges(
+        self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
+    ) -> None:
+        """Atomically replace all data for a file."""
+        self._begin_immediate()
         try:
             self.remove_file_data(file_path)
             for node in nodes:
@@ -284,7 +290,7 @@ class GraphStore:
         self, batch: list[tuple[str, list[NodeInfo], list[EdgeInfo], str]]
     ) -> None:
         """Atomically replace data for a batch of files in one transaction."""
-        self._conn.execute("BEGIN IMMEDIATE")
+        self._begin_immediate()
         try:
             for file_path, nodes, edges, fhash in batch:
                 self.remove_file_data(file_path)

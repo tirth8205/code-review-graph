@@ -72,11 +72,11 @@ inline-run the `--verify` flag on any commit.
 
 What used to make it **non**-reproducible (now fixed):
 
-- `commit: HEAD` in every `eval/configs/*.yaml` — replaced with the pinned latest test-commit SHA per repo
+- `commit: HEAD` in every `code_review_graph/eval/configs/*.yaml` — replaced with the pinned latest test-commit SHA per repo
 - `git clone --depth 50` silently fell back to wrong commits when the pinned SHAs were beyond the shallow window — now uses full clones with explicit `returncode` checks
 - Leiden ran with an unseeded RNG — now seeded
 - `nextjs.yaml` was a misnamed config evaluating this repo — renamed to `code-review-graph.yaml`
-- FTS5 was created but never populated by the eval framework's `full_build` call — `eval/runner.py` now calls `postprocessing.run_post_processing` directly
+- FTS5 was created but never populated by the eval framework's `full_build` call — `code_review_graph/eval/runner.py` now calls `postprocessing.run_post_processing` directly
 
 ## Prerequisites
 
@@ -101,12 +101,21 @@ uv sync --extra eval --extra embeddings     # or: pip install -e ".[eval,embeddi
 
 This step clones 6 upstream repositories at pinned SHAs, builds a full graph
 for each (parser + cross-file resolvers + signatures + FTS5 + flows + Leiden
-communities), then runs the `token_efficiency`, `impact_accuracy`, and
-`multi_hop_retrieval` benchmarks.
+communities), then runs the `token_efficiency`, `impact_accuracy`,
+`agent_baseline`, and `multi_hop_retrieval` benchmarks.
 
 ```bash
-uv run code-review-graph eval --benchmark token_efficiency,impact_accuracy,multi_hop_retrieval
+uv run code-review-graph eval \
+  --benchmark token_efficiency,impact_accuracy,agent_baseline,multi_hop_retrieval
 ```
+
+Failure semantics (applies to every benchmark): a thrown tool call is **not**
+a measurement. The row is kept in the CSV with `status=error` for forensics,
+but excluded from every aggregate. (Two historical bugs made failures look
+like wins: a thrown `get_review_context` produced `graph_tokens=0` and a
+ratio of `naive/1`, and a thrown `analyze_changes` silently set
+`predicted = changed`, guaranteeing recall 1.0. Both are fixed; regression
+tests live in `tests/test_eval.py`.)
 
 Expected runtime on an M1/M2 Mac: roughly 8–15 minutes for the build phase,
 plus seconds per benchmark.
@@ -197,7 +206,7 @@ baseline; and (b) the embedding text per node became richer in this same
 release (see `embeddings._node_to_text`), so the graph response itself is
 slightly bigger. Both are correctness improvements over the prior numbers.
 
-### Formal `token_efficiency` benchmark (`eval/benchmarks/token_efficiency.py`)
+### Formal `token_efficiency` benchmark (`code_review_graph/eval/benchmarks/token_efficiency.py`)
 
 A different denominator: just the **changed-file content** for each commit,
 vs the full `get_review_context()` JSON. For small commits the response is
@@ -207,22 +216,37 @@ different thing than the standalone benchmark.
 
 Raw per-commit CSVs in `evaluate/results/<repo>_token_efficiency_*.csv`.
 
-### Impact accuracy (`eval/benchmarks/impact_accuracy.py`)
+### Impact accuracy (`code_review_graph/eval/benchmarks/impact_accuracy.py`)
 
-13 commits across 6 repos.
+13 commits across 6 repos. The benchmark emits two ground-truth modes side
+by side, distinguished by the `ground_truth_mode` CSV column:
 
-| Metric | Value |
+| Mode | Ground truth | What it tells you |
+|---|---|---|
+| `graph-derived (circular — upper bound)` | changed files + files with CALLS/IMPORTS_FROM edges into them — **derived from the same graph the predictor traverses** | An upper bound. Recall 1.0 here is partly true by construction, not independent evidence. |
+| `co-change (same commit, seed excluded)` | the *other* files the author actually touched in the same commit, given a single seed file | Independent-ish evidence from git history. Expect substantially lower recall. |
+
+The canonical numbers below were captured **in graph-derived mode only**
+(the co-change mode did not exist at capture time). Treat the recall row as
+a circular upper bound, not as "100% recall":
+
+| Metric (graph-derived mode — circular upper bound) | Value |
 |---|---|
-| Recall (mean across 13 commits) | **1.000** (100% on every commit) |
+| Recall (mean across 13 commits) | **1.000** (upper bound on every commit) |
 | F1 (mean) | **0.714** |
 | F1 (median) | 0.667 |
 | F1 (min / max) | 0.455 / 1.000 |
+
+Canonical co-change numbers will be added after the next full capture — we
+do not quote them before measuring. Single-file commits are recorded with
+`status=skipped` in co-change mode (there is nothing independent to grade
+against).
 
 The blast-radius analysis over-predicts in some commits (precision ≈ 0.30 in the
 worst case, where 34 files are flagged for a 10-file change). That is
 intentional: a missed dependency is worse than an extra reviewed file.
 
-### Multi-hop retrieval (`eval/benchmarks/multi_hop_retrieval.py`)
+### Multi-hop retrieval (`code_review_graph/eval/benchmarks/multi_hop_retrieval.py`)
 
 11 hand-curated tasks across the 6 repos. Each task is a 2-step tool chain:
 
@@ -315,22 +339,60 @@ embedded. FTS idx rows are far lower than node count because FTS5 stores
 inverted-index segments, not one row per indexed document.
 <!-- END canonical-stats -->
 
+## Agent baseline benchmark (`code_review_graph/eval/benchmarks/agent_baseline.py`)
+
+The whole-corpus baseline in the standalone token benchmark is an upper
+bound no real agent pays. This benchmark simulates what an agent actually
+does without the graph:
+
+1. Derive search terms from each question in the config's `agent_questions:`
+   list (identifier-shaped tokens via `search.extract_query_identifiers`,
+   plus plain keywords; falls back to the `search_queries` query strings
+   when absent).
+2. Pure-python grep over the corpus (no external `rg`/`grep` binary),
+   ranking source files by total case-insensitive match count
+   (deterministic; ties break on path).
+3. Read the top-3 files and token-count them (`chars/4`) as
+   `baseline_tokens`.
+4. Compare against the graph-query cost for the same question (5 hybrid
+   search hits + up to 5 neighbor edges per hit — the same accounting as the
+   standalone benchmark).
+
+Output: `evaluate/results/<repo>_agent_baseline_<date>.csv` with a
+`baseline_to_graph_ratio` per question. Rows where either side is zero are
+marked `status=no_graph_results` / `status=no_baseline_match` and excluded
+from aggregates (`agent_baseline.aggregate`). No canonical capture exists
+yet; numbers will be added to the canonical block above once captured —
+they are not quoted before being measured.
+
+## Weekly CI run (report-only)
+
+`.github/workflows/eval.yml` runs every Monday at 06:23 UTC (plus manual
+`workflow_dispatch`) against the two smallest pinned configs (`httpx`,
+`flask`) with the `token_efficiency`, `impact_accuracy`, and
+`agent_baseline` benchmarks. It uploads the CSVs as an artifact and writes
+a job-summary table. It is deliberately **report-only**: regressions do not
+fail the default branch yet.
+
 ## Which benchmark measures what
 
-There are three different "token" benchmarks in the repo. They are all valid
+There are four different "token" benchmarks in the repo. They are all valid
 but measure different scenarios:
 
 | Benchmark | Naive baseline | Graph cost | Question answered |
 |---|---|---|---|
-| `eval/benchmarks/token_efficiency.py` | sum of **changed-file content** for a specific commit | full `get_review_context()` JSON | "Is the graph cheaper than just reading the diffed files?" |
-| `eval/token_benchmark.py` | none — absolute per-workflow cost | sum of 5 MCP-tool responses | "How many tokens does a complete agent workflow cost?" |
+| `code_review_graph/eval/benchmarks/token_efficiency.py` | sum of **changed-file content** for a specific commit | full `get_review_context()` JSON | "Is the graph cheaper than just reading the diffed files?" |
+| `code_review_graph/eval/benchmarks/agent_baseline.py` | **grep top-3 files** for the question's identifiers | 5 search hits + 5 neighbor edges per question | "Is the graph cheaper than a realistic grep-and-read agent?" |
+| `code_review_graph/eval/token_benchmark.py` | none — absolute per-workflow cost | sum of 5 MCP-tool responses | "How many tokens does a complete agent workflow cost?" |
 | `code_review_graph/token_benchmark.py` (standalone) | sum of **all source files** in repo | 5 search hits + 5 neighbor edges per question | "Is the graph cheaper than reading the whole repo?" |
 
-The `eval/benchmarks/token_efficiency.py` numbers can be **less than 1.0×**
+The `code_review_graph/eval/benchmarks/token_efficiency.py` numbers can be **less than 1.0×**
 for small commits (`get_review_context` carries impact-radius metadata and
 source snippets, which outweigh a tiny changed-file set). The standalone
 benchmark numbers are **always large** because the baseline is the entire
-repo. Pick the one that matches the scenario you're talking about.
+repo — that is why the README leads with the median (~82×) and treats 528×
+as the max, and why `agent_baseline` exists as the realistic middle ground.
+Pick the one that matches the scenario you're talking about.
 
 ## Generating diagrams
 

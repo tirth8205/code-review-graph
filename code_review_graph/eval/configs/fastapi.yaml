@@ -39,3 +39,10 @@ multi_hop_tasks:
     traversal_pattern: callers_of
     expected_neighbor_names: ["get_parameterless_sub_dependant", "solve_dependencies"]
     k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does include_router register routes on the application"
+  - "Where does APIRoute build its route handler"
+  - "How does solve_dependencies resolve Depends parameters"

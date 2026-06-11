@@ -2,9 +2,12 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+import code_review_graph.tools._common as common_module
+import code_review_graph.tools.analysis_tools as analysis_module
 import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
@@ -434,6 +437,119 @@ class TestGetDocsSection:
 
         assert result["status"] == "ok"
         assert result["content"] == "packaged docs"
+
+
+class TestEmbedGraphProviderErrors:
+    """embed_graph must surface provider errors as structured responses,
+    never as a traceback, and must always close its GraphStore."""
+
+    def test_unknown_provider_returns_structured_error(self, tmp_path):
+        (tmp_path / ".code-review-graph").mkdir()
+        result = docs_module.embed_graph(
+            repo_root=str(tmp_path), provider="voyage",
+        )
+        assert result["status"] == "error"
+        assert "Unknown embedding provider" in result["error"]
+        assert "voyage" in result["error"]
+        assert "Valid: local, openai, google, minimax" in result["error"]
+
+    def test_missing_env_vars_return_structured_error(self, tmp_path, monkeypatch):
+        (tmp_path / ".code-review-graph").mkdir()
+        for var in ("CRG_OPENAI_API_KEY", "CRG_OPENAI_BASE_URL", "CRG_OPENAI_MODEL"):
+            monkeypatch.delenv(var, raising=False)
+        result = docs_module.embed_graph(
+            repo_root=str(tmp_path), provider="openai",
+        )
+        assert result["status"] == "error"
+        assert "CRG_OPENAI_API_KEY" in result["error"]
+
+    def test_store_closed_when_provider_unknown(self, tmp_path, monkeypatch):
+        (tmp_path / ".code-review-graph").mkdir()
+        store = MagicMock()
+        monkeypatch.setattr(
+            docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+        result = docs_module.embed_graph(
+            repo_root=str(tmp_path), provider="voyage",
+        )
+        assert result["status"] == "error"
+        store.close.assert_called_once()
+
+
+_ANALYSIS_TOOL_CASES = [
+    ("get_hub_nodes_func", "find_hub_nodes", []),
+    ("get_bridge_nodes_func", "find_bridge_nodes", []),
+    (
+        "get_knowledge_gaps_func",
+        "find_knowledge_gaps",
+        {
+            "isolated_nodes": [],
+            "thin_communities": [],
+            "untested_hotspots": [],
+            "single_file_communities": [],
+        },
+    ),
+    ("get_surprising_connections_func", "find_surprising_connections", []),
+    ("get_suggested_questions_func", "generate_suggested_questions", []),
+]
+
+
+class TestAnalysisToolsCloseStore:
+    """Regression tests: the 5 analysis tools leaked their GraphStore
+    (no try/finally), leaving graph.db file descriptors open."""
+
+    @pytest.mark.parametrize(
+        "func_name,analysis_name,ret", _ANALYSIS_TOOL_CASES,
+    )
+    def test_store_closed_on_success(
+        self, monkeypatch, tmp_path, func_name, analysis_name, ret,
+    ):
+        store = MagicMock()
+        monkeypatch.setattr(
+            analysis_module, "_get_store",
+            lambda repo_root=None: (store, tmp_path),
+        )
+        monkeypatch.setattr(
+            analysis_module, analysis_name, lambda *a, **k: ret,
+        )
+        result = getattr(analysis_module, func_name)()
+        assert "next_tool_suggestions" in result
+        store.close.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "func_name,analysis_name,_ret", _ANALYSIS_TOOL_CASES,
+    )
+    def test_store_closed_when_analysis_raises(
+        self, monkeypatch, tmp_path, func_name, analysis_name, _ret,
+    ):
+        store = MagicMock()
+        monkeypatch.setattr(
+            analysis_module, "_get_store",
+            lambda repo_root=None: (store, tmp_path),
+        )
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(analysis_module, analysis_name, boom)
+        with pytest.raises(RuntimeError, match="boom"):
+            getattr(analysis_module, func_name)()
+        store.close.assert_called_once()
+
+
+class TestGetWikiPageNoStoreLeak:
+    """Regression test: get_wiki_page_func opened a GraphStore just to
+    resolve the repo root and discarded it without closing."""
+
+    def test_get_wiki_page_does_not_open_graph_store(self, tmp_path, monkeypatch):
+        (tmp_path / ".code-review-graph").mkdir()
+        store_cls = MagicMock()
+        monkeypatch.setattr(common_module, "GraphStore", store_cls)
+        result = docs_module.get_wiki_page_func(
+            "anything", repo_root=str(tmp_path),
+        )
+        assert result["status"] == "not_found"
+        store_cls.assert_not_called()
 
 
 class TestFindLargeFunctions:

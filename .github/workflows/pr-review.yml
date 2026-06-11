@@ -1,0 +1,21 @@
+# Dogfoods the local composite action (action.yml at the repo root) on PRs.
+name: PR Review
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run code-review-graph review
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fail-on-risk: none
