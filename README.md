@@ -60,7 +60,7 @@ One command sets up everything. `install` detects which AI coding tools you have
 
 To target a specific platform:
 
-```bash
+
 code-review-graph install --platform codex       # configure only Codex
 code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
@@ -68,16 +68,14 @@ code-review-graph install --platform gemini-cli   # configure only Gemini CLI
 code-review-graph install --platform kiro         # configure only Kiro
 code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
-```
-
+``
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
 
 Then open your project and ask your AI assistant:
 
-```
-Build the code review graph for this project
-```
 
+Build the code review graph for this project
+`
 The initial build takes ~10 seconds for a 500-file project. After that, watch mode and supported hooks can keep the graph updated automatically.
 
 
@@ -182,22 +180,23 @@ All numbers come from the automated evaluation runner against 6 real open-source
 <summary><strong>Token efficiency: ~82x median per-question reduction (range 38x – 528x; whole-corpus vs graph query)</strong></summary>
 <br>
 
-For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, etc.), the graph returns ~2,000–3,500 tokens of targeted search hits + neighbor edges instead of forcing the agent to read every source file. The table below averages over the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
+For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, etc.), the graph returns ~2,000–3,500 tokens of targeted search hits + neighbor edges instead of forcing the agent to read every source file. The table below averages over the 5 sample questions defined in code_review_graph/token_benchmark.py`.
 
 | Repo | Snapshot SHA | naive_corpus_tokens | avg graph_tokens | Reduction |
 |------|---|-----------------:|----------------:|----------:|
-| fastapi | `0227991a` | 951,071 | 2,169 | **528.4x** |
-| code-review-graph | `84bde354` | 208,821 | 2,495 | **93.0x** |
-| gin | `5c00df8a` | 166,868 | 1,990 | **91.8x** |
-| flask | `a29f88ce` | 125,022 | 1,986 | **71.4x** |
-| express | `b4ab7d65` | 135,955 | 3,465 | **40.6x** |
-| httpx | `b55d4635` | 89,492 | 2,438 | **38.0x** |
+| fastapi |0227991a| 951,071 | 2,169 | **528.4x** |
+| code-review-graph | 84bde354 | 208,821 | 2,495 | **93.0x** |
+| gin | 5c00df8a | 166,868 | 1,990 | **91.8x** |
+| flask | a29f88ce | 125,022 | 1,986 | **71.4x** |
+| express | b4ab7d65| 135,955 | 3,465 | **40.6x** |
+| httpx | b55d4635 | 89,492 | 2,438 | **38.0x** |
 
 Median per-question reduction across the 6 repos: **~82x**. The range is 38x – 528x, where **528x is the best case** (fastapi, the largest corpus), not the headline.
 
 The whole-corpus baseline above is an upper bound no real agent pays: a competent agent greps for identifiers and reads only the best-matching files. The `agent_baseline` eval benchmark measures that realistic baseline — a pure-python grep over the corpus, top-3 files by match count, token-counted and compared to the graph query cost (`evaluate/results/<repo>_agent_baseline_*.csv`).
 
-The formal `eval/benchmarks/token_efficiency.py` benchmark measures a different scenario — full `get_review_context()` JSON versus just the changed-file content of a commit — and reports ratios below 1 for small commits, because the review-context response carries impact-radius edges plus source snippets that exceed a tiny single-file diff. That is not a bug; the two benchmarks answer different questions. See [`docs/REPRODUCING.md`](docs/REPRODUCING.md) for the full methodology.
+The formal eval/benchmarks/token_efficiency.py`
+benchmark measures a different scenario — full `get_review_context()` JSON versus just the changed-file content of a commit — and reports ratios below 1 for small commits, because the review-context response carries impact-radius edges plus source snippets that exceed a tiny single-file diff. That is not a bug; the two benchmarks answer different questions. See [`docs/REPRODUCING.md`](docs/REPRODUCING.md) for the full methodology.
 
 Since v2.3.4, review and impact tools attach a compact `context_savings` estimate so MCP clients can see the approximate context saved per call. In v2.3.5 the CLI surfaces this as the boxed `Token Savings` panel shown above (see "Token Savings panel" in the Usage section) and adds `--verify` to cross-check against OpenAI's `cl100k_base` tokenizer. Calibration data in [`docs/REPRODUCING.md`](docs/REPRODUCING.md) shows the estimate is within ~1% of real GPT-4 tokens in aggregate across 222 sample files.
 
@@ -304,7 +303,7 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 <summary><strong>CLI reference</strong></summary>
 <br>
 
-```bash
+
 code-review-graph install          # Auto-detect and configure all platforms
 code-review-graph install --platform <name>  # Target a specific platform
 code-review-graph build            # Parse entire codebase
@@ -328,11 +327,8 @@ code-review-graph daemon stop      # Stop the daemon
 code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start MCP server
-```
 
-</details>
 
-<details>
 <summary><strong>Token Savings panel: <code>detect-changes --brief</code> vs <code>update --brief</code></strong></summary>
 <br>
 
@@ -375,7 +371,6 @@ The daemon is included with `code-review-graph` — no separate install required
 
 **Quick setup:**
 
-```bash
 # 1. Register the repos you want to watch
 crg-daemon add ~/project-a --alias proj-a
 crg-daemon add ~/project-b
@@ -387,14 +382,13 @@ crg-daemon start
 crg-daemon status                 # check daemon and per-repo watcher status
 crg-daemon logs --repo proj-a -f  # tail logs for a specific repo
 crg-daemon stop                   # stop daemon and all watcher processes
-```
 
 Also available as `code-review-graph daemon start|stop|status|...`.
 
 Under the hood, `crg-daemon add` writes to a TOML config file at
 `~/.code-review-graph/watch.toml`. You can also edit this file directly:
 
-```toml
+
 [[repos]]
 path = "/home/user/project-a"
 alias = "proj-a"
@@ -402,7 +396,7 @@ alias = "proj-a"
 [[repos]]
 path = "/home/user/project-b"
 alias = "project-b"
-```
+
 
 The daemon monitors this config file for changes and automatically starts/stops
 watcher processes as repos are added or removed. Health checks every 30 seconds
@@ -463,26 +457,24 @@ Your AI assistant uses these automatically once the graph is built.
 
 To exclude paths from indexing, create a `.code-review-graphignore` file in your repository root:
 
-```
+
 generated/**
 *.generated.ts
 vendor/**
 node_modules/**
-```
+
 
 Note: in git repos, only tracked files are indexed (`git ls-files`), so gitignored files are skipped automatically. Use `.code-review-graphignore` to exclude tracked files or when git isn't available.
 
 Optional dependency groups:
 
-```bash
 pip install code-review-graph[embeddings]          # Local vector embeddings (sentence-transformers)
 pip install code-review-graph[google-embeddings]   # Google Gemini embeddings
 pip install code-review-graph[communities]         # Community detection (igraph)
 pip install code-review-graph[enrichment]          # Python call-resolution enrichment (Jedi)
 pip install code-review-graph[eval]                # Evaluation benchmarks (matplotlib)
 pip install code-review-graph[wiki]                # Wiki generation with LLM summaries (ollama)
-pip install code-review-graph[all]                 # All optional dependencies
-```
+pip install code-review-graph[all]                 # All optional dependenci
 
 ### Environment Variables
 
@@ -513,8 +505,6 @@ pip install code-review-graph[all]                 # All optional dependencies
 OpenAI-compatible embeddings (real OpenAI, Azure, or any self-hosted gateway like
 new-api / LiteLLM / vLLM / LocalAI / Ollama in openai mode) need no extra install —
 just set the environment variables and pass `provider="openai"` to `embed_graph`:
-
-```bash
 export CRG_OPENAI_BASE_URL=http://127.0.0.1:3000/v1     # or https://api.openai.com/v1
 export CRG_OPENAI_API_KEY=sk-...
 export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway serves
@@ -522,7 +512,6 @@ export CRG_OPENAI_MODEL=text-embedding-3-small          # whatever your gateway 
 export CRG_OPENAI_DIMENSION=1536                        # pin dim (v3 models support reduction)
 export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways with tight limits
                                                         # (e.g. Qwen text-embedding-v4 caps at 10)
-```
 
 The cloud-egress warning is auto-skipped when the base URL points to localhost
 (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
@@ -549,18 +538,18 @@ CRG exposes 30 MCP tools by default. In token-constrained environments, you can
 limit the server to a subset of tools using `--tools` or the `CRG_TOOLS`
 environment variable:
 
-```bash
+``
 # Via CLI flag
 code-review-graph serve --tools query_graph_tool,semantic_search_nodes_tool,detect_changes_tool
 
 # Via environment variable
 CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool code-review-graph serve
-```
+
 
 The CLI flag takes precedence over the environment variable. When neither is set,
 all tools are available. This is especially useful for MCP client configurations:
 
-```json
+
 {
   "mcpServers": {
     "code-review-graph": {
@@ -569,11 +558,8 @@ all tools are available. This is especially useful for MCP client configurations
     }
   }
 }
-```
 
-</details>
 
----
 
 ## FAQ & how it compares
 
@@ -598,7 +584,7 @@ Installing from a **source tree** (for example `pipx install .`) needs build dep
 1. Run the same command from **macOS Terminal.app** (or iTerm) instead of the IDE’s terminal, then retry `pipx install .` or `pipx install "git+https://..."` .
 2. Use **[uv](https://docs.astral.sh/uv/)** to install the CLI from a checkout (uses different download machinery than `pip` in many cases):
 
-   ```bash
+
    cd /path/to/code-review-graph
    uv tool install . --force
    ```
@@ -612,23 +598,22 @@ If you are using Windows and encounter `Invalid JSON: EOF while parsing` or `MCP
 
 Ensure `fastmcp` is updated to at least `3.2.4+`. Then, configure your `~/.claude.json` to execute the `.exe` directly and pass the UTF-8 environment variable via the config:
 
-```json
+`
 "code-review-graph": {
   "command": "C:\\path\\to\\your\\venv\\Scripts\\code-review-graph.exe",
   "args": ["serve", "--repo", "C:\\path\\to\\your\\project"],
   "env": { "PYTHONUTF8": "1" }
 }
-```
 
 ## Contributing
 
-```bash
+
 git clone https://github.com/tirth8205/code-review-graph.git
 cd code-review-graph
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest
-```
+
 
 <details>
 <summary><strong>Adding a new language</strong></summary>
@@ -640,8 +625,8 @@ Edit `code_review_graph/parser.py` and add your extension to `EXTENSION_TO_LANGU
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
-
+MIT 2026-3020 See [LICENSE](LICENSE).
+© JOYANNDAUBA
 <p align="center">
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
