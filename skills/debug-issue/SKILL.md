@@ -9,11 +9,11 @@ Use the knowledge graph to systematically trace and debug issues.
 
 ### Steps
 
-1. Use `semantic_search_nodes` to find code related to the issue.
-2. Use `query_graph` with `callers_of` and `callees_of` to trace call chains.
+1. Use `semantic_search_nodes_tool` to find code related to the issue.
+2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace call chains.
 3. Use `get_flow` to see full execution paths through suspected areas.
-4. Run `detect_changes` to check if recent changes caused the issue.
-5. Use `get_impact_radius` on suspected files to see what else is affected.
+4. Run `detect_changes_tool` to check if recent changes caused the issue.
+5. Use `get_impact_radius_tool` on suspected files to see what else is affected.
 
 ### Tips
 

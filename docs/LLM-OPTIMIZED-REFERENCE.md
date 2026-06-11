@@ -1,4 +1,4 @@
-# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.3.5
+# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.3.6
 
 AI coding agents: Read ONLY the exact `<section>` you need. Never load the whole file.
 
@@ -27,8 +27,8 @@ Never include full files unless explicitly asked.
 <section name="commands">
 Core MCP tools: get_minimal_context_tool, detect_changes_tool, get_review_context_tool, get_impact_radius_tool, query_graph_tool, semantic_search_nodes_tool, get_architecture_overview_tool, get_affected_flows_tool, list_flows_tool, list_communities_tool, refactor_tool, build_or_update_graph_tool, run_postprocess_tool, embed_graph_tool, list_graph_stats_tool, get_docs_section_tool
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check
-Skills: build-graph, review-delta, review-pr
-CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|wiki|detect-changes|postprocess|register|unregister|repos|eval]
+Skills: build-graph, debug-issue, explore-codebase, refactor-safely, review-changes, review-delta, review-pr
+CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|mcp|wiki|detect-changes|postprocess|embed|register|unregister|repos|eval|daemon]
 Token efficiency: Prefer detail_level="minimal" where available. Always call get_minimal_context_tool first. Some review/context tools return compact estimated context_savings metadata.
 </section>
 
@@ -52,6 +52,7 @@ Configure via provider/model parameters, CRG_EMBEDDING_MODEL for local, or CRG_O
 <section name="languages">
 Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
 Parser: Tree-sitter via tree-sitter-language-pack
+Custom languages: add .code-review-graph/languages.toml (extensions + node types per grammar) — no fork needed, see docs/CUSTOM_LANGUAGES.md. Built-ins cannot be overridden.
 </section>
 
 <section name="troubleshooting">

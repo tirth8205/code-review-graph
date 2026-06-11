@@ -29,6 +29,7 @@
   <a href="docs/COMMANDS.md">Commands</a> ·
   <a href="docs/FAQ.md">FAQ</a> ·
   <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> ·
+  <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
   <a href="docs/REPRODUCING.md">Reproducing the benchmarks</a> ·
   <a href="docs/ROADMAP.md">Roadmap</a>
 </p>
@@ -140,6 +141,31 @@ call_node_types = ["call"]
 
 The generic tree-sitter walker handles extraction from there — no code changes, and built-in languages can never be overridden. See [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md) for the schema reference, validation rules, and a worked end-to-end example.
 
+### Risk-scored PR reviews in CI (GitHub Action)
+
+The same analysis runs as a composite GitHub Action — and it stays local-first: the knowledge graph is built and queried entirely on your CI runner, with no source code sent to any external service. On each pull request the action posts a single sticky comment with risk-scored functions, affected execution flows, and test gaps, updated in place on every push. An optional `fail-on-risk` input turns the review into a merge gate.
+
+```yaml
+# .github/workflows/code-review-graph.yml
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: tirth8205/code-review-graph@v2.3.6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+See [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) for inputs, risk levels, and caching details, or the dogfood workflow this repo runs on itself in [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml).
+
 ---
 
 ## Benchmarks
@@ -247,6 +273,8 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 | **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
 | **Architecture overview** | Auto-generated architecture map with coupling warnings |
 | **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows, and test gaps |
+| **Custom languages** | Add new languages via `.code-review-graph/languages.toml` — no fork or code changes needed |
+| **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
 | **Wiki generation** | Auto-generate markdown wiki from community structure |
 | **Multi-repo registry** | Register multiple repos, search across all of them |
