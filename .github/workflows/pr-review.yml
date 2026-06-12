@@ -1,4 +1,8 @@
 # Dogfoods the local composite action (action.yml at the repo root) on PRs.
+# Runs unprivileged: GITHUB_TOKEN is read-only in pull_request runs from
+# forks, so the sticky comment is not posted here. Instead the rendered
+# report is uploaded as an artifact and posted by pr-review-comment.yml
+# (workflow_run, which has write permissions).
 name: PR Review
 
 on:
@@ -7,7 +11,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   review:
@@ -15,7 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run code-review-graph review
+        id: review
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment: "false"
           fail-on-risk: none
+      - name: Stage report artifact
+        env:
+          COMMENT_FILE: ${{ steps.review.outputs.comment-file }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir crg-report
+          cp "${COMMENT_FILE}" crg-report/crg-comment.md
+          echo "${PR_NUMBER}" > crg-report/pr-number.txt
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: crg-report
+          path: crg-report/

@@ -78,6 +78,12 @@ security-sensitive names, caller count). The action maps it to levels:
 | high | 0.70 – 0.84 |
 | critical | ≥ 0.85 |
 
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `comment-file` | Runner-local path to the rendered markdown report. Useful with `comment: false` to publish the report another way — e.g. upload it as an artifact for a privileged `workflow_run` workflow to post on fork PRs (see "Fork PRs" below). |
+
 ## What the comment contains
 
 - **Overall risk** score and level, with counts of changed functions,
@@ -139,16 +145,26 @@ database) with `actions/cache`:
 - **Pinning**: when consuming the action from another repository, pin
   `uses:` to a release tag or commit SHA rather than `@main`.
 - **Fork PRs**: `pull_request` runs from forks receive a read-only
-  `GITHUB_TOKEN`, so the comment step will fail for fork PRs unless you use
-  `pull_request_target` — which checks out trusted base-branch workflow
-  code; understand [the security implications](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/)
-  before switching, or set `comment: false` for fork PRs.
+  `GITHUB_TOKEN`, so the comment step fails for fork PRs. The recommended
+  pattern: run the action with `comment: false`, upload the rendered report
+  (the `comment-file` output) as an artifact, and post it from a separate
+  `workflow_run`-triggered workflow with `pull-requests: write` — see
+  [`pr-review.yml`](../.github/workflows/pr-review.yml) and
+  [`pr-review-comment.yml`](../.github/workflows/pr-review-comment.yml) for
+  a reference implementation, which also verifies the artifact's PR number
+  against the triggering run's head SHA before posting. Avoid
+  `pull_request_target` with a checkout of PR code — it runs untrusted code
+  with a privileged token
+  ([details](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/)).
 
 ## Dogfooding
 
 This repository runs the action on its own PRs via
 [`.github/workflows/pr-review.yml`](../.github/workflows/pr-review.yml),
-which `uses: ./` (the local `action.yml`).
+which `uses: ./` (the local `action.yml`). The review run is unprivileged
+(`comment: false` + artifact upload) and the sticky comment is posted by
+[`pr-review-comment.yml`](../.github/workflows/pr-review-comment.yml), so
+fork PRs get review comments too.
 
 ## Rendering script
 

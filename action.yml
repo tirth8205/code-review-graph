@@ -32,6 +32,15 @@ inputs:
     required: false
     default: "3.12"
 
+outputs:
+  comment-file:
+    description: >-
+      Runner-local path to the rendered markdown report. Useful with
+      `comment: false` to publish the report another way — e.g. upload it
+      as an artifact for a privileged workflow_run workflow to post on
+      fork PRs (see docs/GITHUB_ACTION.md, "Fork PRs").
+    value: ${{ steps.render.outputs.comment-file }}
+
 runs:
   using: "composite"
   steps:
@@ -87,11 +96,13 @@ runs:
           > "${RUNNER_TEMP}/crg-report.json"
 
     - name: Render markdown report
+      id: render
       shell: bash
       run: |
         python "${GITHUB_ACTION_PATH}/scripts/render_pr_comment.py" \
           --input "${RUNNER_TEMP}/crg-report.json" \
           --output "${RUNNER_TEMP}/crg-comment.md"
+        echo "comment-file=${RUNNER_TEMP}/crg-comment.md" >> "${GITHUB_OUTPUT}"
 
     - name: Upsert sticky PR comment
       if: ${{ inputs.comment == 'true' && github.event_name == 'pull_request' }}

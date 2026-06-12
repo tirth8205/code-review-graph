@@ -1,0 +1,65 @@
+# Posts the sticky PR comment rendered by pr-review.yml. Split into a
+# separate workflow_run-triggered workflow because GITHUB_TOKEN is read-only
+# in pull_request runs from forks (observed on #555), so the unprivileged
+# run cannot comment. This workflow never checks out or executes PR code,
+# and it treats the artifact as untrusted input: the PR number it names is
+# only honored if that PR's head is the exact commit the triggering run
+# analyzed.
+name: PR Review Comment
+
+on:
+  workflow_run:
+    workflows: ["PR Review"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - name: Download report artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crg-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upsert sticky PR comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr_number=$(head -n 1 pr-number.txt | tr -d '[:space:]')
+          case "${pr_number}" in
+            ''|*[!0-9]*)
+              echo "Missing or non-numeric PR number in artifact." >&2
+              exit 1
+              ;;
+          esac
+          # The artifact comes from an unprivileged (possibly fork) run.
+          # Only trust its PR number if that PR's head is the commit the
+          # triggering run actually analyzed.
+          actual_sha=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" --jq .head.sha)
+          if [ "${actual_sha}" != "${HEAD_SHA}" ]; then
+            echo "PR ${pr_number} head (${actual_sha}) does not match" \
+              "analyzed commit (${HEAD_SHA}); refusing to comment." >&2
+            exit 1
+          fi
+          marker='<!-- code-review-graph-report -->'
+          comment_id=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+            --paginate \
+            --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | head -n 1)
+          if [ -n "${comment_id}" ]; then
+            gh api --method PATCH --silent \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              -F body=@crg-comment.md
+          else
+            gh api --method POST --silent \
+              "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
+              -F body=@crg-comment.md
+          fi
