@@ -2,8 +2,8 @@
 
 import json
 import os
-import subprocess
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -32,9 +32,9 @@ from code_review_graph.skills import (
     inject_claude_md,
     inject_platform_instructions,
     install_codex_hooks,
+    install_cursor_hooks,
     install_gemini_cli_hooks,
     install_gemini_cli_skills,
-    install_cursor_hooks,
     install_git_hook,
     install_hooks,
     install_opencode_plugin,
@@ -1469,7 +1469,6 @@ class TestCopilotCLIPlatform:
         assert "code-review-graph" in data["servers"]
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
-        """inject_platform_instructions with target='copilot-cli' writes .github/code-review-graph.instruction.md."""
         updated = inject_platform_instructions(tmp_path, target="copilot-cli")
         assert ".github/code-review-graph.instruction.md" in updated
         instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
