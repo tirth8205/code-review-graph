@@ -1,12 +1,15 @@
 """Tests for change impact analysis (changes.py)."""
 
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 from code_review_graph.changes import (
+    _parse_numstat,
     _parse_unified_diff,
     analyze_changes,
+    compute_file_churn,
     compute_risk_score,
     map_changes_to_nodes,
     parse_git_diff_ranges,
@@ -630,3 +633,183 @@ class TestAnalyzeChangesInternalParseRemap:
         # No remapping: keys passed through exactly as the caller gave them.
         assert list(captured["ranges"]) == ["app.py"]
         assert any(f["name"] == "rel_func" for f in result["changed_functions"])
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a git command inside *repo* and return the result."""
+    return subprocess.run(
+        ["git", *args],
+        capture_output=True,
+        text=True,
+        cwd=str(repo),
+        timeout=10,
+    )
+
+
+class TestFileChurn:
+    """compute_file_churn: per-file commit counts from git log --numstat."""
+
+    def test_parse_numstat_counts_commits_per_file(self):
+        log_text = (
+            "3\t1\tsrc/app.py\n"
+            "10\t0\tsrc/util.py\n"
+            "\n"
+            "2\t2\tsrc/app.py\n"
+        )
+        assert _parse_numstat(log_text) == {"src/app.py": 2, "src/util.py": 1}
+
+    def test_parse_numstat_counts_binary_files(self):
+        log_text = "-\t-\tlogo.png\n5\t0\tapp.py\n"
+        assert _parse_numstat(log_text) == {"logo.png": 1, "app.py": 1}
+
+    def test_parse_numstat_ignores_non_numstat_lines(self):
+        log_text = "commit abc123\nAuthor: someone\n\n1\t1\tapp.py\n"
+        assert _parse_numstat(log_text) == {"app.py": 1}
+
+    def test_compute_file_churn_counts_commits(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init")
+        _git(repo, "config", "user.email", "test@test.com")
+        _git(repo, "config", "user.name", "Test")
+
+        app = repo / "app.py"
+        app.write_text("a = 1\n")
+        _git(repo, "add", "app.py")
+        _git(repo, "commit", "-m", "one")
+
+        app.write_text("a = 2\n")
+        util = repo / "util.py"
+        util.write_text("b = 1\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "two")
+
+        counts = compute_file_churn(str(repo))
+        assert counts["app.py"] == 2
+        assert counts["util.py"] == 1
+
+    def test_compute_file_churn_non_git_dir_returns_empty(self, tmp_path):
+        assert compute_file_churn(str(tmp_path)) == {}
+
+    def test_compute_file_churn_subprocess_error_returns_empty(self):
+        with patch(
+            "code_review_graph.changes.subprocess.run",
+            side_effect=OSError("git not found"),
+        ):
+            assert compute_file_churn("/tmp") == {}
+
+    def test_compute_file_churn_nonpositive_window_returns_empty(self, tmp_path):
+        assert compute_file_churn(str(tmp_path), window_days=0) == {}
+
+
+class TestRiskScoreChurn:
+    """Opt-in churn term in compute_risk_score."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name: str, path: str = "app.py") -> None:
+        node = NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=10, language="python",
+        )
+        self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+
+    def test_churn_counts_increase_risk(self):
+        self._add_func("hot_func")
+        node = self.store.get_node("app.py::hot_func")
+        assert node is not None
+        base = compute_risk_score(self.store, node)
+        churned = compute_risk_score(self.store, node, churn_counts={"app.py": 5})
+        assert churned > base
+
+    def test_churn_term_saturates(self):
+        """The churn term maxes out at 0.15 regardless of commit count."""
+        self._add_func("hot_func")
+        node = self.store.get_node("app.py::hot_func")
+        assert node is not None
+        base = compute_risk_score(self.store, node)
+        saturated = compute_risk_score(self.store, node, churn_counts={"app.py": 10})
+        extreme = compute_risk_score(self.store, node, churn_counts={"app.py": 1000})
+        assert extreme == saturated
+        assert abs((saturated - base) - 0.15) < 1e-9
+
+    def test_no_churn_is_backward_compatible(self):
+        """Omitting churn_counts leaves the structural score unchanged."""
+        self._add_func("stable_func")
+        node = self.store.get_node("app.py::stable_func")
+        assert node is not None
+        base = compute_risk_score(self.store, node)
+        assert compute_risk_score(self.store, node, churn_counts=None) == base
+        assert compute_risk_score(self.store, node, churn_counts={}) == base
+        assert compute_risk_score(self.store, node, churn_counts={"other.py": 50}) == base
+
+
+class TestAnalyzeChangesChurn:
+    """Opt-in churn plumbing through analyze_changes."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func_at(self, path: str) -> None:
+        node = NodeInfo(
+            kind="Function", name="greet", file_path=path,
+            line_start=1, line_end=10, language="python",
+        )
+        self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+
+    def test_churn_not_computed_by_default(self, tmp_path):
+        self._add_func_at("app.py")
+        with patch("code_review_graph.changes.compute_file_churn") as mock_churn:
+            analyze_changes(
+                self.store,
+                changed_files=["app.py"],
+                changed_ranges={"app.py": [(1, 10)]},
+                repo_root=str(tmp_path),
+            )
+        mock_churn.assert_not_called()
+
+    def test_include_churn_raises_risk_scores(self, tmp_path):
+        self._add_func_at("app.py")
+        kwargs = {
+            "changed_files": ["app.py"],
+            "changed_ranges": {"app.py": [(1, 10)]},
+            "repo_root": str(tmp_path),
+        }
+        baseline = analyze_changes(self.store, **kwargs)
+        with patch(
+            "code_review_graph.changes.compute_file_churn",
+            return_value={"app.py": 10},
+        ):
+            churned = analyze_changes(self.store, include_churn=True, **kwargs)
+        assert churned["risk_score"] > baseline["risk_score"]
+        assert abs(churned["risk_score"] - baseline["risk_score"] - 0.15) < 1e-9
+
+    def test_include_churn_matches_absolute_node_paths(self, tmp_path):
+        """Repo-relative churn keys must match graphs storing absolute paths."""
+        abs_path = str(tmp_path / "src" / "app.py")
+        self._add_func_at(abs_path)
+        kwargs = {
+            "changed_files": [abs_path],
+            "changed_ranges": {abs_path: [(1, 10)]},
+            "repo_root": str(tmp_path),
+        }
+        baseline = analyze_changes(self.store, **kwargs)
+        with patch(
+            "code_review_graph.changes.compute_file_churn",
+            return_value={"src/app.py": 10},
+        ):
+            churned = analyze_changes(self.store, include_churn=True, **kwargs)
+        assert churned["risk_score"] > baseline["risk_score"]

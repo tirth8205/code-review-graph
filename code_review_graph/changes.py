@@ -167,7 +167,83 @@ def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
 
 
 # ---------------------------------------------------------------------------
-# 2. map_changes_to_nodes
+# 2. compute_file_churn
+# ---------------------------------------------------------------------------
+
+# Commits within the churn window at which the churn risk term saturates.
+_CHURN_SATURATION = 10.0
+_CHURN_WEIGHT = 0.15
+
+# Match "added<TAB>deleted<TAB>path" numstat lines ("-" counts for binary files).
+_NUMSTAT_LINE = re.compile(r"^(?:\d+|-)\t(?:\d+|-)\t(.+)$")
+
+
+def _parse_numstat(log_text: str) -> dict[str, int]:
+    """Parse ``git log --numstat`` output into per-file commit counts.
+
+    Each numstat line represents one file touched by one commit, so
+    counting lines per path yields commits-per-file.
+    """
+    counts: dict[str, int] = {}
+    for line in log_text.splitlines():
+        match = _NUMSTAT_LINE.match(line)
+        if match:
+            path = match.group(1)
+            counts[path] = counts.get(path, 0) + 1
+    return counts
+
+
+def compute_file_churn(repo_root: str, window_days: int | None = None) -> dict[str, int]:
+    """Count commits touching each file over a trailing window.
+
+    The temporal half of hotspot analysis (Tornhill): defect risk
+    correlates with structural complexity x change frequency. Uses
+    native ``git log --numstat`` parsing — no external dependencies.
+    Renames are not followed (``--no-renames``); churn accrues to the
+    path as it existed in each commit.
+
+    Args:
+        repo_root: Absolute path to the repository root.
+        window_days: Trailing window in days. Defaults to the
+            ``CRG_CHURN_WINDOW_DAYS`` environment variable (90).
+
+    Returns:
+        Mapping of repo-relative forward-slash paths to the number of
+        commits touching them within the window. Empty dict on error
+        (not a git repo, git unavailable, timeout) or when the window
+        is not positive.
+    """
+    if window_days is None:
+        window_days = int(os.environ.get("CRG_CHURN_WINDOW_DAYS", "90"))
+    if window_days <= 0:
+        return {}
+    try:
+        result = subprocess.run(
+            [
+                "git", "-c", "core.quotepath=off", "log",
+                f"--since={window_days} days ago", "--numstat",
+                "--no-renames", "--format=",
+            ],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=repo_root,
+            timeout=_GIT_TIMEOUT,
+        )
+        if result.returncode != 0:
+            logger.warning("git log failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return {}
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("git log error: %s", exc)
+        return {}
+
+    return _parse_numstat(result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# 3. map_changes_to_nodes
 # ---------------------------------------------------------------------------
 
 
@@ -212,11 +288,15 @@ def map_changes_to_nodes(
 
 
 # ---------------------------------------------------------------------------
-# 3. compute_risk_score
+# 4. compute_risk_score
 # ---------------------------------------------------------------------------
 
 
-def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
+def compute_risk_score(
+    store: GraphStore,
+    node: GraphNode,
+    churn_counts: dict[str, int] | None = None,
+) -> float:
     """Compute a risk score (0.0 - 1.0) for a single node.
 
     Scoring factors:
@@ -225,6 +305,9 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
       - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges)
       - Security sensitivity: 0.20 if name matches security keywords
       - Caller count: callers / 20, capped at 0.10
+      - Change frequency (opt-in): commits touching the file / 10, capped
+        at 0.15. Only applied when *churn_counts* is provided (see
+        :func:`compute_file_churn`).
     """
     score = 0.0
 
@@ -266,11 +349,16 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
     caller_count = len(caller_edges)
     score += min(caller_count / 20.0, 0.10)
 
+    # --- Change frequency (opt-in, cap 0.15) ---
+    if churn_counts and node.file_path:
+        commit_count = churn_counts.get(node.file_path, 0)
+        score += min(commit_count / _CHURN_SATURATION, 1.0) * _CHURN_WEIGHT
+
     return round(min(max(score, 0.0), 1.0), 4)
 
 
 # ---------------------------------------------------------------------------
-# 4. analyze_changes
+# 5. analyze_changes
 # ---------------------------------------------------------------------------
 
 
@@ -280,6 +368,7 @@ def analyze_changes(
     changed_ranges: dict[str, list[tuple[int, int]]] | None = None,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    include_churn: bool = False,
 ) -> dict[str, Any]:
     """Analyze changes and produce risk-scored review guidance.
 
@@ -291,6 +380,11 @@ def analyze_changes(
             (Git or SVN).
         repo_root: Repository root (for git/svn diff).
         base: Git ref or SVN revision range to diff against.
+        include_churn: When True and ``repo_root`` is given, add a change
+            frequency term to each node's risk score, sourced from
+            ``git log --numstat`` over the trailing churn window
+            (``CRG_CHURN_WINDOW_DAYS``, default 90 days). Off by default
+            so structural-only scores are unchanged.
 
     Returns:
         Dict with ``summary``, ``risk_score``, ``changed_functions``,
@@ -332,10 +426,21 @@ def analyze_changes(
     if funcs_truncated:
         changed_funcs = changed_funcs[:_max_funcs]
 
+    # Optional churn term: key counts by both the repo-relative path git
+    # reports and the absolute native path, so lookups succeed however
+    # the graph stored node file paths (mirrors the diff-key remap above).
+    churn_counts: dict[str, int] | None = None
+    if include_churn and repo_root is not None:
+        churn_counts = {}
+        root_path = Path(repo_root)
+        for key, count in compute_file_churn(repo_root).items():
+            churn_counts[key] = count
+            churn_counts[str(root_path / key)] = count
+
     # Compute per-node risk scores.
     node_risks: list[dict[str, Any]] = []
     for node in changed_funcs:
-        risk = compute_risk_score(store, node)
+        risk = compute_risk_score(store, node, churn_counts)
         node_risks.append({
             **node_to_dict(node),
             "risk_score": risk,
