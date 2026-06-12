@@ -236,10 +236,10 @@ def _build_server_entry(
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
     if key == "opencode":
-        entry: dict[str, Any] = {"command": [command, *args], "type": "local"}
+        cmd: list[str] = [command, *args]
         if repo_root is not None:
-            entry["cwd"] = str(repo_root)
-        return entry
+            cmd += ["--repo", str(repo_root)]
+        return {"command": cmd, "type": "local"}
     entry = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:

@@ -772,9 +772,11 @@ class TestInstallPlatformConfigs:
         entry = data["mcp"]["code-review-graph"]
         assert entry["type"] == "local"
         assert isinstance(entry["command"], list)
-        assert entry["command"][-1] == "serve"
+        assert "serve" in entry["command"]
         assert "args" not in entry
         assert "env" not in entry
+        assert "cwd" not in entry
+        assert str(tmp_path) in entry["command"]
 
     def test_install_opencode_warns_on_legacy_dotfile(self, tmp_path, capsys):
         legacy = tmp_path / ".opencode.json"
@@ -1005,8 +1007,10 @@ class TestJsoncHelpers:
         assert json.loads(_strip_jsonc_comments(raw)) == {"a": 1, "b": 2}
 
     def test_strip_jsonc_comments_handles_crlf_and_cr_line_endings(self):
-        assert json.loads(_strip_jsonc_comments('// tail\r\n{"a": 1, "b": 2}\r\n')) == {"a": 1, "b": 2}
-        assert json.loads(_strip_jsonc_comments('// tail\r{"a": 1, "b": 2}\r')) == {"a": 1, "b": 2}
+        crlf_raw = '// tail\r\n{"a": 1, "b": 2}\r\n'
+        cr_raw = '// tail\r{"a": 1, "b": 2}\r'
+        assert json.loads(_strip_jsonc_comments(crlf_raw)) == {"a": 1, "b": 2}
+        assert json.loads(_strip_jsonc_comments(cr_raw)) == {"a": 1, "b": 2}
 
     def test_opencode_config_path_prefers_jsonc_then_json_then_defaults_to_jsonc(
         self, tmp_path,
