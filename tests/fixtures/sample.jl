@@ -39,6 +39,8 @@ function bar end
 
 Base.length(d::Dog) = d.age
 
+Base.:+(a::Dog, b::Dog) = Dog(a.name, a.age + b.age)
+
 function analyze(v::Vector{Float64})
     return LinearAlgebra.norm(v)
 end

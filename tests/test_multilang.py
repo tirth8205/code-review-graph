@@ -1694,6 +1694,14 @@ class TestJuliaParsing:
         ]
         assert any(e.target.split("::")[-1] == "gemv" for e in calls)
 
+    def test_qualified_operator_def(self):
+        # ``Base.:+(a, b) = ...`` -> method name is the operator, module is
+        # ``Base``; the module must not leak in as a function node.
+        by_name = {n.name: n for n in self.nodes if n.kind == "Function"}
+        assert "+" in by_name
+        assert by_name["+"].extra.get("julia_module_qualifier") == "Base"
+        assert "Base" not in by_name
+
     def test_finds_type_alias(self):
         # ``const FloatVec = Vector{Float64}`` -> Type node.
         types = {n.name for n in self.nodes if n.kind == "Type"}

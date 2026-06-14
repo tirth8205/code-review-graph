@@ -3093,11 +3093,11 @@ class CodeParser:
         for child in call_expr.children:
             if child.type == "identifier":
                 return child.text.decode("utf-8", errors="replace")
+            if child.type == "operator":
+                # bare operator def: ``+(a, b) = ...``
+                return child.text.decode("utf-8", errors="replace")
             if child.type == "field_expression":
-                for ident in reversed(child.children):
-                    if ident.type == "identifier":
-                        return ident.text.decode("utf-8", errors="replace")
-                return None
+                return self._julia_field_method_name(child)
             if child.type == "parametrized_type_expression":
                 for ident in child.children:
                     if ident.type == "identifier":
@@ -3141,16 +3141,45 @@ class CodeParser:
                 parts.append(child.text.decode("utf-8", errors="replace"))
         return parts
 
-    def _julia_field_qualifier(self, field_expr) -> Optional[str]:
-        """Module qualifier of a ``field_expression`` (``A.B.f`` -> ``A.B``).
-
-        The dotted prefix before the final method name; None when there are
-        fewer than two identifier parts.
+    @staticmethod
+    def _julia_component_name(node) -> Optional[str]:
+        """Name of a field_expression's final component: a plain
+        ``identifier`` or a quoted operator (``:+`` / ``:(==)``).
         """
-        parts = self._julia_field_parts(field_expr)
-        if len(parts) >= 2:
-            return ".".join(parts[:-1])
+        if node.type == "identifier":
+            return node.text.decode("utf-8", errors="replace")
+        if node.type == "quote_expression":
+            for c in node.children:
+                if c.type == "operator":
+                    return c.text.decode("utf-8", errors="replace")
+                if c.type == "parenthesized_expression":
+                    for cc in c.children:
+                        if cc.type == "operator":
+                            return cc.text.decode("utf-8", errors="replace")
         return None
+
+    def _julia_field_qualifier(self, field_expr) -> Optional[str]:
+        """Module qualifier of a ``field_expression`` (``A.B.f`` -> ``A.B``,
+        ``Base.:+`` -> ``Base``): the dotted prefix before the final
+        component. None when there is no prefix.
+        """
+        kids = field_expr.children
+        if len(kids) < 2:
+            return None
+        prefix = kids[0]
+        if prefix.type == "field_expression":
+            parts = self._julia_field_parts(prefix)
+            return ".".join(parts) if parts else None
+        if prefix.type == "identifier":
+            return prefix.text.decode("utf-8", errors="replace")
+        return None
+
+    def _julia_field_method_name(self, field_expr) -> Optional[str]:
+        """Final method name of a field_expression (``A.B.f`` -> ``f``,
+        ``Base.:+`` -> ``+``).
+        """
+        kids = field_expr.children
+        return self._julia_component_name(kids[-1]) if kids else None
 
     def _julia_def_qualifier(self, func_def) -> Optional[str]:
         """Module qualifier of a ``function Mod.f(...)`` definition.
@@ -6018,13 +6047,15 @@ class CodeParser:
                                         return target.text.decode(
                                             "utf-8", errors="replace",
                                         )
+                                    if target.type == "operator":
+                                        # bare operator def: ``function +(a, b) end``
+                                        return target.text.decode(
+                                            "utf-8", errors="replace",
+                                        )
                                     if target.type == "field_expression":
-                                        # Qualified: last identifier is method name
-                                        for ident in reversed(target.children):
-                                            if ident.type == "identifier":
-                                                return ident.text.decode(
-                                                    "utf-8", errors="replace",
-                                                )
+                                        return self._julia_field_method_name(
+                                            target,
+                                        )
                                     if target.type == "parametrized_type_expression":
                                         # Parametric constructor: Foo{T}(x) = ...
                                         for p in target.children:
@@ -6041,11 +6072,7 @@ class CodeParser:
                             if sub.type == "identifier":
                                 return sub.text.decode("utf-8", errors="replace")
                             if sub.type == "field_expression":
-                                for ident in reversed(sub.children):
-                                    if ident.type == "identifier":
-                                        return ident.text.decode(
-                                            "utf-8", errors="replace",
-                                        )
+                                return self._julia_field_method_name(sub)
                 return None
             if node.type in ("struct_definition", "abstract_definition"):
                 for child in node.children:
