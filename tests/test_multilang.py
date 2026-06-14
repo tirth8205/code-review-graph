@@ -1694,6 +1694,15 @@ class TestJuliaParsing:
         ]
         assert any(e.target.split("::")[-1] == "gemv" for e in calls)
 
+    def test_short_form_body_call(self):
+        # ``delegate(x) = greet(x)`` -> the RHS call must be captured (the
+        # one-liner body is the call itself, not a block).
+        def tail(q):
+            return q.split("::")[-1].split(".")[-1]
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        srcs_targets = {(tail(e.source), tail(e.target)) for e in calls}
+        assert ("delegate", "greet") in srcs_targets
+
     def test_qualified_operator_def(self):
         # ``Base.:+(a, b) = ...`` -> method name is the operator, module is
         # ``Base``; the module must not leak in as a function node.

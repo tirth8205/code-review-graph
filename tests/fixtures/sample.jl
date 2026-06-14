@@ -35,6 +35,8 @@ add(a, b) = a + b
 
 square(x) = x^2
 
+delegate(x) = greet(x)
+
 function bar end
 
 Base.length(d::Dog) = d.age

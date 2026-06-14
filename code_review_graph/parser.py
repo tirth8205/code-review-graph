@@ -3337,12 +3337,22 @@ class CodeParser:
                     # so internal calls wire up correctly. Visiting the
                     # whole assignment would re-treat the LHS
                     # ``call_expression`` as a self-call.
+                    call_types_jl = set(_CALL_TYPES.get(language, []))
                     seen_op = False
                     for sub in child.children:
                         if not seen_op:
                             if sub.type == "operator":
                                 seen_op = True
                             continue
+                        # A one-liner whose RHS *is* the call (``f(x) = g(x)``)
+                        # needs the call node itself dispatched;
+                        # _extract_from_tree only visits a node's children.
+                        if sub.type in call_types_jl:
+                            self._extract_calls(
+                                sub, source, language, file_path, nodes, edges,
+                                enclosing_class, name,
+                                import_map, defined_names, _depth + 1,
+                            )
                         self._extract_from_tree(
                             sub, source, language, file_path, nodes, edges,
                             enclosing_class=enclosing_class,
