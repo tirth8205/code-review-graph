@@ -293,9 +293,11 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
-            for e in store.get_edges_by_target(qn):
+            # TESTED_BY edges are stored as source=production, target=test
+            # by the parser, so look them up by source. See: #515
+            for e in store.get_edges_by_source(qn):
                 if e.kind == "TESTED_BY":
-                    test = store.get_node(e.source_qualified)
+                    test = store.get_node(e.target_qualified)
                     if test:
                         results.append(node_to_dict(test))
             # Also search by naming convention
