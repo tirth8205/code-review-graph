@@ -308,6 +308,59 @@ class TestGraphStore:
         )
         assert match["indirect"] is True
 
+    def test_parse_store_get_transitive_tests_end_to_end(self):
+        """End-to-end producer->store->consumer guard for #515.
+
+        Parse a real fixture pair (production + test) through the parser,
+        persist the emitted nodes/edges, and confirm get_transitive_tests
+        surfaces the test as covering the production code. This couples the
+        parser's canonical TESTED_BY direction (source=production,
+        target=test) to the consumer query, so a future parser flip would
+        break this test even if every hand-seeded fixture test still passed.
+        """
+        from code_review_graph.parser import CodeParser
+
+        fixtures = Path(__file__).parent / "fixtures"
+        parser = CodeParser()
+        all_nodes: list[NodeInfo] = []
+        all_edges: list[EdgeInfo] = []
+        for fixture in ("sample_python.py", "test_sample.py"):
+            nodes, edges = parser.parse_file(fixtures / fixture)
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+
+        for n in all_nodes:
+            self.store.upsert_node(n)
+        for e in all_edges:
+            self.store.upsert_edge(e)
+        self.store.commit()
+
+        tested_by = [e for e in all_edges if e.kind == "TESTED_BY"]
+        assert tested_by, "fixture pair should yield at least one TESTED_BY edge"
+
+        # Producer direction guard: every TESTED_BY target must be a stored
+        # Test node, and querying the consumer (get_transitive_tests) by the
+        # edge's *source* (production) must surface that test target. If a
+        # future parser flip swapped the direction, the target would point at
+        # production code and this end-to-end assertion would fail.
+        checked = 0
+        for edge in tested_by:
+            target = self.store.get_node(edge.target)
+            assert target is not None, f"missing test node {edge.target}"
+            assert target.is_test, (
+                f"TESTED_BY target {edge.target!r} should be a test node; "
+                f"a flipped parser would put production code here"
+            )
+
+            results = self.store.get_transitive_tests(edge.source)
+            qns = {r["qualified_name"] for r in results}
+            assert edge.target in qns, (
+                f"get_transitive_tests({edge.source!r}) should surface test "
+                f"{edge.target!r}; got {sorted(qns)}"
+            )
+            checked += 1
+        assert checked >= 1
+
     def test_get_all_community_ids_logs_when_column_missing(self, caplog):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
