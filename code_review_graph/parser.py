@@ -851,6 +851,12 @@ class CodeParser:
                 return None
         return self._parsers[language]
 
+    def _safe_parse(self, parser, source: bytes):
+        try:
+            return parser.parse(source)
+        except TypeError:
+            return parser.parse(source.decode("utf-8", errors="replace"))
+
     def detect_language(self, path: Path) -> Optional[str]:
         """Map a file path to its language name.
 
@@ -993,7 +999,7 @@ class CodeParser:
         if not parser:
             return [], []
 
-        tree = parser.parse(source)
+        tree = self._safe_parse(parser, source)
         nodes: list[NodeInfo] = []
         edges: list[EdgeInfo] = []
         file_path_str = str(path)
@@ -1052,7 +1058,7 @@ class CodeParser:
         if not vue_parser:
             return [], []
 
-        tree = vue_parser.parse(source)
+        tree = self._safe_parse(vue_parser, source)
         file_path_str = str(path)
         test_file = _is_test_file(file_path_str)
 
@@ -1110,7 +1116,7 @@ class CodeParser:
             if not script_parser:
                 continue
 
-            script_tree = script_parser.parse(script_source)
+            script_tree = self._safe_parse(script_parser, script_source)
 
             # Collect imports and defined names from the script block
             import_map, defined_names = self._collect_file_scope(
@@ -1174,7 +1180,7 @@ class CodeParser:
         if not svelte_parser:
             return [], []
 
-        tree = svelte_parser.parse(source)
+        tree = self._safe_parse(svelte_parser, source)
         file_path_str = str(path)
         test_file = _is_test_file(file_path_str)
 
@@ -1237,7 +1243,7 @@ class CodeParser:
             if not script_parser:
                 continue
 
-            script_tree = script_parser.parse(script_source)
+            script_tree = self._safe_parse(script_parser, script_source)
             import_map, defined_names = self._collect_file_scope(
                 script_tree.root_node, script_lang, script_source,
             )
@@ -1441,7 +1447,7 @@ class CodeParser:
             concatenated = "\n".join(code_chunks)
             concat_bytes = concatenated.encode("utf-8")
 
-            tree = ts_parser.parse(concat_bytes)
+            tree = self._safe_parse(ts_parser, concat_bytes)
 
             import_map, defined_names = self._collect_file_scope(
                 tree.root_node, lang, concat_bytes,
@@ -2035,7 +2041,7 @@ class CodeParser:
         # --- tree-sitter pass ---
         parser = self._get_parser("sql")
         if parser:
-            tree = parser.parse(source)
+            tree = self._safe_parse(parser, source)
             self._walk_sql_tree(
                 tree.root_node, source, file_path_str, nodes, edges,
             )
@@ -5632,7 +5638,7 @@ class CodeParser:
         if not parser:
             return None
 
-        tree = parser.parse(source)
+        tree = self._safe_parse(parser, source)
 
         # Direct local definition/export in the module file.
         import_map, defined_names = self._collect_file_scope(
