@@ -3128,6 +3128,51 @@ class CodeParser:
                 return child.text.decode("utf-8", errors="replace")
         return None
 
+    def _julia_field_qualifier(self, field_expr) -> Optional[str]:
+        """Module qualifier of a ``field_expression`` (``A.B.f`` -> ``A.B``).
+
+        The dotted prefix before the final method name; None when there are
+        fewer than two identifier parts.
+        """
+        parts = [
+            ident.text.decode("utf-8", errors="replace")
+            for ident in field_expr.children
+            if ident.type == "identifier"
+        ]
+        if len(parts) >= 2:
+            return ".".join(parts[:-1])
+        return None
+
+    def _julia_def_qualifier(self, func_def) -> Optional[str]:
+        """Module qualifier of a ``function Mod.f(...)`` definition.
+
+        Peels ``where`` / typed-return wrappers around the signature to reach
+        the inner ``call_expression`` (or a bare ``field_expression`` for a
+        stub ``function Mod.f end``), then returns its module prefix.
+        """
+        for sub in func_def.children:
+            if sub.type != "signature":
+                continue
+            scope = sub
+            for _ in range(2):
+                wrapper = next(
+                    (c for c in scope.children
+                     if c.type in ("where_expression", "typed_expression")),
+                    None,
+                )
+                if wrapper is None:
+                    break
+                scope = wrapper
+            for inner in scope.children:
+                if inner.type == "field_expression":
+                    return self._julia_field_qualifier(inner)
+                if inner.type == "call_expression":
+                    if inner.children and inner.children[0].type == "field_expression":
+                        return self._julia_field_qualifier(inner.children[0])
+                    return None
+            return None
+        return None
+
     def _extract_julia_constructs(
         self,
         child,
@@ -3148,6 +3193,48 @@ class CodeParser:
         Returns True if the child was fully handled and should be skipped
         by the main dispatch loop.
         """
+        # --- const type alias: ``const Name = T{...}`` -> Type node ---
+        # Only parametrized / curly RHS forms are treated as aliases; value
+        # bindings (``const MAX = 42``) stay on the generic path.
+        if node_type == "const_statement":
+            assign = next(
+                (c for c in child.children if c.type == "assignment"), None,
+            )
+            if assign is not None and assign.children:
+                name_node = assign.children[0]
+                rhs = assign.children[-1] if len(assign.children) >= 3 else None
+                if (
+                    name_node.type == "identifier"
+                    and rhs is not None
+                    and rhs.type in (
+                        "parametrized_type_expression", "curly_expression",
+                    )
+                ):
+                    name = name_node.text.decode("utf-8", errors="replace")
+                    qualified = self._qualify(name, file_path, enclosing_class)
+                    nodes.append(NodeInfo(
+                        kind="Type",
+                        name=name,
+                        file_path=file_path,
+                        line_start=child.start_point[0] + 1,
+                        line_end=child.end_point[0] + 1,
+                        language=language,
+                        parent_name=enclosing_class,
+                    ))
+                    container = (
+                        self._qualify(enclosing_class, file_path, None)
+                        if enclosing_class
+                        else file_path
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=qualified,
+                        file_path=file_path,
+                        line=child.start_point[0] + 1,
+                    ))
+                    return True
+
         # --- Short-form function: assignment with call_expression LHS ---
         # ``f(x) = expr`` or ``Base.f(x) = expr``.  Anything else with an
         # ``=`` (plain variable, const) is left to the generic path.
@@ -3168,6 +3255,13 @@ class CodeParser:
                     qualified = self._qualify(
                         name, file_path, enclosing_class,
                     )
+                    # ``Base.f(x) = ...`` short-form qualified method: keep the
+                    # module qualifier the same way as the long form.
+                    short_extra: dict = {}
+                    if lhs.children and lhs.children[0].type == "field_expression":
+                        qmod = self._julia_field_qualifier(lhs.children[0])
+                        if qmod:
+                            short_extra["julia_module_qualifier"] = qmod
                     nodes.append(NodeInfo(
                         kind=kind,
                         name=name,
@@ -3177,6 +3271,7 @@ class CodeParser:
                         language=language,
                         parent_name=enclosing_class,
                         is_test=is_test,
+                        extra=short_extra,
                     ))
                     container = (
                         self._qualify(enclosing_class, file_path, None)
@@ -3190,6 +3285,15 @@ class CodeParser:
                         file_path=file_path,
                         line=child.start_point[0] + 1,
                     ))
+                    if short_extra.get("julia_module_qualifier"):
+                        edges.append(EdgeInfo(
+                            kind="REFERENCES",
+                            source=qualified,
+                            target=short_extra["julia_module_qualifier"],
+                            file_path=file_path,
+                            line=child.start_point[0] + 1,
+                            extra={"julia_qualified_def": True},
+                        ))
                     # Recurse into the RHS only (children after the ``=``
                     # operator) with this function as the enclosing scope
                     # so internal calls wire up correctly. Visiting the
@@ -4445,6 +4549,13 @@ class CodeParser:
                     child, name, enclosing_class, file_path, edges,
                 )
 
+        # Julia: ``function Mod.f(...)`` carries its module qualifier on the
+        # node so the definition is distinguishable from a local ``f``.
+        if language == "julia" and child.type == "function_definition":
+            qmod = self._julia_def_qualifier(child)
+            if qmod:
+                method_extra["julia_module_qualifier"] = qmod
+
         node = NodeInfo(
             kind=kind,
             name=name,
@@ -4475,56 +4586,21 @@ class CodeParser:
         ))
 
         # Julia: ``function Base.show(io, x)`` extends a foreign module's
-        # method. Record a REFERENCES edge from the function to the
-        # qualifier module so cross-module links stay visible even though
-        # the function's local name is just the method name.
-        if language == "julia" and child.type == "function_definition":
-            for sub in child.children:
-                if sub.type != "signature":
-                    continue
-                call_expr = None
-                scope = sub
-                # Peel where_expression / typed_expression wrappers so we
-                # land on the inner call_expression regardless of
-                # ``func(x) where T`` or ``func(x)::T`` sugar.
-                for _ in range(2):
-                    found_wrapper = False
-                    for inner in scope.children:
-                        if inner.type in (
-                            "where_expression", "typed_expression",
-                        ):
-                            scope = inner
-                            found_wrapper = True
-                            break
-                    if not found_wrapper:
-                        break
-                for inner in scope.children:
-                    if inner.type == "call_expression":
-                        call_expr = inner
-                        break
-                if call_expr is None:
-                    break
-                if call_expr.children and call_expr.children[0].type == "field_expression":
-                    field_expr = call_expr.children[0]
-                    parts: list[str] = []
-                    for ident in field_expr.children:
-                        if ident.type == "identifier":
-                            parts.append(
-                                ident.text.decode("utf-8", errors="replace"),
-                            )
-                    # Module qualifier = everything except the final method
-                    # name.
-                    if len(parts) >= 2:
-                        qualifier = ".".join(parts[:-1])
-                        edges.append(EdgeInfo(
-                            kind="REFERENCES",
-                            source=qualified,
-                            target=qualifier,
-                            file_path=file_path,
-                            line=child.start_point[0] + 1,
-                            extra={"julia_qualified_def": True},
-                        ))
-                break
+        # method. Record a REFERENCES edge to the qualifier module so the
+        # cross-module link stays visible (the local name is just the method).
+        if (
+            language == "julia"
+            and child.type == "function_definition"
+            and method_extra.get("julia_module_qualifier")
+        ):
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=qualified,
+                target=method_extra["julia_module_qualifier"],
+                file_path=file_path,
+                line=child.start_point[0] + 1,
+                extra={"julia_qualified_def": True},
+            ))
 
         # Solidity: modifier invocations on functions -> CALLS edges
         if language == "solidity":
@@ -4695,6 +4771,17 @@ class CodeParser:
                     call_name = method_name
                 if receiver:
                     call_extra["receiver"] = receiver
+
+            # Julia: ``Mod.f(...)`` keeps its module qualifier on the edge
+            # instead of collapsing to a bare ``f``.
+            if (
+                language == "julia"
+                and child.children
+                and child.children[0].type == "field_expression"
+            ):
+                qmod = self._julia_field_qualifier(child.children[0])
+                if qmod:
+                    call_extra["julia_call_module"] = qmod
 
             # When a receiver is present, skip scope-based resolution: the method
             # lives on the receiver's type, not in the current file's scope.
@@ -5937,6 +6024,19 @@ class CodeParser:
                                                     "utf-8", errors="replace",
                                                 )
                                 return None
+                        # Stub / generic-function declaration: ``function foo
+                        # end`` (and qualified ``function Mod.foo end``) parse
+                        # as a signature with a direct identifier /
+                        # field_expression child, no call_expression.
+                        for sub in call.children:
+                            if sub.type == "identifier":
+                                return sub.text.decode("utf-8", errors="replace")
+                            if sub.type == "field_expression":
+                                for ident in reversed(sub.children):
+                                    if ident.type == "identifier":
+                                        return ident.text.decode(
+                                            "utf-8", errors="replace",
+                                        )
                 return None
             if node.type in ("struct_definition", "abstract_definition"):
                 for child in node.children:
@@ -6344,6 +6444,18 @@ class CodeParser:
                         parts.append(sub.text.decode("utf-8", errors="replace"))
                 return ".".join(parts)
 
+            def _alias_real_name(alias_node) -> Optional[str]:
+                # ``X as Y`` / ``A.B as Y``: the dependency is on the real
+                # name (first child), not the local alias.
+                for sub in alias_node.children:
+                    if sub.type == "as":
+                        break
+                    if sub.type == "identifier":
+                        return sub.text.decode("utf-8", errors="replace")
+                    if sub.type == "import_path":
+                        return _import_path_text(sub)
+                return None
+
             for child in node.children:
                 if child.type == "identifier":
                     imports.append(
@@ -6353,6 +6465,10 @@ class CodeParser:
                     path = _import_path_text(child)
                     if path:
                         imports.append(path)
+                elif child.type == "import_alias":
+                    real = _alias_real_name(child)
+                    if real:
+                        imports.append(real)
                 elif child.type == "selected_import":
                     module_name: Optional[str] = None
                     seen_colon = False
@@ -6375,6 +6491,10 @@ class CodeParser:
                                     "utf-8", errors="replace",
                                 )
                                 imports.append(f"{module_name}.{imported}")
+                            elif sub.type == "import_alias" and module_name:
+                                real = _alias_real_name(sub)
+                                if real:
+                                    imports.append(f"{module_name}.{real}")
         elif language == "gdscript":
             # ``extends Node`` → type > identifier("Node")
             # ``extends "res://path.gd"`` → string literal

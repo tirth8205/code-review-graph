@@ -1654,6 +1654,52 @@ class TestJuliaParsing:
         assert "square" in trailing
         assert "add" in trailing
 
+    def test_finds_function_stub(self):
+        # ``function bar end`` (generic-function declaration, no signature
+        # call_expression) must still register a node.
+        funcs = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "bar" in funcs
+
+    def test_qualified_long_def_records_module(self):
+        # ``function Base.show(...)`` -> node name "show", module qualifier
+        # "Base" preserved on the node so it is distinguishable from a local
+        # ``show``.
+        by_name = {n.name: n for n in self.nodes if n.kind == "Function"}
+        assert by_name["show"].extra.get("julia_module_qualifier") == "Base"
+
+    def test_qualified_short_def_records_module(self):
+        # ``Base.length(d::Dog) = ...`` short-form qualified method.
+        by_name = {n.name: n for n in self.nodes if n.kind == "Function"}
+        assert "length" in by_name
+        assert by_name["length"].extra.get("julia_module_qualifier") == "Base"
+
+    def test_qualified_call_records_module(self):
+        # ``LinearAlgebra.norm(v)`` -> CALLS edge keeps the module qualifier
+        # instead of collapsing to a bare ``norm``.
+        calls = [
+            e for e in self.edges
+            if e.kind == "CALLS"
+            and e.extra
+            and e.extra.get("julia_call_module") == "LinearAlgebra"
+        ]
+        assert any(e.target.split("::")[-1] == "norm" for e in calls)
+
+    def test_finds_type_alias(self):
+        # ``const FloatVec = Vector{Float64}`` -> Type node.
+        types = {n.name for n in self.nodes if n.kind == "Type"}
+        assert "FloatVec" in types
+
+    def test_value_const_not_a_type(self):
+        # ``const MY_CONST = 42`` is a value binding, not a type alias.
+        types = {n.name for n in self.nodes if n.kind == "Type"}
+        assert "MY_CONST" not in types
+
+    def test_finds_aliased_import(self):
+        # ``import DataFrames as DF`` records a dependency on the real module.
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "DataFrames" in targets
+
     def test_qualified_function_references_base(self):
         refs = [e for e in self.edges if e.kind == "REFERENCES"]
         # function Base.show(...) should emit a REFERENCES edge to Base

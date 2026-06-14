@@ -4,6 +4,7 @@ using LinearAlgebra
 using Statistics: mean, std
 import Base: show, print
 import JSON
+import DataFrames as DF
 
 export greet, Dog, process
 public square, add
@@ -33,6 +34,16 @@ end
 add(a, b) = a + b
 
 square(x) = x^2
+
+function bar end
+
+Base.length(d::Dog) = d.age
+
+function analyze(v::Vector{Float64})
+    return LinearAlgebra.norm(v)
+end
+
+const FloatVec = Vector{Float64}
 
 const MY_CONST = 42
 
