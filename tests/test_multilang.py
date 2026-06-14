@@ -1684,6 +1684,16 @@ class TestJuliaParsing:
         ]
         assert any(e.target.split("::")[-1] == "norm" for e in calls)
 
+    def test_multi_segment_call_module(self):
+        # ``LinearAlgebra.BLAS.gemv(...)`` keeps the full dotted module path,
+        # not just the innermost segment.
+        calls = [
+            e for e in self.edges
+            if e.kind == "CALLS"
+            and e.extra.get("julia_call_module") == "LinearAlgebra.BLAS"
+        ]
+        assert any(e.target.split("::")[-1] == "gemv" for e in calls)
+
     def test_finds_type_alias(self):
         # ``const FloatVec = Vector{Float64}`` -> Type node.
         types = {n.name for n in self.nodes if n.kind == "Type"}

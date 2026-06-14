@@ -3128,17 +3128,26 @@ class CodeParser:
                 return child.text.decode("utf-8", errors="replace")
         return None
 
+    def _julia_field_parts(self, field_expr) -> list[str]:
+        """Flatten a (possibly nested) ``field_expression`` to its dotted
+        identifier parts in source order. ``A.B.f`` nests as
+        ``field_expression(field_expression(A, B), f)``, so recurse.
+        """
+        parts: list[str] = []
+        for child in field_expr.children:
+            if child.type == "field_expression":
+                parts.extend(self._julia_field_parts(child))
+            elif child.type == "identifier":
+                parts.append(child.text.decode("utf-8", errors="replace"))
+        return parts
+
     def _julia_field_qualifier(self, field_expr) -> Optional[str]:
         """Module qualifier of a ``field_expression`` (``A.B.f`` -> ``A.B``).
 
         The dotted prefix before the final method name; None when there are
         fewer than two identifier parts.
         """
-        parts = [
-            ident.text.decode("utf-8", errors="replace")
-            for ident in field_expr.children
-            if ident.type == "identifier"
-        ]
+        parts = self._julia_field_parts(field_expr)
         if len(parts) >= 2:
             return ".".join(parts[:-1])
         return None

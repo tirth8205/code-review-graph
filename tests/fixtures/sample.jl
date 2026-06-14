@@ -43,6 +43,10 @@ function analyze(v::Vector{Float64})
     return LinearAlgebra.norm(v)
 end
 
+function spawn_work(v)
+    return LinearAlgebra.BLAS.gemv('N', 1.0, v, v)
+end
+
 const FloatVec = Vector{Float64}
 
 const MY_CONST = 42
