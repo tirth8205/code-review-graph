@@ -147,6 +147,7 @@ def query_graph(
     target: str,
     repo_root: str | None = None,
     detail_level: str = "standard",
+    max_results: int = 0,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -156,6 +157,10 @@ def query_graph(
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
+        max_results: Cap on returned ``results`` (and matching ``edges``) so a
+            hot symbol cannot return an unbounded payload.  ``0`` (default)
+            means no cap.  When the cap trims results the response carries
+            ``truncated=True`` and ``total_results`` with the full count.
 
     Returns:
         Matching nodes and edges for the query.
@@ -331,10 +336,32 @@ def query_graph(
                 for n in store.get_nodes_by_file(graph_path):
                     results.append(node_to_dict(n))
 
+        total_results = len(results)
+
+        # Cap the payload so callers_of/callees_of on a hot symbol cannot
+        # return unbounded results.  Keep the head (queries append in a stable
+        # graph order) and trim edges to the surviving result set when we can.
+        truncated = False
+        if max_results and total_results > max_results:
+            truncated = True
+            results = results[:max_results]
+            kept_qns = {
+                r.get("qualified_name") for r in results if "qualified_name" in r
+            }
+            if kept_qns:
+                edges_out = [
+                    e for e in edges_out
+                    if e.get("source") in kept_qns or e.get("target") in kept_qns
+                ][:max_results]
+            else:
+                edges_out = edges_out[:max_results]
+
         summary = (
-            f"Found {len(results)} result(s) "
+            f"Found {total_results} result(s) "
             f"for {pattern}('{target}')"
         )
+        if truncated:
+            summary += f" (showing first {len(results)})"
 
         if detail_level == "minimal":
             minimal_results = [
@@ -345,17 +372,21 @@ def query_graph(
                 }
                 for r in results[:5]
             ]
-            return {
+            response: dict[str, Any] = {
                 "status": "ok",
                 "pattern": pattern,
                 "target": target,
                 "description": _QUERY_PATTERNS[pattern],
                 "summary": summary,
-                "result_count": len(results),
+                "result_count": total_results,
                 "results": minimal_results,
             }
+            if truncated:
+                response["truncated"] = True
+                response["total_results"] = total_results
+            return response
 
-        return {
+        response = {
             "status": "ok",
             "pattern": pattern,
             "target": target,
@@ -364,6 +395,10 @@ def query_graph(
             "results": results,
             "edges": edges_out,
         }
+        if truncated:
+            response["truncated"] = True
+            response["total_results"] = total_results
+        return response
     finally:
         store.close()
 
