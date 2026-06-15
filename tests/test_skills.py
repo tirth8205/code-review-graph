@@ -60,12 +60,12 @@ class TestGenerateSkills:
             "review-changes",
         ]
         for d in skills_dir.iterdir():
-            assert (d / "skill.md").is_file()
+            assert (d / "SKILL.md").is_file()
 
     def test_skill_files_have_frontmatter(self, tmp_path):
         skills_dir = generate_skills(tmp_path)
         for subdir in skills_dir.iterdir():
-            path = subdir / "skill.md"
+            path = subdir / "SKILL.md"
             content = path.read_text()
             assert content.startswith("---\n")
             assert "name:" in content
@@ -87,7 +87,7 @@ class TestGenerateSkills:
         """Every skill template must reference get_minimal_context."""
         skills_dir = generate_skills(tmp_path)
         for subdir in skills_dir.iterdir():
-            content = (subdir / "skill.md").read_text()
+            content = (subdir / "SKILL.md").read_text()
             assert "get_minimal_context" in content, (
                 f"{subdir.name} missing get_minimal_context reference"
             )
@@ -96,7 +96,7 @@ class TestGenerateSkills:
         """Every skill template must reference detail_level."""
         skills_dir = generate_skills(tmp_path)
         for subdir in skills_dir.iterdir():
-            content = (subdir / "skill.md").read_text()
+            content = (subdir / "SKILL.md").read_text()
             assert "detail_level" in content, (
                 f"{subdir.name} missing detail_level reference"
             )
