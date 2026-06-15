@@ -526,11 +526,11 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
-        # Claude Code expects skills at .claude/skills/<name>/skill.md
+        # Claude Code expects skills at .claude/skills/<name>/SKILL.md
         skill_name = filename.removesuffix(".md")
         skill_subdir = skills_dir / skill_name
         skill_subdir.mkdir(parents=True, exist_ok=True)
-        path = skill_subdir / "skill.md"
+        path = skill_subdir / "SKILL.md"
         content = (
             "---\n"
             f"name: {skill['name']}\n"
