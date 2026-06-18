@@ -118,7 +118,7 @@ class TestGenerateHooksConfig:
         config = generate_hooks_config(Path("/repo"))
         assert "PostToolUse" in config["hooks"]
         entry = config["hooks"]["PostToolUse"][0]
-        assert entry["matcher"] == "Edit|Write|Bash"
+        assert entry["matcher"] == "Edit|Write"
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
@@ -152,17 +152,51 @@ class TestGenerateHooksConfig:
                 assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
                 assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
 
-    def test_repo_root_embedded_in_commands(self):
-        config = generate_hooks_config(Path("/my/project"))
-        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "/my/project" in post_cmd
-        assert "/my/project" in session_cmd
+    def test_hooks_have_path_guard(self):
+        """Regression test for #549: hooks must guard against missing binary."""
+        config = generate_hooks_config(Path("/repo"))
+        for hook_type, entries in config["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    assert "command -v code-review-graph" in hook["command"], (
+                        f"{hook_type} hook missing PATH guard — will fail noisily"
+                        " when binary is not on PATH (e.g. project venv)"
+                    )
 
-    def test_quotes_repo_paths_with_spaces(self):
-        config = generate_hooks_config(Path("/repo with spaces"))
-        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
+    def test_hooks_use_dynamic_repo_root(self):
+        """Regression test for #558: hooks must not embed absolute paths.
+
+        The repo root should be resolved at runtime via git rev-parse so
+        settings.json is shareable across collaborators.
+        """
+        config = generate_hooks_config(Path("/my/specific/checkout/path"))
+        for hook_type, entries in config["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    assert "git rev-parse --show-toplevel" in hook["command"], (
+                        f"{hook_type} hook should use git rev-parse --show-toplevel"
+                        " to resolve repo root dynamically"
+                    )
+
+    def test_hooks_no_absolute_path_embedded(self):
+        """Regression test for #558: no absolute path should appear in commands."""
+        config = generate_hooks_config(Path("/home/user/projects/my-repo"))
+        for hook_type, entries in config["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    assert "/home/user/projects/my-repo" not in hook["command"], (
+                        f"{hook_type} hook embeds absolute path — settings.json"
+                        " is not shareable across collaborators"
+                    )
+
+    def test_post_tool_use_matcher_excludes_bash(self):
+        """Regression test for #549: Bash matcher fires on every shell command."""
+        config = generate_hooks_config(Path("/repo"))
+        matcher = config["hooks"]["PostToolUse"][0]["matcher"]
+        assert "Bash" not in matcher, (
+            "PostToolUse matcher includes Bash — fires on every shell command"
+            " (git status, ls, test runs), not just file mutations"
+        )
 
     def test_entries_use_claude_code_hook_schema(self):
         """Regression guard for the Claude Code hook schema.

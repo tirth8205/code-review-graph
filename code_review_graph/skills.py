@@ -550,21 +550,28 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
+
+    The ``repo_root`` parameter is retained for backward compatibility but is
+    not embedded in hook commands. Instead, the repo root is resolved at
+    runtime via ``git rev-parse --show-toplevel`` so that ``settings.json``
+    is shareable across collaborators with different checkout paths.
+    A PATH guard ensures the hook exits silently when the binary is not on
+    ``$PATH`` (e.g. installed in a project venv).
     """
-    repo_arg = json.dumps(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [
                 {
-                    "matcher": "Edit|Write|Bash",
+                    "matcher": "Edit|Write",
                     "hooks": [
                         {
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
+                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph update --skip-flows"
-                                f" --repo {repo_arg}"
+                                " && code-review-graph update --skip-flows"
+                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
                                 " || true"
                             ),
                             "timeout": 30,
@@ -580,8 +587,10 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
+                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph status --repo {repo_arg}"
+                                " && code-review-graph status"
+                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "timeout": 10,
