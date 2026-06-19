@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-## [2.4.0] - 2026-06-14
+## [2.3.7] - 2026-06-14
 
 **The token moat, sharpened.** This release makes the graph spend fewer of your
 tokens by default, lets you *prove* the savings, and removes the Python-install
