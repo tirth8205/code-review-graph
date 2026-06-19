@@ -192,6 +192,36 @@ class TestGenerateHooksConfig:
                     assert "timeout" in hook
 
 
+class TestStripJsonc:
+    """#553: JSONC sanitisation must not corrupt string *contents*.
+
+    The previous implementation used two naive regexes — ``//.*?$`` and
+    ``,(\\s*[}\\]])`` — which happily edited text *inside* string values: a
+    URL got truncated at ``//`` and any string containing ``,]``/``,}`` lost
+    its comma, corrupting otherwise-valid user config.
+    """
+
+    def test_strips_line_comments_and_trailing_commas(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{\n  // a comment\n  "a": 1,\n  "b": [1, 2,],\n}'
+        assert json.loads(_strip_jsonc(raw)) == {"a": 1, "b": [1, 2]}
+
+    def test_preserves_double_slash_inside_strings(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{"url": "https://example.com/x"}'
+        assert json.loads(_strip_jsonc(raw)) == {"url": "https://example.com/x"}
+
+    def test_preserves_comma_then_bracket_inside_strings(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{"weird": "a,]b", "list": [1,]}'
+        assert json.loads(_strip_jsonc(raw)) == {"weird": "a,]b", "list": [1]}
+
+    def test_strips_block_comments(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{/* c */ "a": 1}'
+        assert json.loads(_strip_jsonc(raw)) == {"a": 1}
+
+
 class TestShippedHooksFiles:
     """The vestigial hooks/ directory ships in the sdist (see pyproject
     sdist includes). Its hook commands must drain stdin exactly like the

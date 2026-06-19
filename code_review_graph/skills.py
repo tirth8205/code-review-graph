@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import platform
-import re
 import shutil
 import stat
 import subprocess
@@ -290,6 +289,61 @@ def _merge_toml_mcp_server(
     return True
 
 
+def _strip_jsonc(text: str) -> str:
+    """Strip ``//`` and ``/* */`` comments and trailing commas from JSONC,
+    leaving the contents of string literals untouched.
+
+    Editors like Zed permit non-standard JSON, so existing config may contain
+    comments or trailing commas.  A previous implementation used naive regexes
+    (``//.*?$`` and ``,(\\s*[}\\]])``) that also edited text *inside* strings —
+    truncating URLs at ``//`` and dropping commas in values like ``"a,]b"`` —
+    which corrupted otherwise-valid user config (#553).  This scanner only
+    removes structural comments/commas found outside of string literals.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_str = False
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            i += 2
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if ch == ",":
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            if j < n and text[j] in "}]":
+                i += 1
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -345,10 +399,9 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             raw = config_path.read_text(encoding="utf-8", errors="replace")
-            # Strip single-line comments and trailing commas (JSONC compat
-            # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
-            stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
+            # Strip comments and trailing commas (JSONC compat for editors
+            # like Zed) without corrupting string contents — see #553.
+            stripped = _strip_jsonc(raw)
             try:
                 existing = json.loads(stripped)
             except (json.JSONDecodeError, OSError):
