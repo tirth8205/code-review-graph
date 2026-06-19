@@ -460,19 +460,26 @@ def incremental_trace_flows(
         return 0
 
     conn = store._conn
-    changed_file_set = set(changed_files)
+    # The parser stores absolute file_paths (``str(path)``) while incremental
+    # callers pass repo-relative paths (``git diff --name-only``).  Reconcile
+    # them so the filter and entry-point membership check below match the
+    # stored nodes instead of silently dropping every change (#569).
+    matched_files = store.resolve_changed_files(changed_files)
+    changed_file_set = set(matched_files)
 
     # ------------------------------------------------------------------
     # 1. Find affected flow IDs
     # ------------------------------------------------------------------
-    placeholders = ",".join("?" * len(changed_files))
-    affected_rows = conn.execute(
-        f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
-        f"JOIN nodes n ON n.id = fm.node_id "
-        f"WHERE n.file_path IN ({placeholders})",
-        changed_files,
-    ).fetchall()
-    affected_ids = [r[0] for r in affected_rows]
+    affected_ids: list[int] = []
+    if matched_files:
+        placeholders = ",".join("?" * len(matched_files))
+        affected_rows = conn.execute(
+            f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
+            f"JOIN nodes n ON n.id = fm.node_id "
+            f"WHERE n.file_path IN ({placeholders})",
+            matched_files,
+        ).fetchall()
+        affected_ids = [r[0] for r in affected_rows]
 
     # ------------------------------------------------------------------
     # 2. Collect old entry-point node IDs before deletion
