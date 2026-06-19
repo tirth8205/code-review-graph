@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import platform
+import shlex
 import shutil
 import stat
 import subprocess
@@ -604,7 +605,11 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
     """
-    repo_arg = json.dumps(repo_root.resolve().as_posix())
+    # Shell-quote the path for the hook command.  json.dumps() escapes
+    # non-ASCII to \uXXXX, which the shell passes verbatim — a CJK repo path
+    # then became a literal "基..." directory (#497).  shlex.quote keeps
+    # the UTF-8 bytes intact and is safe for spaces/quotes/$ etc.
+    repo_arg = shlex.quote(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [

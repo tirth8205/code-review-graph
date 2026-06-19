@@ -162,7 +162,19 @@ class TestGenerateHooksConfig:
     def test_quotes_repo_paths_with_spaces(self):
         config = generate_hooks_config(Path("/repo with spaces"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
+        # Path is shell-quoted (shlex) so the space stays inside one token.
+        assert "'/repo with spaces'" in post_cmd
+
+    def test_nonascii_repo_path_embedded_literally(self):
+        """#497: a non-ASCII repo path must appear as literal UTF-8 in the
+        hook command, not as JSON ``\\uXXXX`` escapes.  ``json.dumps`` (with
+        the default ``ensure_ascii=True``) turned the path into backslash-u
+        sequences which the shell passed verbatim, creating a corrupted
+        nested directory tree (e.g. ``u57fa/...``)."""
+        config = generate_hooks_config(Path("/repo/基项目"))
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "基项目" in post_cmd
+        assert "\\u" not in post_cmd
 
     def test_entries_use_claude_code_hook_schema(self):
         """Regression guard for the Claude Code hook schema.
