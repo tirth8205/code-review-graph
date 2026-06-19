@@ -656,10 +656,18 @@ def incremental_detect_communities(
 
     conn = store._conn
 
+    # The parser stores absolute file_paths (``str(path)``) while incremental
+    # callers pass repo-relative paths (``git diff --name-only``).  Reconcile
+    # them so the affected-community check below isn't silently empty — without
+    # this, real changes never trigger re-detection (the #569-class mismatch).
+    matched_files = store.resolve_changed_files(changed_files)
+    if not matched_files:
+        return 0
+
     # Check if any communities are affected (batch to stay under SQLite limit)
     affected_count = 0
-    for i in range(0, len(changed_files), _SQL_BATCH):
-        batch = changed_files[i:i + _SQL_BATCH]
+    for i in range(0, len(matched_files), _SQL_BATCH):
+        batch = matched_files[i:i + _SQL_BATCH]
         placeholders = ",".join("?" * len(batch))
         row = conn.execute(
             f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
