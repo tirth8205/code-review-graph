@@ -2226,6 +2226,145 @@ class TestSpringDIResolver:
             )
 
 
+class TestSpringDIAdvancedParsing:
+    """Parser-level tests for implicit constructor injection, bean names,
+    @Primary and @Qualifier metadata used by the multi-impl resolver."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "SpringDIAdvanced.java"
+        )
+
+    def _injects(self):
+        return [e for e in self.edges if e.kind == "INJECTS"]
+
+    def test_implicit_constructor_injection_emitted(self):
+        """A stereotype bean with one unannotated constructor is injected."""
+        edges = [e for e in self._injects()
+                 if e.extra.get("injection_type") == "constructor_implicit"]
+        targets = {e.target for e in edges}
+        assert "Mailer" in targets  # WelcomeService(Mailer)
+        assert "Gateway" in targets  # RefundService(@Qualifier Gateway)
+
+    def test_field_qualifier_captured(self):
+        edges = [e for e in self._injects() if e.extra.get("field_name") == "gateway"]
+        quals = {e.extra.get("qualifier") for e in edges}
+        assert "backupGw" in quals  # CheckoutService field @Qualifier
+
+    def test_constructor_param_qualifier_captured(self):
+        edges = [e for e in self._injects()
+                 if e.extra.get("injection_type") == "constructor_implicit"
+                 and e.extra.get("qualifier")]
+        quals = {e.extra.get("qualifier") for e in edges}
+        assert "primaryGw" in quals  # RefundService ctor param @Qualifier
+
+    def test_inherits_carries_bean_name(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        beans = {e.extra.get("bean_name") for e in inherits}
+        assert "primaryGw" in beans
+        assert "backupGw" in beans
+
+    def test_inherits_marks_primary(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        primary_sources = {e.source for e in inherits if e.extra.get("primary")}
+        assert any("PrimaryGateway" in s for s in primary_sources)
+        assert not any("BackupGateway" in s for s in primary_sources)
+
+
+class TestSpringDIDisambiguation:
+    """Integration tests: resolver picks the right impl for multi-impl beans."""
+
+    def _build(self, tmp_path):
+        pkg = tmp_path / "src/main/java/com/example"
+        pkg.mkdir(parents=True)
+
+        (pkg / "Gateway.java").write_text(
+            "package com.example;\n"
+            "public interface Gateway { String pay(String id); }\n"
+        )
+        (pkg / "PrimaryGateway.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.context.annotation.Primary;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service(\"primaryGw\")\n@Primary\n"
+            "public class PrimaryGateway implements Gateway {\n"
+            "    public String pay(String id) { return id; }\n}\n"
+        )
+        (pkg / "BackupGateway.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service(\"backupGw\")\n"
+            "public class BackupGateway implements Gateway {\n"
+            "    public String pay(String id) { return id; }\n}\n"
+        )
+        (pkg / "CheckoutService.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.beans.factory.annotation.Autowired;\n"
+            "import org.springframework.beans.factory.annotation.Qualifier;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service\n"
+            "public class CheckoutService {\n"
+            "    @Autowired @Qualifier(\"backupGw\") private Gateway gateway;\n"
+            "    public String checkout(String id) { return gateway.pay(id); }\n}\n"
+        )
+        (pkg / "RefundService.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.beans.factory.annotation.Qualifier;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service\n"
+            "public class RefundService {\n"
+            "    private final Gateway gateway;\n"
+            "    public RefundService(@Qualifier(\"primaryGw\") Gateway gateway) "
+            "{ this.gateway = gateway; }\n"
+            "    public String refund(String id) { return gateway.pay(id); }\n}\n"
+        )
+        (pkg / "AuditService.java").write_text(
+            "package com.example;\n"
+            "import org.springframework.beans.factory.annotation.Autowired;\n"
+            "import org.springframework.stereotype.Service;\n"
+            "@Service\n"
+            "public class AuditService {\n"
+            "    @Autowired private Gateway gateway;\n"
+            "    public String audit(String id) { return gateway.pay(id); }\n}\n"
+        )
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.postprocessing import run_post_processing
+
+        store = GraphStore(str(tmp_path / "graph.db"))
+        full_build(tmp_path, store)
+        run_post_processing(store)
+        return store
+
+    def _resolved_target(self, store, caller_method):
+        cur = store._conn.cursor()
+        rows = cur.execute(
+            "SELECT source_qualified, target_qualified FROM edges "
+            "WHERE kind='CALLS' AND extra LIKE '%spring_resolved%'"
+        ).fetchall()
+        for src, tgt in rows:
+            if src.endswith(caller_method):
+                return tgt
+        return None
+
+    def test_field_qualifier_resolves_to_backup(self, tmp_path):
+        store = self._build(tmp_path)
+        target = self._resolved_target(store, "CheckoutService.checkout")
+        assert target and "BackupGateway" in target
+
+    def test_constructor_qualifier_resolves_to_primary(self, tmp_path):
+        store = self._build(tmp_path)
+        target = self._resolved_target(store, "RefundService.refund")
+        assert target and "PrimaryGateway" in target
+
+    def test_primary_wins_without_qualifier(self, tmp_path):
+        store = self._build(tmp_path)
+        target = self._resolved_target(store, "AuditService.audit")
+        assert target and "PrimaryGateway" in target
+
+
 class TestTemporalParsing:
     """Tests for Temporal @WorkflowInterface / @ActivityInterface detection."""
 

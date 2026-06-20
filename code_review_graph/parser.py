@@ -3874,6 +3874,43 @@ class CodeParser:
                             break
         return names
 
+    @staticmethod
+    def _first_java_string_literal(node) -> Optional[str]:
+        """Return the first string-literal value (quotes stripped) anywhere under node."""
+        stack = list(node.children)
+        while stack:
+            n = stack.pop(0)
+            if n.type == "string_literal":
+                return n.text.decode("utf-8", errors="replace").strip('"')
+            stack.extend(n.children)
+        return None
+
+    @staticmethod
+    def _get_java_annotation_string_args(modifier_owner) -> dict:
+        """Map annotation name -> first string-literal argument.
+
+        Captures Spring bean names and qualifiers, e.g.
+        ``@Service("kafkaLedger")`` -> {"Service": "kafkaLedger"} and
+        ``@Qualifier("kafkaLedger")`` -> {"Qualifier": "kafkaLedger"}.
+        Marker annotations with no arguments are omitted.
+        """
+        result: dict = {}
+        for child in modifier_owner.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type != "annotation":  # marker_annotation has no args
+                    continue
+                ann_name = None
+                for sub in mod.children:
+                    if sub.type == "identifier" and ann_name is None:
+                        ann_name = sub.text.decode("utf-8", errors="replace")
+                    elif sub.type == "annotation_argument_list":
+                        val = CodeParser._first_java_string_literal(sub)
+                        if ann_name and val is not None:
+                            result[ann_name] = val
+        return result
+
     def _emit_spring_injections(
         self,
         class_node,
@@ -3896,12 +3933,23 @@ class CodeParser:
         has_lombok_constructor = any(
             a in _LOMBOK_CONSTRUCTOR_ANNOTATIONS for a in class_annotations
         )
+        is_spring_bean = any(
+            a in _SPRING_STEREOTYPE_ANNOTATIONS for a in class_annotations
+        )
         qualified_source = self._qualify(class_name, file_path, None)
 
         # Find the class body
         for node in class_node.children:
             if node.type != "class_body":
                 continue
+            # Single-constructor implicit injection rule (Spring 4.3+):
+            # a stereotype bean with exactly one constructor is autowired
+            # even without an @Autowired annotation.
+            ctor_count = sum(
+                1 for m in node.children
+                if m.type == "constructor_declaration"
+            )
+            sole_constructor = ctor_count == 1
             for member in node.children:
                 if member.type == "field_declaration":
                     self._emit_spring_field_injection(
@@ -3911,6 +3959,8 @@ class CodeParser:
                 elif member.type == "constructor_declaration":
                     self._emit_spring_constructor_injection(
                         member, qualified_source, file_path, edges,
+                        is_spring_bean=is_spring_bean,
+                        sole_constructor=sole_constructor,
                     )
 
     def _emit_spring_field_injection(
@@ -3976,6 +4026,10 @@ class CodeParser:
         extra: dict = {"injection_type": injection_type}
         if field_name:
             extra["field_name"] = field_name
+        # @Qualifier("beanName") at the injection point disambiguates multi-impl
+        qualifier = self._get_java_annotation_string_args(field_node).get("Qualifier")
+        if qualifier:
+            extra["qualifier"] = qualifier
         edges.append(EdgeInfo(
             kind="INJECTS",
             source=qualified_source,
@@ -3991,11 +4045,23 @@ class CodeParser:
         qualified_source: str,
         file_path: str,
         edges: list[EdgeInfo],
+        is_spring_bean: bool = False,
+        sole_constructor: bool = False,
     ) -> None:
-        """Emit INJECTS edges for @Autowired constructor parameters."""
+        """Emit INJECTS edges for constructor parameters.
+
+        Two triggers:
+        - Explicit: constructor carries @Autowired / @Inject / @Resource.
+        - Implicit: class is a Spring stereotype bean with exactly one
+          constructor (Spring 4.3+ implicit constructor injection — no
+          annotation required). This is the recommended modern style.
+        """
         ctor_annotations = self._get_java_annotations(ctor_node)
-        if not any(a in _SPRING_INJECT_ANNOTATIONS for a in ctor_annotations):
+        has_inject = any(a in _SPRING_INJECT_ANNOTATIONS for a in ctor_annotations)
+        implicit = is_spring_bean and sole_constructor
+        if not has_inject and not implicit:
             return
+        resolved_injection_type = "constructor" if has_inject else "constructor_implicit"
 
         for child in ctor_node.children:
             if child.type != "formal_parameters":
@@ -4011,9 +4077,13 @@ class CodeParser:
                     elif sub.type == "identifier":
                         param_name = sub.text.decode("utf-8", errors="replace")
                 if param_type:
-                    extra: dict = {"injection_type": "constructor"}
+                    extra: dict = {"injection_type": resolved_injection_type}
                     if param_name:
                         extra["field_name"] = param_name
+                    # @Qualifier("bean") on the constructor parameter
+                    qualifier = self._get_java_annotation_string_args(param).get("Qualifier")
+                    if qualifier:
+                        extra["qualifier"] = qualifier
                     edges.append(EdgeInfo(
                         kind="INJECTS",
                         source=qualified_source,
@@ -4319,6 +4389,21 @@ class CodeParser:
 
         # Inheritance edges
         bases = self._get_bases(child, language, source)
+        # Spring bean identity for DI disambiguation (@Qualifier / @Primary).
+        # Carried on INHERITS so the post-build resolver can pick the right
+        # implementation when an interface has multiple implementors.
+        inherits_extra: dict = {}
+        if language == "java" and extra.get("spring_stereotype"):
+            ann_args = self._get_java_annotation_string_args(child)
+            bean_name = (
+                ann_args.get("Component") or ann_args.get("Service")
+                or ann_args.get("Repository") or ann_args.get("Controller")
+                or (name[0].lower() + name[1:] if name else None)
+            )
+            if bean_name:
+                inherits_extra["bean_name"] = bean_name
+            if "Primary" in class_annotations:
+                inherits_extra["primary"] = True
         for base in bases:
             edges.append(EdgeInfo(
                 kind="INHERITS",
@@ -4328,6 +4413,7 @@ class CodeParser:
                 target=base,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=dict(inherits_extra),
             ))
 
         # Spring DI: emit INJECTS edges for injected dependencies

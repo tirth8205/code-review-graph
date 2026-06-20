@@ -52,6 +52,8 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # from INJECTS edges that carry extra.field_name
     # -----------------------------------------------------------------------
     field_map: dict[tuple[str, str], str] = {}
+    # (class_qual, field_name) → @Qualifier bean name at the injection point
+    qualifier_map: dict[tuple[str, str], str] = {}
     injects_rows = conn.execute(
         "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind = 'INJECTS'"
     ).fetchall()
@@ -66,6 +68,9 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         # source_qualified is the full class qualified name
         class_qual = row["source_qualified"]
         field_map[(class_qual, fname)] = row["target_qualified"]
+        qualifier = extra.get("qualifier")
+        if qualifier:
+            qualifier_map[(class_qual, fname)] = qualifier
 
     if not field_map:
         logger.info("Spring resolver: no INJECTS edges with field_name found, skipping")
@@ -101,14 +106,21 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # Build implementors: bare interface name → list of implementing class quals
     # from INHERITS edges (Java uses INHERITS for both extends and implements)
     # -----------------------------------------------------------------------
-    implementors: dict[str, list[str]] = {}
+    # bare interface name → list of (impl_qual, bean_name, is_primary)
+    implementors: dict[str, list[tuple[str, str | None, bool]]] = {}
     for row in conn.execute(
-        "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'INHERITS'"
+        "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind = 'INHERITS'"
     ).fetchall():
         iface = row["target_qualified"]
         impl = row["source_qualified"]
+        try:
+            iextra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            iextra = {}
         if any(impl.startswith(f) for f in java_files) or "::" in impl:
-            implementors.setdefault(iface, []).append(impl)
+            implementors.setdefault(iface, []).append(
+                (impl, iextra.get("bean_name"), bool(iextra.get("primary")))
+            )
 
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
@@ -167,11 +179,30 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         if not injected_type:
             continue
 
-        # Resolve to concrete implementation if unique
+        # Resolve to a concrete implementation.
+        #   1 impl            → that impl
+        #   N impls + @Qualifier("bean") at injection point → matching bean
+        #   N impls + exactly one @Primary impl             → the primary
+        #   otherwise         → leave at interface level (ambiguous)
         impls = implementors.get(injected_type, [])
+        chosen: str | None = None
         if len(impls) == 1:
-            concrete_class = impls[0].split("::")[-1]
-            fallback = f"{impls[0]}.{method_name}"
+            chosen = impls[0][0]
+        elif len(impls) > 1:
+            wanted = qualifier_map.get((enclosing_class_qual, receiver))
+            if wanted:
+                for impl_qual, bean_name, _primary in impls:
+                    if bean_name == wanted:
+                        chosen = impl_qual
+                        break
+            if chosen is None:
+                primaries = [i for i in impls if i[2]]
+                if len(primaries) == 1:
+                    chosen = primaries[0][0]
+
+        if chosen is not None:
+            concrete_class = chosen.split("::")[-1]
+            fallback = f"{chosen}.{method_name}"
             new_target = method_to_qual.get((concrete_class, method_name)) or fallback
         else:
             type_bare = injected_type.rsplit(".", 1)[-1]
