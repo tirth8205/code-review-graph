@@ -1,5 +1,12 @@
 # Worktrunk project configuration for the Zazz worktree layout.
 
+pre-start = "/opt/homebrew/bin/wt step copy-ignored"
+post-start = [
+  "git -C {{ worktree_path }} config --worktree core.bare false",
+  "git -C {{ worktree_path }} config --worktree core.worktree {{ worktree_path }}",
+  "cd {{ worktree_path }} && uv sync --all-extras --group dev",
+]
+
 [forge]
 platform = "github"
 hostname = "github.com"
@@ -12,6 +19,35 @@ remotes = true
 [pre-merge]
 tests = "uv run pytest"
 lint = "uv run ruff check ."
+
+[step.copy-ignored]
+exclude = [
+  ".claude/",
+  ".claude-plugin/",
+  ".qoder/",
+  ".venv/",
+  "venv/",
+  "env/",
+  "node_modules/",
+  "dist/",
+  "build/",
+  "*.egg-info/",
+  ".pytest_cache/",
+  ".ruff_cache/",
+  ".mypy_cache/",
+  "htmlcov/",
+  ".coverage",
+  ".coverage.*",
+  ".code-review-graph/",
+  "*.db",
+  "*.db-journal",
+  "*.db-wal",
+  "*.db-shm",
+  "code-review-graph-vscode/dist/",
+  "*.vsix",
+  "evaluate/test_repos/",
+  "evaluate/reports/",
+]
 
 [aliases]
 test = "uv run pytest"

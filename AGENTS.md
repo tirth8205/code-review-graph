@@ -71,13 +71,14 @@ Rules:
 - Do implementation work in feature, proposal, docs, or deliverable worktrees.
 - Use flat branch names that can also be sibling directory names.
 - Prefer Worktrunk for routine worktree operations:
-  - from the container, `wt -C main list`
+  - from the container, `wt -C .bare list`
   - from the container, `wt -C main switch --create <flat-branch-name>`
   - from the container, `wt -C main switch <branch-or-pr>`
 
 The checked-in Worktrunk project config lives at `main/.config/wt.toml`. Invoking
 Worktrunk with `-C main` loads that shared config while still managing the same bare
-worktree set. `wt -C .bare ...` is still useful for low-level inspection when needed.
+worktree set. `wt -C .bare list` is the cleanest way to list worktrees because it omits
+the integration worktree's duplicate bare-repo row.
 
 ## Shared-File Coordination
 
@@ -93,7 +94,7 @@ Repo-specific defaults:
 - Integration branch: `main`
 - Durable docs root: `.zazz`
 - Worktree setup reference: `.zazz/worktree-setup.md`
-- Worktrunk cheat sheet: `.zazz/wt-cheat-sheet.md`
+- Worktrunk cheat sheet: `.zazz/docs/wt-cheat-sheet.md`
 - Human review remains the merge authority; agents should not merge PRs.
 
 This project uses **bd** (beads) for issue tracking. Run `bd prime` for full workflow context.
