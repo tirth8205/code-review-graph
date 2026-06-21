@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
 from ..embeddings import EmbeddingStore, embed_all_nodes
 from ..incremental import find_project_root, get_db_path
-from ._common import _get_store, _validate_repo_root
+from ._common import _get_store, _resolve_root, _validate_repo_root
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tool 7: embed_graph
@@ -45,40 +48,48 @@ def embed_graph(
         Number of nodes embedded and total embedding count.
     """
     store, root = _get_store(repo_root)
-    db_path = get_db_path(root)
-    emb_store = EmbeddingStore(db_path, provider=provider, model=model)
     try:
-        if not emb_store.available:
-            if provider in ("openai", "google", "minimax"):
-                err = (
-                    f"The '{provider}' embedding provider is not available. "
-                    "Check the required environment variables "
-                    "(see README and `get_provider()` docstring) and that "
-                    "the endpoint is reachable."
-                )
-            else:
-                err = (
-                    "The local embedding provider needs sentence-transformers. "
-                    "Install with: pip install code-review-graph[embeddings] — "
-                    "or switch provider to 'openai' / 'google' / 'minimax'."
-                )
-            return {"status": "error", "error": err}
+        db_path = get_db_path(root)
+        try:
+            emb_store = EmbeddingStore(db_path, provider=provider, model=model)
+        except ValueError as exc:
+            # Unknown provider name or missing provider env vars — surface
+            # as a structured error rather than a traceback.
+            logger.error("embed_graph: %s", exc)
+            return {"status": "error", "error": str(exc)}
+        try:
+            if not emb_store.available:
+                if provider in ("openai", "google", "minimax"):
+                    err = (
+                        f"The '{provider}' embedding provider is not available. "
+                        "Check the required environment variables "
+                        "(see README and `get_provider()` docstring) and that "
+                        "the endpoint is reachable."
+                    )
+                else:
+                    err = (
+                        "The local embedding provider needs sentence-transformers. "
+                        "Install with: pip install code-review-graph[embeddings] — "
+                        "or switch provider to 'openai' / 'google' / 'minimax'."
+                    )
+                return {"status": "error", "error": err}
 
-        newly_embedded = embed_all_nodes(store, emb_store)
-        total = emb_store.count()
+            newly_embedded = embed_all_nodes(store, emb_store)
+            total = emb_store.count()
 
-        return {
-            "status": "ok",
-            "summary": (
-                f"Embedded {newly_embedded} new node(s). "
-                f"Total embeddings: {total}. "
-                "Semantic search is now active."
-            ),
-            "newly_embedded": newly_embedded,
-            "total_embeddings": total,
-        }
+            return {
+                "status": "ok",
+                "summary": (
+                    f"Embedded {newly_embedded} new node(s). "
+                    f"Total embeddings: {total}. "
+                    "Semantic search is now active."
+                ),
+                "newly_embedded": newly_embedded,
+                "total_embeddings": total,
+            }
+        finally:
+            emb_store.close()
     finally:
-        emb_store.close()
         store.close()
 
 
@@ -246,7 +257,7 @@ def get_wiki_page_func(
     from ..incremental import get_data_dir
     from ..wiki import get_wiki_page
 
-    _, root = _get_store(repo_root)
+    root = _resolve_root(repo_root)
     wiki_dir = get_data_dir(root) / "wiki"
     content = get_wiki_page(wiki_dir, community_name)
     if content is None:

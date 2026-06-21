@@ -626,6 +626,9 @@ def _warn_cloud_egress(provider_name: str) -> None:
     )
 
 
+_VALID_PROVIDERS = {"local", "openai", "google", "minimax"}
+
+
 def get_provider(
     provider: str | None = None,
     model: str | None = None,
@@ -634,7 +637,9 @@ def get_provider(
 
     Args:
         provider: Provider name. One of "local", "google", "minimax", "openai",
-                  or None for local.
+                  or None for local. Names are case-insensitive and surrounding
+                  whitespace is ignored; unknown names raise ValueError instead
+                  of silently falling back to the local provider.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
                   OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
@@ -647,8 +652,19 @@ def get_provider(
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
                For Google provider this is a Gemini model ID.
                For OpenAI provider this overrides CRG_OPENAI_MODEL.
+
+    Raises:
+        ValueError: If the provider name is not one of the known providers,
+                    or if required environment variables are missing.
     """
-    if provider == "openai":
+    name = provider.strip().lower() if provider else ""
+    if name and name not in _VALID_PROVIDERS:
+        raise ValueError(
+            f"Unknown embedding provider '{name}'. "
+            "Valid: local, openai, google, minimax"
+        )
+
+    if name == "openai":
         api_key = os.environ.get("CRG_OPENAI_API_KEY")
         base_url = os.environ.get("CRG_OPENAI_BASE_URL")
         resolved_model = model or os.environ.get("CRG_OPENAI_MODEL")
@@ -678,7 +694,7 @@ def get_provider(
             batch_size=batch_size,
         )
 
-    if provider == "minimax":
+    if name == "minimax":
         api_key = os.environ.get("MINIMAX_API_KEY")
         if not api_key:
             raise ValueError(
@@ -688,7 +704,7 @@ def get_provider(
         _warn_cloud_egress("minimax")
         return MiniMaxEmbeddingProvider(api_key=api_key)
 
-    if provider == "google":
+    if name == "google":
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError(

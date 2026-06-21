@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+> **注意:** この翻訳は古いリリースに基づいています。ベンチマーク数値や対応プラットフォームの一覧は[英語版 README](README.md)より古い場合があります。
+
 <p align="center">
   <strong>トークンの無駄遣いをやめて、スマートなレビューを。</strong>
 </p>
@@ -121,7 +123,7 @@ Build the code review graph for this project
   <img src="diagrams/diagram5_benchmark_board.png" alt="実リポジトリでのベンチマーク：トークン4.9倍から27.3倍削減、保守的な影響分析" width="85%" />
 </p>
 
-すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。生データは [`evaluate/reports/summary.md`](evaluate/reports/summary.md) をご覧ください。
+すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。完全な再現手順と正規の数値は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) をご覧ください。
 
 > 詳細なベンチマーク結果（トークン効率、影響精度、ビルド性能、既知の制限事項）については [英語版README](README.md) を参照してください。
 

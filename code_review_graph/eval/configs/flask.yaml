@@ -41,3 +41,10 @@ multi_hop_tasks:
     traversal_pattern: callers_of
     expected_neighbor_names: ["wsgi_app"]
     k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does dispatch_request route an incoming HTTP request"
+  - "Where is the AppContext pushed and popped"
+  - "How does create_logger configure application logging"

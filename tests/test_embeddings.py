@@ -169,6 +169,55 @@ class TestLocalEmbeddingProviderModelName:
             assert provider.name == "local:BAAI/bge-small-en-v1.5"
 
 
+class TestGetProviderValidation:
+    """Unknown provider names must raise instead of silently using local."""
+
+    @pytest.mark.parametrize("name", ["voyage", "opnai", "cohere", "VoYage"])
+    def test_unknown_provider_raises(self, name):
+        with pytest.raises(ValueError, match="Unknown embedding provider"):
+            get_provider(name)
+
+    def test_unknown_provider_message_lists_valid_names(self):
+        with pytest.raises(ValueError) as exc_info:
+            get_provider("voyage")
+        msg = str(exc_info.value)
+        assert "voyage" in msg
+        assert "Valid: local, openai, google, minimax" in msg
+
+    def test_case_and_whitespace_normalized_for_openai(self):
+        """'  OPENAI ' must route to the openai branch (and fail on its
+        missing env vars), not fall through to the local default."""
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError, match="Missing required environment"):
+                get_provider("  OPENAI ")
+
+    def test_case_normalized_for_minimax(self):
+        with patch.dict(os.environ, {
+            "MINIMAX_API_KEY": "fake",
+            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+        }, clear=False):
+            with patch(
+                "code_review_graph.embeddings.MiniMaxEmbeddingProvider",
+            ) as mock_cls:
+                mock_cls.return_value = MagicMock()
+                provider = get_provider("MiniMax")
+        assert provider is mock_cls.return_value
+
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_local_case_and_whitespace_normalized(self, _mock_available, mock_cls):
+        mock_cls.return_value = MagicMock()
+        assert get_provider(" Local ") is mock_cls.return_value
+
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_none_and_empty_default_to_local(self, _mock_available, mock_cls):
+        mock_cls.return_value = MagicMock()
+        assert get_provider(None) is mock_cls.return_value
+        assert get_provider("") is mock_cls.return_value
+        assert get_provider("   ") is mock_cls.return_value
+
+
 class TestGetProviderModel:
     """Tests for model parameter in get_provider()."""
 

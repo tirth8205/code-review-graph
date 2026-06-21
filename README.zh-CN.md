@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+> **注意：** 本翻译对应较早的版本；基准测试数据和平台列表可能落后于[英文 README](README.md)。
+
 <p align="center">
   <strong>不再浪费 token，让代码审查更智能。</strong>
 </p>
@@ -29,7 +31,7 @@
 AI 编码工具在审查任务中可能会反复读取代码库的大量内容。`code-review-graph` 解决了这个问题。它使用 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) 构建代码的结构化映射，增量跟踪变更，并通过 [MCP](https://modelcontextprotocol.io/) 为 AI 助手提供精准的上下文，使其只读取真正需要的内容。
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：在 6 个真实仓库中平均减少 8.2 倍的 token 消耗" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：在 6 个真实仓库中实现 38 倍到 528 倍的 token 削减" width="85%" />
 </p>
 
 ---
@@ -102,7 +104,7 @@ Build the code review graph for this project
 大型 monorepo 是 token 浪费最严重的场景。图能穿透噪音——排除 27,700+ 个文件，只读取约 15 个文件。
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js monorepo：27,732 个文件经过 code-review-graph 过滤后仅剩约 15 个文件——token 减少 49 倍" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 仓库：208,821 个源码 token 收敛为约 2,495 token 的图响应——每个问题的 token 减少 93 倍" width="80%" />
 </p>
 
 ### 广泛语言覆盖 + Jupyter 笔记本
@@ -118,7 +120,7 @@ Build the code review graph for this project
 ## 基准测试
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="真实仓库基准测试：token 减少 4.9 倍到 27.3 倍，并使用保守的影响分析" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="对 6 个真实仓库的基准测试：token 减少 38 倍到 528 倍，影响分析召回率 100%，平均 F1 0.71" width="85%" />
 </p>
 
 所有数据来自针对 6 个真实开源仓库（共 13 次提交）的自动化评估。可通过 `code-review-graph eval --all` 复现。完整基准测试数据请参阅[英文 README](README.md)。
