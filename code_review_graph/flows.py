@@ -459,6 +459,11 @@ def incremental_trace_flows(
     if not changed_files:
         return 0
 
+    # Normalize to absolute paths — git diff returns relative paths but
+    # the graph stores absolute file_path values (see #569).
+    import os
+    changed_files = [os.path.abspath(f) for f in changed_files]
+
     conn = store._conn
     changed_file_set = set(changed_files)
 
