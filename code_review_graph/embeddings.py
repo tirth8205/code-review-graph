@@ -170,7 +170,7 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
             self._dimension: int | None = None
         except ImportError:
             raise ImportError(
-                "google-generativeai not installed. "
+                "google-genai not installed. "
                 "Run: pip install code-review-graph[google-embeddings]"
             )
 
@@ -657,6 +657,17 @@ def get_provider(
         ValueError: If the provider name is not one of the known providers,
                     or if required environment variables are missing.
     """
+    # Auto-select OpenAI when the caller did not pin a provider but the
+    # OpenAI env vars are configured. Without this, a fully-configured
+    # OpenAI-compatible setup silently fell back to the local provider
+    # (and returned None when sentence-transformers wasn't installed). #551
+    if (
+        provider is None
+        and os.environ.get("CRG_OPENAI_API_KEY")
+        and os.environ.get("CRG_OPENAI_BASE_URL")
+    ):
+        provider = "openai"
+
     name = provider.strip().lower() if provider else ""
     if name and name not in _VALID_PROVIDERS:
         raise ValueError(
@@ -966,8 +977,44 @@ class EmbeddingStore:
         )
         self._conn.commit()
 
-    def count(self) -> int:
+    def count(self, provider: str | None = None) -> int:
+        """Count stored embeddings, optionally scoped to one provider.
+
+        ``search()`` only matches rows whose ``provider`` column equals the
+        active provider's ``name``. A provider-agnostic count therefore
+        overcounts: a DB full of vectors from a *different* provider would
+        report a non-zero count while ``search()`` silently returns nothing.
+        Pass a ``provider`` name to count only the rows ``search()`` will
+        actually consider.
+        """
+        if provider is not None:
+            return self._conn.execute(
+                "SELECT COUNT(*) FROM embeddings WHERE provider = ?",
+                (provider,),
+            ).fetchone()[0]
         return self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+
+    def count_for_active_provider(self) -> int:
+        """Count embeddings stored under the *active* provider's identity.
+
+        Returns 0 (and logs a warning) when the DB holds embeddings from
+        other providers but none for the active one — the silent
+        mismatched-provider case that made ``search()`` return empty.
+        """
+        if self.provider is None:
+            return 0
+        active = self.provider.name
+        active_count = self.count(provider=active)
+        if active_count == 0:
+            total = self.count()
+            if total > 0:
+                logger.warning(
+                    "Embeddings present (%d rows) but none match the active "
+                    "provider '%s' — semantic search will return nothing until "
+                    "you re-embed with this provider.",
+                    total, active,
+                )
+        return active_count
 
 
 def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) -> int:

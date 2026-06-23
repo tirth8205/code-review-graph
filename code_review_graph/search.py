@@ -10,11 +10,47 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .graph import GraphStore, _sanitize_name
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SearchMeta:
+    """Describes which retrieval path ``hybrid_search`` actually executed.
+
+    ``mode`` is one of:
+      * ``embeddings`` — FTS and/or vector embeddings contributed results
+        (with ``embeddings_ran`` true when the vector path produced hits).
+      * ``fts`` — only the FTS5 BM25 path produced results.
+      * ``keyword`` — FTS/embeddings were empty; the LIKE fallback was used.
+      * ``none`` — nothing matched.
+
+    The embedding flags let the tool layer report ``embeddings_available`` /
+    ``embeddings_error`` instead of silently swallowing a cloud failure. See
+    #537.
+    """
+
+    mode: str = "none"
+    fts_ran: bool = False
+    embeddings_ran: bool = False
+    keyword_fallback: bool = False
+    embeddings_available: bool = False
+    embeddings_failed: bool = False
+    embeddings_error: Optional[str] = None
+
+
+@dataclass
+class _EmbeddingSearchResult:
+    """Internal result of ``_embedding_search``: hits plus a failure signal."""
+
+    results: list[tuple[int, float]] = field(default_factory=list)
+    available: bool = False
+    failed: bool = False
+    error: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +224,15 @@ def _fts_search(
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
     """
-    # Sanitize: wrap in double quotes to prevent FTS5 operator injection
-    safe_query = '"' + query.replace('"', '""') + '"'
+    # Tokenize and quote each term individually, joined with OR. Quoting each
+    # term still neutralizes FTS5 operator injection (every token is a literal
+    # phrase), but wrapping the *whole* query as one phrase (``"a b c"``) forced
+    # strict adjacency, so any 3+ word query that wasn't a contiguous substring
+    # returned zero rows. OR-of-terms lets non-adjacent matches through. See #419.
+    terms = [w for w in query.split() if w]
+    if not terms:
+        return []
+    safe_query = " OR ".join('"' + w.replace('"', '""') + '"' for w in terms)
 
     try:
         rows = conn.execute(
@@ -215,22 +258,31 @@ def _embedding_search(
     limit: int = 50,
     model: str | None = None,
     provider: str | None = None,
-) -> list[tuple[int, float]]:
+) -> _EmbeddingSearchResult:
     """Run a vector similarity search using the embedding store.
 
-    Returns list of ``(node_id, similarity_score)`` tuples.
-    Gracefully returns an empty list if embeddings are not available.
+    Returns an ``_EmbeddingSearchResult`` carrying the ``(node_id, score)``
+    hits plus availability/failure signals. Embeddings are *not* required, so
+    an unavailable provider yields an empty-but-not-failed result. A genuine
+    error (e.g. a cloud embedding call raising) is surfaced via ``failed`` /
+    ``error`` instead of being silently swallowed (#537), while the caller
+    still degrades gracefully to FTS / keyword search.
     """
     try:
         from .embeddings import EmbeddingStore
     except ImportError:
-        return []
+        return _EmbeddingSearchResult(available=False)
 
     try:
         emb_store = EmbeddingStore(store.db_path, provider=provider, model=model)
         try:
-            if not emb_store.available or emb_store.count() == 0:
-                return []
+            if not emb_store.available:
+                return _EmbeddingSearchResult(available=False)
+            # Provider-aware gate: only count rows the active provider can
+            # actually match, so a mismatched-provider DB doesn't look
+            # "available" while search() returns nothing.
+            if emb_store.count_for_active_provider() == 0:
+                return _EmbeddingSearchResult(available=True)
 
             results = emb_store.search(query, limit=limit)
             # Map qualified names back to node IDs
@@ -239,12 +291,15 @@ def _embedding_search(
                 node = store.get_node(qn)
                 if node:
                     id_scores.append((node.id, score))
-            return id_scores
+            return _EmbeddingSearchResult(results=id_scores, available=True)
         finally:
             emb_store.close()
     except Exception as e:
+        # Graceful fallback is preserved (we still return empty results so
+        # FTS/keyword can take over), but the failure is now propagated so the
+        # tool layer can report embeddings_available=false / embeddings_error.
         logger.warning("Embedding search failed: %s", e)
-        return []
+        return _EmbeddingSearchResult(available=True, failed=True, error=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +371,10 @@ def hybrid_search(
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
-    Attempts FTS5 + embedding search first, falling back to FTS5-only,
-    then keyword LIKE matching if FTS5 is unavailable.
+    Backward-compatible thin wrapper around :func:`hybrid_search_with_meta`
+    that returns only the result list. Callers that need to know which
+    retrieval path actually ran (FTS vs embeddings vs keyword fallback) or
+    whether embeddings failed should call ``hybrid_search_with_meta``.
 
     Args:
         store: The graph store to search.
@@ -330,8 +387,33 @@ def hybrid_search(
     Returns:
         List of dicts with node metadata and ``score`` field.
     """
+    results, _meta = hybrid_search_with_meta(
+        store, query, kind=kind, limit=limit, context_files=context_files,
+        model=model, provider=provider,
+    )
+    return results
+
+
+def hybrid_search_with_meta(
+    store: GraphStore,
+    query: str,
+    kind: Optional[str] = None,
+    limit: int = 20,
+    context_files: Optional[list[str]] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], SearchMeta]:
+    """Hybrid search returning both results and a :class:`SearchMeta`.
+
+    Attempts FTS5 + embedding search first, falling back to FTS5-only,
+    then keyword LIKE matching if FTS5 is unavailable. The returned
+    ``SearchMeta`` reports which path actually executed and whether the
+    embedding step failed, so the tool layer can set ``search_mode`` from the
+    real path (not result-emptiness) and surface embedding errors (#537).
+    """
+    meta = SearchMeta()
     if not query or not query.strip():
-        return []
+        return [], meta
 
     # NOTE: hybrid_search uses store._conn for FTS5 and keyword queries
     # because those operate on the FTS virtual table or need raw Row
@@ -341,18 +423,23 @@ def hybrid_search(
 
     # ------ Phase 1: Gather ranked lists ------
     fts_results: list[tuple[int, float]] = []
-    emb_results: list[tuple[int, float]] = []
 
     # Try FTS5 search
     try:
         fts_results = _fts_search(conn, query, limit=fetch_limit)
     except Exception as e:
         logger.warning("FTS5 unavailable, will use fallback: %s", e)
+    meta.fts_ran = bool(fts_results)
 
     # Try embedding search
-    emb_results = _embedding_search(
+    emb = _embedding_search(
         store, query, limit=fetch_limit, model=model, provider=provider,
     )
+    emb_results = emb.results
+    meta.embeddings_available = emb.available and not emb.failed
+    meta.embeddings_failed = emb.failed
+    meta.embeddings_error = emb.error
+    meta.embeddings_ran = bool(emb_results)
 
     # ------ Phase 2: Merge via RRF or fallback ------
     if fts_results or emb_results:
@@ -362,12 +449,15 @@ def hybrid_search(
         if emb_results:
             lists_to_merge.append(emb_results)
         merged = rrf_merge(*lists_to_merge)
+        meta.mode = "embeddings" if emb_results else "fts"
     else:
         # Fallback: keyword LIKE matching
         keyword_results = _keyword_search(conn, query, limit=fetch_limit)
         if not keyword_results:
-            return []
+            return [], meta
         merged = keyword_results
+        meta.keyword_fallback = True
+        meta.mode = "keyword"
 
     # ------ Phase 3+4: Batch-fetch nodes, apply boosting and kind filter ------
     kind_boosts = detect_query_kind_boost(query)
@@ -444,4 +534,4 @@ def hybrid_search(
             "score": round(final_score, 6),
         })
 
-    return results
+    return results, meta

@@ -11,7 +11,7 @@ from ..embeddings import EmbeddingStore
 from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
-from ..search import hybrid_search
+from ..search import hybrid_search, hybrid_search_with_meta
 from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
@@ -405,14 +405,21 @@ def semantic_search_nodes(
     """
     store, root = _get_store(repo_root)
     try:
-        results = hybrid_search(
+        results, meta = hybrid_search_with_meta(
             store, query, kind=kind, limit=limit, context_files=context_files,
             model=model, provider=provider,
         )
 
-        search_mode = "hybrid"
-        if not results:
-            search_mode = "keyword"
+        # Report the path actually executed, not result-emptiness (#537).
+        # ``embeddings`` (FTS + vectors) is surfaced as the canonical
+        # "hybrid" mode; FTS-only and keyword fallback are named explicitly.
+        mode_labels = {
+            "embeddings": "hybrid",
+            "fts": "fts",
+            "keyword": "keyword",
+            "none": "keyword",
+        }
+        search_mode = mode_labels.get(meta.mode, meta.mode)
 
         summary = f"Found {len(results)} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""
@@ -427,21 +434,28 @@ def semantic_search_nodes(
                 }
                 for r in results[:5]
             ]
-            return {
+            minimal_response: dict[str, object] = {
                 "status": "ok",
                 "query": query,
                 "search_mode": search_mode,
+                "embeddings_available": meta.embeddings_available,
                 "summary": summary,
                 "results": minimal_results,
             }
+            if meta.embeddings_failed:
+                minimal_response["embeddings_error"] = meta.embeddings_error
+            return minimal_response
 
         result: dict[str, object] = {
             "status": "ok",
             "query": query,
             "search_mode": search_mode,
+            "embeddings_available": meta.embeddings_available,
             "summary": summary,
             "results": results,
         }
+        if meta.embeddings_failed:
+            result["embeddings_error"] = meta.embeddings_error
         result["_hints"] = generate_hints(
             "semantic_search_nodes", result, get_session()
         )

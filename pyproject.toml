@@ -53,8 +53,11 @@ embeddings = [
     "sentence-transformers>=3.0.0,<4",
     "numpy>=1.26,<3",
 ]
+# embeddings.py imports the new unified SDK via ``from google import genai``
+# (the ``google-genai`` package), NOT the legacy ``google-generativeai`` SDK.
+# Installing the wrong one left ``from google import genai`` unimportable. #534
 google-embeddings = [
-    "google-generativeai>=0.8.0,<1",
+    "google-genai>=0.3.0,<2",
 ]
 communities = [
     "igraph>=0.11.0",
@@ -66,6 +69,12 @@ eval = [
 wiki = [
     "ollama>=0.1.0",
 ]
+# ``all`` bundles the local/offline feature extras only. Cloud embedding
+# providers are intentionally EXCLUDED: ``google-embeddings`` pulls a heavy
+# cloud SDK and requires GOOGLE_API_KEY, and MiniMax/OpenAI providers need no
+# extra at all (they speak HTTP via the stdlib). Installing ``[all]`` therefore
+# keeps CRG fully offline-capable by default; opt into cloud Google with
+# ``code-review-graph[google-embeddings]``. #534
 all = [
     "code-review-graph[embeddings]",
     "code-review-graph[communities]",

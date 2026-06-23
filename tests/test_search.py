@@ -2,12 +2,15 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
 from code_review_graph.search import (
+    _EmbeddingSearchResult,
     detect_query_kind_boost,
     hybrid_search,
+    hybrid_search_with_meta,
     rebuild_fts_index,
     rrf_merge,
 )
@@ -249,6 +252,33 @@ class TestHybridSearch:
             # Just assert no exception was raised
             assert isinstance(results, list)
 
+    def test_multiword_query_not_phrase_quoted(self):
+        """Regression for #419: a 3+ word query must NOT be wrapped as one
+        FTS5 phrase (strict adjacency). The words ``get``, ``users`` and
+        ``Session`` all appear in the ``get_users`` node's indexed text
+        (name + signature) but never adjacently, so a phrase query returns
+        nothing while an OR-of-terms query finds the node."""
+        rebuild_fts_index(self.store)
+
+        # Phrase form ("get users Session") would require strict adjacency
+        # and return zero rows. The fix tokenizes + ORs the terms.
+        results = hybrid_search(self.store, "get users Session")
+        names = [r["name"] for r in results]
+        assert "get_users" in names, (
+            "3-word query returned no match — FTS5 likely still phrase-quoting "
+            "the whole query as one strict-adjacency phrase (#419)."
+        )
+
+    def test_multiword_query_via_fts_path(self):
+        """A multi-word query that only matches via FTS (not the keyword
+        LIKE fallback) must still return rows. ``authenticate token bool``
+        spans the name + signature of the ``authenticate`` node
+        non-adjacently."""
+        rebuild_fts_index(self.store)
+        results = hybrid_search(self.store, "authenticate token bool")
+        names = [r["name"] for r in results]
+        assert "authenticate" in names
+
     def test_fts_rebuild_is_atomic(self):
         """Regression test for #259: rebuild_fts_index must wrap the DROP +
         CREATE + INSERT sequence in a single transaction so a crash between
@@ -268,3 +298,106 @@ class TestHybridSearch:
         # Verify search still works after double-rebuild.
         results = hybrid_search(self.store, "auth")
         assert isinstance(results, list)
+
+
+class TestSearchMeta:
+    """Regression for #537: hybrid_search_with_meta must report the path it
+    actually took (not result-emptiness) and surface embedding failures."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        node = NodeInfo(
+            kind="Function", name="authenticate", file_path="auth.py",
+            line_start=1, line_end=20, language="python",
+            params="(token: str)", return_type="bool",
+        )
+        self.store.upsert_node(node, file_hash="abc123")
+        self.store._conn.commit()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _no_embeddings(self):
+        """Patch _embedding_search to behave like an unavailable provider."""
+        return patch(
+            "code_review_graph.search._embedding_search",
+            return_value=_EmbeddingSearchResult(available=False),
+        )
+
+    def test_mode_is_fts_when_only_fts_matches(self):
+        """With FTS indexed and embeddings unavailable, the mode must be
+        'fts' — driven by the executed path, not by whether results were
+        empty."""
+        rebuild_fts_index(self.store)
+        with self._no_embeddings():
+            results, meta = hybrid_search_with_meta(self.store, "authenticate")
+        assert len(results) > 0
+        assert meta.mode == "fts"
+        assert meta.fts_ran is True
+        assert meta.embeddings_ran is False
+        assert meta.keyword_fallback is False
+
+    def test_mode_is_keyword_when_fts_absent(self):
+        """Drop the FTS table: the keyword LIKE fallback must run and the
+        mode must say 'keyword' even though results are non-empty."""
+        self.store._conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        self.store._conn.commit()
+        with self._no_embeddings():
+            results, meta = hybrid_search_with_meta(self.store, "authenticate")
+        assert len(results) > 0  # found via keyword fallback
+        assert meta.mode == "keyword"
+        assert meta.keyword_fallback is True
+        assert meta.fts_ran is False
+
+    def test_mode_is_none_when_nothing_matches(self):
+        rebuild_fts_index(self.store)
+        with self._no_embeddings():
+            results, meta = hybrid_search_with_meta(
+                self.store, "zzz_no_such_symbol_qqq"
+            )
+        assert results == []
+        assert meta.mode == "none"
+
+    def test_embedding_failure_is_surfaced(self):
+        """A forced embedding failure must propagate through meta rather than
+        being silently swallowed — while results still come back from FTS."""
+        rebuild_fts_index(self.store)
+        failed = _EmbeddingSearchResult(
+            available=True, failed=True, error="cloud endpoint timed out",
+        )
+        with patch(
+            "code_review_graph.search._embedding_search", return_value=failed,
+        ):
+            results, meta = hybrid_search_with_meta(self.store, "authenticate")
+        # Graceful fallback: FTS still returned the node.
+        assert len(results) > 0
+        # The failure is no longer hidden.
+        assert meta.embeddings_failed is True
+        assert meta.embeddings_error == "cloud endpoint timed out"
+        assert meta.embeddings_available is False
+
+    def test_embedding_success_sets_embeddings_mode(self):
+        """When the embedding path returns hits, mode is 'embeddings' and
+        embeddings_ran/available are true."""
+        rebuild_fts_index(self.store)
+        node = self.store.get_node("auth.py::authenticate")
+        emb_hit = _EmbeddingSearchResult(
+            results=[(node.id, 0.99)], available=True,
+        )
+        with patch(
+            "code_review_graph.search._embedding_search", return_value=emb_hit,
+        ):
+            results, meta = hybrid_search_with_meta(self.store, "authenticate")
+        assert len(results) > 0
+        assert meta.mode == "embeddings"
+        assert meta.embeddings_ran is True
+        assert meta.embeddings_available is True
+        assert meta.embeddings_failed is False
+
+    def test_hybrid_search_wrapper_returns_list(self):
+        """The backward-compatible wrapper must still return a bare list."""
+        rebuild_fts_index(self.store)
+        out = hybrid_search(self.store, "authenticate")
+        assert isinstance(out, list)

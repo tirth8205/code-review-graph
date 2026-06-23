@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,42 @@ from code_review_graph.embeddings import (
     get_provider,
 )
 from code_review_graph.graph import GraphNode
+
+
+class TestGoogleEmbeddingsExtra:
+    """Regression for #534: the google-embeddings extra must install the SDK
+    that embeddings.py actually imports (``from google import genai`` ->
+    ``google-genai``), not the legacy ``google-generativeai`` package."""
+
+    def _load_pyproject(self):
+        try:
+            import tomllib as toml_lib  # py3.11+
+        except ModuleNotFoundError:  # pragma: no cover - py3.10
+            import tomli as toml_lib
+        # tests/ -> repo root
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "pyproject.toml", "rb") as fh:
+            return toml_lib.load(fh)
+
+    def test_google_extra_names_google_genai(self):
+        data = self._load_pyproject()
+        extra = data["project"]["optional-dependencies"]["google-embeddings"]
+        joined = " ".join(extra)
+        assert "google-genai" in joined, (
+            f"google-embeddings extra must install google-genai, got {extra}"
+        )
+        # The legacy SDK ships a *different* import surface and must not be
+        # the pinned dependency.
+        assert not any(
+            dep.strip().lower().startswith("google-generativeai") for dep in extra
+        ), f"legacy google-generativeai must not be pinned: {extra}"
+
+    def test_pyproject_parses_and_all_extra_excludes_cloud(self):
+        data = self._load_pyproject()
+        extras = data["project"]["optional-dependencies"]
+        all_extra = " ".join(extras["all"])
+        # Intentional exclusion: cloud Google must NOT be bundled into [all].
+        assert "google-embeddings" not in all_extra
 
 
 class TestVectorEncoding:
@@ -146,6 +183,65 @@ class TestEmbeddingStore:
             store.close()
 
 
+class TestEmbeddingStoreProviderAwareCount:
+    """Regression: count() must support a provider filter so the availability
+    gate matches the provider-filtered search() query. A mismatched-provider
+    DB must report 0 for the active provider instead of silently returning
+    empty search results."""
+
+    def _seed(self, store, qn, provider):
+        store._conn.execute(
+            "INSERT OR REPLACE INTO embeddings "
+            "(qualified_name, vector, text_hash, provider) VALUES (?, ?, ?, ?)",
+            (qn, _encode_vector([0.1, 0.2, 0.3]), "h", provider),
+        )
+        store._conn.commit()
+
+    def test_count_provider_filter(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        with patch("code_review_graph.embeddings.get_provider", return_value=None):
+            store = EmbeddingStore(db)
+            self._seed(store, "a::f", "local:m1")
+            self._seed(store, "b::g", "local:m1")
+            self._seed(store, "c::h", "openai:m2@https://x/v1")
+            # Unfiltered count sees all three rows.
+            assert store.count() == 3
+            # Provider-filtered counts only the matching rows.
+            assert store.count(provider="local:m1") == 2
+            assert store.count(provider="openai:m2@https://x/v1") == 1
+            assert store.count(provider="provider-with-no-rows") == 0
+            store.close()
+
+    def test_count_for_active_provider_zero_on_mismatch(self, tmp_path):
+        """DB has embeddings, but none under the active provider's name:
+        count_for_active_provider must return 0 (and warn)."""
+        db = tmp_path / "embeddings.db"
+        active = MagicMock()
+        active.name = "local:active-model"
+        with patch(
+            "code_review_graph.embeddings.get_provider", return_value=active,
+        ):
+            store = EmbeddingStore(db)
+            # All stored rows belong to a *different* provider.
+            self._seed(store, "a::f", "openai:other@https://x/v1")
+            assert store.count() == 1  # rows exist...
+            assert store.count_for_active_provider() == 0  # ...but not ours
+            store.close()
+
+    def test_count_for_active_provider_matches(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        active = MagicMock()
+        active.name = "local:active-model"
+        with patch(
+            "code_review_graph.embeddings.get_provider", return_value=active,
+        ):
+            store = EmbeddingStore(db)
+            self._seed(store, "a::f", "local:active-model")
+            self._seed(store, "b::g", "openai:other@https://x/v1")
+            assert store.count_for_active_provider() == 1
+            store.close()
+
+
 class TestLocalEmbeddingProviderModelName:
     """Tests for configurable model name on LocalEmbeddingProvider."""
 
@@ -216,6 +312,56 @@ class TestGetProviderValidation:
         assert get_provider(None) is mock_cls.return_value
         assert get_provider("") is mock_cls.return_value
         assert get_provider("   ") is mock_cls.return_value
+
+
+class TestGetProviderOpenAIAutoSelect:
+    """Regression for #551: when provider=None but CRG_OPENAI_API_KEY and
+    CRG_OPENAI_BASE_URL are both set, get_provider must select the OpenAI
+    provider instead of silently defaulting to local."""
+
+    _OPENAI_ENV = {
+        "CRG_OPENAI_API_KEY": "sk-test",
+        "CRG_OPENAI_BASE_URL": "http://127.0.0.1:3000/v1",
+        "CRG_OPENAI_MODEL": "text-embedding-3-small",
+    }
+
+    def test_none_provider_with_openai_env_selects_openai(self):
+        with patch.dict("os.environ", self._OPENAI_ENV, clear=True):
+            provider = get_provider(provider=None)
+        assert isinstance(provider, OpenAIEmbeddingProvider)
+        assert provider.name == (
+            "openai:text-embedding-3-small@http://127.0.0.1:3000/v1"
+        )
+
+    def test_none_provider_without_base_url_stays_local(self):
+        """Only the api key (no base url) must NOT trigger openai auto-select;
+        it should fall through to the local provider."""
+        env = {"CRG_OPENAI_API_KEY": "sk-test"}
+        with patch.dict("os.environ", env, clear=True):
+            with patch(
+                "code_review_graph.embeddings.LocalEmbeddingProvider",
+            ) as mock_cls:
+                with patch(
+                    "code_review_graph.embeddings._check_available",
+                    return_value=True,
+                ):
+                    mock_cls.return_value = MagicMock()
+                    provider = get_provider(provider=None)
+        assert provider is mock_cls.return_value
+
+    def test_explicit_local_overrides_openai_env(self):
+        """An explicit provider='local' must win over the OpenAI env vars."""
+        with patch.dict("os.environ", self._OPENAI_ENV, clear=True):
+            with patch(
+                "code_review_graph.embeddings.LocalEmbeddingProvider",
+            ) as mock_cls:
+                with patch(
+                    "code_review_graph.embeddings._check_available",
+                    return_value=True,
+                ):
+                    mock_cls.return_value = MagicMock()
+                    provider = get_provider(provider="local")
+        assert provider is mock_cls.return_value
 
 
 class TestGetProviderModel:
