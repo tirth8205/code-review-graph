@@ -445,9 +445,20 @@ class TestPHPParsing:
         assert "execute" in target_names
         assert "search" in target_names
 
-        # Scoped/static calls
-        assert "QueryUtils::fetchRecords" in targets
-        assert "EncounterService::create" in targets
+        # Scoped/static calls: ``QueryUtils::fetchRecords`` and
+        # ``EncounterService::create`` are defined in this same file, so the
+        # call resolver rewrites them to the qualified method-node names
+        # (``...::QueryUtils.fetchRecords``). The class part is normalized to
+        # the bare last namespace segment before resolution. See: #567
+        assert any(t.endswith("::QueryUtils.fetchRecords") for t in targets), (
+            f"expected resolved QueryUtils.fetchRecords, got: {targets}"
+        )
+        assert any(t.endswith("::EncounterService.create") for t in targets), (
+            f"expected resolved EncounterService.create, got: {targets}"
+        )
+        # The buggy raw ``Class::method`` strings must no longer leak through.
+        assert "QueryUtils::fetchRecords" not in targets
+        assert "EncounterService::create" not in targets
         assert any(t.endswith("__construct") for t in run_queries_targets)
         assert any(t.endswith("factory") for t in run_queries_targets)
 
@@ -2548,3 +2559,159 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+
+class TestPHPUseImports:
+    """PHP ``use`` imports must record the FQN, not the raw statement (#574)."""
+
+    def _imports(self, tmp_path, body):
+        src = tmp_path / "a.php"
+        src.write_text("<?php\nnamespace App;\n" + body)
+        _, edges = CodeParser().parse_file(src)
+        return [e.target for e in edges if e.kind == "IMPORTS_FROM"]
+
+    def test_simple_fqn(self, tmp_path):
+        targets = self._imports(tmp_path, "use App\\Domain\\Entity\\Job;\n")
+        assert "App\\Domain\\Entity\\Job" in targets
+        # The raw ``use ...;`` statement text must NOT be recorded.
+        assert not any(t.startswith("use ") for t in targets)
+
+    def test_alias_keeps_original_fqn(self, tmp_path):
+        targets = self._imports(tmp_path, "use App\\Service\\Foo as Bar;\n")
+        assert "App\\Service\\Foo" in targets
+        assert "Bar" not in targets
+
+    def test_grouped_use(self, tmp_path):
+        targets = self._imports(tmp_path, "use App\\Util\\{Helper, Tool};\n")
+        assert "App\\Util\\Helper" in targets
+        assert "App\\Util\\Tool" in targets
+
+    def test_function_and_const_use(self, tmp_path):
+        targets = self._imports(
+            tmp_path,
+            "use function App\\fn\\helper;\nuse const App\\C\\MAX;\n",
+        )
+        assert "App\\fn\\helper" in targets
+        assert "App\\C\\MAX" in targets
+
+    def test_use_resolves_to_php_file(self, tmp_path):
+        """An imported FQN resolves to the matching .php file path (#574)."""
+        (tmp_path / "App" / "Domain").mkdir(parents=True)
+        target_file = tmp_path / "App" / "Domain" / "Job.php"
+        target_file.write_text("<?php\nnamespace App\\Domain;\nclass Job {}\n")
+        importer = tmp_path / "Importer.php"
+        importer.write_text("<?php\nuse App\\Domain\\Job;\n")
+        _, edges = CodeParser().parse_file(importer)
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert str(target_file.resolve()) in targets, (
+            f"expected resolved Job.php path, got: {targets}"
+        )
+
+
+class TestKotlinAnnotations:
+    """Kotlin annotations must be stored on node.extra (#295)."""
+
+    def test_function_annotations_stored(self, tmp_path):
+        src = tmp_path / "ui.kt"
+        src.write_text(
+            "@Composable\n"
+            "fun Greeting(name: String) {\n"
+            "    Text(name)\n"
+            "}\n"
+        )
+        nodes, _ = CodeParser().parse_file(src)
+        greeting = next(n for n in nodes if n.name == "Greeting")
+        assert greeting.extra.get("annotations") == ["Composable"]
+
+    def test_class_annotations_stored(self, tmp_path):
+        src = tmp_path / "model.kt"
+        src.write_text(
+            "@Entity\n"
+            "@Serializable\n"
+            "class Animal(val n: String) {\n"
+            "    fun speak() {}\n"
+            "}\n"
+        )
+        nodes, _ = CodeParser().parse_file(src)
+        animal = next(n for n in nodes if n.name == "Animal" and n.kind == "Class")
+        assert animal.extra.get("annotations") == ["Entity", "Serializable"]
+
+
+class TestKotlinBaseConstructor:
+    """Kotlin ``: Animal()`` base should be 'Animal', not 'Animal()'."""
+
+    def test_base_constructor_call_normalized(self, tmp_path):
+        src = tmp_path / "dog.kt"
+        src.write_text("class Dog : Animal() {\n}\n")
+        _, edges = CodeParser().parse_file(src)
+        inherits = [e.target for e in edges if e.kind == "INHERITS"]
+        assert "Animal" in inherits
+        assert "Animal()" not in inherits
+        # The class's own name must not appear as a base (no self-edge).
+        assert "Dog" not in inherits
+
+    def test_interface_base_detected(self, tmp_path):
+        src = tmp_path / "repo.kt"
+        src.write_text("class Repo : UserRepository {\n}\n")
+        _, edges = CodeParser().parse_file(src)
+        inherits = [e.target for e in edges if e.kind == "INHERITS"]
+        assert "UserRepository" in inherits
+        assert "Repo" not in inherits
+
+
+class TestCSharpInheritance:
+    """C# base_list (class : Base, IFace) must yield inheritance edges."""
+
+    def test_base_class_and_interface_edges(self, tmp_path):
+        src = tmp_path / "dog.cs"
+        src.write_text(
+            "class Dog : Animal, IBark {\n"
+            "    public void Bark() {}\n"
+            "}\n"
+        )
+        _, edges = CodeParser().parse_file(src)
+        inherits = [e.target for e in edges if e.kind == "INHERITS"]
+        assert "Animal" in inherits
+        assert "IBark" in inherits
+        assert "Dog" not in inherits
+
+
+class TestGoGenericReceiver:
+    """Go generic receivers attach methods to the base type (#190)."""
+
+    def test_generic_pointer_receiver_attaches_to_base_type(self, tmp_path):
+        src = tmp_path / "repo.go"
+        src.write_text(
+            "package m\n"
+            "type Repo[T any] struct { count int }\n"
+            "func (r *Repo[T]) Foo() {}\n"
+            "func (r Repo[T]) Bar() {}\n"
+        )
+        nodes, _ = CodeParser().parse_file(src)
+        foo = next(n for n in nodes if n.name == "Foo")
+        bar = next(n for n in nodes if n.name == "Bar")
+        # The base type name (Repo), not the type parameter (T).
+        assert foo.parent_name == "Repo"
+        assert bar.parent_name == "Repo"
+
+
+class TestGoEmbeddedStruct:
+    """Go embedded structs yield INHERITS; named fields do not (#get_bases)."""
+
+    def test_embedded_field_yields_inherits(self, tmp_path):
+        src = tmp_path / "repo.go"
+        src.write_text(
+            "package m\n"
+            "type Repo struct {\n"
+            "    Base\n"
+            "    count int\n"
+            "    name string\n"
+            "}\n"
+        )
+        _, edges = CodeParser().parse_file(src)
+        inherits = [e.target for e in edges if e.kind == "INHERITS"]
+        assert "Base" in inherits
+        # Named field types must not be treated as embedded bases.
+        assert "int" not in inherits
+        assert "string" not in inherits

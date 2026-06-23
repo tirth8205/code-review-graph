@@ -1491,3 +1491,206 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+class TestDartCallAttribution:
+    """Dart calls must be attributed to the enclosing method, not the file (#87)."""
+
+    def test_method_call_attributed_to_method(self, tmp_path):
+        src = tmp_path / "service.dart"
+        src.write_text(
+            "class Service {\n"
+            "  void process() {\n"
+            "    helper();\n"
+            "  }\n"
+            "}\n"
+            "void helper() {}\n"
+        )
+        p = CodeParser()
+        nodes, edges = p.parse_file(src)
+        file_path = str(src.resolve())
+        calls = [e for e in edges if e.kind == "CALLS" and e.target.endswith("::helper")]
+        assert calls, "expected a resolved CALLS edge to helper()"
+        # The call site is inside Service.process — source must be that method,
+        # NOT the bare file path.
+        sources = {e.source for e in calls}
+        assert f"{file_path}::Service.process" in sources, (
+            f"helper() call should be attributed to Service.process, got: {sources}"
+        )
+        assert file_path not in sources, "call must not be attributed to the file"
+
+    def test_top_level_function_call_attributed(self, tmp_path):
+        src = tmp_path / "main.dart"
+        src.write_text(
+            "void main() {\n"
+            "  run();\n"
+            "}\n"
+            "void run() {}\n"
+        )
+        p = CodeParser()
+        nodes, edges = p.parse_file(src)
+        file_path = str(src.resolve())
+        calls = [e for e in edges if e.kind == "CALLS" and e.target.endswith("::run")]
+        assert calls
+        assert {e.source for e in calls} == {f"{file_path}::main"}
+
+    def test_no_duplicate_file_scoped_call(self, tmp_path):
+        """The function_body sibling must not be reprocessed at file scope."""
+        src = tmp_path / "dup.dart"
+        src.write_text(
+            "void main() {\n"
+            "  run();\n"
+            "}\n"
+            "void run() {}\n"
+        )
+        p = CodeParser()
+        _, edges = p.parse_file(src)
+        run_calls = [e for e in edges if e.kind == "CALLS" and e.target.endswith("::run")]
+        # Exactly one CALLS edge for run(); no duplicate emitted at file scope.
+        assert len(run_calls) == 1, f"expected 1 run() call, got {run_calls}"
+
+
+class TestScopedCallResolution:
+    """Static Class::method calls resolve to same-file method nodes (#567)."""
+
+    def test_php_static_call_resolves_same_file(self, tmp_path):
+        src = tmp_path / "svc.php"
+        src.write_text(
+            "<?php\n"
+            "class Helper {\n"
+            "    public static function go(): void {}\n"
+            "}\n"
+            "class Caller {\n"
+            "    public function run(): void {\n"
+            "        Helper::go();\n"
+            "    }\n"
+            "}\n"
+        )
+        p = CodeParser()
+        _, edges = p.parse_file(src)
+        file_path = str(src.resolve())
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        # Helper::go() must resolve to the qualified method node, not the raw
+        # "Helper::go" string.
+        assert f"{file_path}::Helper.go" in targets, (
+            f"expected resolved Helper.go node, got: {targets}"
+        )
+        assert "Helper::go" not in targets
+
+    def test_php_namespaced_static_call_normalized(self, tmp_path):
+        """A namespaced class part keeps only its last backslash-segment (#567)."""
+        src = tmp_path / "ns.php"
+        src.write_text(
+            "<?php\n"
+            "class Caller {\n"
+            "    public function run(): void {\n"
+            "        \\App\\Foo\\Bar::method();\n"
+            "    }\n"
+            "}\n"
+        )
+        p = CodeParser()
+        _, edges = p.parse_file(src)
+        targets = {e.target for e in edges if e.kind == "CALLS"}
+        # Bar is not defined in this file, so the target stays Class::method
+        # with the BARE class name (last namespace segment) for cross-file
+        # resolution by the graph agent.
+        assert "Bar::method" in targets, (
+            f"expected bare-normalized Bar::method, got: {targets}"
+        )
+        assert not any("App\\Foo\\Bar" in t for t in targets), (
+            f"namespace backslashes must be stripped from the class part: {targets}"
+        )
+
+
+class TestCppQtMacros:
+    """Qt/bare uppercase macros must not become Function nodes (#463)."""
+
+    def test_qt_namespace_macro_before_class_skipped(self, tmp_path):
+        # When QT_BEGIN_NAMESPACE precedes a class, tree-sitter parses the
+        # macro into a standalone function_definition (no function_declarator).
+        # It must NOT become a Function node.
+        src = tmp_path / "widget.cpp"
+        src.write_text(
+            "#include <QObject>\n"
+            "\n"
+            "QT_BEGIN_NAMESPACE\n"
+            "\n"
+            "class Widget : public QObject {\n"
+            "    Q_OBJECT\n"
+            "public:\n"
+            "    void show();\n"
+            "};\n"
+            "\n"
+            "QT_END_NAMESPACE\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        func_names = {n.name for n in nodes if n.kind == "Function"}
+        assert "QT_BEGIN_NAMESPACE" not in func_names
+        assert "QT_END_NAMESPACE" not in func_names
+        assert "Q_OBJECT" not in func_names
+
+    def test_real_function_still_extracted(self, tmp_path):
+        """A genuine function next to a macro is still extracted."""
+        src = tmp_path / "macros.cpp"
+        src.write_text(
+            "QT_BEGIN_NAMESPACE\n"
+            "\n"
+            "int realFunc() { return 1; }\n"
+            "\n"
+            "QT_END_NAMESPACE\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        func_names = {n.name for n in nodes if n.kind == "Function"}
+        assert "realFunc" in func_names
+        assert "QT_BEGIN_NAMESPACE" not in func_names
+
+
+class TestCppHeaderDetection:
+    """C++ headers stored in .h files are detected when content is sniffed (#463)."""
+
+    def test_cpp_header_routes_to_cpp(self, tmp_path):
+        src = tmp_path / "shape.h"
+        src.write_text(
+            "#ifndef SHAPE_H\n"
+            "#define SHAPE_H\n"
+            "namespace geo {\n"
+            "class Shape {\n"
+            "public:\n"
+            "    virtual double area() const = 0;\n"
+            "};\n"
+            "}\n"
+            "#endif\n"
+        )
+        p = CodeParser()
+        nodes, _ = p.parse_file(src)
+        # With content sniffing, the header is parsed as C++ and the class
+        # is found (the C grammar would emit bogus 'class'/'namespace' funcs).
+        assert p.detect_language(src, src.read_bytes()) == "cpp"
+        class_names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Shape" in class_names
+        func_names = {n.name for n in nodes if n.kind == "Function"}
+        assert "class" not in func_names
+        assert "namespace" not in func_names
+
+    def test_pure_c_header_stays_c(self, tmp_path):
+        src = tmp_path / "util.h"
+        src.write_text(
+            "#ifndef UTIL_H\n"
+            "#define UTIL_H\n"
+            "struct Point { int x; int y; };\n"
+            "int add(int a, int b);\n"
+            "#endif\n"
+        )
+        p = CodeParser()
+        assert p.detect_language(src, src.read_bytes()) == "c"
+        nodes, _ = p.parse_file(src)
+        class_names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Point" in class_names
+
+    def test_h_without_source_defaults_to_c(self):
+        """detect_language without source bytes keeps the C default for .h."""
+        p = CodeParser()
+        assert p.detect_language(Path("foo.h")) == "c"

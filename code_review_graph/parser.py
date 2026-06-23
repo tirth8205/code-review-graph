@@ -502,6 +502,22 @@ _TEMPORAL_METHOD_ANNOTATIONS = frozenset({
 # Kafka consumer annotations (annotation-based pattern)
 _KAFKA_LISTENER_ANNOTATIONS = frozenset({"KafkaListener", "KafkaHandler"})
 
+# C++ bare macros that tree-sitter misparses as function_definition nodes.
+# These should never become Function nodes (Q_DECLARE_* is matched by prefix).
+# See: #463
+_CPP_PSEUDO_FUNCTION_MACROS = frozenset({
+    "QT_BEGIN_NAMESPACE",
+    "QT_END_NAMESPACE",
+    "QT_BEGIN_MOC_NAMESPACE",
+    "QT_END_MOC_NAMESPACE",
+    "Q_OBJECT",
+    "Q_GADGET",
+    "Q_GADGET_EXPORT",
+    "Q_NAMESPACE",
+    "Q_SIGNALS",
+    "Q_SLOTS",
+})
+
 # Kafka consumer field types (reactive / imperative)
 _KAFKA_CONSUMER_TYPES = frozenset({
     "KafkaReceiver",
@@ -851,7 +867,16 @@ class CodeParser:
                 return None
         return self._parsers[language]
 
-    def detect_language(self, path: Path) -> Optional[str]:
+    # C++-only tokens used to distinguish C++ headers stored in ``.h`` files
+    # from plain C headers (which default to the C grammar). See: #463
+    _CPP_HEADER_HINT = re.compile(
+        rb"\bclass\b|\bnamespace\b|\btemplate\s*<|::|\bpublic\s*:|"
+        rb"\bprivate\s*:|\bprotected\s*:|Q_OBJECT",
+    )
+
+    def detect_language(
+        self, path: Path, source: Optional[bytes] = None,
+    ) -> Optional[str]:
         """Map a file path to its language name.
 
         Extension-based lookup is tried first.  For extension-less files
@@ -860,9 +885,18 @@ class CodeParser:
         already have a known extension are never re-read — shebang probing
         only runs when the extension lookup returns ``None`` **and** the path
         has no suffix at all.  See issue #237.
+
+        ``.h`` headers default to the C grammar, but C++ headers are common in
+        ``.h`` files. When ``source`` bytes are available we cheaply sniff the
+        head for C++-only tokens and route to ``cpp`` when found, preserving the
+        C default otherwise. See: #463
         """
         suffix = path.suffix.lower()
         lang = self._extension_map.get(suffix)
+        if lang == "c" and suffix == ".h" and source is not None:
+            head = source[:4096]
+            if self._CPP_HEADER_HINT.search(head):
+                return "cpp"
         if lang is not None:
             return lang
         # Only probe shebang for files without any extension — "README", "LICENSE",
@@ -949,7 +983,9 @@ class CodeParser:
         This avoids re-reading the file from disk, eliminating TOCTOU gaps
         when the caller has already read the bytes (e.g. for hashing).
         """
-        language = self.detect_language(path)
+        # Pass the already-read bytes so ``.h`` C++ headers are detected
+        # without a second read (TOCTOU-safe). See: #463
+        language = self.detect_language(path, source)
         if not language:
             return [], []
 
@@ -2175,19 +2211,46 @@ class CodeParser:
 
         External calls (names not defined in this file) remain bare.
         """
-        # Build symbol table: bare_name -> qualified_name
+        # Build symbol table: bare_name -> qualified_name, plus a
+        # (class_name, method_name) -> qualified_name index so that static
+        # ``Class::method`` calls resolve to the in-file method node. See: #567
         symbols: dict[str, str] = {}
+        qualified_symbols: dict[tuple[str, str], str] = {}
         for node in nodes:
             if node.kind in ("Function", "Class", "Type", "Test"):
                 bare = node.name
                 qualified = self._qualify(bare, file_path, node.parent_name)
                 if bare not in symbols:
                     symbols[bare] = qualified
+                if node.parent_name:
+                    key = (node.parent_name, bare)
+                    if key not in qualified_symbols:
+                        qualified_symbols[key] = qualified
 
         resolved: list[EdgeInfo] = []
         for edge in edges:
-            if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
-                if edge.target in symbols:
+            if edge.kind in ("CALLS", "REFERENCES"):
+                if "::" in edge.target:
+                    # ``Class::method`` — resolve same-file static calls. The
+                    # class part is the segment before the last ``::``; the
+                    # method is the final segment. When we can resolve to a
+                    # local method node, rewrite to its qualified name; when we
+                    # cannot, leave the target as ``Class::method`` with the
+                    # BARE class name (last ``::`` segment) for the graph
+                    # agent's cross-file resolution.
+                    method = edge.target.rsplit("::", 1)[-1]
+                    cls = edge.target.rsplit("::", 1)[0].rsplit("::", 1)[-1]
+                    local = qualified_symbols.get((cls, method))
+                    if local is not None:
+                        edge = EdgeInfo(
+                            kind=edge.kind,
+                            source=edge.source,
+                            target=local,
+                            file_path=edge.file_path,
+                            line=edge.line,
+                            extra=edge.extra,
+                        )
+                elif edge.target in symbols:
                     edge = EdgeInfo(
                         kind=edge.kind,
                         source=edge.source,
@@ -2316,6 +2379,16 @@ class CodeParser:
             # the parent.  Scan child's children here and emit CALLS edges
             # for any we find; nested calls are handled by the main recursion.
             if language == "dart":
+                # A ``function_body`` is the sibling of a function_signature /
+                # method_signature and is processed by _extract_functions with
+                # the correct enclosing_func. Skip it here so calls aren't
+                # double-attributed (once to the method, once to the file).
+                if node_type == "function_body":
+                    prev = child.prev_sibling
+                    if prev is not None and prev.type in (
+                        "function_signature", "method_signature",
+                    ):
+                        continue
                 self._extract_dart_calls_from_children(
                     child, source, file_path, edges,
                     enclosing_class, enclosing_func,
@@ -3874,6 +3947,31 @@ class CodeParser:
                             break
         return names
 
+    @staticmethod
+    def _get_kotlin_annotations(class_node) -> list[str]:
+        """Return annotation names from a Kotlin class/object node.
+
+        Kotlin nests annotation names as
+        ``modifiers > annotation > user_type > type_identifier`` (unlike Java,
+        which exposes them as a bare ``identifier``). See: #295
+        """
+        names: list[str] = []
+        for child in class_node.children:
+            if child.type != "modifiers":
+                continue
+            for mod in child.children:
+                if mod.type != "annotation":
+                    continue
+                for sub in mod.children:
+                    if sub.type == "user_type":
+                        for ident in sub.children:
+                            if ident.type == "type_identifier":
+                                names.append(
+                                    ident.text.decode("utf-8", errors="replace"),
+                                )
+                                break
+        return names
+
     def _emit_spring_injections(
         self,
         class_node,
@@ -4296,6 +4394,14 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
 
+        # Kotlin: class/object annotations (@Entity, @Serializable, ...) live in
+        # ``modifiers > annotation > user_type > type_identifier`` and were
+        # previously dropped. Persist them on the node's extra. See: #295
+        if language == "kotlin":
+            kotlin_annotations = self._get_kotlin_annotations(child)
+            if kotlin_annotations:
+                extra["annotations"] = kotlin_annotations
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -4371,6 +4477,13 @@ class CodeParser:
         if not name:
             return False
 
+        # C++: bare uppercase macros (QT_BEGIN_NAMESPACE, Q_OBJECT, ...) are
+        # parsed by tree-sitter as function_definition nodes whose name is the
+        # macro's type_identifier, with no function_declarator/parameter_list.
+        # Don't emit Function nodes for these. See: #463
+        if language == "cpp" and self._is_cpp_macro_pseudo_function(child, name):
+            return False
+
         # Go methods: attach to their receiver type as the enclosing class,
         # so `func (s *T) Foo()` becomes a member of T rather than a
         # top-level function. See: #190
@@ -4444,6 +4557,11 @@ class CodeParser:
                 self._emit_kafka_edges_from_method(
                     child, name, enclosing_class, file_path, edges,
                 )
+        # Kotlin: annotations (@Composable, @Test, ...) are extracted into
+        # deco_list but were previously dropped. Persist them on the node so
+        # downstream analysis can see them. See: #295
+        if language == "kotlin" and deco_list:
+            method_extra["annotations"] = deco_list
 
         node = NodeInfo(
             kind=kind,
@@ -4543,6 +4661,20 @@ class CodeParser:
                             ))
                             break
 
+        # Dart: the function body is a *sibling* of the function_signature
+        # (or of the method_signature wrapping it), not a child. Recurse into
+        # it here with enclosing_func=name so calls are attributed to the
+        # method; the parent loop skips re-processing that body. See: #87
+        if language == "dart" and child.type == "function_signature":
+            body = self._dart_function_body_sibling(child)
+            if body is not None:
+                self._extract_from_tree(
+                    body, source, language, file_path, nodes, edges,
+                    enclosing_class=enclosing_class, enclosing_func=name,
+                    import_map=import_map, defined_names=defined_names,
+                    _depth=_depth + 1,
+                )
+
         # Recurse to find calls inside the function
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
@@ -4551,6 +4683,23 @@ class CodeParser:
             _depth=_depth + 1,
         )
         return True
+
+    @staticmethod
+    def _dart_function_body_sibling(signature_node):
+        """Return the ``function_body`` paired with a Dart ``function_signature``.
+
+        The body is the next sibling of the signature for top-level functions,
+        or of the enclosing ``method_signature`` for class methods. Returns
+        ``None`` for abstract/bodyless declarations. See: #87
+        """
+        anchor = signature_node
+        parent = signature_node.parent
+        if parent is not None and parent.type == "method_signature":
+            anchor = parent
+        sib = anchor.next_sibling
+        if sib is not None and sib.type == "function_body":
+            return sib
+        return None
 
     def _extract_imports(
         self,
@@ -5531,6 +5680,20 @@ class CodeParser:
                         break
                     current = current.parent
 
+        elif language == "php":
+            # ``use App\Domain\Entity\Job;`` — convert the namespace-separated
+            # FQN to a relative path (backslash -> ``/``) and walk up from the
+            # caller's directory to find the source root. See: #574
+            rel_path = module.replace("\\", "/") + ".php"
+            current = caller_dir
+            while True:
+                target = current / rel_path
+                if target.is_file():
+                    return str(target.resolve())
+                if current == current.parent:
+                    break
+                current = current.parent
+
         return None
 
     def _find_dart_pubspec_root(
@@ -5998,6 +6161,29 @@ class CodeParser:
                 return name_child.text.decode("utf-8", errors="replace")
         return None
 
+    @staticmethod
+    def _is_cpp_macro_pseudo_function(node, name: str) -> bool:
+        """True if a C++ ``function_definition`` is really a bare macro.
+
+        Qt and similar headers use bare uppercase macros (``QT_BEGIN_NAMESPACE``,
+        ``Q_OBJECT``, ``Q_DECLARE_METATYPE(...)``) that tree-sitter misparses as
+        ``function_definition`` nodes. The tell is an all-uppercase name with no
+        ``function_declarator``/``parameter_list`` child (a real function always
+        has a declarator). Also covers a known set of Qt macros. See: #463
+        """
+        # Real functions carry a declarator / parameter list.
+        for child in node.children:
+            if child.type in (
+                "function_declarator", "parameter_list", "pointer_declarator",
+            ):
+                return False
+        if name in _CPP_PSEUDO_FUNCTION_MACROS:
+            return True
+        if name.startswith("Q_DECLARE_"):
+            return True
+        # ^[A-Z][A-Z0-9_]*$ — an all-uppercase macro-shaped identifier.
+        return bool(re.fullmatch(r"[A-Z][A-Z0-9_]*", name))
+
     def _get_go_receiver_type(self, node) -> Optional[str]:
         """Extract the receiver type from a Go method_declaration.
 
@@ -6006,9 +6192,18 @@ class CodeParser:
 
         The receiver is always the first ``parameter_list`` child of a
         Go ``method_declaration`` and contains a single ``parameter_declaration``
-        whose type is either a ``type_identifier`` or a ``pointer_type``
-        wrapping one. See: #190
+        whose type is either a ``type_identifier``, a ``generic_type``
+        (``Repo[T]``), or a ``pointer_type`` wrapping one. For generic
+        receivers we return the base type name (``Repo``), not the type
+        parameter. See: #190
         """
+        def _generic_base(generic_node) -> Optional[str]:
+            # ``generic_type`` -> first ``type_identifier`` is the base type.
+            for sub in generic_node.children:
+                if sub.type == "type_identifier":
+                    return sub.text.decode("utf-8", errors="replace")
+            return None
+
         for child in node.children:
             if child.type != "parameter_list":
                 continue
@@ -6018,12 +6213,20 @@ class CodeParser:
                 for sub in param.children:
                     if sub.type == "type_identifier":
                         return sub.text.decode("utf-8", errors="replace")
+                    if sub.type == "generic_type":
+                        base = _generic_base(sub)
+                        if base:
+                            return base
                     if sub.type == "pointer_type":
                         for ptr_child in sub.children:
                             if ptr_child.type == "type_identifier":
                                 return ptr_child.text.decode(
                                     "utf-8", errors="replace"
                                 )
+                            if ptr_child.type == "generic_type":
+                                base = _generic_base(ptr_child)
+                                if base:
+                                    return base
             # First parameter_list is always the receiver; stop searching.
             return None
         return None
@@ -6060,6 +6263,28 @@ class CodeParser:
                     return node.children[i + 1].text.decode("utf-8", errors="replace")
         return None
 
+    @staticmethod
+    def _kotlin_delegation_base(deleg_node) -> Optional[str]:
+        """Return the bare base type from a Kotlin ``delegation_specifier``.
+
+        Handles both ``: Animal()`` (ctor call -> ``constructor_invocation >
+        user_type > type_identifier``) and ``: Iface`` (``user_type >
+        type_identifier``). Returns the bare type name (``Animal``), never the
+        malformed ``Animal()`` that ``.text`` would yield.
+        """
+        # Unwrap a constructor_invocation wrapper if present.
+        scope = deleg_node
+        for child in deleg_node.children:
+            if child.type == "constructor_invocation":
+                scope = child
+                break
+        for child in scope.children:
+            if child.type == "user_type":
+                for sub in child.children:
+                    if sub.type == "type_identifier":
+                        return sub.text.decode("utf-8", errors="replace")
+        return None
+
     def _get_bases(self, node, language: str, source: bytes) -> list[str]:
         """Extract base classes / implemented interfaces."""
         bases = []
@@ -6086,12 +6311,31 @@ class CodeParser:
                                 if ident.type in ("type_identifier", "generic_type"):
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language in ("csharp", "kotlin"):
-            # Look for superclass/interfaces in extends/implements clauses
+            # Look for superclass/interfaces in extends/implements clauses.
+            # NOTE: ``type_identifier`` is intentionally NOT matched here — for
+            # Kotlin the class's own name is a ``type_identifier`` child, so
+            # matching it produced spurious ``X INHERITS X`` self-edges.
             for child in node.children:
-                if child.type in (
+                if child.type == "base_list":
+                    # C#: ``class Dog : Animal, IBark`` — base_list holds the
+                    # base class and interfaces as identifier/qualified_name/
+                    # generic_name children. See C# inheritance edges fix.
+                    for sub in child.children:
+                        if sub.type in (
+                            "identifier", "qualified_name", "generic_name",
+                        ):
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace"),
+                            )
+                elif child.type == "delegation_specifier":
+                    # Kotlin: ``: Animal()`` / ``: Iface`` — descend to the bare
+                    # type name so we don't keep the ctor parens (``Animal()``).
+                    base = self._kotlin_delegation_base(child)
+                    if base:
+                        bases.append(base)
+                elif child.type in (
                     "superclass", "super_interfaces", "extends_type",
-                    "implements_type", "type_identifier", "supertype",
-                    "delegation_specifier",
+                    "implements_type", "supertype",
                 ):
                     text = child.text.decode("utf-8", errors="replace")
                     bases.append(text)
@@ -6132,16 +6376,39 @@ class CodeParser:
                                 if ident.type == "identifier":
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language == "go":
-            # Embedded structs / interface composition
+            # Embedded structs / interface composition. Each field inside the
+            # ``field_declaration_list`` is wrapped in a ``field_declaration``;
+            # an *embedded* field has NO ``field_identifier`` (the named-field
+            # case, e.g. ``count int``) and a single type child
+            # (``type_identifier`` / ``qualified_type``). See Go embedded fix.
             for child in node.children:
                 if child.type == "type_spec":
                     for sub in child.children:
                         if sub.type in ("struct_type", "interface_type"):
                             for field_node in sub.children:
-                                if field_node.type == "field_declaration_list":
-                                    for f in field_node.children:
-                                        if f.type == "type_identifier":
-                                            bases.append(f.text.decode("utf-8", errors="replace"))
+                                if field_node.type != "field_declaration_list":
+                                    continue
+                                for fd in field_node.children:
+                                    if fd.type != "field_declaration":
+                                        continue
+                                    has_name = any(
+                                        c.type == "field_identifier"
+                                        for c in fd.children
+                                    )
+                                    if has_name:
+                                        continue
+                                    type_children = [
+                                        c for c in fd.children
+                                        if c.type in (
+                                            "type_identifier", "qualified_type",
+                                        )
+                                    ]
+                                    if len(type_children) == 1:
+                                        bases.append(
+                                            type_children[0].text.decode(
+                                                "utf-8", errors="replace",
+                                            ),
+                                        )
         elif language == "dart":
             # class Foo extends Bar with Mixin implements Iface { ... }
             # AST: superclass contains type_identifier (base) and mixins (with clause);
@@ -6211,6 +6478,58 @@ class CodeParser:
                             )
         return bases
 
+    @staticmethod
+    def _php_qualified_name_text(node) -> Optional[str]:
+        """Return the FQN text of a PHP ``qualified_name``/``name`` node.
+
+        Strips any leading namespace separator (``\\``) so the result is a
+        stable, root-relative FQN like ``App\\Domain\\Entity\\Job``.
+        """
+        if node is None:
+            return None
+        txt = node.text.decode("utf-8", errors="replace").strip()
+        return txt.lstrip("\\") or None
+
+    def _extract_php_use(self, node, imports: list[str]) -> None:
+        """Extract PHP ``use`` import FQNs from a ``namespace_use_declaration``.
+
+        Records the original FQN (never the alias) so cross-file resolution can
+        map it to a ``.php`` file. Grouped imports (``use A\\{B, C}``) expand to
+        one FQN per clause. ``use function``/``use const`` are treated the same
+        way (the leading ``function``/``const`` keyword is ignored). See: #574
+        """
+        group_prefix: Optional[str] = None
+        for child in node.children:
+            # ``use App\Util\{Helper, Tool};`` — the shared prefix appears as a
+            # ``namespace_name`` sibling of the ``namespace_use_group``.
+            if child.type == "namespace_name":
+                group_prefix = self._php_qualified_name_text(child)
+            elif child.type == "namespace_use_group":
+                for clause in child.children:
+                    if clause.type != "namespace_use_clause":
+                        continue
+                    tail = self._php_use_clause_fqn(clause)
+                    if tail is None:
+                        continue
+                    fqn = f"{group_prefix}\\{tail}" if group_prefix else tail
+                    imports.append(fqn)
+            elif child.type == "namespace_use_clause":
+                fqn = self._php_use_clause_fqn(clause=child)
+                if fqn:
+                    imports.append(fqn)
+
+    def _php_use_clause_fqn(self, clause) -> Optional[str]:
+        """Return the FQN of a single PHP ``namespace_use_clause``.
+
+        The first ``qualified_name``/``name`` child (ignoring leading
+        ``function``/``const`` keywords) is the imported symbol; any trailing
+        ``as <alias>`` is intentionally ignored so the canonical FQN is kept.
+        """
+        for sub in clause.children:
+            if sub.type in ("qualified_name", "name"):
+                return self._php_qualified_name_text(sub)
+        return None
+
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:
         """Extract import targets as module/path strings."""
         imports = []
@@ -6261,6 +6580,13 @@ class CodeParser:
             parts = text.split()
             if len(parts) >= 2:
                 imports.append(parts[-1].rstrip(";"))
+        elif language == "php":
+            # ``use App\Domain\Entity\Job;`` — record the fully-qualified name
+            # (FQN), not the raw statement text. Handles:
+            #   - aliases:      ``use App\Service\Foo as Bar;`` -> FQN ``App\Service\Foo``
+            #   - grouped use:  ``use App\Util\{Helper, Tool};`` -> ``App\Util\Helper``, ...
+            #   - function/const imports: ``use function App\fn\h;`` -> ``App\fn\h``
+            self._extract_php_use(node, imports)
         elif language == "solidity":
             # import "path/to/file.sol" or import {Symbol} from "path"
             for child in node.children:
@@ -6466,7 +6792,12 @@ class CodeParser:
                         raw = child.text.decode("utf-8", errors="replace")
                         parts.append(_normalize_php_name(raw))
                 if len(parts) >= 2:
-                    return f"{parts[0]}::{parts[-1]}"
+                    # Normalize the class part to its last backslash-segment so
+                    # it matches a Class node's parent_name (``App\Foo\Bar`` ->
+                    # ``Bar``). The static resolver / graph agent then resolve
+                    # ``Bar::method`` from there. See: #567
+                    cls = parts[0].rsplit("\\", 1)[-1]
+                    return f"{cls}::{parts[-1]}"
                 if parts:
                     return parts[0]
                 return None
