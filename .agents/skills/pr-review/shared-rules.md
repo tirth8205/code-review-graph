@@ -1,7 +1,7 @@
 # Shared Review Rules
 
-These rules apply to both the Standards axis and the Spec axis. Each sub-agent receives this file as part of its brief
-alongside the axis-specific guidance.
+These rules apply to every PR-review axis. Each sub-agent receives this file as part of its brief alongside the
+axis-specific guidance.
 
 ## Diff Scope Discipline
 
@@ -32,13 +32,23 @@ encodes the finding's **severity, importance, impact, and blast radius**, and dr
   radius. **Must be fixed to gain approval.**
 - **`[rock]`** — significant defect or standards violation: acceptance criterion not met, clear regression, unsafe
   migration, broken contract, missing required auth/authz, or a serious test gap. **Must be fixed to gain approval.**
-  (If a finding is genuinely *expected to be addressed*, that expectation is a block — it is a rock, not a pebble.)
+  Use `[rock]` for correctness, contract, safety, or evidence failures where the PR is not acceptable as-is.
+- **`[big-pebble]`** — important non-trivial cleanup, reviewability issue, or standards drift that does not prove a
+  runtime defect by itself, but the reviewer expects it to be addressed in the current PR. Examples include oversized
+  new files that are still under the hard split threshold, stale comments that could mislead future maintainers,
+  speculative API surface, or repeated low-value test structure when the fix is straightforward and within scope.
+  **Must be fixed to gain approval when included in a review.** Do not use `[big-pebble]` for true defects or broken
+  contracts; those are `[rock]`.
 - **`[pebble]`** — recommended improvement or cleanup that improves clarity: maintainability, edge-case, scope, or
   reviewability. **Optional — author's discretion.** Does not block approval and carries no obligation.
 - **`[sand]`** — suggestion: style or formatting only. Does not block approval.
 
-**Approval rule:** any open `[boulder]` or `[rock]` ⇒ the PR is **not approvable** until resolved. `[pebble]` and
-`[sand]` never block approval.
+**Approval rule:** any open `[boulder]`, `[rock]`, or `[big-pebble]` ⇒ the PR is **not approvable** until resolved.
+`[pebble]` and `[sand]` never block approval.
+
+**When in doubt between `[rock]` and `[big-pebble]`:** ask whether the current PR would be behaviorally or contractually
+wrong if the finding remained. If yes, use `[rock]`. If the PR could work but the issue is still expected to be cleaned
+up before approval, use `[big-pebble]`. If the author may reasonably leave it for later, use `[pebble]`.
 
 **Sizing spans axes — escalate when one finding hits more than one.** The tags above name a finding's worst *single*
 dimension, but a defect often lives on several at once: a standards violation that is *also* a performance regression
@@ -65,33 +75,48 @@ For these areas, review both code and tests. A passing happy path is not enough.
 
 ## Output Format
 
-Use the standard code-review shape:
+Use `findings-reporting.md` as the final artifact contract. The rules below define the minimum finding section shape for
+axis notes and final reports.
 
-1. Findings first, ordered by size (largest first: boulders → rocks → pebbles → sand).
+Use the standard code-review shape for axis-level notes and final review artifacts:
+
+1. Findings first. Axis-level notes may order by size, but the final assembled review organizes detailed findings by
+   file path and line number so all issues in a file can be addressed together.
 1. Open questions or assumptions.
 1. Brief summary only after findings — include an approval verdict derived from the tags (not approvable while any
-   `[boulder]` or `[rock]` is open).
+   `[boulder]`, `[rock]`, or `[big-pebble]` is open).
 1. Verification performed or not performed.
 
-**Emit every finding as its own copy-paste-able code block** so a reviewer can drop it straight into a PR comment
-unedited. **Each block MUST start with the size-importance tag** (`[boulder]` / `[rock]` / `[pebble]` / `[sand]`),
-followed by the `file:line` and a one-line problem statement, then the why (cite the standard when the finding is
-policy-based) and a concrete fix:
+Emit every final-artifact finding as its own copy-paste-able Markdown subsection so a reviewer can drop it straight
+into a PR comment unedited while the artifact remains readable when rendered. Do **not** wrap the whole finding in a
+fenced code block. The subsection heading starts with a stable finding ID, then the size-importance tag
+(`[boulder]` / `[rock]` / `[big-pebble]` / `[pebble]` / `[sand]`), line number, and one-line problem statement. The body
+then lists the axis, severity, location, evidence, why, and proposed fix:
 
-```text
-[rock] backend/src/foo/bar.py:42 — <one-line problem statement>
-Why: <impact + which standard it violates; cite the index.yaml entry / standard filename>
-Fix: <concrete suggested change>
+```markdown
+#### F-SCQ-001 [rock] line 42 - <one-line problem statement>
+
+- **Axis:** Standards / Code Quality
+- **Severity:** rock
+- **Location:** `backend/src/foo/bar.py:42`
+- **Evidence:** <changed code, related source/test/standard lines, or verification command that proves the issue>
+- **Why it matters:** <impact + which standard it violates; cite the index.yaml entry / standard filename>
+- **Proposed fix:** <concrete suggested change>
 ```
 
-Rules for the blocks:
+Rules for finding sections:
 
-- The size tag is always the first token of the block — no prose before it.
-- Keep each block self-contained (no cross-references like "same as above") so it survives being pasted in isolation.
-- One finding per block; do not bundle multiple issues under one tag.
+- The heading uses a stable finding ID with an axis prefix: `F-SCQ`, `F-FS`, `F-SDO`, or `F-TQ`.
+- Do not emit raw HTML anchors. Use Markdown headings and generated heading anchors for summary links.
+- Do not repeat the full file path in the heading when the finding is already under a `### <file>` section; keep the
+  complete path in the `Location` field.
+- Keep each finding self-contained (no cross-references like "same as above") so it survives being pasted in isolation.
+- One finding per section; do not bundle multiple issues under one tag.
 
-Each finding must include: the leading size tag, a concise title, a file/line reference when available, why it matters,
-and a suggested remediation.
+Each finding must include: the size tag in the heading, axis, severity, a concise title, a file/line reference when
+available, evidence, why it matters, and a suggested remediation. When the final review is assembled, findings MUST be
+grouped by file path and sorted by line number so reviewers can work through all issues in one file before moving to the
+next.
 
 If there are no findings, say so clearly and mention residual risk or tests not run.
 

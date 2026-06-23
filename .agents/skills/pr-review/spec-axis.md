@@ -81,7 +81,8 @@ No specification, no linked issue with requirements, and the PR description is t
 In this tier:
 
 - state clearly that no spec or meaningful requirements source was found
-- note this as **residual review risk** — the Spec axis cannot verify intent alignment without a requirements source
+- note this as **residual review risk** — the Functionality / Spec axis cannot verify intent alignment without a
+  requirements source
 - if there is any PR body text at all, check for obvious contradictions between the description and the diff
 - do **not** generate findings about missing ACs or methodology compliance — there is nothing to measure against
 
@@ -90,7 +91,7 @@ only the residual-risk note. Do not pad the report.
 
 ### Cross-Axis Note
 
-When the Standards axis raises a redundant-computation finding that also represents a design-level strategy error,
-evaluate whether the underlying approach was within scope and whether a specification's design decisions (if any)
-anticipated the data-flow shape. If the implementation strategy diverged from the spec's intent, this is a Spec axis
-finding in addition to a Standards axis finding.
+When the Standards / Code Quality axis raises a redundant-computation finding that also represents a design-level
+strategy error, evaluate whether the underlying approach was within scope and whether a specification's design decisions
+(if any) anticipated the data-flow shape. If the implementation strategy diverged from the spec's intent, this is a
+Functionality / Spec axis finding in addition to a Standards / Code Quality axis finding.

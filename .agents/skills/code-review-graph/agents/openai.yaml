@@ -1,0 +1,5 @@
+interface:
+  display_name: "Code Review Graph"
+  short_description: "CRG-guided Zazz PR review workflow"
+  brand_color: "#2563EB"
+  default_prompt: "Use $code-review-graph to perform a Zazz-methodology PR review with compact CRG context."

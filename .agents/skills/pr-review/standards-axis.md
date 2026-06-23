@@ -23,7 +23,11 @@ Zazz methodology repos are expected to store durable review guidance in `<DOCS_R
 If the standards index is missing, stale, or does not cover a changed area, state that as residual review risk instead
 of inventing a policy. General review judgment still applies, but repo standards win when they are explicit.
 
-## Test Quality Review
+## Testing Standards Touchpoints
+
+The dedicated Test Quality axis owns the full verification-quality review. In this Standards / Code Quality axis, focus
+on whether changed tests violate explicit repo standards, add structural slop, or duplicate code in a way that affects
+maintainability. Share any broader evidence gaps with the orchestrator so the Test Quality axis can evaluate them.
 
 The repo's testing standards — loaded via the standards index in the Standards-Driven Review step — are the
 authoritative source for test patterns, anti-patterns, fixture conventions, and consolidation rules. Apply those
@@ -111,14 +115,33 @@ risk. Flag patterns that often appear in agent-generated diffs and make the code
 Be specific about why the issue matters: review noise, future maintenance, hidden bug, or divergence from established
 project patterns.
 
+## Cross-File Organization Opportunities
+
+Look for improvements that span multiple changed files and would reduce code, simplify review, or make future changes
+less error-prone. Do not force these into many duplicate findings. Record them as `Systemic Improvement Opportunities`
+for the orchestrator unless the issue is required for approval in a specific file.
+
+Good candidates:
+
+- multiple new test files in the 400-600 line band that share natural operation boundaries;
+- repeated HTTP response declarations, error mapping branches, fixtures, payload builders, or mock setup across sibling
+  files;
+- service functions that repeat filtering, row mapping, or exception translation logic that could be named once;
+- sibling files exposing an unsettled convention that should be codified in standards rather than argued case by case.
+
+When the opportunity would remove meaningful duplication, name the files involved, the natural extraction or split
+point, and whether it is blocking (`[big-pebble]` or larger) or optional (`[pebble]`/systemic note).
+
 ## File Size And Incremental Discoverability
 
 When a code-structure standard is present, cite its file-size and discoverability sections instead of duplicating that
 policy. If no such standard exists, apply these fallback thresholds to every added or modified file under review,
 including code, tests, scripts, configuration, and agent-facing markdown guides:
 
-- More than 400 lines: raise a `[pebble]` asking the author to split the file into smaller modules or document why this
-  file is intentionally cohesive.
+- More than 400 lines: raise a `[big-pebble]` when the file is new or substantially expanded by the current PR and no
+  concrete cohesion exception is documented; ask the author to split the file into smaller modules or document why this
+  file is intentionally cohesive. Use `[pebble]` only when the issue is clearly optional or should be handled in a
+  separate cleanup PR.
 - More than 600 lines: raise a `[rock]`; the PR is not approvable until the file is split or the reviewer accepts a
   concrete exception.
 
@@ -152,4 +175,4 @@ shape that would serve every consumer — not just "this looks redundant."
 Redundant-computation findings that also represent a design-level strategy error — where the implementation approach
 itself chose the wrong data-flow shape — may have methodology implications. When you raise such a finding, note whether
 it suggests the implementation strategy diverged from what a specification's design decisions would have anticipated.
-The orchestrator will surface this to the Spec axis if relevant.
+The orchestrator will surface this to the Functionality / Spec axis if relevant.
