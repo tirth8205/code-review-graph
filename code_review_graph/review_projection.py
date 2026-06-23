@@ -200,15 +200,28 @@ def project_for_review(
         returned_tokens=estimate_tokens(payload),
     )
     payload = truncate_to_budget(payload, max_tokens)
-    returned_tokens = estimate_tokens(payload)
-    payload["savings_record"] = build_savings_record(
-        base=base,
-        changed_file_count=len(scoped_files),
-        baseline_tokens=baseline,
-        returned_tokens=returned_tokens,
-    )
+    for _ in range(3):
+        returned_tokens = estimate_tokens(payload)
+        payload["savings_record"] = build_savings_record(
+            base=base,
+            changed_file_count=len(scoped_files),
+            baseline_tokens=baseline,
+            returned_tokens=returned_tokens,
+        )
+        if max_tokens is None or estimate_tokens(payload) <= max_tokens:
+            break
+        payload = truncate_to_budget(payload, max_tokens)
     if "budget" in payload:
         payload["budget"]["estimated_tokens"] = estimate_tokens(payload)
+        if max_tokens is not None and payload["budget"]["estimated_tokens"] > max_tokens:
+            payload = truncate_to_budget(payload, max_tokens)
+            payload["savings_record"] = build_savings_record(
+                base=base,
+                changed_file_count=len(scoped_files),
+                baseline_tokens=baseline,
+                returned_tokens=estimate_tokens(payload),
+            )
+            payload["budget"]["estimated_tokens"] = estimate_tokens(payload)
         if max_tokens is not None:
             payload["budget"]["minimum_envelope_exceeded"] = (
                 payload["budget"]["estimated_tokens"] > max_tokens
