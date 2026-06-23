@@ -856,7 +856,7 @@ function moveTooltip(ev) {
 }
 function hideTooltip() { tooltip.classList.remove("visible"); }
 var W = innerWidth, H = innerHeight;
-var svg = d3.select("svg").attr("viewBox", [0, 0, W, H]);
+var svg = d3.select("#graph-svg").attr("viewBox", [0, 0, W, H]);
 var gRoot = svg.append("g");
 var currentTransform = d3.zoomIdentity;
 var zoomBehavior = d3.zoom()

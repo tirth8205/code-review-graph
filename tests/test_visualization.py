@@ -576,3 +576,25 @@ def test_community_detail_data_complete(large_store):
     assert original_qns == all_detail_qns, (
         "All original nodes should be accounted for in community details"
     )
+
+
+def test_full_mode_selects_graph_svg_by_id(store_with_data, tmp_path):
+    """Full-mode init must target the real graph <svg id="graph-svg">, not the
+    first inline <svg> (a 16x16 legend icon appears earlier in document order).
+
+    Regression for #523/#450: `d3.select("svg")` grabbed the legend icon, so the
+    whole graph rendered into a tiny 16x16 box.
+    """
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store_with_data, output_path, mode="full")
+    content = output_path.read_text()
+
+    # The real graph element carries an id; the init must select it.
+    assert 'id="graph-svg"' in content
+    assert 'd3.select("#graph-svg")' in content
+
+    # The buggy bare-tag selection for graph init must be gone. Legend icons
+    # precede the graph svg in document order, so a bare select picks the wrong one.
+    assert 'd3.select("svg").attr("viewBox"' not in content
