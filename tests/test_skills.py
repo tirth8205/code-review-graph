@@ -5,15 +5,11 @@ import os
 import subprocess
 import stat
 import sys
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover - Python 3.10 backport
-    import tomli as tomllib
 
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
@@ -39,9 +35,7 @@ from code_review_graph.skills import (
     install_platform_configs,
 )
 
-_needs_tomllib = pytest.mark.skipif(
-    tomllib is None, reason="tomllib requires Python 3.11+",
-)
+_needs_tomllib = pytest.mark.skipif(False, reason="tomllib is always available on Python 3.12+")
 
 
 class TestGenerateSkills:

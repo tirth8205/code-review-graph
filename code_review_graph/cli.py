@@ -30,11 +30,11 @@ from __future__ import annotations
 import sys
 
 # Python version check — must come before any other imports
-if sys.version_info < (3, 10):
-    print("code-review-graph requires Python 3.10 or higher.")
+if sys.version_info < (3, 12):
+    print("code-review-graph requires Python 3.12 or higher.")
     print(f"  You are running Python {sys.version}")
     print()
-    print("Install Python 3.10+: https://www.python.org/downloads/")
+    print("Install Python 3.12+: https://www.python.org/downloads/")
     sys.exit(1)
 
 import argparse

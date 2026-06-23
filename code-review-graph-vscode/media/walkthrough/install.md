@@ -2,7 +2,7 @@
 
 code-review-graph needs a Python backend to parse your codebase.
 
-**Requirements:** Python 3.10+
+**Requirements:** Python 3.12+
 
 **Recommended:** Install via [uv](https://docs.astral.sh/uv/):
 ```bash

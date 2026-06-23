@@ -20,7 +20,7 @@
   <a href="https://github.com/tirth8205/code-review-graph/stargazers"><img src="https://img.shields.io/github/stars/tirth8205/code-review-graph?style=flat-square" alt="Stars"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence"></a>
   <a href="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml"><img src="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square" alt="Python 3.10+"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.12%2B-blue.svg?style=flat-square" alt="Python 3.12+"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square" alt="MCP"></a>
   <a href="https://code-review-graph.com"><img src="https://img.shields.io/badge/website-code--review--graph.com-blue?style=flat-square" alt="Website"></a>
   <a href="https://discord.gg/3p58KXqGFN"><img src="https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
@@ -59,7 +59,7 @@ code-review-graph install --platform claude-code  # Claude Codeのみ設定
 code-review-graph install --platform kiro         # Kiroのみ設定
 ```
 
-Python 3.10以上が必要です。最良の体験のためには [uv](https://docs.astral.sh/uv/) のインストールを推奨します（MCP設定は利用可能な場合 `uvx` を使用し、そうでない場合は `code-review-graph` コマンドに直接フォールバックします）。
+Python 3.12以上が必要です。最良の体験のためには [uv](https://docs.astral.sh/uv/) のインストールを推奨します（MCP設定は利用可能な場合 `uvx` を使用し、そうでない場合は `code-review-graph` コマンドに直接フォールバックします）。
 
 セットアップ後、プロジェクトを開いてAIアシスタントに聞いてみましょう：
 

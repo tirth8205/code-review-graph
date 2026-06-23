@@ -62,7 +62,7 @@ To turn the review into a merge gate:
 | `github-token` | yes | — | Token used to post the sticky PR comment via the GitHub API. The workflow's default `GITHUB_TOKEN` works when the job has `pull-requests: write`. |
 | `comment` | no | `true` | Post (and keep updated) the sticky PR comment. Set to `false` to run analysis/gating without commenting. |
 | `fail-on-risk` | no | `none` | Fail the job when the overall risk score reaches a level: `none` (never fail), `high` (risk ≥ 0.70), `critical` (risk ≥ 0.85). |
-| `python-version` | no | `3.12` | Python version used to run code-review-graph (3.10+ supported). |
+| `python-version` | no | `3.12` | Python version used to run code-review-graph (3.12+ supported). |
 
 ### Risk levels
 

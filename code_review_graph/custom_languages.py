@@ -25,22 +25,14 @@ from __future__ import annotations
 
 import logging
 import re
-import sys
 import threading
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import tree_sitter_language_pack as tslp
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomli as tomllib  # type: ignore[no-redef]
-    except ImportError:
-        tomllib = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -147,13 +139,6 @@ def _load_uncached(
     builtin_extensions: Mapping[str, str],
     builtin_languages: frozenset[str],
 ) -> dict[str, CustomLanguage]:
-    if tomllib is None:
-        logger.warning(
-            "%s found but TOML parsing requires the 'tomli' package on "
-            "Python < 3.11 — no custom languages loaded",
-            config_path,
-        )
-        return {}
     try:
         raw = config_path.read_bytes()
     except (OSError, PermissionError) as exc:

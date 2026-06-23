@@ -34,7 +34,7 @@ body:
     id: python-version
     attributes:
       label: Python version
-      description: Output of `python --version`. Python 3.10+ is required.
+      description: Output of `python --version`. Python 3.12+ is required.
       placeholder: "3.12.4"
     validations:
       required: true

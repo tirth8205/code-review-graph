@@ -39,7 +39,7 @@ uv run mypy code_review_graph/ --ignore-missing-imports --no-strict-optional
 ## Code Style
 
 - **Line length**: 100 characters
-- **Target**: Python 3.10+
+- **Target**: Python 3.12+
 - **Linter**: ruff (rules: E, F, I, N, W)
 - **SQL**: Always parameterized queries (`?` placeholders)
 - **Imports**: Sorted by ruff (isort-compatible)

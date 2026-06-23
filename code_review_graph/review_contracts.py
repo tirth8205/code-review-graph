@@ -4,18 +4,13 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import tomllib
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
 from .review_standards import project_matched_standards
 from .test_gap_config import path_matches_any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef]
-
 
 AMBIGUOUS_SPEC_RE = re.compile(r"\b(ambiguous|maybe|unclear|tbd|should probably)\b", re.I)
 HTTP_STATUS_RE = re.compile(

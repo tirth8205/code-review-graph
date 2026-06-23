@@ -19,18 +19,11 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomli as tomllib  # type: ignore[no-redef]
-    except ImportError:
-        tomllib = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +83,7 @@ def load_config(path: Path | None = None) -> DaemonConfig:
     Returns:
         A fully-validated :class:`DaemonConfig`.
 
-    Raises:
-        RuntimeError: If ``tomllib`` / ``tomli`` is unavailable on Python < 3.11.
     """
-    if tomllib is None:
-        raise RuntimeError(
-            "TOML parsing requires the 'tomli' package on Python < 3.11. "
-            "Install it with:  pip install tomli"
-        )
 
     config_path = path or CONFIG_PATH
 

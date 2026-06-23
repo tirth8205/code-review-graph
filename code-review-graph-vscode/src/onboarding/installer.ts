@@ -65,7 +65,7 @@ export class Installer {
         if (!installer) {
             const openLink = 'Download Python';
             const response = await vscode.window.showErrorMessage(
-                'Python 3.10+ is required. Install Python first.',
+                'Python 3.12+ is required. Install Python first.',
                 openLink,
             );
 

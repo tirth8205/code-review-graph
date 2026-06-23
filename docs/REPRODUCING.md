@@ -80,7 +80,7 @@ What used to make it **non**-reproducible (now fixed):
 
 ## Prerequisites
 
-- Python 3.10 or newer
+- Python 3.12 or newer
 - `git` on PATH
 - Network access (~600 MB to clone the 6 upstream repos)
 - ~3 GB free disk

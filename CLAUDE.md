@@ -14,7 +14,7 @@ When using code-review-graph MCP tools, follow these rules:
 
 ## Architecture
 
-- **Core Package**: `code_review_graph/` (Python 3.10+)
+- **Core Package**: `code_review_graph/` (Python 3.12+)
   - `parser.py` — Tree-sitter multi-language AST parser plus targeted fallbacks for broad source-language and notebook support
   - `custom_languages.py` — Config-driven custom language support (`.code-review-graph/languages.toml`, see docs/CUSTOM_LANGUAGES.md)
   - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
@@ -66,7 +66,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 ## Code Conventions
 
 - **Line length**: 100 chars (ruff)
-- **Python target**: 3.10+
+- **Python target**: 3.12+
 - **SQL**: Always use parameterized queries (`?` placeholders), never f-string values
 - **Error handling**: Catch specific exceptions, log with `logger.warning/error`
 - **Thread safety**: `threading.Lock` for shared caches, `check_same_thread=False` for SQLite
@@ -113,10 +113,10 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 
 ## CI Pipeline
 
-- **lint**: ruff on Python 3.10
+- **lint**: ruff on Python 3.12
 - **type-check**: mypy
 - **security**: bandit scan
-- **test**: pytest matrix (3.10, 3.11, 3.12, 3.13) with 65% coverage minimum
+- **test**: pytest matrix (3.12, 3.13) with 65% coverage minimum
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->

@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib
 
 from .incremental import _should_ignore
 

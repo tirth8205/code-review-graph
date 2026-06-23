@@ -36,7 +36,7 @@ pipx install code-review-graph
 pip install code-review-graph
 ```
 
-Requires Python 3.10+.
+Requires Python 3.12+.
 
 ### 3. Build Your Graph
 
@@ -81,7 +81,7 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 ## Requirements
 
 - VS Code 1.85+
-- Python 3.10+ (for the backend CLI)
+- Python 3.12+ (for the backend CLI)
 - A workspace with source code to analyze
 
 ## Links
