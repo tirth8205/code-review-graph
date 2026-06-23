@@ -13,6 +13,10 @@
 - **Store-leak fixes**: the five analysis MCP tools and the wiki-page tool no longer leak SQLite connections (try/finally `store.close()`).
 - **`fastmcp<4` cap**: the next fastmcp major can no longer silently break the server.
 - **Worktree-safe git hooks**: `install` resolves the real hooks directory via `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath` (husky) setups get a working pre-commit hook.
+- **Compact review packets**: `detect-changes --for-review --max-tokens N` emits deterministic repo-relative review JSON with top `file:line` priorities, de-noised test gaps, affected-flow summaries, truncation metadata, and a scope-honest `savings_record`.
+- **One-shot review context**: `review-context --base <ref> --max-tokens N` refreshes the graph through the existing update path, then emits the same compact review payload for stale-safe PR review.
+- **Scoped review slices**: `--scope <glob>` filters compact changed functions, review priorities, test gaps, and affected-flow summaries by repo-relative path for section agents.
+- **Change-analysis token savings**: the CLI savings panel now names its measurement scope so estimates are not confused with whole review-session token accounting.
 
 ## v2.3.5
 - **Token Savings panel on every brief CLI call**: `code-review-graph detect-changes --brief` and the new `code-review-graph update --brief` print a boxed `Token Savings` panel — full-context baseline, graph response, saved tokens, percent, and per-category breakdown (Functions / Tests / Risk / Other) that sums exactly to the graph response size.

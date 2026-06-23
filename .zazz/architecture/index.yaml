@@ -1,0 +1,7 @@
+architecture:
+  - file: crg-architecture.md
+    scope: project
+    purpose: >-
+      Orientation to the Code Review Graph application architecture, runtime
+      surfaces, graph storage, parsing pipeline, review projection, optional
+      subsystems, and Zazz fork direction.

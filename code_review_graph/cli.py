@@ -12,6 +12,7 @@ Usage:
     code-review-graph visualize
     code-review-graph wiki
     code-review-graph detect-changes [--base BASE] [--brief]
+    code-review-graph review-context [--base BASE]
     code-review-graph register <path> [--alias name]
     code-review-graph unregister <path_or_alias>
     code-review-graph repos
@@ -348,6 +349,55 @@ def _handle_data_dir_option(args, repo_root: Path) -> None:
             sys.exit(1)
 
 
+def _scope_args(args: argparse.Namespace) -> list[str] | None:
+    scopes = getattr(args, "scope", None)
+    if not scopes:
+        return None
+    return list(scopes)
+
+
+def _changed_files_from_update(
+    repo_root: Path,
+    base: str,
+    update_result: dict | None = None,
+) -> list[str]:
+    if update_result is not None and "changed_files" in update_result:
+        return list(update_result.get("changed_files") or [])
+    from .incremental import get_changed_files, get_staged_and_unstaged
+
+    changed = get_changed_files(repo_root, base)
+    if not changed:
+        changed = get_staged_and_unstaged(repo_root)
+    return changed
+
+
+def _build_for_review_payload(
+    store,
+    repo_root: Path,
+    *,
+    base: str,
+    changed: list[str],
+    max_tokens: int | None,
+    path_globs: list[str] | None,
+) -> dict:
+    from .changes import analyze_changes
+    from .context_savings import attach_context_savings, estimate_file_tokens
+
+    original_tokens = estimate_file_tokens(repo_root, changed)
+    result = analyze_changes(
+        store,
+        changed,
+        repo_root=str(repo_root),
+        base=base,
+        for_review=True,
+        max_tokens=max_tokens,
+        path_globs=path_globs,
+        baseline_tokens=original_tokens,
+    )
+    attach_context_savings(result, original_tokens=original_tokens)
+    return result
+
+
 def main() -> None:
     """Main CLI entry point."""
     ap = argparse.ArgumentParser(
@@ -634,6 +684,23 @@ def main() -> None:
         help="Show the risk summary + Token Savings panel instead of the "
              "full JSON. Read-only against the existing graph.",
     )
+    detect_cmd.add_argument(
+        "--for-review",
+        action="store_true",
+        help="Emit compact repo-relative JSON for review agents.",
+    )
+    detect_cmd.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Estimated token budget for --for-review output.",
+    )
+    detect_cmd.add_argument(
+        "--scope",
+        action="append",
+        default=None,
+        help="Repo-relative path glob to include in --for-review output. Repeatable.",
+    )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     detect_cmd.add_argument(
         "--verify",
@@ -642,6 +709,29 @@ def main() -> None:
              "cl100k_base tokenizer (the GPT-4 family tokenizer). Adds a "
              "second row to the panel with the real token counts. Requires "
              "`pip install tiktoken`.",
+    )
+
+    review_context_cmd = sub.add_parser(
+        "review-context",
+        help="Update the graph, then emit compact review context JSON.",
+    )
+    review_context_cmd.add_argument(
+        "--base",
+        default="HEAD~1",
+        help="Git diff base (default: HEAD~1)",
+    )
+    review_context_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    review_context_cmd.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Estimated token budget for compact review output.",
+    )
+    review_context_cmd.add_argument(
+        "--scope",
+        action="append",
+        default=None,
+        help="Repo-relative path glob to include in output. Repeatable.",
     )
 
     # serve / mcp
@@ -955,21 +1045,31 @@ def main() -> None:
         print(result.get("summary", "Embedding done."))
         return
 
-    if args.command in ("update", "detect-changes"):
+    if args.command in ("update", "detect-changes", "review-context"):
         # update and detect-changes require git for diffing
-        repo_root = Path(args.repo) if args.repo else find_repo_root()
-        if not repo_root:
+        detected_repo_root = Path(args.repo) if args.repo else find_repo_root()
+        if not detected_repo_root:
             logging.error(
                 "Not in a git repository. '%s' requires git for diffing.",
                 args.command,
             )
             logging.error("Use 'build' for a full parse, or run 'git init' first.")
             sys.exit(1)
+        repo_root = detected_repo_root
     else:
         repo_root = Path(args.repo) if args.repo else find_project_root()
 
     # Handle --data-dir for commands that support it
-    _data_dir_cmds = ("build", "update", "detect-changes", "status", "watch", "visualize", "wiki")
+    _data_dir_cmds = (
+        "build",
+        "update",
+        "detect-changes",
+        "review-context",
+        "status",
+        "watch",
+        "visualize",
+        "wiki",
+    )
     if args.command in _data_dir_cmds:
         _handle_data_dir_option(args, repo_root)
 
@@ -1188,7 +1288,6 @@ def main() -> None:
             print(f"Output: {wiki_dir}")
 
         elif args.command == "detect-changes":
-            from .changes import analyze_changes
             from .context_savings import (
                 attach_context_savings,
                 estimate_file_tokens,
@@ -1203,41 +1302,91 @@ def main() -> None:
             if not changed:
                 print("No changes detected.")
             else:
-                result = analyze_changes(
-                    store,
-                    changed,
-                    repo_root=str(repo_root),
-                    base=base,
-                )
-                original_tokens = estimate_file_tokens(repo_root, changed)
-                attach_context_savings(
-                    result,
-                    original_tokens=original_tokens,
-                )
-                if args.brief:
-                    from .context_savings import (
-                        format_context_savings_panel,
-                        verify_with_tiktoken,
+                if getattr(args, "for_review", False):
+                    result = _build_for_review_payload(
+                        store,
+                        repo_root,
+                        base=base,
+                        changed=changed,
+                        max_tokens=getattr(args, "max_tokens", None),
+                        path_globs=_scope_args(args),
                     )
-                    print(result.get("summary", "No summary available."))
-                    verified = None
-                    if getattr(args, "verify", False):
-                        verified = verify_with_tiktoken(repo_root, changed, result)
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        result.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=result,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
-                else:
                     print(json.dumps(result, indent=2, default=str))
+                else:
+                    from .changes import analyze_changes
+
+                    result = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        result,
+                        original_tokens=original_tokens,
+                    )
+                    if args.brief:
+                        from .context_savings import (
+                            format_context_savings_panel,
+                            verify_with_tiktoken,
+                        )
+                        print(result.get("summary", "No summary available."))
+                        verified = None
+                        if getattr(args, "verify", False):
+                            verified = verify_with_tiktoken(repo_root, changed, result)
+                            if verified is None:
+                                print(
+                                    "Note: --verify requires tiktoken. "
+                                    "Install with `pip install tiktoken`.",
+                                )
+                        panel = format_context_savings_panel(
+                            result.get("context_savings"),
+                            original_tokens=original_tokens,
+                            response=result,
+                            verified=verified,
+                        )
+                        if panel:
+                            print(panel)
+                    else:
+                        print(json.dumps(result, indent=2, default=str))
+
+        elif args.command == "review-context":
+            from .tools.build import build_or_update_graph
+
+            build_result = build_or_update_graph(
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+            )
+            changed = _changed_files_from_update(
+                repo_root,
+                args.base,
+                update_result=build_result,
+            )
+            if not changed:
+                result = {
+                    "status": "ok",
+                    "summary": "No changes detected.",
+                    "base": args.base,
+                    "risk_score": 0.0,
+                    "changed_file_count": 0,
+                    "changed_files": [],
+                    "changed_functions": [],
+                    "review_priorities": [],
+                    "test_gaps": [],
+                    "affected_flows": [],
+                }
+            else:
+                result = _build_for_review_payload(
+                    store,
+                    repo_root,
+                    base=args.base,
+                    changed=changed,
+                    max_tokens=getattr(args, "max_tokens", None),
+                    path_globs=_scope_args(args),
+                )
+            print(json.dumps(result, indent=2, default=str))
 
     finally:
         store.close()

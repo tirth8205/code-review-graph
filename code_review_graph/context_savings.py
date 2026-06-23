@@ -102,6 +102,29 @@ def attach_context_savings(
     return result
 
 
+def build_savings_record(
+    *,
+    base: str,
+    changed_file_count: int,
+    baseline_tokens: int,
+    returned_tokens: int,
+    measurement_scope: str = "change_analysis",
+) -> dict[str, int | str | bool]:
+    """Return scope-honest, machine-readable savings metadata."""
+    saved = max(0, baseline_tokens - returned_tokens)
+    percent = round((saved / baseline_tokens) * 100) if baseline_tokens else 0
+    return {
+        "base": base,
+        "changed_file_count": int(changed_file_count),
+        "estimated": True,
+        "baseline_tokens": int(baseline_tokens),
+        "returned_tokens": int(returned_tokens),
+        "saved_tokens": int(saved),
+        "saved_percent": int(percent),
+        "measurement_scope": measurement_scope,
+    }
+
+
 def format_context_savings(estimate: dict[str, Any] | None) -> str | None:
     """Format a one-line human summary for CLI output."""
     if not estimate:
@@ -206,7 +229,7 @@ def format_context_savings_panel(
     response: dict[str, Any] | None = None,
     breakdown: dict[str, int] | None = None,
     verified: dict[str, int] | None = None,
-    title: str = "Token Savings",
+    title: str = "Change-analysis token savings",
     width: int = 64,
 ) -> str | None:
     """Format the savings estimate as a boxed multi-line CLI panel.
@@ -220,9 +243,11 @@ def format_context_savings_panel(
         │ Breakdown: Functions 580 · Tests 120 · ...    │
         └───────────────────────────────────────────────┘
 
-    All numbers are labelled as estimates upstream (``estimated: true`` in the
-    metadata dict) because the project uses a 4-chars-per-token approximation,
-    not model-specific tokenization.
+    The title names the scope deliberately: these numbers measure only the
+    change-analysis response versus changed-file content, not a whole review
+    session. All numbers are labelled as estimates upstream (``estimated:
+    true`` in the metadata dict) because the project uses a 4-chars-per-token
+    approximation, not model-specific tokenization.
 
     Args:
         estimate: The ``context_savings`` dict from a tool response.
@@ -276,6 +301,7 @@ def format_context_savings_panel(
         f"Full context would be:  {original_tokens:>9,} tokens",
         f"Graph context used:     {returned_tokens:>9,} tokens",
         f"Saved:                  {saved:>9,} tokens (~{percent}%)",
+        "Scope: change analysis only; not whole review session",
     ]
     if verified:
         vb = verified["verified_baseline"]

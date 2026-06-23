@@ -12,6 +12,8 @@ import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
+    _validate_repo_root,
+    detect_changes_func,
     get_affected_flows_func,
     get_architecture_overview_func,
     get_community_func,
@@ -22,7 +24,6 @@ from code_review_graph.tools import (
     list_communities_func,
     list_flows,
     query_graph,
-    _validate_repo_root,
 )
 
 
@@ -157,6 +158,70 @@ class TestTools:
         edges = self.store.search_edges_by_target_name("helper")
         assert len(edges) == 1
         assert edges[0].source_qualified == "/repo/main.py::process"
+
+    def test_detect_changes_for_review_uses_portable_paths(self, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.tools.review._get_store",
+            lambda repo_root=None: (self.store, Path("/repo")),
+        )
+        monkeypatch.setattr(
+            "code_review_graph.tools.review.get_changed_files",
+            lambda root, base: ["auth.py"],
+        )
+        monkeypatch.setattr(
+            "code_review_graph.tools.review.parse_diff_ranges",
+            lambda root, base: {"auth.py": [(10, 20)]},
+        )
+        self.store.close = lambda: None
+
+        result = detect_changes_func(
+            repo_root="/repo",
+            base="main",
+            for_review=True,
+        )
+
+        assert result["status"] == "ok"
+        assert result["changed_files"] == ["auth.py"]
+        assert all(
+            not row["file"].startswith("/repo")
+            for row in result["changed_functions"]
+        )
+        assert all(
+            not row["file"].startswith("/repo")
+            for row in result["review_priorities"]
+        )
+        assert result["savings_record"]["measurement_scope"] == "change_analysis"
+
+    def test_detect_changes_scope_returns_only_matching_section(self, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.tools.review._get_store",
+            lambda repo_root=None: (self.store, Path("/repo")),
+        )
+        monkeypatch.setattr(
+            "code_review_graph.tools.review.get_changed_files",
+            lambda root, base: ["auth.py", "main.py"],
+        )
+        monkeypatch.setattr(
+            "code_review_graph.tools.review.parse_diff_ranges",
+            lambda root, base: {
+                "auth.py": [(5, 40)],
+                "main.py": [(5, 15)],
+            },
+        )
+        self.store.close = lambda: None
+
+        result = detect_changes_func(
+            repo_root="/repo",
+            base="main",
+            for_review=True,
+            path_globs=["auth.py"],
+        )
+
+        assert result["changed_files"] == ["auth.py"]
+        files = {row["file"] for row in result["changed_functions"]}
+        assert files == {"auth.py"}
+        priority_files = {row["file"] for row in result["review_priorities"]}
+        assert priority_files == {"auth.py"}
 
 
 class TestQueryGraphCallTargetFallbacks:

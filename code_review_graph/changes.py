@@ -16,6 +16,12 @@ from typing import Any
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
+from .review_projection import priority_sort_key, project_for_review, to_repo_relative
+from .test_gap_config import (
+    TestGapSuppression,
+    is_test_gap_suppressed,
+    load_test_gap_suppressions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +286,11 @@ def analyze_changes(
     changed_ranges: dict[str, list[tuple[int, int]]] | None = None,
     repo_root: str | None = None,
     base: str = "HEAD~1",
+    for_review: bool = False,
+    max_tokens: int | None = None,
+    path_globs: list[str] | None = None,
+    baseline_tokens: int | None = None,
+    test_gap_suppressions: list[TestGapSuppression] | None = None,
 ) -> dict[str, Any]:
     """Analyze changes and produce risk-scored review guidance.
 
@@ -348,12 +359,27 @@ def analyze_changes(
     affected = get_affected_flows(store, changed_files)
 
     # Detect test gaps: changed functions without TESTED_BY edges.
+    suppression_root = Path(repo_root) if repo_root is not None else None
+    suppressions = (
+        test_gap_suppressions
+        if test_gap_suppressions is not None
+        else load_test_gap_suppressions(suppression_root)
+    )
+    suppressed_test_gap_count = 0
     test_gaps: list[dict[str, Any]] = []
     for node in changed_funcs:
         if node.is_test:
             continue
         tested = store.get_edges_by_target(node.qualified_name)
         if not any(e.kind == "TESTED_BY" for e in tested):
+            rel_path = to_repo_relative(node.file_path, suppression_root) or node.file_path
+            if is_test_gap_suppressed(
+                node,
+                repo_relative_path=rel_path,
+                suppressions=suppressions,
+            ):
+                suppressed_test_gap_count += 1
+                continue
             test_gaps.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": _sanitize_name(node.qualified_name),
@@ -363,7 +389,7 @@ def analyze_changes(
             })
 
     # Review priorities: top 10 by risk score.
-    review_priorities = sorted(node_risks, key=lambda x: x["risk_score"], reverse=True)[:10]
+    review_priorities = sorted(node_risks, key=priority_sort_key)[:10]
 
     # Build summary.
     summary_parts = [
@@ -398,7 +424,7 @@ def analyze_changes(
             f"(set CRG_MAX_CHANGED_FUNCS to adjust)"
         )
 
-    return {
+    result = {
         "summary": "\n".join(summary_parts),
         "risk_score": overall_risk,
         "changed_functions": node_risks,
@@ -406,4 +432,16 @@ def analyze_changes(
         "test_gaps": test_gaps,
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
+        "suppressed_test_gap_count": suppressed_test_gap_count,
     }
+    if for_review:
+        return project_for_review(
+            result,
+            repo_root=suppression_root,
+            changed_files=changed_files,
+            base=base,
+            max_tokens=max_tokens,
+            path_globs=path_globs,
+            baseline_tokens=baseline_tokens,
+        )
+    return result

@@ -579,6 +579,10 @@ async def detect_changes_tool(
     max_depth: int = 2,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
+    for_review: bool = False,
+    max_tokens: Optional[int] = None,
+    path_globs: Optional[list[str]] = None,
+    scope: Optional[list[str] | str] = None,
 ) -> dict:
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
@@ -598,12 +602,18 @@ async def detect_changes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
+        for_review: Return compact, repo-relative, budgeted review payload.
+        max_tokens: Optional estimated-token budget for for_review payloads.
+        path_globs: Optional repo-relative path globs for scoped output.
+        scope: Alias for path_globs; may be one glob string or a list.
     """
     coro = asyncio.to_thread(
         detect_changes_func,
         base=base, changed_files=changed_files,
         include_source=include_source, max_depth=max_depth,
         repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
+        for_review=for_review, max_tokens=max_tokens,
+        path_globs=path_globs, scope=scope,
     )
     tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
     if tool_timeout > 0:

@@ -179,9 +179,8 @@ class TestBuildUpdateCommands:
 
 class TestDetectChangesCommand:
     def test_brief_output_includes_token_savings_panel(self, tmp_path, capsys):
-        """v2.3.5: --brief output renders a boxed Token Savings panel.
+        """--brief output renders a boxed change-analysis savings panel.
 
-        Replaces the v2.3.4 one-line `Estimated context saved: …` format.
         The panel must include the title, the saved-tokens line, the
         percent suffix, and box borders.
         """
@@ -215,12 +214,45 @@ class TestDetectChangesCommand:
         output = capsys.readouterr().out
         assert "summary only" in output
         # Panel structure: title, the three core rows, and box borders.
-        assert "Token Savings" in output
+        assert "Change-analysis token savings" in output
         assert "Full context would be:" in output
         assert "Graph context used:" in output
         assert "Saved:" in output
+        assert "Scope: change analysis only; not whole review session" in output
         # Box drawing characters from format_context_savings_panel
         assert "┌" in output and "┘" in output
+
+    def test_brief_panel_names_change_analysis_scope(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "app.py").write_text("x" * 2000, encoding="utf-8")
+        argv = [
+            "code-review-graph",
+            "detect-changes",
+            "--repo",
+            str(repo),
+            "--brief",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.incremental.get_changed_files",
+                        return_value=["app.py"],
+                    ):
+                        with patch(
+                            "code_review_graph.changes.analyze_changes",
+                            return_value={"summary": "summary only"},
+                        ):
+                            cli.main()
+
+        output = capsys.readouterr().out
+        assert "Change-analysis token savings" in output
+        assert "not whole review session" in output
 
     def test_json_output_includes_compact_savings_metadata(self, tmp_path, capsys):
         repo = tmp_path / "repo"
@@ -255,6 +287,150 @@ class TestDetectChangesCommand:
             "saved_tokens",
             "saved_percent",
         }
+
+    def test_detect_changes_for_review_obeys_token_budget_with_truncation_metadata(
+        self, tmp_path, capsys,
+    ):
+        repo = tmp_path / "repo"
+        src = repo / "src"
+        src.mkdir(parents=True)
+        app = src / "app.py"
+        app.write_text("x" * 4000, encoding="utf-8")
+        argv = [
+            "code-review-graph",
+            "detect-changes",
+            "--repo",
+            str(repo),
+            "--base",
+            "main",
+            "--for-review",
+            "--max-tokens",
+            "1200",
+        ]
+
+        def fake_analyze(*_args, **kwargs):
+            from code_review_graph.review_projection import project_for_review
+
+            rows = [
+                {
+                    "name": f"func_{i}",
+                    "qualified_name": f"{app}::func_{i}",
+                    "kind": "Function",
+                    "file_path": str(app),
+                    "line_start": i + 1,
+                    "line_end": i + 2,
+                    "risk_score": 0.5,
+                }
+                for i in range(40)
+            ]
+            raw = {
+                "summary": "many rows",
+                "risk_score": 0.5,
+                "changed_functions": rows,
+                "review_priorities": rows,
+                "test_gaps": rows,
+                "affected_flows": [
+                    {
+                        "id": i,
+                        "name": f"flow_{i}",
+                        "criticality": 0.5,
+                        "steps": [
+                            {
+                                "name": "func",
+                                "kind": "Function",
+                                "file": str(app),
+                                "line_start": 1,
+                            }
+                        ],
+                    }
+                    for i in range(15)
+                ],
+            }
+            return project_for_review(
+                raw,
+                repo_root=repo,
+                changed_files=[str(app)],
+                base=kwargs["base"],
+                max_tokens=kwargs["max_tokens"],
+                path_globs=kwargs["path_globs"],
+                baseline_tokens=4000,
+            )
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.incremental.get_changed_files",
+                        return_value=["src/app.py"],
+                    ):
+                        with patch(
+                            "code_review_graph.changes.analyze_changes",
+                            side_effect=fake_analyze,
+                        ):
+                            cli.main()
+
+        result = json.loads(capsys.readouterr().out)
+        assert result["budget"]["max_tokens"] == 1200
+        assert result["budget"]["estimated_tokens"] <= 1200
+        assert result["budget"]["truncated"] is True
+        assert result["budget"]["omitted_count"] > 0
+        assert result["review_priorities"][0]["file"] == "src/app.py"
+        assert result["savings_record"]["measurement_scope"] == "change_analysis"
+
+    def test_review_context_runs_update_then_compact_projection_once(
+        self, tmp_path, capsys,
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        argv = [
+            "code-review-graph",
+            "review-context",
+            "--repo",
+            str(repo),
+            "--base",
+            "main",
+            "--max-tokens",
+            "2000",
+        ]
+        compact = {
+            "status": "ok",
+            "summary": "compact",
+            "changed_file_count": 1,
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                store = MagicMock()
+                mock_store.return_value = store
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value={"changed_files": ["src/app.py"]},
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.cli._build_for_review_payload",
+                            return_value=compact,
+                        ) as mock_payload:
+                            cli.main()
+
+        mock_build.assert_called_once_with(
+            full_rebuild=False,
+            repo_root=str(repo),
+            base="main",
+        )
+        mock_payload.assert_called_once_with(
+            store,
+            repo,
+            base="main",
+            changed=["src/app.py"],
+            max_tokens=2000,
+            path_globs=None,
+        )
+        assert json.loads(capsys.readouterr().out) == compact
 
 
 class TestDetectChangesEndToEnd:

@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 
 from code_review_graph.context_savings import (
+    build_savings_record,
     estimate_context_savings,
     estimate_file_tokens,
     estimate_tokens,
     format_context_savings,
+    format_context_savings_panel,
 )
 
 
@@ -62,3 +64,35 @@ def test_format_context_savings_is_one_short_line():
     )
 
     assert text == "Estimated context saved: ~1,240 tokens (~18%)"
+
+
+def test_savings_record_names_change_analysis_scope():
+    record = build_savings_record(
+        base="main",
+        changed_file_count=3,
+        baseline_tokens=1000,
+        returned_tokens=250,
+    )
+
+    assert record == {
+        "base": "main",
+        "changed_file_count": 3,
+        "estimated": True,
+        "baseline_tokens": 1000,
+        "returned_tokens": 250,
+        "saved_tokens": 750,
+        "saved_percent": 75,
+        "measurement_scope": "change_analysis",
+    }
+
+
+def test_context_savings_panel_names_change_analysis_scope():
+    panel = format_context_savings_panel(
+        {"estimated": True, "saved_tokens": 750, "saved_percent": 75},
+        original_tokens=1000,
+        returned_tokens=250,
+    )
+
+    assert panel is not None
+    assert "Change-analysis token savings" in panel
+    assert "Scope: change analysis only; not whole review session" in panel

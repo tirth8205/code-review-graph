@@ -81,6 +81,21 @@ detail_level: str = "standard"   # "standard" or "minimal"
 ```
 Relevant responses may include compact estimated `context_savings` metadata.
 
+#### `detect_changes_tool`
+```
+base: str = "HEAD~1"
+changed_files: list[str] | None
+include_source: bool = False
+max_depth: int = 2
+repo_root: str | None
+detail_level: str = "standard"
+for_review: bool = False             # Compact repo-relative review payload
+max_tokens: int | None               # Budget for for_review payload
+path_globs: list[str] | None         # Scoped repo-relative path globs
+scope: list[str] | str | None        # Alias for path_globs
+```
+Use `for_review=true` for a compact, deterministic payload with repo-relative paths, top `file:line` priorities, de-noised test gaps, affected-flow summaries, truncation metadata, and a `savings_record` whose measurement scope is change analysis.
+
 #### `traverse_graph_tool`
 ```
 query: str
@@ -325,6 +340,10 @@ code-review-graph detect-changes               # Risk-scored change analysis
 code-review-graph detect-changes --base HEAD~3 # Custom base ref
 code-review-graph detect-changes --brief       # Compact panel with token-savings estimate
 code-review-graph detect-changes --brief --verify  # ...and cross-check vs tiktoken
+code-review-graph detect-changes --for-review --max-tokens 2000
+code-review-graph detect-changes --for-review --scope 'src/**'
+code-review-graph review-context --base origin/main --max-tokens 2000
+code-review-graph review-context --scope 'tests/**' --max-tokens 2000
 
 # detect-changes vs update --brief — which one?
 # • detect-changes --brief: read-only. Asks "what's the impact of my current
@@ -333,7 +352,9 @@ code-review-graph detect-changes --brief --verify  # ...and cross-check vs tikto
 # • update --brief: re-parses your changed files into the graph FIRST, then
 #   runs the same analysis at the end. Use this after a rebase, a big
 #   change set, or whenever you suspect the graph is stale.
-# Both end with an identical "Token Savings" panel.
+# Both end with an identical "Change-analysis token savings" panel.
+# Use review-context when you want one command to refresh stale graph state
+# and emit the same compact payload as detect-changes --for-review.
 
 # Wiki
 code-review-graph wiki                         # Generate markdown wiki from communities

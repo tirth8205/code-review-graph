@@ -124,7 +124,7 @@ cd /Users/michael/Dev/zazzcode/code-review-graph/mw-improve-metrics-analyis-zazz
 uv run pytest tests/test_changes.py tests/test_cli.py tests/test_tools.py -q
 uv run pytest tests/test_context_savings.py tests/test_action_render.py -q
 uv run pytest -q
-python -m code_review_graph.cli review-context --repo . --base main --max-tokens 4000 > /tmp/crg-review-context-check.json
+uv run code-review-graph review-context --repo . --base main --max-tokens 4000 > /tmp/crg-review-context-check.json
 python - <<'PY'
 import json
 from pathlib import Path

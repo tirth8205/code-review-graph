@@ -360,6 +360,10 @@ def detect_changes_func(
     max_depth: int = 2,
     repo_root: str | None = None,
     detail_level: str = "standard",
+    for_review: bool = False,
+    max_tokens: int | None = None,
+    path_globs: list[str] | None = None,
+    scope: list[str] | str | None = None,
 ) -> dict[str, Any]:
     """Detect changes and produce risk-scored review guidance.
 
@@ -379,6 +383,10 @@ def detect_changes_func(
             "minimal" returns only summary, risk_score, changed_file_count,
             test_gap_count, and top 3 review priorities (text only).
             Default: "standard".
+        for_review: Return compact, portable review payload.
+        max_tokens: Optional token budget for compact review payload.
+        path_globs: Optional repo-relative path globs for scoped output.
+        scope: Alias for ``path_globs``. A string is treated as one glob.
 
     Returns:
         Risk-scored analysis with changed functions, affected flows,
@@ -416,12 +424,24 @@ def detect_changes_func(
             abs_path = str(root / rel_path)
             abs_ranges[abs_path] = ranges
 
+        scoped_globs: list[str] | None
+        if path_globs is not None:
+            scoped_globs = path_globs
+        elif isinstance(scope, str):
+            scoped_globs = [scope]
+        else:
+            scoped_globs = scope
+
         analysis = analyze_changes(
             store,
             changed_files=abs_files,
             changed_ranges=abs_ranges if abs_ranges else None,
             repo_root=str(root),
             base=base,
+            for_review=for_review,
+            max_tokens=max_tokens,
+            path_globs=scoped_globs,
+            baseline_tokens=original_tokens,
         )
 
         # Optionally include source snippets for changed functions.
@@ -446,13 +466,15 @@ def detect_changes_func(
                         except (OSError, UnicodeDecodeError):
                             func["source"] = "(could not read file)"
 
-        if detail_level == "minimal":
+        if for_review:
+            result = analysis
+        elif detail_level == "minimal":
             priorities = analysis.get("review_priorities", [])
             top_priorities = [
                 p.get("name", p.get("qualified_name", ""))
                 for p in priorities[:3]
             ]
-            result: dict[str, Any] = {
+            result = {
                 "status": "ok",
                 "summary": analysis.get("summary", ""),
                 "risk_score": analysis.get("risk_score", 0.0),

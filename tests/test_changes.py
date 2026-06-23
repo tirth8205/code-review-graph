@@ -14,6 +14,7 @@ from code_review_graph.changes import (
 from code_review_graph.flows import store_flows, trace_flows
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.test_gap_config import TestGapSuppression
 
 
 class TestChanges:
@@ -410,6 +411,116 @@ class TestChanges:
         if len(priorities) >= 2:
             for i in range(len(priorities) - 1):
                 assert priorities[i]["risk_score"] >= priorities[i + 1]["risk_score"]
+
+    def test_for_review_projection_uses_repo_relative_paths_and_stable_tiebreaks(
+        self, tmp_path,
+    ):
+        """Compact review output is portable and deterministic."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        alpha = repo / "src" / "alpha.py"
+        beta = repo / "src" / "beta.py"
+        alpha.parent.mkdir()
+        alpha.write_text("def alpha():\n    return 1\n", encoding="utf-8")
+        beta.write_text("def beta():\n    return 2\n", encoding="utf-8")
+
+        self._add_func(
+            "beta",
+            path=str(beta),
+            line_start=1,
+            line_end=2,
+        )
+        self._add_func(
+            "alpha",
+            path=str(alpha),
+            line_start=1,
+            line_end=2,
+        )
+
+        result = analyze_changes(
+            self.store,
+            changed_files=[str(beta), str(alpha)],
+            changed_ranges={
+                str(beta): [(1, 2)],
+                str(alpha): [(1, 2)],
+            },
+            repo_root=str(repo),
+            base="main",
+            for_review=True,
+        )
+
+        assert result["changed_files"] == ["src/alpha.py", "src/beta.py"]
+        files = {row["file"] for row in result["changed_functions"]}
+        assert files == {"src/alpha.py", "src/beta.py"}
+        priorities = result["review_priorities"]
+        assert [row["file"] for row in priorities] == [
+            "src/alpha.py",
+            "src/beta.py",
+        ]
+
+    def test_for_review_scope_filters_projected_rows_by_path_glob(self, tmp_path):
+        repo = tmp_path / "repo"
+        src_path = repo / "src" / "app.py"
+        docs_path = repo / "docs" / "guide.py"
+        src_path.parent.mkdir(parents=True)
+        docs_path.parent.mkdir(parents=True)
+        src_path.write_text("def keep():\n    return 1\n", encoding="utf-8")
+        docs_path.write_text("def drop():\n    return 2\n", encoding="utf-8")
+
+        self._add_func("keep", path=str(src_path), line_start=1, line_end=2)
+        self._add_func("drop", path=str(docs_path), line_start=1, line_end=2)
+
+        result = analyze_changes(
+            self.store,
+            changed_files=[str(src_path), str(docs_path)],
+            changed_ranges={
+                str(src_path): [(1, 2)],
+                str(docs_path): [(1, 2)],
+            },
+            repo_root=str(repo),
+            for_review=True,
+            path_globs=["src/**"],
+        )
+
+        assert result["changed_files"] == ["src/app.py"]
+        assert {row["name"] for row in result["changed_functions"]} == {"keep"}
+        assert {row["name"] for row in result["review_priorities"]} == {"keep"}
+        assert {row["name"] for row in result["test_gaps"]} == {"keep"}
+
+    def test_test_gap_suppressions_remove_boilerplate_and_report_count(self, tmp_path):
+        repo = tmp_path / "repo"
+        path = repo / "src" / "app.py"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "def build_generated_model():\n    return 1\n"
+            "def needs_test():\n    return 2\n",
+            encoding="utf-8",
+        )
+        self._add_func(
+            "build_generated_model",
+            path=str(path),
+            line_start=1,
+            line_end=2,
+        )
+        self._add_func("needs_test", path=str(path), line_start=3, line_end=4)
+
+        result = analyze_changes(
+            self.store,
+            changed_files=[str(path)],
+            changed_ranges={str(path): [(1, 4)]},
+            repo_root=str(repo),
+            test_gap_suppressions=[
+                TestGapSuppression(
+                    path_globs=("src/**",),
+                    kinds=("Function",),
+                    name_patterns=("build_generated_*",),
+                    reason="generated boilerplate",
+                )
+            ],
+        )
+
+        assert result["suppressed_test_gap_count"] == 1
+        assert {gap["name"] for gap in result["test_gaps"]} == {"needs_test"}
 
     def test_analyze_changes_fallback_no_ranges(self):
         """Falls back to all nodes in files when no ranges provided."""

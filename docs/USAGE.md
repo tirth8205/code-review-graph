@@ -53,11 +53,36 @@ Parses your entire codebase. Takes ~10s for 500 files.
 ```
 Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use ~82x fewer tokens per question (median; range 38x–528x) than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
 
+For a compact payload that can be pasted directly into a review agent, use:
+
+```bash
+code-review-graph detect-changes --for-review --max-tokens 2000
+```
+
+The `--for-review` payload uses repo-relative paths, deterministic priority ordering, `file:line` review priorities, de-noised test gaps, affected-flow summaries, truncation metadata, and a scope-honest `savings_record`.
+
 ### 3. Review a PR
 ```
 /code-review-graph:review-pr
 ```
 Comprehensive structural review of a branch diff with blast-radius analysis.
+
+When the graph may be stale, run the one-shot CLI flow:
+
+```bash
+code-review-graph review-context --base origin/main --max-tokens 2000
+```
+
+This refreshes the graph with the existing update path, then emits the same compact review payload as `detect-changes --for-review`.
+
+For section-oriented reviews, add one or more scoped path globs:
+
+```bash
+code-review-graph review-context --base origin/main --scope 'src/**' --max-tokens 2000
+code-review-graph detect-changes --for-review --scope 'tests/**' --max-tokens 1500
+```
+
+`--scope` filters emitted changed functions, review priorities, test gaps, and affected-flow summaries by repo-relative path. Nonmatching changed files stay out of the compact payload.
 
 ### 4. Watch mode (optional)
 ```bash
@@ -112,7 +137,7 @@ CRG reduces review context by sending graph-derived structural context instead o
 code-review-graph eval --all
 ```
 
-Since v2.3.4, review and impact tools include compact `context_savings` metadata. In v2.3.5 the CLI surfaces this as a boxed `Token Savings` panel on both `detect-changes --brief` and `update --brief`, with a per-category breakdown (Functions / Tests / Risk / Other) that sums exactly to the graph response size. Add `--verify` to cross-check the displayed numbers against OpenAI's `cl100k_base` tokenizer (requires `pip install tiktoken`). All numbers are labelled estimated because they use a conservative approximation rather than model-specific tokenisation; calibration shows the estimate stays within ~1% of real GPT-4 tokens in aggregate. Small single-file changes can occasionally use more context than the raw file because graph metadata has overhead.
+Since v2.3.4, review and impact tools include compact `context_savings` metadata. In v2.3.5 the CLI surfaced this as a boxed savings panel on both `detect-changes --brief` and `update --brief`, with a per-category breakdown (Functions / Tests / Risk / Other) that sums exactly to the graph response size. The panel is now titled `Change-analysis token savings` because it measures the change-analysis response against changed-file content, not a whole review session with agent transcripts or sub-agent fan-out. Add `--verify` to cross-check the displayed numbers against OpenAI's `cl100k_base` tokenizer (requires `pip install tiktoken`). All numbers are labelled estimated because they use a conservative approximation rather than model-specific tokenisation; calibration shows the estimate stays within ~1% of real GPT-4 tokens in aggregate. Small single-file changes can occasionally use more context than the raw file because graph metadata has overhead.
 
 ## Supported Languages
 
@@ -152,3 +177,15 @@ vendor/**
 ```
 
 In git repos, indexing is based on tracked files (`git ls-files`), so gitignored files are skipped automatically. Use `.code-review-graphignore` to exclude tracked files or when git isn't available.
+
+Low-signal test-gap rows can be suppressed in `pyproject.toml` without overloading `.code-review-graphignore`:
+
+```toml
+[[tool.code-review-graph.test_gap_suppressions.rules]]
+path_globs = ["generated/**"]
+kinds = ["Function"]
+name_patterns = ["build_generated_*"]
+reason = "Generated boilerplate is covered through generator tests."
+```
+
+Suppressed rows are removed from compact `test_gaps`, and the payload reports `suppressed_test_gap_count` so broad rules remain visible during review.
