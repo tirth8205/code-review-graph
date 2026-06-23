@@ -567,6 +567,24 @@ class TestFlows:
         new_flows = [f for f in after if f["name"] == "new_entry"]
         assert len(new_flows) == 1
 
+    def test_incremental_trace_flows_relative_changed_files_match_absolute(self):
+        """Regression for #569: the parser stores absolute file_paths
+        (``str(path)``), but incremental callers pass repo-relative paths
+        (``git diff --name-only``).  A relative changed file must still match
+        its absolute stored node, otherwise new entry points are silently
+        dropped and ``flows_detected`` is always 0."""
+        abs_path = "/repo/services/b.py"
+        self._add_func("new_entry", path=abs_path)
+        self._add_func("new_callee", path=abs_path)
+        self._add_call(f"{abs_path}::new_entry", f"{abs_path}::new_callee", abs_path)
+
+        # Caller passes the repo-RELATIVE path, as get_changed_files() returns.
+        count = incremental_trace_flows(self.store, ["services/b.py"])
+
+        assert count >= 1
+        after = get_flows(self.store)
+        assert any(f["name"] == "new_entry" for f in after)
+
     def test_incremental_trace_flows_no_affected_flows(self):
         """When changed files have no existing flows, only new entry points are checked."""
         self._add_func("handler", path="routes.py")

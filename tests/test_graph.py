@@ -58,6 +58,21 @@ class TestGraphStore:
         assert result.kind == "Function"
         assert result.name == "my_func"
 
+    def test_resolve_changed_files_matches_relative_to_absolute(self):
+        """#569: repo-relative changed paths must resolve to the absolute
+        file_paths actually stored (exact, or separator-aligned suffix)."""
+        self.store.upsert_node(self._make_func_node("a", "/repo/pkg/mod.py"))
+        self.store.upsert_node(self._make_func_node("b", "/repo/other.py"))
+        self.store.commit()
+
+        # Relative path resolves to its absolute stored form.
+        assert self.store.resolve_changed_files(["pkg/mod.py"]) == ["/repo/pkg/mod.py"]
+        # Exact (already-absolute) match also works.
+        assert self.store.resolve_changed_files(["/repo/other.py"]) == ["/repo/other.py"]
+        # A file not in the graph matches nothing; empty input is a no-op.
+        assert self.store.resolve_changed_files(["nope.py"]) == []
+        assert self.store.resolve_changed_files([]) == []
+
     def test_upsert_method_node(self):
         method = self._make_func_node(name="do_thing", parent="MyClass")
         self.store.upsert_node(method)

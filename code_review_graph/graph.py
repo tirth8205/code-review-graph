@@ -1061,6 +1061,39 @@ class GraphStore:
             result.update(r["id"] for r in rows)
         return result
 
+    def resolve_changed_files(self, changed_files: list[str]) -> list[str]:
+        """Map caller-supplied changed files onto the file_path strings stored
+        in the graph.
+
+        The parser persists absolute paths (``str(path)``) while incremental
+        callers pass repo-relative paths (``git diff --name-only``).  Returns
+        the stored file_path values corresponding to *changed_files*, matching
+        on exact equality (after normalisation) or when a relative changed path
+        is a separator-aligned suffix of a stored absolute path.  Without this
+        reconciliation, incremental flow and community filters that compare
+        against stored file_paths match nothing (#569).
+        """
+        def _norm(p: str) -> str:
+            return os.path.normpath(p).replace(os.sep, "/")
+
+        norm_changed = {_norm(c) for c in changed_files if c}
+        if not norm_changed:
+            return []
+        matched: set[str] = set()
+        for row in self._conn.execute("SELECT DISTINCT file_path FROM nodes"):
+            stored = row["file_path"]
+            if not stored:
+                continue
+            nstored = _norm(stored)
+            if nstored in norm_changed:
+                matched.add(stored)
+                continue
+            for nc in norm_changed:
+                if nstored.endswith("/" + nc):
+                    matched.add(stored)
+                    break
+        return list(matched)
+
     def get_flow_ids_by_node_ids(
         self, node_ids: set[int],
     ) -> list[int]:

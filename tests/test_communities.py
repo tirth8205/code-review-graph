@@ -590,3 +590,36 @@ class TestCommunities:
         # Pass a file that IS part of existing communities
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
+
+    def test_incremental_detect_relative_changed_files_match_absolute(self):
+        """Regression for the #569-class mismatch in communities: the parser
+        stores absolute file_paths (``str(path)``) but incremental callers
+        pass repo-relative paths (``git diff --name-only``).  A relative
+        changed file inside an existing community must still trigger
+        re-detection instead of being silently skipped (returning 0)."""
+        def _cluster(fp, names):
+            self.store.upsert_node(NodeInfo(
+                kind="File", name=fp.rsplit("/", 1)[-1], file_path=fp,
+                line_start=1, line_end=100, language="python",
+            ), file_hash="h")
+            for nm in names:
+                self.store.upsert_node(NodeInfo(
+                    kind="Function", name=nm, file_path=fp,
+                    line_start=1, line_end=10, language="python",
+                ), file_hash="h")
+            for nm in names[1:]:
+                self.store.upsert_edge(EdgeInfo(
+                    kind="CALLS", source=f"{fp}::{names[0]}",
+                    target=f"{fp}::{nm}", file_path=fp, line=5,
+                ))
+
+        _cluster("/repo/auth.py", ["login", "logout", "check_token"])
+        _cluster("/repo/db.py", ["connect", "query", "close"])
+        self.store.commit()
+        communities = detect_communities(self.store, min_size=2)
+        stored = store_communities(self.store, communities)
+        assert stored > 0
+
+        # Caller passes the repo-RELATIVE path (git diff --name-only).
+        result = incremental_detect_communities(self.store, ["auth.py"])
+        assert result > 0
