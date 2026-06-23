@@ -162,7 +162,19 @@ class TestGenerateHooksConfig:
     def test_quotes_repo_paths_with_spaces(self):
         config = generate_hooks_config(Path("/repo with spaces"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert '"' in post_cmd  # path is JSON-encoded so spaces are quoted
+        # Path is shell-quoted (shlex) so the space stays inside one token.
+        assert "'/repo with spaces'" in post_cmd
+
+    def test_nonascii_repo_path_embedded_literally(self):
+        """#497: a non-ASCII repo path must appear as literal UTF-8 in the
+        hook command, not as JSON ``\\uXXXX`` escapes.  ``json.dumps`` (with
+        the default ``ensure_ascii=True``) turned the path into backslash-u
+        sequences which the shell passed verbatim, creating a corrupted
+        nested directory tree (e.g. ``u57fa/...``)."""
+        config = generate_hooks_config(Path("/repo/基项目"))
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "基项目" in post_cmd
+        assert "\\u" not in post_cmd
 
     def test_entries_use_claude_code_hook_schema(self):
         """Regression guard for the Claude Code hook schema.
@@ -190,6 +202,36 @@ class TestGenerateHooksConfig:
                     )
                     assert "command" in hook
                     assert "timeout" in hook
+
+
+class TestStripJsonc:
+    """#553: JSONC sanitisation must not corrupt string *contents*.
+
+    The previous implementation used two naive regexes — ``//.*?$`` and
+    ``,(\\s*[}\\]])`` — which happily edited text *inside* string values: a
+    URL got truncated at ``//`` and any string containing ``,]``/``,}`` lost
+    its comma, corrupting otherwise-valid user config.
+    """
+
+    def test_strips_line_comments_and_trailing_commas(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{\n  // a comment\n  "a": 1,\n  "b": [1, 2,],\n}'
+        assert json.loads(_strip_jsonc(raw)) == {"a": 1, "b": [1, 2]}
+
+    def test_preserves_double_slash_inside_strings(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{"url": "https://example.com/x"}'
+        assert json.loads(_strip_jsonc(raw)) == {"url": "https://example.com/x"}
+
+    def test_preserves_comma_then_bracket_inside_strings(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{"weird": "a,]b", "list": [1,]}'
+        assert json.loads(_strip_jsonc(raw)) == {"weird": "a,]b", "list": [1]}
+
+    def test_strips_block_comments(self):
+        from code_review_graph.skills import _strip_jsonc
+        raw = '{/* c */ "a": 1}'
+        assert json.loads(_strip_jsonc(raw)) == {"a": 1}
 
 
 class TestShippedHooksFiles:
