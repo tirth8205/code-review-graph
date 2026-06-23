@@ -24,6 +24,24 @@ from .parser import CodeParser
 
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
 
+# On Windows, launching a console subprocess (git/svn) pops a transient
+# console window and adds overhead.  CREATE_NO_WINDOW suppresses it.  The
+# flag does not exist off-Windows, so ``getattr`` yields 0 there, and we
+# only inject it when actually running on win32 (issues #262, #91).
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _subprocess_kwargs() -> dict:
+    """Return platform-specific kwargs for ``subprocess.run``.
+
+    On Windows this injects ``creationflags=CREATE_NO_WINDOW`` so git/svn
+    invocations do not flash a console window; elsewhere it returns an empty
+    dict (no-op).  See issues #262, #91.
+    """
+    if sys.platform == "win32" and _CREATE_NO_WINDOW:
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
+
 
 def _select_executor_kind() -> str:
     """Return 'process' or 'thread' for parallel parsing.
@@ -115,6 +133,9 @@ DEFAULT_IGNORE_PATTERNS = [
     "vendor/**",
     "bootstrap/cache/**",
     "public/build/**",
+    "storage/**",
+    # Temporary scratch dirs (generated, never source). #91
+    "tmp/**",
     # Ruby / Bundler
     ".bundle/**",
     # Java / Kotlin / Gradle
@@ -416,25 +437,29 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         if result.returncode == 0:
             sha = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     return branch, sha
 
@@ -449,6 +474,7 @@ def _svn_revision_info(repo_root: Path) -> tuple[str, str]:
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(repo_root), timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         if result.returncode == 0:
             for line in result.stdout.splitlines():
@@ -508,22 +534,26 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         if result.returncode != 0:
             # Fallback: try diff against empty tree (initial commit)
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
                 capture_output=True,
-                text=True, encoding='utf-8',                cwd=str(repo_root),
+                text=True, encoding='utf-8', errors='replace',
+                cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
+                **_subprocess_kwargs(),
             )
         files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
 
@@ -541,6 +571,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
+                **_subprocess_kwargs(),
             )
             if result.returncode != 0:
                 logger.warning("svn diff --summarize failed (rc=%d): %s",
@@ -558,6 +589,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=str(repo_root), timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
+                **_subprocess_kwargs(),
             )
             files = []
             for line in result.stdout.splitlines():
@@ -582,9 +614,11 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         files = []
         for line in result.stdout.splitlines():
@@ -595,7 +629,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
                     entry = entry.split(" -> ", 1)[1]
                 files.append(entry)
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
 
@@ -627,12 +661,14 @@ def get_all_tracked_files(
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
 
@@ -648,6 +684,7 @@ def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=str(repo_root), timeout=60,  # svn list queries the server
             stdin=subprocess.DEVNULL,
+            **_subprocess_kwargs(),
         )
         if result.returncode == 0:
             # svn list returns paths relative to the WC URL; directories end with "/"

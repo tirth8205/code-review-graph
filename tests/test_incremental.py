@@ -868,3 +868,177 @@ class TestStartWatchThread:
             assert thread is None
         finally:
             store.close()
+
+
+class TestGitDecodeRobustness:
+    """Regression tests for #566: git subprocess calls must decode
+    non-UTF-8 output without raising UnicodeDecodeError.
+
+    Six git calls previously passed ``encoding='utf-8'`` but no
+    ``errors='replace'``, so strict decoding raised on the first invalid
+    byte (e.g. a Latin-1 filename in ``git ls-files`` output). The SVN
+    calls already used ``errors='replace'``; the git calls now match.
+    """
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_passes_errors_replace(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0, stdout="a.py\n")
+        get_changed_files(tmp_path)
+        assert mock_run.call_args.kwargs.get("errors") == "replace"
+        assert mock_run.call_args.kwargs.get("encoding") == "utf-8"
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_staged_and_unstaged_passes_errors_replace(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        get_staged_and_unstaged(tmp_path)
+        assert mock_run.call_args.kwargs.get("errors") == "replace"
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_passes_errors_replace(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=0, stdout="a.py\n")
+        get_all_tracked_files(tmp_path)
+        assert mock_run.call_args.kwargs.get("errors") == "replace"
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_git_branch_info_passes_errors_replace(self, mock_run, tmp_path):
+        from code_review_graph.incremental import _git_branch_info
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="main\n")
+        _git_branch_info(tmp_path)
+        # Both rev-parse calls must use errors='replace'.
+        for call in mock_run.call_args_list:
+            assert call.kwargs.get("errors") == "replace"
+
+    def test_real_git_with_non_utf8_filename_does_not_crash(self, tmp_path):
+        """End-to-end: a tracked file whose name contains a non-UTF-8 byte
+        must not crash ``get_all_tracked_files`` under strict decoding.
+
+        ``git ls-files`` core.quotepath default actually octal-escapes such
+        names, but if quoting is disabled (or for other git output paths)
+        the bytes flow through verbatim — and strict utf-8 decoding would
+        raise. ``errors='replace'`` makes this resilient regardless.
+        """
+        import os
+        import shutil
+
+        if shutil.which("git") is None:
+            import pytest
+
+            pytest.skip("git not available")
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "t@example.com"], cwd=str(repo), check=True
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"], cwd=str(repo), check=True
+        )
+        # Disable path quoting so the raw (possibly non-utf8) bytes appear.
+        subprocess.run(
+            ["git", "config", "core.quotepath", "false"], cwd=str(repo), check=True
+        )
+
+        # Create a file whose name is a Latin-1 byte (0xE9 = 'é' in latin-1,
+        # invalid as a standalone UTF-8 byte). Some filesystems reject this;
+        # if so, skip rather than fail.
+        try:
+            bad_name = os.fsdecode(b"caf\xe9.py")
+            (repo / bad_name).write_text("x = 1\n")
+        except (OSError, ValueError, UnicodeError):
+            import pytest
+
+            pytest.skip("filesystem rejects non-utf8 filename")
+
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+
+        # The call must not raise UnicodeDecodeError.
+        result = get_all_tracked_files(repo)
+        assert isinstance(result, list)
+
+
+class TestSubprocessCreationFlags:
+    """Regression tests for #262: subprocess calls inject
+    ``creationflags=CREATE_NO_WINDOW`` only on win32 to avoid console
+    window flashes on Windows.
+    """
+
+    def test_kwargs_empty_off_windows(self, monkeypatch):
+        from code_review_graph.incremental import _subprocess_kwargs
+
+        monkeypatch.setattr("code_review_graph.incremental.sys.platform", "linux")
+        assert _subprocess_kwargs() == {}
+
+    def test_kwargs_empty_on_darwin(self, monkeypatch):
+        from code_review_graph.incremental import _subprocess_kwargs
+
+        monkeypatch.setattr("code_review_graph.incremental.sys.platform", "darwin")
+        assert "creationflags" not in _subprocess_kwargs()
+
+    def test_kwargs_has_flag_on_win32(self, monkeypatch):
+        import code_review_graph.incremental as inc
+
+        monkeypatch.setattr(inc.sys, "platform", "win32")
+        # Simulate the Windows-only constant being present.
+        monkeypatch.setattr(inc, "_CREATE_NO_WINDOW", 0x08000000)
+        kwargs = inc._subprocess_kwargs()
+        assert kwargs.get("creationflags") == 0x08000000
+
+    def test_kwargs_no_flag_on_win32_when_constant_absent(self, monkeypatch):
+        """If somehow CREATE_NO_WINDOW is 0 (unexpected), do not pass a
+        zero creationflags that could confuse callers."""
+        import code_review_graph.incremental as inc
+
+        monkeypatch.setattr(inc.sys, "platform", "win32")
+        monkeypatch.setattr(inc, "_CREATE_NO_WINDOW", 0)
+        assert inc._subprocess_kwargs() == {}
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_git_call_routes_through_helper_on_win32(self, mock_run, tmp_path, monkeypatch):
+        import code_review_graph.incremental as inc
+
+        monkeypatch.setattr(inc.sys, "platform", "win32")
+        monkeypatch.setattr(inc, "_CREATE_NO_WINDOW", 0x08000000)
+        mock_run.return_value = MagicMock(returncode=0, stdout="a.py\n")
+        get_all_tracked_files(tmp_path)
+        assert mock_run.call_args.kwargs.get("creationflags") == 0x08000000
+
+
+class TestNewIgnorePatterns:
+    """Regression tests for #91: added Laravel/temp default ignore patterns
+    that must not over-match legitimate source directories.
+    """
+
+    def test_storage_and_tmp_are_default_patterns(self):
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        assert "storage/**" in DEFAULT_IGNORE_PATTERNS
+        assert "tmp/**" in DEFAULT_IGNORE_PATTERNS
+
+    def test_storage_ignored_at_root_and_nested(self):
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        # Laravel storage at root
+        assert _should_ignore("storage/logs/laravel.log", patterns)
+        # storage nested under a sub-app in a monorepo
+        assert _should_ignore("apps/api/storage/framework/cache/data", patterns)
+
+    def test_tmp_ignored_at_root_and_nested(self):
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        assert _should_ignore("tmp/scratch.txt", patterns)
+        assert _should_ignore("build/tmp/intermediate.o", patterns)
+
+    def test_new_patterns_do_not_overmatch_source_dirs(self):
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        # Segment-prefixed dirs are NOT exact segment matches -> not ignored.
+        assert not _should_ignore("src/storage_utils/x.py", patterns)
+        assert not _should_ignore("src/tmpfile_helpers/y.py", patterns)
+        assert not _should_ignore("lib/tmp_codec/z.py", patterns)
+        # A file literally named tmp.py is a source file, not a tmp dir.
+        assert not _should_ignore("src/tmp.py", patterns)

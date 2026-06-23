@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,18 @@ from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
+
+# CREATE_NO_WINDOW suppresses the transient console window git/svn would
+# otherwise flash on Windows.  Absent off-Windows, so ``getattr`` yields 0
+# and we only inject it when running on win32 (issue #262).
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _subprocess_kwargs() -> dict:
+    """Return ``creationflags=CREATE_NO_WINDOW`` on Windows, else ``{}``."""
+    if sys.platform == "win32" and _CREATE_NO_WINDOW:
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
 
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 _SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
@@ -57,6 +70,7 @@ def parse_git_diff_ranges(
             errors="replace",
             cwd=repo_root,
             timeout=_GIT_TIMEOUT,
+            **_subprocess_kwargs(),
         )
         if result.returncode != 0:
             logger.warning("git diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
@@ -99,6 +113,7 @@ def parse_svn_diff_ranges(
             errors="replace",
             cwd=repo_root,
             timeout=_GIT_TIMEOUT,
+            **_subprocess_kwargs(),
         )
         if result.returncode != 0:
             logger.warning("svn diff failed (rc=%d): %s", result.returncode, result.stderr[:200])

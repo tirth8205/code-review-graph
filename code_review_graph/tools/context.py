@@ -5,12 +5,25 @@ from __future__ import annotations
 import logging
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 from ._common import _get_store, compact_response
 
 logger = logging.getLogger(__name__)
+
+# CREATE_NO_WINDOW suppresses the transient console window git would otherwise
+# flash on Windows.  Absent off-Windows, so ``getattr`` yields 0 and the flag
+# is only injected when running on win32 (issue #262).
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _subprocess_kwargs() -> dict:
+    """Return ``creationflags=CREATE_NO_WINDOW`` on Windows, else ``{}``."""
+    if sys.platform == "win32" and _CREATE_NO_WINDOW:
+        return {"creationflags": _CREATE_NO_WINDOW}
+    return {}
 
 
 def _has_git_changes(root: Path, base: str) -> bool:
@@ -20,6 +33,7 @@ def _has_git_changes(root: Path, base: str) -> bool:
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True, stdin=subprocess.DEVNULL, text=True,
             cwd=str(root), timeout=10,
+            **_subprocess_kwargs(),
         )
         if result.returncode == 0 and result.stdout.strip():
             return True
@@ -28,6 +42,7 @@ def _has_git_changes(root: Path, base: str) -> bool:
             ["git", "status", "--porcelain"],
             capture_output=True, stdin=subprocess.DEVNULL, text=True,
             cwd=str(root), timeout=10,
+            **_subprocess_kwargs(),
         )
         return bool(result2.stdout.strip())
     except (FileNotFoundError, subprocess.TimeoutExpired):

@@ -2,14 +2,16 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from code_review_graph.changes import (
     _parse_unified_diff,
+    _subprocess_kwargs,
     analyze_changes,
     compute_risk_score,
     map_changes_to_nodes,
     parse_git_diff_ranges,
+    parse_svn_diff_ranges,
 )
 from code_review_graph.flows import store_flows, trace_flows
 from code_review_graph.graph import GraphStore
@@ -632,3 +634,40 @@ class TestAnalyzeChangesInternalParseRemap:
         # No remapping: keys passed through exactly as the caller gave them.
         assert list(captured["ranges"]) == ["app.py"]
         assert any(f["name"] == "rel_func" for f in result["changed_functions"])
+
+
+class TestSubprocessCreationFlags:
+    """Regression tests for #262: git/svn diff calls inject
+    ``creationflags=CREATE_NO_WINDOW`` only on win32.
+    """
+
+    def test_kwargs_empty_off_windows(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.changes.sys.platform", "linux")
+        assert _subprocess_kwargs() == {}
+
+    def test_kwargs_has_flag_on_win32(self, monkeypatch):
+        import code_review_graph.changes as ch
+
+        monkeypatch.setattr(ch.sys, "platform", "win32")
+        monkeypatch.setattr(ch, "_CREATE_NO_WINDOW", 0x08000000)
+        assert ch._subprocess_kwargs().get("creationflags") == 0x08000000
+
+    @patch("code_review_graph.changes.subprocess.run")
+    def test_git_diff_routes_through_helper_on_win32(self, mock_run, monkeypatch):
+        import code_review_graph.changes as ch
+
+        monkeypatch.setattr(ch.sys, "platform", "win32")
+        monkeypatch.setattr(ch, "_CREATE_NO_WINDOW", 0x08000000)
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        parse_git_diff_ranges("/some/repo", base="HEAD~1")
+        assert mock_run.call_args.kwargs.get("creationflags") == 0x08000000
+
+    @patch("code_review_graph.changes.subprocess.run")
+    def test_svn_diff_routes_through_helper_on_win32(self, mock_run, monkeypatch):
+        import code_review_graph.changes as ch
+
+        monkeypatch.setattr(ch.sys, "platform", "win32")
+        monkeypatch.setattr(ch, "_CREATE_NO_WINDOW", 0x08000000)
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        parse_svn_diff_ranges("/some/repo")
+        assert mock_run.call_args.kwargs.get("creationflags") == 0x08000000
