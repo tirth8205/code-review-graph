@@ -5531,6 +5531,24 @@ class CodeParser:
                         break
                     current = current.parent
 
+        elif language == "php":
+            # ``use App\Domain\Entity\Job;`` — convert namespace separators to
+            # a relative path and walk up from the caller's directory to find
+            # the file, mirroring the Java resolver. PSR-4 layouts where a
+            # namespace segment maps to a real directory (e.g. ``App\Foo`` ->
+            # ``.../App/Foo``) resolve; vendor/global classes (``\Exception``)
+            # and ``use function`` / ``use const`` targets with no matching
+            # file stay unresolved and keep the bare FQN, like JDK imports.
+            rel_path = module.replace("\\", "/").lstrip("/") + ".php"
+            current = caller_dir
+            while True:
+                target = current / rel_path
+                if target.is_file():
+                    return str(target.resolve())
+                if current == current.parent:
+                    break
+                current = current.parent
+
         return None
 
     def _find_dart_pubspec_root(
@@ -6394,6 +6412,47 @@ class CodeParser:
                     txt = child.text.decode("utf-8", errors="replace")
                     if txt and txt != "extends":
                         imports.append(txt)
+        elif language == "php":
+            # ``namespace_use_declaration`` covers several shapes:
+            #   use A\B\C;            use A\B\C as D;
+            #   use function A\b;     use const A\B;
+            #   use A\B, C\D;         (comma-separated clauses)
+            #   use A\B\{C, D as E};  (grouped — clause names are relative to A\B)
+            # Record the fully-qualified name of each imported symbol, ignoring
+            # any ``as`` alias and stripping a leading ``\``, so IMPORTS_FROM
+            # targets are clean FQNs that _do_resolve_module can map to files.
+            # Without this branch PHP falls through to the raw-text fallback and
+            # stores the entire ``use ...;`` statement as the edge target.
+            def _php_clause_fqn(clause) -> Optional[str]:
+                for sub in clause.children:
+                    if sub.type in ("qualified_name", "name"):
+                        return sub.text.decode(
+                            "utf-8", errors="replace",
+                        ).lstrip("\\")
+                return None
+
+            group_node = None
+            prefix = ""
+            for child in node.children:
+                if child.type == "namespace_name":
+                    prefix = child.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip("\\")
+                elif child.type == "namespace_use_group":
+                    group_node = child
+
+            if group_node is not None:
+                for clause in group_node.children:
+                    if clause.type == "namespace_use_clause":
+                        rel = _php_clause_fqn(clause)
+                        if rel:
+                            imports.append(f"{prefix}\\{rel}" if prefix else rel)
+            else:
+                for clause in node.children:
+                    if clause.type == "namespace_use_clause":
+                        fqn = _php_clause_fqn(clause)
+                        if fqn:
+                            imports.append(fqn)
         elif language in self._custom_languages:
             # Custom languages (languages.toml): prefer the grammar's
             # module-ish field over the raw statement text (e.g. Erlang

@@ -455,6 +455,94 @@ class TestPHPParsing:
         assert "dirname" in target_names
 
 
+class TestPHPImportResolution:
+    """PHP ``use`` imports resolve to absolute file paths (PSR-4 layout)."""
+
+    def test_resolves_project_import(self, tmp_path):
+        """``use`` of a project class resolves to its .php file."""
+        entity = tmp_path / "src/App/Domain/Entity"
+        entity.mkdir(parents=True)
+        (entity / "Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\nclass Job {}\n"
+        )
+        svc = tmp_path / "src/App/Service"
+        svc.mkdir(parents=True)
+        (svc / "MatchService.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use App\\Domain\\Entity\\Job;\n"
+            "class MatchService {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "MatchService.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((entity / "Job.php").resolve())
+
+    def test_vendor_import_stays_unresolved(self, tmp_path):
+        """A class with no local file stays as the bare FQN, not a raw
+        ``use ...;`` statement and not a fake path."""
+        svc = tmp_path / "src/App/Service"
+        svc.mkdir(parents=True)
+        (svc / "Logger.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use Psr\\Log\\LoggerInterface;\n"
+            "class Logger {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "Logger.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == "Psr\\Log\\LoggerInterface"
+        assert not imports[0].target.endswith(".php")
+
+    def test_aliased_import_records_fqn_not_alias(self, tmp_path):
+        """``use A\\B\\C as D`` records the FQN A\\B\\C, ignoring the alias."""
+        contact = tmp_path / "src/App/Domain/Embedded"
+        contact.mkdir(parents=True)
+        (contact / "Contact.php").write_text(
+            "<?php\nnamespace App\\Domain\\Embedded;\nclass Contact {}\n"
+        )
+        job = tmp_path / "src/App/Domain/Entity"
+        job.mkdir(parents=True)
+        (job / "Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\n"
+            "use App\\Domain\\Embedded\\Contact as ContactEmbedded;\n"
+            "class Job {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(job / "Job.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((contact / "Contact.php").resolve())
+
+    def test_grouped_use_expands_to_multiple_imports(self, tmp_path):
+        """``use App\\Domain\\{Entity\\Job, Model\\Status}`` -> two imports,
+        each prefixed with the group namespace and resolved independently."""
+        base = tmp_path / "src/App/Domain"
+        (base / "Entity").mkdir(parents=True)
+        (base / "Model").mkdir(parents=True)
+        (base / "Entity/Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\nclass Job {}\n"
+        )
+        (base / "Model/Status.php").write_text(
+            "<?php\nnamespace App\\Domain\\Model;\nclass Status {}\n"
+        )
+        consumer = tmp_path / "src/App/Service"
+        consumer.mkdir(parents=True)
+        (consumer / "C.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use App\\Domain\\{Entity\\Job, Model\\Status};\n"
+            "class C {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(consumer / "C.php")
+        targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert str((base / "Entity/Job.php").resolve()) in targets
+        assert str((base / "Model/Status.php").resolve()) in targets
+        assert len(targets) == 2
+
+
 class TestKotlinParsing:
     def setup_method(self):
         self.parser = CodeParser()
