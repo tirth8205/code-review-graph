@@ -42,13 +42,17 @@ def _handle_start(args: argparse.Namespace) -> None:
 
     if not args.foreground:
         daemon.daemonize()
+    else:
+        # Foreground runs never daemonize, so write the PID file and install
+        # signal handlers here, or stop/status would not find the daemon (#554).
+        daemon.setup_foreground()
 
     daemon.run_forever()
 
 
 def _handle_stop(_args: argparse.Namespace) -> None:
     """Stop the running daemon process."""
-    from .daemon import clear_pid, is_daemon_running, read_pid
+    from .daemon import clear_pid, is_daemon_running, pid_alive, read_pid
 
     if not is_daemon_running():
         print("Daemon is not running.")
@@ -69,21 +73,30 @@ def _handle_stop(_args: argparse.Namespace) -> None:
     except PermissionError:
         print(f"Error: Permission denied sending signal to PID {pid}.")
         sys.exit(1)
+    except OSError as exc:
+        # Windows os.kill can raise a generic WinError instead of the
+        # POSIX-specific subclasses above (#511) — don't crash the command.
+        print(f"Error sending signal to PID {pid}: {exc}")
+        sys.exit(1)
 
-    # Wait up to 5 seconds for process to die
+    # Wait up to 5 seconds for process to die. Use the cross-platform
+    # liveness check rather than os.kill(pid, 0), which raises WinError 87
+    # on Windows for PIDs outside the caller's console group (#511).
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not pid_alive(pid):
             break
         time.sleep(0.1)
     else:
-        # Still alive after 5s — send SIGKILL
+        # Still alive after 5s — force-kill. SIGKILL is POSIX-only, so fall
+        # back to SIGTERM on platforms (e.g. Windows) that lack it (#511).
+        sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
         print("Daemon did not stop gracefully, sending SIGKILL...")
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, sigkill)
         except ProcessLookupError:
             pass
+        except OSError as exc:
+            print(f"Warning: failed to force-kill PID {pid}: {exc}")
 
     clear_pid()
     print("Daemon stopped.")

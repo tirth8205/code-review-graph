@@ -863,6 +863,17 @@ class WatchDaemon:
 
         logger.info("Daemonized (PID %d)", os.getpid())
 
+    def setup_foreground(self) -> None:
+        """Prepare a foreground daemon: write the PID file and install handlers.
+
+        The double-fork :meth:`daemonize` path does this itself, but foreground
+        runs (``crg-daemon start --foreground``) never daemonize, so without
+        this the PID file is never written and SIGTERM/SIGHUP are not handled
+        (#554).
+        """
+        write_pid()
+        self._setup_signal_handlers()
+
     def _setup_signal_handlers(self) -> None:
         """Install SIGTERM/SIGHUP handlers for graceful shutdown."""
 
