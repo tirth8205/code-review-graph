@@ -1,21 +1,23 @@
 ---
 name: pr-review
-description: Review a pull request, branch, or local diff along two independent axes — Standards (does the code follow documented coding standards?) and Spec (does the code match what was asked for?) — using parallel sub-agents; use when the user wants draft-PR self-review, reviewer-side PR feedback, standards-guided findings, or review readiness assessment.
+description: Review a pull request, branch, or local diff along independent axes — Standards/Code Quality, Functionality/Spec, Security/Data/Ops, and Test Quality — using repo standards, CRG context when useful, and parallel sub-agents; use when the user wants draft-PR self-review, reviewer-side PR feedback, standards-guided findings, graph-assisted review, or review readiness assessment.
 ---
 
 # PR Review Skill
 
 ## Mission
 
-Review a PR, branch, or local diff as an automated review pass along two independent axes:
+Review a PR, branch, or local diff as an automated review pass along independent axes:
 
-- **Standards** — does the code conform to documented coding standards, test patterns, and architectural conventions?
-- **Spec** — does the code faithfully implement the originating specification, issue, or stated intent?
+- **Standards / Code Quality** — does the code conform to documented coding standards, architecture conventions, maintainability expectations, and anti-slop guidance?
+- **Functionality / Spec** — does the code faithfully implement the originating specification, issue, PR intent, and user-visible behavior?
+- **Security / Data / Ops** — does the diff preserve auth/authz, tenant boundaries, persistence safety, operational observability, and failure-mode behavior?
+- **Test Quality** — does the evidence prove the behavior and realistic risks without padding the PR with low-value tests?
 
-Both axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their
-findings. Reporting them separately prevents one axis from masking the other: code that follows every standard but
-implements the wrong thing is a Spec failure, not a pass. Code that does exactly what the issue asked but breaks the
-project's conventions is a Standards failure, not a pass.
+The axes run as **parallel sub-agents** so they don't pollute each other's context, then this skill aggregates their
+findings. Reporting them separately prevents one lens from masking another: code that follows every style rule but
+implements the wrong thing is a Functionality failure, not a pass; code that works but violates a security boundary is
+a Security failure; tests that inflate coverage without proving behavior are Test Quality findings.
 
 It can be used by the PR author during draft cleanup, or by a human reviewer evaluating someone else's PR.
 
@@ -42,8 +44,8 @@ conventions when available.
 1. If none of the above finds a standards index, ask the user: "I couldn't find a standards index. Where are your
    coding standards (a directory path), or should I run without standards-driven review?"
 
-Record the resolved docs root and standards index path. If no standards are available, the Standards axis still runs
-using general engineering judgment but notes the gap as residual risk.
+Record the resolved docs root and standards index path. If no standards are available, the Standards / Code Quality
+axis still runs using general engineering judgment but notes the gap as residual risk.
 
 **Integration branch discovery** — resolve using this order:
 
@@ -82,6 +84,7 @@ advances between when the two sub-agents start. Capture:
 - **Commit list:** `git log $MERGE_BASE..HEAD --oneline`
 - **Changed files:** `git diff $MERGE_BASE...HEAD --name-only`
 - **Changed file count:** `git diff $MERGE_BASE...HEAD --name-only | wc -l`
+- **Head SHA:** `git rev-parse HEAD`
 
 ### 4. Size The Review And Prefer Code-Review-Graph For Large Diffs
 
@@ -90,7 +93,11 @@ Use the changed-file count from step 3 as a cheap sizing gate before reading bro
 `code-review-graph` is the preferred context accelerator for large PRs. Use it to reduce token usage and avoid reading
 broad file contents before knowing which files, symbols, flows, and tests matter. If the changed file count is
 **greater than 10**, or the user explicitly asked for graph context, blast-radius analysis, token-efficient review, or
-graph tooling, read `code-review-graph.md` from this skill directory and follow its discovery/setup guidance.
+graph tooling, use the `$code-review-graph` skill when available. Its job is to produce compact graph context while
+routing customization through the repo's standards index and Zazz docs.
+
+If `$code-review-graph` is not installed in this repo, read `code-review-graph.md` from this skill directory as the
+fallback local workflow.
 
 If the changed file count is **10 or fewer** and the user did not ask for graph context, do not load the optional
 utility file. Record `Graph context: not requested - N changed files` in the preamble.
@@ -102,7 +109,7 @@ ordinary review on this optional utility unless the user specifically requested 
 
 Collect the inputs each sub-agent will need.
 
-**For the Standards axis:**
+**For the Standards / Code Quality axis:**
 
 1. Load the standards index from the resolved docs root (step 1).
 1. Match the changed file paths and activity to standards entries using the index's `applies_to` rules.
@@ -110,7 +117,7 @@ Collect the inputs each sub-agent will need.
 1. Note machine-enforced config files (eslint, prettier, tsconfig, editorconfig) — the sub-agent should not re-check
    what tooling already checks.
 
-**For the Spec axis**, search for the originating spec in this order:
+**For the Functionality / Spec axis**, search for the originating spec in this order:
 
 1. A deliverable specification or external specification record linked in the PR body or branch name.
 1. A specification file in `<DOCS_ROOT>/specifications/` (or `docs/specifications/` by convention) matching the branch
@@ -125,18 +132,18 @@ Collect the inputs each sub-agent will need.
 
 Classify the spec situation into one of three tiers:
 
-- **Tier 1 — Full spec**: a deliverable specification, PRD, or detailed issue with acceptance criteria exists. The Spec
-  sub-agent reviews against it with full methodology checks.
-- **Tier 2 — Lightweight spec**: only a PR description, brief issue, or user-stated intent exists. The Spec sub-agent
-  reviews against it but frames findings as lower-confidence.
-- **Tier 3 — No spec**: nothing found, and the user confirms there isn't one. The Spec sub-agent runs in reduced mode
-  or is skipped if there is literally no PR body and no issue context.
+- **Tier 1 — Full spec**: a deliverable specification, PRD, or detailed issue with acceptance criteria exists. The
+  Functionality / Spec sub-agent reviews against it with full methodology checks.
+- **Tier 2 — Lightweight spec**: only a PR description, brief issue, or user-stated intent exists. The Functionality /
+  Spec sub-agent reviews against it but frames findings as lower-confidence.
+- **Tier 3 — No spec**: nothing found, and the user confirms there isn't one. The Functionality / Spec sub-agent runs
+  in reduced mode or is skipped if there is literally no PR body and no issue context.
 
 If no spec source is found, ask the user: "I didn't find a spec, PRD, or linked issue. Is there one I should look at,
 or should I review against the PR description / your stated intent only?"
 
-If they say there isn't one and the PR description is too thin to review against, skip the Spec axis and note it as
-residual risk.
+If they say there isn't one and the PR description is too thin to review against, skip the Functionality / Spec axis
+and note it as residual risk.
 
 ### 7. Preamble Confirmation
 
@@ -148,9 +155,10 @@ single confirmation, not a multi-step interview:
 
 - **Target**: <branch/PR> against `<integration-branch>` (merge base: `<short-sha>`)
 - **Standards**: <N standards matched from `<docs-root>/standards/index.yaml`> [or "none found — running with general judgment"]
-- **Spec**: <tier> — <spec source description> [or "none found — Spec axis will be skipped"]
-- **Graph context**: <not requested/unavailable/declined/available/recommended> [brief risk/blast-radius summary if used]
+- **Spec**: <tier> — <spec source description> [or "none found — Functionality / Spec axis will be skipped"]
+- **Graph context**: <not requested/unavailable/declined/available/recommended> [brief risk/blast-radius, token budget, and scope summary if used]
 - **Changed files**: <N files> across <services/areas>
+- **Axes**: Standards/Code Quality, Functionality/Spec, Security/Data/Ops, Test Quality
 
 Proceed with review, or should I adjust anything?
 ```
@@ -164,84 +172,159 @@ repo has AGENTS.md with standards, and the PR body links a spec), the preamble m
 
 ### 8. Dispatch Sub-Agents
 
-Send a **single message with two `Agent` tool calls** so both axes run in parallel. Use `general-purpose` subagent type
-for both.
+Send a **single message with one `Agent` tool call per active axis** so axes run in parallel. Use `general-purpose`
+subagent type for each.
 
 Read the following files from this skill's directory:
 
-- `shared-rules.md` — both sub-agents receive this
-- `standards-axis.md` — Standards sub-agent only
-- `spec-axis.md` — Spec sub-agent only
+- `shared-rules.md` — every axis receives this
+- `findings-reporting.md` — every axis receives this and the aggregator applies it to the final artifact
+- `axis-artifacts.md` — every axis receives this and the aggregator uses it for intermediate packet files
+- `standards-axis.md` — Standards / Code Quality sub-agent only
+- `spec-axis.md` — Functionality / Spec sub-agent only
+- `security-axis.md` — Security / Data / Ops sub-agent only
+- `test-quality-axis.md` — Test Quality sub-agent only
 
-**Standards sub-agent prompt — include:**
+Before dispatch, follow `axis-artifacts.md` to create a fresh axis artifact directory and determine the expected packet
+paths. Pass the axis directory and axis-specific packet path to each active sub-agent. If sub-agents cannot write files,
+require them to return complete packet text so the orchestrator can write it verbatim before consolidation.
+
+**Standards / Code Quality sub-agent prompt — include:**
 
 - The pinned merge base, diff command, commit list, and changed-files list from step 3
 - The optional code-review-graph summary from step 4, if available, especially blast radius, impacted
   callers/dependents, and test signals
 - The list of matched standards files and their contents from step 5
 - The full text of `shared-rules.md`
+- The full text of `findings-reporting.md`
+- The full text of `axis-artifacts.md`
 - The full text of `standards-axis.md`
-- Instruction: "You are the Standards axis reviewer. Review the diff using the shared rules and the standards-axis
-  brief. Produce findings in the specified output format. Focus exclusively on standards conformance, code quality,
-  test value, agentic slop, and redundant computation. Do not assess specification compliance — the Spec axis handles
-  that independently."
+- Instruction: "You are the Standards / Code Quality axis reviewer. Review the diff using the shared rules, matched
+  standards, standards-axis brief, and findings reporting contract. Produce findings in the specified output format.
+  Focus on standards conformance, maintainability, architecture fit, agentic slop, and redundant computation. Do not
+  assess requirement satisfaction, security/data/ops risk, or test evidence quality except where a standards violation
+  requires local context. Write your axis packet to the assigned `01-standards-code-quality.md` path; if file writes are
+  unavailable, return the complete packet text."
 
-**Spec sub-agent prompt — include:**
+**Functionality / Spec sub-agent prompt — include:**
 
 - The pinned merge base, diff command, commit list, and changed-files list from step 3
 - The optional code-review-graph summary from step 4, if available, especially blast radius and affected flows that may
   change acceptance-criteria coverage
 - The spec contents or path from step 5, with the tier classification from step 6
 - The full text of `shared-rules.md`
+- The full text of `findings-reporting.md`
+- The full text of `axis-artifacts.md`
 - The full text of `spec-axis.md`
-- Instruction: "You are the Spec axis reviewer. Review the diff using the shared rules and the spec-axis brief. The
-  spec availability tier for this review is: [tier]. Produce findings in the specified output format. Focus exclusively
-  on specification compliance, scope drift, acceptance-criteria coverage, and methodology. Do not assess coding
-  standards or test quality patterns — the Standards axis handles that independently."
+- Instruction: "You are the Functionality / Spec axis reviewer. Review the diff using the shared rules and spec-axis
+  brief, plus the findings reporting contract. The spec availability tier for this review is: [tier]. Produce findings
+  in the specified output format. Focus on stated requirements, user-visible behavior, public contracts, scope drift,
+  and acceptance-criteria coverage. Do not assess coding style, security policy, or test quality patterns except where
+  needed to prove a functionality finding. Write your axis packet to the assigned `02-functionality-spec.md` path; if
+  file writes are unavailable, return the complete packet text."
 
-If the Spec axis is being skipped (tier 3 with no usable context), send only the Standards sub-agent and note the skip
-in the aggregation.
+**Security / Data / Ops sub-agent prompt — include:**
 
-### 9. Aggregate
+- The pinned merge base, diff command, commit list, and changed-files list from step 3
+- The optional code-review-graph summary from step 4, if available, especially affected flows, callers/dependents,
+  database objects, route/service boundaries, and shared infrastructure
+- The matched standards files related to auth/authz, data, migrations, errors, logging, observability, CI/deploy, and
+  operations
+- The full text of `shared-rules.md`
+- The full text of `findings-reporting.md`
+- The full text of `axis-artifacts.md`
+- The full text of `security-axis.md`
+- Instruction: "You are the Security / Data / Ops axis reviewer. Review the diff using the shared rules, matched
+  standards, security-axis brief, and findings reporting contract. Produce findings in the specified output format.
+  Focus on auth/authz, secrets, tenant boundaries, injection/path risks, persistence and migration safety, idempotency,
+  transactions, error handling, logging/metrics, and operational recovery. Do not assess general code style or
+  requirements coverage unless they create security/data/ops risk. Write your axis packet to the assigned
+  `03-security-data-ops.md` path; if file writes are unavailable, return the complete packet text."
 
-Present the two reports under separate headings. Do **not** merge or rerank findings across axes — the two axes are
-deliberately separate so the user sees them independently.
+**Test Quality sub-agent prompt — include:**
 
-#### Cross-Axis Overlap
+- The pinned merge base, diff command, commit list, changed-files list, and tests/static checks already run
+- The optional code-review-graph summary from step 4, if available, especially test gaps, affected flows, changed test
+  files, and impact radius
+- The matched testing standards and requirement evidence expectations
+- The full text of `shared-rules.md`
+- The full text of `findings-reporting.md`
+- The full text of `axis-artifacts.md`
+- The full text of `test-quality-axis.md`
+- Instruction: "You are the Test Quality axis reviewer. Review the diff using the shared rules, matched testing
+  standards, test-quality brief, and findings reporting contract. Produce findings in the specified output format.
+  Focus on whether tests and verification prove real behavior and risks, whether required evidence is missing, and
+  whether new tests are low-value, redundant, brittle, or mock-only. Do not re-review implementation style or spec
+  compliance except where missing evidence makes the risk concrete. Write your axis packet to the assigned
+  `04-test-quality.md` path; if file writes are unavailable, return the complete packet text."
 
-If both axes flag the same `file:line`, they are flagging it for different reasons (one for standards, one for spec
-compliance). This is a signal the issue is important, not a duplicate. Note the overlap: "Both axes flagged `file:line`
-— this may indicate a systemic issue worth prioritizing."
+If the Functionality / Spec axis is being skipped (tier 3 with no usable context), note the skip when aggregating that
+it had no usable requirement source. Security / Data / Ops and Test Quality still run when the diff touches their
+surfaces or when the user requested a comprehensive review.
 
-Do not deduplicate across axes. Do not merge findings from different axes into one block.
+Skipped axes still get packet files per `axis-artifacts.md`.
 
-#### Final Output Structure
 
-```markdown
-## Standards Review
+### 9. Run Focused Validator Passes
 
-[Standards sub-agent findings, verbatim or lightly cleaned]
+After the independent axes finish and before final aggregation, run a small set of focused validator passes whenever the
+changed-file set touches the relevant surfaces. These passes are narrower than the axis agents: they exist to catch
+cross-seam issues that one-agent-per-axis can miss.
 
-## Spec Review
+Use focused validators when their trigger matches:
 
-[Spec sub-agent findings, verbatim or lightly cleaned]
-[Or: "Skipped — no spec, PRD, or linked issue available. Residual risk: ..." ]
+- **Cross-Seam Contract Validator** - Trigger when the PR changes stored procedures, data-layer wrappers, generated
+  clients/schemas, OpenAPI docs, service functions, or tests at those seams. Verify the contract end to end: producer
+  shape, wrapper/schema shape, consumer behavior, and the test that would fail if they drifted.
+- **Service Evidence Matrix Validator** - Trigger when service-layer functions are added or changed. Build a table of
+  changed service function -> data wrapper/sproc or external dependency -> unit evidence -> integration evidence ->
+  public-boundary evidence. Compare the table to the matched testing standards.
+- **HTTP Contract Validator** - Trigger when HTTP route files, schemas, OpenAPI response docs, or HTTP tests change.
+  Compare actual returned/aborted statuses and detail envelopes to `@bp.doc(responses=...)` and route tests.
+- **Spec Reconciliation Validator** - Trigger when the review uses a PR body, issue, or spec as requirement evidence.
+  Compare the current requirement text to route docs, tests, and implemented behavior; classify contradictions
+  separately from intentional documented deviations.
 
-## Cross-Axis Overlap
+Each validator returns one short packet with: trigger, files inspected, findings, rejected candidates, and residual
+risk. Validators may be run by sub-agents or by the orchestrator, but their output must be read during aggregation. Do
+not let validator findings bypass source verification; every final finding still needs code, test, standard, or spec
+evidence.
 
-[Any file:line locations flagged by both axes, if applicable]
-[Omit this section if there is no overlap]
+### 10. Aggregate
 
-## Summary
+Assemble the final review as a file-first action document. Sub-agents may return axis-specific reports, but the final
+artifact groups detailed findings by source file and line so an author can address every issue in a file together and
+resolve merge conflicts locally. Do **not** hide which axis raised a finding — every finding keeps its axis label,
+severity tag, and proposed fix.
 
-- **Standards axis**: N findings (X boulders, Y rocks, Z pebbles, W sand)
-- **Spec axis**: N findings (X boulders, Y rocks, Z pebbles, W sand) [or "skipped — no spec"]
-- **Verdict**: [Approvable | Not approvable — N blocking findings remain]
-- **Residual risk**: [anything not checked, tests not run, spec gaps, standards gaps]
-```
+Before writing the final artifact, read every active or skipped axis packet file and every focused-validator packet from the axis artifact directory. If a
+sub-agent returned packet text instead of writing a file, write that text to the expected packet path first, then read it
+back for aggregation. The final artifact is consolidated from packet files and validator packets, not from memory.
 
-**Approval rule:** any open `[boulder]` or `[rock]` from *either* axis means the PR is **not approvable** until
-resolved. `[pebble]` and `[sand]` from either axis never block.
+Apply `findings-reporting.md` as the source of truth for final artifact structure, must-fix summary, detailed finding
+sections, systemic improvement opportunities, cross-axis overlap, axis coverage, verification, and summary.
+
+Apply `axis-artifacts.md` as the source of truth for intermediate packet file names, skipped-axis packet content, and
+consolidation notes. Record the axis artifact directory, packet file list, and focused validators run in the final artifact's `Verification`
+section.
+
+Use the exact final section order from `findings-reporting.md`:
+
+1. `Must-Fix Findings By File And Line`
+1. `Detailed Findings By File`
+1. `Systemic Improvement Opportunities` when applicable
+1. `Cross-Axis Overlap` when applicable
+1. `Consolidation Notes` when applicable
+1. `Axis Coverage`
+1. `Verification`
+1. `Summary`
+
+The final detailed findings are grouped by file path and sorted by line number. Each finding includes axis, severity,
+why it matters, and proposed fix. Any open `[boulder]`, `[rock]`, or `[big-pebble]` from any active axis means the PR is
+not approvable until resolved.
+
+If the consolidated final artifact has materially fewer actionable findings than the axis packets, add a short
+consolidation note explaining which findings were ruled out, merged, downgraded, or omitted and why.
 
 #### Targeted Tests And Static Checks
 

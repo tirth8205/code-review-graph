@@ -1,8 +1,13 @@
 # Code Review Graph For Zazz PR Review
 
-This guide explains how Zazz methodology users should use
+This fallback guide explains how Zazz methodology users should use
 [`code-review-graph`](https://github.com/tirth8205/code-review-graph) as optional graph
 context during `pr-review`.
+
+When the repo has `.agents/skills/code-review-graph/`, prefer the `$code-review-graph`
+skill instead of this file. The skill keeps graph usage standards-routed and records
+token-budget evidence. Use this file only as local fallback guidance for older repos that
+do not vendor that skill yet.
 
 ## Upstream Credit
 
@@ -33,7 +38,8 @@ reading broad file contents.
 
 Default Zazz behavior:
 
-- use the CLI for the first compact graph summary
+- use the repo-vendored `$code-review-graph` skill for the first compact graph summary
+- if that skill is unavailable, use the CLI fallback described below
 - optionally configure MCP for targeted follow-up questions
 - do not install upstream companion skills by default
 - do not install hooks by default
@@ -73,6 +79,31 @@ Risk and test-gap numbers can be misleading when a PR is large but cohesive, tou
 harnesses, changes generated files, or crosses API/event boundaries that static call
 graphs do not model.
 
+
+## Review-Process Improvement Targets
+
+PR219 exposed a useful split of responsibility between the PR-review skill and Code Review Graph:
+
+- the skill should orchestrate independent axes plus focused validators;
+- CRG should supply compact, repo-aware evidence that tells validators where to look;
+- neither should treat a graph score or a passing command as review truth without source verification.
+
+Useful CRG improvements for this workflow:
+
+- **Synthetic contract edges:** connect files that share a contract but not a normal import edge, such as SQL stored
+  procedures -> Python wrappers -> service functions -> HTTP routes -> tests.
+- **Policy-aware test gaps:** report not only "symbol has no test edge," but also repo-standard gaps such as
+  service-layer functions over real DB dependencies lacking happy-path DB integration evidence.
+- **Result-shape extraction:** for SQL/Python stacks, extract stored-procedure result columns and compare them with
+  wrapper row types and database tests when configured.
+- **HTTP contract extraction:** compare route status returns/aborts, OpenAPI response declarations, and tests asserting
+  those statuses and envelopes.
+- **Standards applicability projection:** include matched standards and triggered review checklists in review-context
+  output so focused validators start with the right policy surface.
+
+These signals should be advisory and explainable. A validator or reviewer must still confirm findings in code, tests,
+standards, and spec text before carrying them into the final artifact.
+
 ## Zazz Fork Plan
 
 The planned Zazz direction is a fork or wrapper that keeps the graph engine and context
@@ -85,8 +116,8 @@ The fork should optimize for Zazz review questions:
 - Which sensitive standards govern the changed paths?
 - How far does the change reach through callers, dependents, and cross-boundary contracts?
 - How many review tiers are crossed, and would a stack or split improve human review?
-- Do the Standards and Spec axes agree that risk is low, or did either axis find blocking
-  issues?
+- Do the Standards / Code Quality, Functionality / Spec, Security / Data / Ops, and
+  Test Quality axes agree that risk is low, or did any axis find blocking issues?
 
 Prefer explainable scoring over a single opaque number. A useful Zazz score should
 combine:
@@ -95,7 +126,7 @@ combine:
 - **External blast radius:** callers or dependents outside the theme increase risk.
 - **Standards sensitivity:** security, auth, migration, deployment, settings, logging,
   and data-boundary standards raise review sensitivity.
-- **Review findings:** open Standards or Spec boulders/rocks raise risk more than file
+- **Review findings:** open Standards or Spec boulders/rocks/big-pebbles raise risk more than file
   count does.
 - **Stack span:** multiple substantial tiers increase review complexity, but this is a
   split/stack advisory signal rather than a defect signal.
