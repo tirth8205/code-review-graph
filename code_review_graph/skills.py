@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import platform
-import shlex
 import shutil
 import stat
 import subprocess
@@ -84,8 +83,11 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        "config_path": lambda root: root / ".opencode.json",
-        "key": "mcpServers",
+        # OpenCode reads `opencode.json` (no leading dot) with a top-level
+        # `mcp` key; each entry uses the `local` server schema. See
+        # https://opencode.ai/docs/mcp-servers/
+        "config_path": lambda root: root / "opencode.json",
+        "key": "mcp",
         "detect": lambda: True,
         "format": "object",
         "needs_type": True,
@@ -235,14 +237,21 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
+    if key == "opencode":
+        # OpenCode's `local` server schema: a single `command` array
+        # (binary + args), `type: "local"`, and an `enabled` flag.
+        # See https://opencode.ai/docs/mcp-servers/
+        return {
+            "type": "local",
+            "command": [command, *args],
+            "enabled": True,
+        }
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
-    if key == "opencode":
-        entry["env"] = []
     return entry
 
 
@@ -450,7 +459,7 @@ def install_platform_configs(
 
 _SKILLS: dict[str, dict[str, str]] = {
     "explore-codebase.md": {
-        "name": "Explore Codebase",
+        "name": "explore-codebase",
         "description": "Navigate and understand codebase structure using the knowledge graph",
         "body": (
             "## Explore Codebase\n\n"
@@ -478,7 +487,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "review-changes.md": {
-        "name": "Review Changes",
+        "name": "review-changes",
         "description": "Perform a structured code review using change detection and impact",
         "body": (
             "## Review Changes\n\n"
@@ -506,7 +515,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "debug-issue.md": {
-        "name": "Debug Issue",
+        "name": "debug-issue",
         "description": "Systematically debug issues using graph-powered code navigation",
         "body": (
             "## Debug Issue\n\n"
@@ -532,7 +541,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "refactor-safely.md": {
-        "name": "Refactor Safely",
+        "name": "refactor-safely",
         "description": "Plan and execute safe refactoring using dependency analysis",
         "body": (
             "## Refactor Safely\n\n"
@@ -604,25 +613,44 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
+
+    The generated commands are path-independent: they resolve the
+    ``code-review-graph`` binary from the project's ``.venv`` first (falling
+    back to ``PATH``) and exit silently when it is absent, mirroring the
+    ``command -v`` guard used by ``install_git_hook``. This avoids the noisy
+    "command not found" stderr that Claude Code surfaces as a hook error when
+    the binary is not installed (issue #549). No absolute ``--repo`` path is
+    baked in so the committed ``.claude/settings.json`` is machine-independent
+    (issue #558); the CLI auto-detects the repo root from the working
+    directory and the ``git rev-parse`` guard ensures the hook only runs
+    inside a git repository.
     """
-    # Shell-quote the path for the hook command.  json.dumps() escapes
-    # non-ASCII to \uXXXX, which the shell passes verbatim — a CJK repo path
-    # then became a literal "基..." directory (#497).  shlex.quote keeps
-    # the UTF-8 bytes intact and is safe for spaces/quotes/$ etc.
-    repo_arg = shlex.quote(repo_root.resolve().as_posix())
+    # Resolve a venv binary first, then fall back to PATH; exit silently when
+    # neither is available so the hook never emits "command not found" noise
+    # (#549).  No absolute ``--repo`` path is embedded — the CLI auto-detects
+    # the repo root from the working directory — so the committed
+    # settings.json stays machine-independent (#558) and a non-ASCII repo path
+    # can no longer be mangled into the hook command (#497).
+    resolve = (
+        'CRG="$CLAUDE_PROJECT_DIR/.venv/bin/code-review-graph"; '
+        'command -v "$CRG" >/dev/null 2>&1 || CRG=code-review-graph; '
+        'command -v "$CRG" >/dev/null 2>&1 || exit 0; '
+    )
     return {
         "hooks": {
+            # Narrowed to Edit|Write so the hook does not fire on every Bash
+            # shell command (issue #549).
             "PostToolUse": [
                 {
-                    "matcher": "Edit|Write|Bash",
+                    "matcher": "Edit|Write",
                     "hooks": [
                         {
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph update --skip-flows"
-                                f" --repo {repo_arg}"
+                                + resolve
+                                + "git rev-parse --git-dir >/dev/null 2>&1"
+                                ' && "$CRG" update --skip-flows'
                                 " || true"
                             ),
                             "timeout": 30,
@@ -638,8 +666,9 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph status --repo {repo_arg}"
+                                + resolve
+                                + "git rev-parse --git-dir >/dev/null 2>&1"
+                                ' && "$CRG" status'
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "timeout": 10,
@@ -804,8 +833,7 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
         if isinstance(merged_hooks.get(hook_name), list):
             merged_list = list(merged_hooks[hook_name])
             for entry in hook_entries:
-                if entry not in merged_list:
-                    merged_list.append(entry)
+                _merge_hook_entry_by_command(merged_list, entry)
             merged_hooks[hook_name] = merged_list
         else:
             merged_hooks[hook_name] = hook_entries
@@ -814,6 +842,38 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
 
     settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     logger.info("Wrote hooks config: %s", settings_path)
+
+
+def _entry_crg_commands(entry: Any) -> list[str]:
+    """Return the code-review-graph commands nested in a hook entry."""
+    if not isinstance(entry, dict):
+        return []
+    return [
+        hook.get("command", "")
+        for hook in entry.get("hooks", [])
+        if isinstance(hook, dict) and "code-review-graph" in hook.get("command", "")
+    ]
+
+
+def _merge_hook_entry_by_command(merged_list: list[Any], entry: dict[str, Any]) -> None:
+    """Insert or replace a code-review-graph hook entry by command identity.
+
+    Exact dict equality lets a single changed field (e.g. a different
+    ``--repo`` path or matcher) accumulate a duplicate entry on every
+    re-install. Instead, identify any existing entry that owns a
+    ``code-review-graph`` command and replace it in place; otherwise append
+    (issue #558).
+    """
+    entry_commands = _entry_crg_commands(entry)
+    if not entry_commands:
+        if entry not in merged_list:
+            merged_list.append(entry)
+        return
+    for idx, existing_entry in enumerate(merged_list):
+        if _entry_crg_commands(existing_entry):
+            merged_list[idx] = entry
+            return
+    merged_list.append(entry)
 
 
 def install_codex_hooks(repo_root: Path) -> Path:

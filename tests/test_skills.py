@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import stat
 import sys
@@ -108,6 +109,24 @@ class TestGenerateSkills:
         skills_dir = tmp_path / ".claude" / "skills"
         assert len(list(skills_dir.iterdir())) == 4
 
+    def test_frontmatter_name_is_lowercase_hyphen_slug(self, tmp_path):
+        """Each skill's frontmatter `name:` must be the kebab slug matching its
+        directory (lowercase letters, digits, hyphens) — not Title Case (#561).
+        """
+        slug_re = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+        skills_dir = generate_skills(tmp_path)
+        for subdir in skills_dir.iterdir():
+            content = (subdir / "skill.md").read_text()
+            name_line = next(
+                line for line in content.splitlines() if line.startswith("name:")
+            )
+            name = name_line.split(":", 1)[1].strip()
+            assert slug_re.match(name), (
+                f"{subdir.name}: frontmatter name {name!r} is not a kebab slug"
+            )
+            # The frontmatter name must match the directory slug exactly.
+            assert name == subdir.name
+
 
 class TestGenerateHooksConfig:
     def test_returns_dict_with_hooks(self):
@@ -118,7 +137,9 @@ class TestGenerateHooksConfig:
         config = generate_hooks_config(Path("/repo"))
         assert "PostToolUse" in config["hooks"]
         entry = config["hooks"]["PostToolUse"][0]
-        assert entry["matcher"] == "Edit|Write|Bash"
+        # Matcher must NOT fire on every Bash command (issue #549).
+        assert entry["matcher"] == "Edit|Write"
+        assert "Bash" not in entry["matcher"]
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
@@ -136,6 +157,24 @@ class TestGenerateHooksConfig:
         assert inner["command"].startswith("cat >/dev/null || true; ")
         assert 0 < inner["timeout"] <= 600
 
+    def test_commands_guard_against_missing_binary(self):
+        """Each generated hook must resolve+guard the binary and exit silently
+        when it is absent, mirroring install_git_hook (issue #549)."""
+        config = generate_hooks_config(Path("/repo"))
+        post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        for cmd in (post_cmd, session_cmd):
+            assert "command -v" in cmd, "hook must guard the binary with command -v"
+            assert "exit 0" in cmd, "hook must exit silently when the binary is absent"
+
+    def test_post_tool_use_matcher_excludes_bash(self):
+        """The PostToolUse matcher must not include Bash so the hook does not
+        fire on every shell command (issue #549)."""
+        config = generate_hooks_config(Path("/repo"))
+        matcher = config["hooks"]["PostToolUse"][0]["matcher"]
+        assert "Bash" not in matcher
+        assert matcher == "Edit|Write"
+
     def test_does_not_emit_invalid_pre_commit_hook(self):
         config = generate_hooks_config(Path("/repo"))
         assert "PreCommit" not in config["hooks"]
@@ -152,28 +191,34 @@ class TestGenerateHooksConfig:
                 assert "hooks" in entry, f"{hook_type} entry missing 'hooks' array"
                 assert "command" not in entry, f"{hook_type} has bare 'command' outside hooks[]"
 
-    def test_repo_root_embedded_in_commands(self):
+    def test_commands_do_not_bake_absolute_repo_path(self):
+        """The shared .claude/settings.json must be machine-independent: no
+        absolute --repo path may be interpolated into hook commands (#558).
+
+        The CLI auto-detects the repo root from the working directory and the
+        `git rev-parse` guard ensures the hook only runs inside a git repo.
+        """
         config = generate_hooks_config(Path("/my/project"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "/my/project" in post_cmd
-        assert "/my/project" in session_cmd
+        assert "/my/project" not in post_cmd
+        assert "/my/project" not in session_cmd
 
-    def test_quotes_repo_paths_with_spaces(self):
+    def test_commands_do_not_pin_a_specific_repo_path_with_spaces(self):
+        """Even a path with spaces must not leak into the committed command."""
         config = generate_hooks_config(Path("/repo with spaces"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        # Path is shell-quoted (shlex) so the space stays inside one token.
-        assert "'/repo with spaces'" in post_cmd
+        session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "/repo with spaces" not in post_cmd
+        assert "/repo with spaces" not in session_cmd
 
-    def test_nonascii_repo_path_embedded_literally(self):
-        """#497: a non-ASCII repo path must appear as literal UTF-8 in the
-        hook command, not as JSON ``\\uXXXX`` escapes.  ``json.dumps`` (with
-        the default ``ensure_ascii=True``) turned the path into backslash-u
-        sequences which the shell passed verbatim, creating a corrupted
-        nested directory tree (e.g. ``u57fa/...``)."""
+    def test_nonascii_repo_path_not_embedded(self):
+        """#497/#558: a non-ASCII repo path must not be embedded in the hook
+        command at all (the CLI auto-detects the repo root), so it can never be
+        mangled into a corrupted nested directory tree (e.g. ``u57fa/...``)."""
         config = generate_hooks_config(Path("/repo/基项目"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        assert "基项目" in post_cmd
+        assert "基项目" not in post_cmd
         assert "\\u" not in post_cmd
 
     def test_entries_use_claude_code_hook_schema(self):
@@ -403,6 +448,71 @@ class TestInstallHooks:
     def test_creates_claude_directory(self, tmp_path):
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
+
+    def test_reinstall_is_idempotent_by_command_identity(self, tmp_path):
+        """Re-installing must not accumulate duplicate code-review-graph hook
+        entries, even if the generated command text changes (#558)."""
+        install_hooks(tmp_path)
+        install_hooks(tmp_path)
+        settings_path = tmp_path / ".claude" / "settings.json"
+        data = json.loads(settings_path.read_text())
+        for event in ("PostToolUse", "SessionStart"):
+            entries = data["hooks"][event]
+            crg_entries = [
+                entry
+                for entry in entries
+                if any(
+                    "code-review-graph" in hook.get("command", "")
+                    for hook in entry.get("hooks", [])
+                )
+            ]
+            assert len(crg_entries) == 1, (
+                f"{event} has {len(crg_entries)} code-review-graph entries "
+                "after re-install; expected exactly 1"
+            )
+
+    def test_reinstall_replaces_stale_entry(self, tmp_path):
+        """A pre-existing code-review-graph entry with an old (e.g. absolute
+        --repo) command is replaced in place, not duplicated (#558)."""
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir(parents=True)
+        stale = {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "matcher": "Edit|Write|Bash",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": (
+                                    "code-review-graph update --skip-flows "
+                                    "--repo /old/machine/path"
+                                ),
+                                "timeout": 30,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        (settings_dir / "settings.json").write_text(json.dumps(stale))
+
+        install_hooks(tmp_path)
+
+        data = json.loads((settings_dir / "settings.json").read_text())
+        post = data["hooks"]["PostToolUse"]
+        crg_entries = [
+            entry
+            for entry in post
+            if any(
+                "code-review-graph" in hook.get("command", "")
+                for hook in entry.get("hooks", [])
+            )
+        ]
+        assert len(crg_entries) == 1
+        # The stale absolute path must be gone.
+        joined = json.dumps(data)
+        assert "/old/machine/path" not in joined
 
 
 class TestGenerateCodexHooksConfig:
@@ -805,13 +915,42 @@ class TestInstallPlatformConfigs:
         assert data["mcpServers"][0]["type"] == "stdio"
 
     def test_install_opencode_config(self, tmp_path):
+        """OpenCode writes opencode.json (no dot) with a top-level `mcp` key
+        and the `local` server schema (#550).
+
+        See https://opencode.ai/docs/mcp-servers/ — entries are
+        {"type": "local", "command": [bin, ...args], "enabled": true}.
+        """
         configured = install_platform_configs(tmp_path, target="opencode")
         assert "OpenCode" in configured
-        config_path = tmp_path / ".opencode.json"
+        # Correct filename: opencode.json (no leading dot).
+        config_path = tmp_path / "opencode.json"
+        assert config_path.exists()
+        assert not (tmp_path / ".opencode.json").exists()
         data = json.loads(config_path.read_text())
-        entry = data["mcpServers"]["code-review-graph"]
-        assert entry["type"] == "stdio"
-        assert entry["env"] == []
+        # Top-level key is `mcp`, not `mcpServers`.
+        assert "mcp" in data
+        assert "mcpServers" not in data
+        entry = data["mcp"]["code-review-graph"]
+        assert entry["type"] == "local"
+        assert entry["enabled"] is True
+        # command is a single array (binary + args), ending in `serve`.
+        assert isinstance(entry["command"], list)
+        assert entry["command"][-1] == "serve"
+        assert "args" not in entry
+        assert "env" not in entry
+
+    def test_install_opencode_preserves_existing_servers(self, tmp_path):
+        """Existing `mcp` entries are preserved when adding code-review-graph."""
+        config_path = tmp_path / "opencode.json"
+        config_path.write_text(
+            json.dumps({"mcp": {"other": {"type": "local", "command": ["other"]}}}),
+            encoding="utf-8",
+        )
+        install_platform_configs(tmp_path, target="opencode")
+        data = json.loads(config_path.read_text())
+        assert "other" in data["mcp"]
+        assert "code-review-graph" in data["mcp"]
 
     def test_install_gemini_cli_config(self, tmp_path):
         gemini_config = tmp_path / ".gemini" / "settings.json"
@@ -902,7 +1041,7 @@ class TestInstallPlatformConfigs:
         assert "OpenCode" in configured
         assert codex_config.exists()
         assert (tmp_path / ".mcp.json").exists()
-        assert (tmp_path / ".opencode.json").exists()
+        assert (tmp_path / "opencode.json").exists()
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""
