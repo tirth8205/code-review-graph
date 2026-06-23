@@ -406,6 +406,135 @@ class TestGraphStore:
         conn.close()
 
 
+class TestScopedCallResolution:
+    """Regression tests for #567: cross-file ``Class::method`` CALLS resolution.
+
+    The parser emits unresolved scoped CALLS edges (PHP ``Foo::bar``, Rust
+    ``Foo::bar``) whose target is ``<BareClass>::<method>``.  These must be
+    rewritten to the real node's qualified name so callers_of / impact-radius /
+    tests_for see the caller cross-file.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _build_scoped_graph(self):
+        """caller() in /a.php calls Foo::bar(), defined as Foo.bar in /b.php."""
+        # Defining file + class + method
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/b.php", file_path="/b.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="Foo", file_path="/b.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="bar", file_path="/b.php",
+            line_start=5, line_end=20, language="php", parent_name="Foo",
+        ))
+        # Calling file + caller function
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/a.php", file_path="/a.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="caller", file_path="/a.php",
+            line_start=5, line_end=20, language="php",
+        ))
+        # Dangling scoped CALLS edge: target is bare ``Foo::bar``.
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/a.php::caller",
+            target="Foo::bar", file_path="/a.php", line=10,
+        ))
+        self.store.commit()
+
+    def test_resolve_scoped_call_rewrites_target(self):
+        self._build_scoped_graph()
+        target_qn = "/b.php::Foo.bar"
+        # Precondition: the edge is dangling (does not point at the real node).
+        assert self.store.get_edges_by_target(target_qn) == []
+
+        resolved = self.store.resolve_scoped_call_targets()
+        assert resolved == 1
+
+        edges = self.store.get_edges_by_target(target_qn)
+        assert len(edges) == 1
+        assert edges[0].source_qualified == "/a.php::caller"
+        assert edges[0].target_qualified == target_qn
+
+    def test_resolve_scoped_call_enables_callers_of(self):
+        self._build_scoped_graph()
+        self.store.resolve_scoped_call_targets()
+
+        # callers_of-style lookup: edges targeting the real node.
+        callers = {
+            e.source_qualified
+            for e in self.store.get_edges_by_target("/b.php::Foo.bar")
+            if e.kind == "CALLS"
+        }
+        assert callers == {"/a.php::caller"}
+
+    def test_search_edges_by_target_name_scoped_fallback(self):
+        """search_edges_by_target_name must find a dangling ``Class::method``
+        edge via a class+method-aware fallback when the bare lookup misses.
+        """
+        self._build_scoped_graph()
+        # Bare-name lookup on "bar" misses the stored "Foo::bar" target.
+        edges = self.store.search_edges_by_target_name("bar", kind="CALLS")
+        assert len(edges) == 1
+        assert edges[0].source_qualified == "/a.php::caller"
+        assert edges[0].target_qualified == "Foo::bar"
+
+    def test_resolve_scoped_call_ignores_ambiguous_method(self):
+        """If two classes both define the method, do not resolve (no parent
+        match would be unique only if class names differ).
+        """
+        self._build_scoped_graph()
+        # A different file also defines Foo.bar -> ambiguous class match.
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/c.php", file_path="/c.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="Foo", file_path="/c.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="bar", file_path="/c.php",
+            line_start=5, line_end=20, language="php", parent_name="Foo",
+        ))
+        self.store.commit()
+
+        resolved = self.store.resolve_scoped_call_targets()
+        # Ambiguous: two Foo.bar candidates -> leave the edge untouched.
+        assert resolved == 0
+        edges = self.store.get_edges_by_source("/a.php::caller")
+        assert edges[0].target_qualified == "Foo::bar"
+
+    def test_resolve_scoped_call_leaves_dotted_targets_untouched(self):
+        """Already-resolved qualified targets (with a dot) are not rewritten."""
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/x.php", file_path="/x.php",
+            line_start=1, line_end=50, language="php",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="g", file_path="/x.php",
+            line_start=5, line_end=20, language="php",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/x.php::g",
+            target="/x.php::g", file_path="/x.php", line=10,
+        ))
+        self.store.commit()
+        assert self.store.resolve_scoped_call_targets() == 0
+
+
 class TestImpactRadiusSql:
     """Tests for get_impact_radius_sql vs NetworkX BFS."""
 

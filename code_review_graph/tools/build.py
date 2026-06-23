@@ -69,6 +69,20 @@ def _run_postprocess(
         logger.warning("FTS index rebuild failed: %s", e)
         warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
 
+    # -- Resolve dangling scoped ``Class::method`` CALLS targets (PHP/Rust) --
+    # The parser emits cross-file static calls as ``<BareClass>::<method>`` and
+    # cannot resolve them within a single file; rewrite them to the qualified
+    # method node now that the whole graph is stored, so impact-radius and the
+    # pre-computed summaries (which read stored edges) see the real callers and
+    # not a dangling target (#567). Narrow and idempotent: it only touches the
+    # un-dotted ``::`` form and only unambiguous single-candidate matches.
+    try:
+        resolved = store.resolve_scoped_call_targets()
+        build_result["scoped_calls_resolved"] = resolved
+    except sqlite3.OperationalError as e:
+        logger.warning("Scoped call resolution failed: %s", e)
+        warnings.append(f"Scoped call resolution failed: {type(e).__name__}: {e}")
+
     if postprocess == "minimal":
         return warnings
 
