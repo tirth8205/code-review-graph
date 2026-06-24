@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import platform
-import re
 import shutil
 import stat
 import sys
@@ -289,6 +288,83 @@ def _merge_toml_mcp_server(
     return True
 
 
+def _strip_jsonc(text: str) -> str:
+    """Strip JSONC comments and trailing commas without corrupting string values.
+
+    Editors like Zed accept non-standard JSON (``//`` and ``/* */`` comments,
+    trailing commas). To merge such a config we must reduce it to strict JSON
+    first. A naive regex pass cannot tell structure from data: it would delete a
+    comma inside ``"foo, bar"`` or truncate a ``"https://..."`` URL at the
+    ``//``. This walks the text character by character, tracking whether we are
+    inside a double-quoted string (respecting ``\\`` escapes), and only removes
+    comments and trailing commas that appear in structural position. Content
+    inside string values is preserved verbatim. (GH #553)
+    """
+
+    def _skip_comment(s: str, idx: int) -> int | None:
+        """If a comment starts at ``idx``, return the index just past it."""
+        if s[idx] != "/" or idx + 1 >= len(s):
+            return None
+        nxt = s[idx + 1]
+        if nxt == "/":
+            idx += 2
+            while idx < len(s) and s[idx] != "\n":
+                idx += 1
+            return idx
+        if nxt == "*":
+            idx += 2
+            while idx + 1 < len(s) and not (s[idx] == "*" and s[idx + 1] == "/"):
+                idx += 1
+            return idx + 2  # consume the closing */ (or run off the end if unterminated)
+        return None
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])  # escaped char is data, never a delimiter
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        # Outside a string.
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        past = _skip_comment(text, i)
+        if past is not None:
+            i = past
+            continue
+        if ch == ",":
+            # Trailing comma if the next significant char (skipping whitespace
+            # and comments) closes an object or array.
+            j = i + 1
+            while j < n:
+                if text[j] in " \t\r\n":
+                    j += 1
+                    continue
+                past = _skip_comment(text, j)
+                if past is not None:
+                    j = past
+                    continue
+                break
+            if j < n and text[j] in "}]":
+                i += 1  # drop the trailing comma
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -344,10 +420,9 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             raw = config_path.read_text(encoding="utf-8", errors="replace")
-            # Strip single-line comments and trailing commas (JSONC compat
-            # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
-            stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
+            # Strip comments and trailing commas (JSONC compat for editors like
+            # Zed that allow non-standard JSON) without corrupting string values.
+            stripped = _strip_jsonc(raw)
             try:
                 existing = json.loads(stripped)
             except (json.JSONDecodeError, OSError):

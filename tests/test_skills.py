@@ -18,6 +18,7 @@ from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
     _cursor_hook_scripts,
+    _strip_jsonc,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
@@ -41,6 +42,71 @@ from code_review_graph.skills import (
 _needs_tomllib = pytest.mark.skipif(
     tomllib is None, reason="tomllib requires Python 3.11+",
 )
+
+
+class TestStripJsonc:
+    """JSONC sanitizer must not corrupt string values (GH #553)."""
+
+    def test_comma_inside_string_preserved(self):
+        # The original #553 repro: a comma inside a string, immediately before a
+        # line whose first non-space char is `}`. A naive regex deleted it.
+        src = (
+            '{\n'
+            '  "mcp": {\n'
+            '    "my-server": {\n'
+            '      "command": ["x"],\n'
+            '      "description": "foo, bar"\n'
+            '    }\n'
+            '  }\n'
+            '}\n'
+        )
+        parsed = json.loads(_strip_jsonc(src))
+        assert parsed["mcp"]["my-server"]["description"] == "foo, bar"
+
+    def test_url_with_double_slash_preserved(self):
+        # The `//` comment stripper must not truncate `https://...` inside a string.
+        src = '{"url": "https://mcp.example.com/path", "n": 1}'
+        parsed = json.loads(_strip_jsonc(src))
+        assert parsed["url"] == "https://mcp.example.com/path"
+        assert parsed["n"] == 1
+
+    def test_real_trailing_comma_before_brace_removed(self):
+        src = '{"a": 1, "b": 2,}'
+        assert json.loads(_strip_jsonc(src)) == {"a": 1, "b": 2}
+
+    def test_real_trailing_comma_before_bracket_removed(self):
+        src = '{"list": [1, 2, 3,]}'
+        assert json.loads(_strip_jsonc(src)) == {"list": [1, 2, 3]}
+
+    def test_line_comment_removed(self):
+        src = '{\n  "a": 1 // inline comment\n}'
+        assert json.loads(_strip_jsonc(src)) == {"a": 1}
+
+    def test_block_comment_removed(self):
+        src = '{\n  /* leading */ "a": 1\n}'
+        assert json.loads(_strip_jsonc(src)) == {"a": 1}
+
+    def test_comment_markers_inside_string_preserved(self):
+        src = '{"a": "x // y", "b": "p /* q */ r"}'
+        parsed = json.loads(_strip_jsonc(src))
+        assert parsed["a"] == "x // y"
+        assert parsed["b"] == "p /* q */ r"
+
+    def test_escaped_quote_does_not_break_string_tracking(self):
+        # The escaped quote must not end the string early; the comma after it is
+        # data, and the `}` that follows is structural.
+        src = '{"a": "he said \\"hi, there\\"", "b": 2,}'
+        parsed = json.loads(_strip_jsonc(src))
+        assert parsed["a"] == 'he said "hi, there"'
+        assert parsed["b"] == 2
+
+    def test_trailing_comma_then_comment_then_close(self):
+        src = '{\n  "a": 1, // trailing then comment\n}'
+        assert json.loads(_strip_jsonc(src)) == {"a": 1}
+
+    def test_strict_json_unchanged(self):
+        src = '{"a": [1, 2], "b": {"c": "d, e"}}'
+        assert json.loads(_strip_jsonc(src)) == json.loads(src)
 
 
 class TestGenerateSkills:
