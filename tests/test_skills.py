@@ -460,6 +460,7 @@ class TestInjectPlatformInstructionsFiltering:
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
+            "CODEBUDDY.md",
         }
 
     def test_default_is_all(self, tmp_path):
@@ -468,6 +469,7 @@ class TestInjectPlatformInstructionsFiltering:
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
+            "CODEBUDDY.md",
         }
 
     def test_claude_writes_nothing(self, tmp_path):
@@ -514,6 +516,29 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / "GEMINI.md").exists()
         assert not (tmp_path / ".cursorrules").exists()
         assert not (tmp_path / ".windsurfrules").exists()
+
+    def test_codebuddy_writes_only_codebuddy_md(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="codebuddy")
+        assert updated == ["CODEBUDDY.md"]
+        assert (tmp_path / "CODEBUDDY.md").exists()
+        # 不污染其它平台文件
+        assert not (tmp_path / "AGENTS.md").exists()
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+    def test_codebuddy_instruction_uses_shared_marker(self, tmp_path):
+        inject_platform_instructions(tmp_path, target="codebuddy")
+        content = (tmp_path / "CODEBUDDY.md").read_text()
+        assert _CLAUDE_MD_SECTION_MARKER in content
+        assert "get_minimal_context" in content or "detect_changes" in content
+
+    def test_codebuddy_instruction_idempotent(self, tmp_path):
+        first = inject_platform_instructions(tmp_path, target="codebuddy")
+        second = inject_platform_instructions(tmp_path, target="codebuddy")
+        assert first == ["CODEBUDDY.md"]
+        assert second == []
+        content = (tmp_path / "CODEBUDDY.md").read_text()
+        assert content.count(_CLAUDE_MD_SECTION_MARKER) == 1
 
 
 class TestCodeBuddyPlatformEntry:

@@ -933,6 +933,7 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
     ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
+    "CODEBUDDY.md": ("codebuddy",),
 }
 
 
