@@ -5089,6 +5089,47 @@ class CodeParser:
                 line=child.start_point[0] + 1,
             ))
 
+    @staticmethod
+    def _is_in_static_dead_guard(node) -> bool:
+        """Walk ancestors to detect statically-dead guards.
+
+        Returns True when ``node`` sits inside an ``if_statement`` whose
+        condition is ``False`` (the literal) or ``TYPE_CHECKING`` (the
+        ``typing`` sentinel).  This covers the two most common Python
+        idioms for compile-time-only code:
+
+            if False:
+                ...
+            if TYPE_CHECKING:
+                ...
+
+        The walk stops at function/class/module boundaries so a dead
+        guard in an outer scope does not leak into nested definitions.
+        """
+        cursor = node.parent
+        while cursor is not None:
+            ntype = cursor.type
+            # Stop at scope boundaries -- a dead guard in an outer
+            # function does not make an inner function's calls dead.
+            if ntype in (
+                "function_definition", "class_definition", "module",
+            ):
+                break
+            if ntype == "if_statement":
+                cond = cursor.child_by_field_name("condition")
+                if cond is not None:
+                    # ``if False:``
+                    if cond.type == "false":
+                        return True
+                    # ``if TYPE_CHECKING:``
+                    if (
+                        cond.type == "identifier"
+                        and cond.text == b"TYPE_CHECKING"
+                    ):
+                        return True
+            cursor = cursor.parent
+        return False
+
     def _extract_calls(
         self,
         child,
@@ -5221,6 +5262,12 @@ class CodeParser:
                     call_name, file_path, language,
                     import_map or {}, defined_names or set(),
                 )
+            # Tag calls inside statically-dead guards (if False: /
+            # if TYPE_CHECKING:) so downstream consumers can filter
+            # them out.  Live edges omit the key (absent = live).
+            if self._is_in_static_dead_guard(child):
+                call_extra["reachable"] = False
+
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=caller,

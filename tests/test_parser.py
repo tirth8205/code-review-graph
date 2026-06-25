@@ -1149,6 +1149,30 @@ class TestCodeParser:
         assert "test_something" in test_names
         assert "helper" not in test_names
 
+    def test_dead_guard_reachable_flag(self):
+        """CALLS edges inside ``if False:`` / ``if TYPE_CHECKING:`` are
+        tagged with ``extra["reachable"] == False``; live calls omit the
+        key entirely.  See: #576."""
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.py",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        live = [e for e in calls if "live_helper" in e.target]
+        dead_false = [e for e in calls if "dead_false_call" in e.target]
+        dead_tc = [e for e in calls if "dead_tc_call" in e.target]
+
+        # Control: live call has no reachable key
+        assert len(live) == 1
+        assert "reachable" not in live[0].extra
+
+        # Dead calls carry the flag
+        assert len(dead_false) == 1
+        assert dead_false[0].extra.get("reachable") is False
+
+        assert len(dead_tc) == 1
+        assert dead_tc[0].extra.get("reachable") is False
+
 
 class TestValueReferences:
     """Tests for REFERENCES edge extraction from function-as-value patterns."""
