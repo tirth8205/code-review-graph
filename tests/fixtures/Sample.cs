@@ -45,4 +45,25 @@ namespace SampleApp
             return _repo.FindById(id);
         }
     }
+
+    // Inheritance coverage for INHERITS edges (base_list clause).
+    // Extends a base class AND implements an interface (both bare identifiers).
+    public class CachedRepo : InMemoryRepo, IRepository
+    {
+        public new User FindById(int id)
+        {
+            return base.FindById(id);
+        }
+    }
+
+    // Qualified base type name (qualified_name node).
+    public class DisposableService : System.IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    // Generic base type name (generic_name node).
+    public class UserList : List<User>
+    {
+    }
 }

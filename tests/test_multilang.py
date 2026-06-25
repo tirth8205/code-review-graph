@@ -389,6 +389,36 @@ class TestCSharpParsing:
         names = {f.name for f in funcs}
         assert "FindById" in names or "Save" in names
 
+    def test_finds_inheritance(self):
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        # InMemoryRepo : IRepository, CachedRepo : InMemoryRepo, IRepository
+        assert len(inherits) >= 3
+        targets = {e.target for e in inherits}
+        assert "IRepository" in targets
+        assert "InMemoryRepo" in targets
+
+    def test_inheritance_target_is_bare_name(self):
+        """INHERITS target must be the bare type name, not ': Foo' or 'Foo, Bar'.
+
+        tree-sitter-csharp wraps the `: Base, IFace` clause in a base_list
+        node whose .text includes the colon and commas. Without the
+        csharp-specific branch in _get_bases the whole clause is stored as
+        the edge target, so inheritors_of / get_impact_radius miss .cs files.
+        Qualified (System.IDisposable) and generic (List<User>) base names
+        must be preserved.
+        """
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        targets = {e.target for e in inherits}
+        assert "System.IDisposable" in targets  # qualified_name preserved
+        assert "List<User>" in targets  # generic_name preserved
+        for e in inherits:
+            assert not e.target.startswith(":"), (
+                f"INHERITS target should be a bare type name, got: {e.target!r}"
+            )
+            assert "," not in e.target, (
+                f"INHERITS target should be a single type, got: {e.target!r}"
+            )
+
 
 class TestRubyParsing:
     def setup_method(self):

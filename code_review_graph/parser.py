@@ -6085,7 +6085,25 @@ class CodeParser:
                             for ident in sub.children:
                                 if ident.type in ("type_identifier", "generic_type"):
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
-        elif language in ("csharp", "kotlin"):
+        elif language == "csharp":
+            # C#: class_declaration carries a `base_list` child wrapping the
+            # `: Base, IFace, ...` clause. Its `.text` includes the leading
+            # colon and commas, so drill into the named base-type children
+            # (identifier / qualified_name / generic_name) for bare names.
+            # Without this, the shared handler below looked for
+            # superclass/super_interfaces nodes the C# grammar never emits,
+            # so C# classes produced zero INHERITS edges and inheritors_of /
+            # get_impact_radius returned empty for .cs files.
+            for child in node.children:
+                if child.type == "base_list":
+                    for sub in child.children:
+                        if sub.type in (
+                            "identifier", "qualified_name", "generic_name",
+                        ):
+                            bases.append(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
+        elif language == "kotlin":
             # Look for superclass/interfaces in extends/implements clauses
             for child in node.children:
                 if child.type in (
