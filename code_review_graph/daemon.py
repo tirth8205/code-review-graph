@@ -164,22 +164,57 @@ def load_config(path: Path | None = None) -> DaemonConfig:
 # ---------------------------------------------------------------------------
 
 
+def _toml_escape_string(value: str) -> str:
+    """Escape *value* so it can be embedded in a TOML basic (double-quoted) string.
+
+    TOML basic strings interpret backslash as the start of an escape sequence,
+    so a raw Windows path like ``C:\\Users\\jimmy`` would otherwise be written
+    verbatim and later misread: ``\\U`` is parsed as an 8-hex-digit Unicode
+    escape (``\\u`` is the 4-digit form), ``\\n``/``\\t`` as control chars, etc.
+    Backslash and double-quote must therefore be doubled; the remaining control
+    characters are emitted with their standard TOML escapes.
+
+    Note: ``str.translate`` cannot map a single character to a multi-character
+    string (such mappings are silently ignored), so replacements are done
+    explicitly with ``str.replace``.
+    """
+    # Backslash first: every replacement below adds backslashes, so doubling
+    # them up front prevents double-escaping of our own inserted backslashes.
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    # Emit control characters with their standard TOML escapes.
+    control_escapes = {
+        "\b": "\\b",
+        "\t": "\\t",
+        "\n": "\\n",
+        "\f": "\\f",
+        "\r": "\\r",
+    }
+    for char, esc in control_escapes.items():
+        escaped = escaped.replace(char, esc)
+    # Any remaining control character (< 0x20) as \uXXXX to keep the file valid.
+    return "".join(
+        ch if ord(ch) >= 0x20 else f"\\u{ord(ch):04x}" for ch in escaped
+    )
+
+
 def _serialize_toml(config: DaemonConfig) -> str:
     """Serialize a :class:`DaemonConfig` to TOML text.
 
-    ``tomllib`` is read-only, so we build the TOML manually.
+    ``tomllib`` is read-only, so we build the TOML manually. String values are
+    escaped via :func:`_toml_escape_string` so backslashes (e.g. Windows paths)
+    survive a save/load round-trip.
     """
     lines: list[str] = [
         "[daemon]",
-        f'session_name = "{config.session_name}"',
-        f'log_dir = "{config.log_dir}"',
+        f'session_name = "{_toml_escape_string(config.session_name)}"',
+        f'log_dir = "{_toml_escape_string(str(config.log_dir))}"',
         f"poll_interval = {config.poll_interval}",
     ]
     for repo in config.repos:
         lines.append("")
         lines.append("[[repos]]")
-        lines.append(f'path = "{repo.path}"')
-        lines.append(f'alias = "{repo.alias}"')
+        lines.append(f'path = "{_toml_escape_string(repo.path)}"')
+        lines.append(f'alias = "{_toml_escape_string(repo.alias)}"')
     lines.append("")  # trailing newline
     return "\n".join(lines)
 

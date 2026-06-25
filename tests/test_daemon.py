@@ -40,23 +40,21 @@ def sample_config_file(tmp_path):
     repo_b.mkdir()
     (repo_b / ".git").mkdir()
 
-    config = tmp_path / "watch.toml"
-    config.write_text(
-        f"[daemon]\n"
-        f'session_name = "test-session"\n'
-        f'log_dir = "{tmp_path / "logs"}"\n'
-        f"poll_interval = 5\n"
-        f"\n"
-        f"[[repos]]\n"
-        f'path = "{repo_a}"\n'
-        f'alias = "alpha"\n'
-        f"\n"
-        f"[[repos]]\n"
-        f'path = "{repo_b}"\n'
-        f'alias = "beta"\n',
-        encoding="utf-8",
+    config = DaemonConfig(
+        session_name="test-session",
+        log_dir=tmp_path / "logs",
+        poll_interval=5,
+        repos=[
+            WatchRepo(path=str(repo_a.resolve()), alias="alpha"),
+            WatchRepo(path=str(repo_b.resolve()), alias="beta"),
+        ],
     )
-    return config
+    config_file = tmp_path / "watch.toml"
+    # Persist via save_config so paths are escaped correctly on every platform
+    # (hand-writing a TOML string with a Windows tmp_path would produce an
+    # invalid "\U" escape sequence).
+    save_config(config, config_file)
+    return config_file
 
 
 @pytest.fixture()
@@ -96,8 +94,10 @@ class TestConfigParsing:
         (repo / ".git").mkdir()
 
         config_file = tmp_path / "watch.toml"
+        # Use a TOML literal string (single quotes) for the path so backslashes
+        # in a Windows tmp_path are treated as literal characters, not escapes.
         config_file.write_text(
-            f'[[repos]]\npath = "{repo}"\n',
+            f"[[repos]]\npath = '{repo}'\n",
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -108,7 +108,7 @@ class TestConfigParsing:
         """Bad repo path is skipped with a warning."""
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            '[[repos]]\npath = "/no/such/directory/ever"\nalias = "gone"\n',
+            "[[repos]]\npath = '/no/such/directory/ever'\nalias = 'gone'\n",
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -126,8 +126,8 @@ class TestConfigParsing:
 
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            f'[[repos]]\npath = "{repo_a}"\nalias = "dup"\n\n'
-            f'[[repos]]\npath = "{repo_b}"\nalias = "dup"\n',
+            f"[[repos]]\npath = '{repo_a}'\nalias = 'dup'\n\n"
+            f"[[repos]]\npath = '{repo_b}'\nalias = 'dup'\n",
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -141,7 +141,7 @@ class TestConfigParsing:
 
         config_file = tmp_path / "watch.toml"
         config_file.write_text(
-            f'[[repos]]\npath = "{bare}"\nalias = "bare"\n',
+            f"[[repos]]\npath = '{bare}'\nalias = 'bare'\n",
             encoding="utf-8",
         )
         cfg = load_config(config_file)
@@ -169,6 +169,56 @@ class TestConfigParsing:
         assert len(loaded.repos) == 1
         assert loaded.repos[0].alias == "rt"
         assert loaded.repos[0].path == str(repo.resolve())
+
+    def test_serialize_roundtrip_backslash_paths(self, tmp_path):
+        """Windows-style backslash paths survive a save/load round-trip.
+
+        Regression: _serialize_toml wrote raw backslashes into a basic
+        (double-quoted) TOML string, so a path like ``C:\\Users`` produced
+        the escape sequence ``\\U`` which tomllib parsed as an 8-hex-digit
+        Unicode escape and raised ``Invalid hex value`` on the next load.
+        """
+        import tomllib
+
+        backslash_path = r"C:\Users\jimmy\project"
+        backslash_log_dir = r"C:\Users\jimmy\.code-review-graph\logs"
+
+        original = DaemonConfig(
+            session_name="win-session",
+            log_dir=Path(backslash_log_dir),
+            poll_interval=3,
+            repos=[WatchRepo(path=backslash_path, alias="win")],
+        )
+        config_file = tmp_path / "backslash.toml"
+        save_config(original, config_file)
+
+        # The persisted file must be valid TOML. tomllib.load would previously
+        # raise TOMLDecodeError: Invalid hex value (at line 3, column 16).
+        with open(config_file, "rb") as fh:
+            raw = tomllib.load(fh)
+        assert raw["daemon"]["log_dir"] == backslash_log_dir
+        assert raw["repos"][0]["path"] == backslash_path
+        assert raw["repos"][0]["alias"] == "win"
+
+    def test_serialize_escapes_special_chars(self, tmp_path):
+        """Quotes and backslashes in string values are escaped on write."""
+        import tomllib
+
+        original = DaemonConfig(
+            session_name='he said "hi"',
+            log_dir=Path(r"C:\path with \backslash"),
+            poll_interval=1,
+            repos=[WatchRepo(path=r"D:\repo\name", alias='alias"quote')],
+        )
+        config_file = tmp_path / "special.toml"
+        save_config(original, config_file)
+
+        with open(config_file, "rb") as fh:
+            raw = tomllib.load(fh)
+        assert raw["daemon"]["session_name"] == 'he said "hi"'
+        assert raw["daemon"]["log_dir"] == r"C:\path with \backslash"
+        assert raw["repos"][0]["path"] == r"D:\repo\name"
+        assert raw["repos"][0]["alias"] == 'alias"quote'
 
     def test_add_repo_to_config(self, tmp_path):
         """add_repo_to_config adds a repo and saves."""
