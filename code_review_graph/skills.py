@@ -83,14 +83,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        # OpenCode reads `opencode.json` (no leading dot) with a top-level
-        # `mcp` key; each entry uses the `local` server schema. See
-        # https://opencode.ai/docs/mcp-servers/
-        "config_path": lambda root: root / "opencode.json",
+        # OpenCode reads `opencode.json`/`opencode.jsonc` (no leading dot) with
+        # a top-level `mcp` key; each entry uses the `local` server schema.
+        # See https://opencode.ai/docs/mcp-servers/
+        "config_path": lambda root: _opencode_config_path(root),
         "key": "mcp",
         "detect": lambda: True,
         "format": "object",
-        "needs_type": True,
+        "needs_type": False,
     },
     "antigravity": {
         "name": "Antigravity",
@@ -239,13 +239,12 @@ def _build_server_entry(
     command, args = _detect_serve_command()
     if key == "opencode":
         # OpenCode's `local` server schema: a single `command` array
-        # (binary + args), `type: "local"`, and an `enabled` flag.
-        # See https://opencode.ai/docs/mcp-servers/
-        return {
-            "type": "local",
-            "command": [command, *args],
-            "enabled": True,
-        }
+        # (binary + args) and `type: "local"`. See
+        # https://opencode.ai/docs/mcp-servers/
+        cmd: list[str] = [command, *args]
+        if repo_root is not None:
+            cmd += ["--repo", str(repo_root)]
+        return {"command": cmd, "type": "local"}
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
@@ -253,6 +252,67 @@ def _build_server_entry(
     if plat["needs_type"]:
         entry["type"] = "stdio"
     return entry
+
+
+def _opencode_config_path(root: Path) -> Path:
+    """Pick the project-level OpenCode config file to read or write."""
+    for name in ("opencode.jsonc", "opencode.json"):
+        candidate = root / name
+        if candidate.is_file():
+            return candidate
+    return root / "opencode.jsonc"
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """Remove ``//`` line comments from JSONC text, respecting quoted strings."""
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        c = text[i]
+        if in_string:
+            if c == "\\" and i + 1 < n:
+                out.append(c)
+                out.append(text[i + 1])
+                i += 2
+                continue
+            out.append(c)
+            if c == '"':
+                in_string = False
+            i += 1
+            continue
+        if c == '"':
+            in_string = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] not in "\r\n":
+                i += 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _warn_legacy_opencode_config(repo_root: Path) -> None:
+    """Warn when a legacy ``.opencode.json`` (Cursor-shaped) is still present."""
+    legacy = repo_root / ".opencode.json"
+    if not legacy.is_file():
+        return
+    try:
+        data = json.loads(
+            _strip_jsonc_comments(legacy.read_text(encoding="utf-8", errors="replace"))
+        )
+    except (json.JSONDecodeError, OSError):
+        return
+    if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict) \
+            and "code-review-graph" in data["mcpServers"]:
+        print(
+            f"  Note: removing/replacing {legacy} is recommended — it was written "
+            f"by an older code-review-graph and uses a schema OpenCode does not "
+            f"load. The new config is at {_opencode_config_path(repo_root)}."
+        )
 
 
 def _format_toml_value(value: Any) -> str:
@@ -383,6 +443,8 @@ def install_platform_configs(
     configured: list[str] = []
 
     for key, plat in platforms_to_install.items():
+        if key == "opencode":
+            _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)

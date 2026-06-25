@@ -3,8 +3,8 @@
 import json
 import os
 import re
-import subprocess
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +23,9 @@ from code_review_graph.skills import (
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
+    _opencode_config_path,
     _opencode_plugin_content,
+    _strip_jsonc_comments,
     generate_codex_hooks_config,
     generate_cursor_hooks_config,
     generate_hooks_config,
@@ -31,9 +33,9 @@ from code_review_graph.skills import (
     inject_claude_md,
     inject_platform_instructions,
     install_codex_hooks,
+    install_cursor_hooks,
     install_gemini_cli_hooks,
     install_gemini_cli_skills,
-    install_cursor_hooks,
     install_git_hook,
     install_hooks,
     install_opencode_plugin,
@@ -923,32 +925,68 @@ class TestInstallPlatformConfigs:
         """
         configured = install_platform_configs(tmp_path, target="opencode")
         assert "OpenCode" in configured
-        # Correct filename: opencode.json (no leading dot).
-        config_path = tmp_path / "opencode.json"
-        assert config_path.exists()
-        assert not (tmp_path / ".opencode.json").exists()
+        config_path = tmp_path / "opencode.jsonc"
         data = json.loads(config_path.read_text())
-        # Top-level key is `mcp`, not `mcpServers`.
-        assert "mcp" in data
-        assert "mcpServers" not in data
         entry = data["mcp"]["code-review-graph"]
         assert entry["type"] == "local"
-        assert entry["enabled"] is True
-        # command is a single array (binary + args), ending in `serve`.
         assert isinstance(entry["command"], list)
-        assert entry["command"][-1] == "serve"
+        assert "serve" in entry["command"]
         assert "args" not in entry
         assert "env" not in entry
+        assert "cwd" not in entry
+        assert str(tmp_path) in entry["command"]
 
-    def test_install_opencode_preserves_existing_servers(self, tmp_path):
-        """Existing `mcp` entries are preserved when adding code-review-graph."""
-        config_path = tmp_path / "opencode.json"
-        config_path.write_text(
-            json.dumps({"mcp": {"other": {"type": "local", "command": ["other"]}}}),
-            encoding="utf-8",
+    def test_install_opencode_warns_on_legacy_dotfile(self, tmp_path, capsys):
+        legacy = tmp_path / ".opencode.json"
+        legacy.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "code-review-graph": {
+                            "command": "old",
+                            "args": ["old"],
+                            "type": "stdio",
+                        }
+                    }
+                }
+            )
         )
         install_platform_configs(tmp_path, target="opencode")
-        data = json.loads(config_path.read_text())
+        captured = capsys.readouterr()
+        assert "removing/replacing" in captured.out
+        assert str(legacy) in captured.out
+        assert (tmp_path / "opencode.jsonc").exists()
+        assert legacy.exists()
+
+    def test_install_opencode_no_warning_when_no_legacy(self, tmp_path, capsys):
+        install_platform_configs(tmp_path, target="opencode")
+        captured = capsys.readouterr()
+        assert "removing/replacing" not in captured.out
+
+    def test_install_opencode_merges_into_existing_jsonc(self, tmp_path):
+        existing = tmp_path / "opencode.jsonc"
+        existing.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://opencode.ai/config.json",
+                    "mcp": {"other-server": {"type": "local", "command": ["x"]}},
+                }
+            )
+        )
+        install_platform_configs(tmp_path, target="opencode")
+        assert existing.exists()
+        assert not (tmp_path / "opencode.json").exists()
+        data = json.loads(existing.read_text())
+        assert "other-server" in data["mcp"]
+        assert "code-review-graph" in data["mcp"]
+
+    def test_install_opencode_merges_into_existing_json(self, tmp_path):
+        existing = tmp_path / "opencode.json"
+        existing.write_text(json.dumps({"mcp": {"other": {"type": "local"}}}))
+        install_platform_configs(tmp_path, target="opencode")
+        assert existing.exists()
+        assert not (tmp_path / "opencode.jsonc").exists()
+        data = json.loads(existing.read_text())
         assert "other" in data["mcp"]
         assert "code-review-graph" in data["mcp"]
 
@@ -1041,7 +1079,7 @@ class TestInstallPlatformConfigs:
         assert "OpenCode" in configured
         assert codex_config.exists()
         assert (tmp_path / ".mcp.json").exists()
-        assert (tmp_path / "opencode.json").exists()
+        assert (tmp_path / "opencode.jsonc").exists()
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""
@@ -1104,6 +1142,42 @@ class TestInstallPlatformConfigs:
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
         expected_cmd, _ = _detect_serve_command()
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
+
+
+class TestJsoncHelpers:
+    def test_strip_jsonc_comments_preserves_slashes_in_strings(self):
+        raw = (
+            '{"$schema": "https://opencode.ai/config.json", '
+            '"x": "a // b", "y": "hi\\"//escaped"}'
+        )
+        assert json.loads(_strip_jsonc_comments(raw)) == {
+            "$schema": "https://opencode.ai/config.json",
+            "x": "a // b",
+            "y": 'hi"//escaped',
+        }
+
+    def test_strip_jsonc_comments_strips_full_line_and_inline_outside_strings(self):
+        raw = (
+            '// header comment\n'
+            '{"a": 1, "b": 2} // inline tail\n'
+            '// {"ignored": true}\n'
+        )
+        assert json.loads(_strip_jsonc_comments(raw)) == {"a": 1, "b": 2}
+
+    def test_strip_jsonc_comments_handles_crlf_and_cr_line_endings(self):
+        crlf_raw = '// tail\r\n{"a": 1, "b": 2}\r\n'
+        cr_raw = '// tail\r{"a": 1, "b": 2}\r'
+        assert json.loads(_strip_jsonc_comments(crlf_raw)) == {"a": 1, "b": 2}
+        assert json.loads(_strip_jsonc_comments(cr_raw)) == {"a": 1, "b": 2}
+
+    def test_opencode_config_path_prefers_jsonc_then_json_then_defaults_to_jsonc(
+        self, tmp_path,
+    ):
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.jsonc"
+        (tmp_path / "opencode.json").write_text("{}")
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.json"
+        (tmp_path / "opencode.jsonc").write_text("{}")
+        assert _opencode_config_path(tmp_path) == tmp_path / "opencode.jsonc"
 
 
 class TestGeminiCLIInstall:
@@ -1553,7 +1627,6 @@ class TestCopilotCLIPlatform:
         assert "code-review-graph" in data["servers"]
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
-        """inject_platform_instructions with target='copilot-cli' writes .github/code-review-graph.instruction.md."""
         updated = inject_platform_instructions(tmp_path, target="copilot-cli")
         assert ".github/code-review-graph.instruction.md" in updated
         instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
