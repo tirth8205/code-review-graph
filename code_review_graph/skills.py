@@ -145,6 +145,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    "codebuddy": {
+        "name": "CodeBuddy Code",
+        "config_path": lambda root: root / ".mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: True,
+        "format": "object",
+        "needs_type": True,
+    },
 }
 
 

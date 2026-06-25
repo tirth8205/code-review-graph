@@ -516,6 +516,25 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / ".windsurfrules").exists()
 
 
+class TestCodeBuddyPlatformEntry:
+    def test_codebuddy_in_platforms(self):
+        from code_review_graph.skills import PLATFORMS
+        assert "codebuddy" in PLATFORMS
+        plat = PLATFORMS["codebuddy"]
+        assert plat["name"] == "CodeBuddy Code"
+        assert plat["format"] == "object"
+        assert plat["key"] == "mcpServers"
+        assert plat["needs_type"] is True
+        # config_path 是 lambda，需要传 repo_root 验证
+        from pathlib import Path
+        fake_root = Path("/tmp/fake-repo")
+        assert plat["config_path"](fake_root) == fake_root / ".mcp.json"
+
+    def test_codebuddy_in_cli_choices(self):
+        from code_review_graph.cli import _PLATFORM_CHOICES
+        assert "codebuddy" in _PLATFORM_CHOICES
+
+
 class TestInstallPlatformConfigs:
     @_needs_tomllib
     def test_install_codex_config(self, tmp_path):
