@@ -560,6 +560,51 @@ class TestCodeBuddyPlatformEntry:
         assert "codebuddy" in _PLATFORM_CHOICES
 
 
+class TestInstallCodeBuddySkills:
+    def test_creates_codebuddy_skills_dir(self, tmp_path):
+        from code_review_graph.skills import install_codebuddy_skills
+        result = install_codebuddy_skills(tmp_path)
+        assert result == tmp_path / ".codebuddy" / "skills"
+        assert result.is_dir()
+
+    def test_creates_four_skill_subdirs(self, tmp_path):
+        from code_review_graph.skills import install_codebuddy_skills
+        skills_dir = install_codebuddy_skills(tmp_path)
+        subdirs = sorted(f.name for f in skills_dir.iterdir() if f.is_dir())
+        assert subdirs == [
+            "debug-issue",
+            "explore-codebase",
+            "refactor-safely",
+            "review-changes",
+        ]
+
+    def test_skill_files_have_frontmatter(self, tmp_path):
+        from code_review_graph.skills import install_codebuddy_skills
+        skills_dir = install_codebuddy_skills(tmp_path)
+        for subdir in skills_dir.iterdir():
+            path = subdir / "SKILL.md"
+            assert path.is_file()
+            content = path.read_text()
+            assert content.startswith("---\n")
+            assert "name:" in content
+            assert "description:" in content
+
+    def test_skill_content_references_graph_tools(self, tmp_path):
+        from code_review_graph.skills import install_codebuddy_skills
+        skills_dir = install_codebuddy_skills(tmp_path)
+        for subdir in skills_dir.iterdir():
+            content = (subdir / "SKILL.md").read_text()
+            # 每个 skill body 都该提到 graph 工具
+            assert "get_minimal_context" in content or "detect_changes" in content
+
+    def test_install_codebuddy_skills_idempotent(self, tmp_path):
+        from code_review_graph.skills import install_codebuddy_skills
+        install_codebuddy_skills(tmp_path)
+        # 第二次调用不应报错
+        install_codebuddy_skills(tmp_path)
+        assert (tmp_path / ".codebuddy" / "skills" / "explore-codebase" / "SKILL.md").is_file()
+
+
 class TestInstallPlatformConfigs:
     @_needs_tomllib
     def test_install_codex_config(self, tmp_path):

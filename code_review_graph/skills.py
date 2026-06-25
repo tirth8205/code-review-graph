@@ -1353,6 +1353,35 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
     return None
 
 
+def install_codebuddy_skills(repo_root: Path) -> Path:
+    """Install CodeBuddy Code skills at .codebuddy/skills/<slug>/SKILL.md.
+
+    CodeBuddy Code CLI discovers project-level skills from
+    ``.codebuddy/skills/<slug>/SKILL.md``. The SKILL.md format (YAML
+    frontmatter + Markdown body) is identical to Gemini CLI and Qoder.
+    Reuses the shared ``_SKILLS`` dictionary for body content.
+    """
+    skills_root = repo_root / ".codebuddy" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote CodeBuddy skill: %s", skill_path)
+
+    return skills_root
+
+
 # --- OpenCode plugin ---
 
 
