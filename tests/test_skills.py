@@ -1002,6 +1002,53 @@ class TestInstallPlatformConfigs:
         expected_cmd, _ = _detect_serve_command()
         assert data["mcpServers"]["code-review-graph"]["command"] == expected_cmd
 
+    def test_install_all_dedupes_shared_mcp_json(self, tmp_path):
+        """When two platforms share the same config_path (e.g., claude and
+        codebuddy both use <repo>/.mcp.json), the file must be written once
+        and both platform names appear in `configured`."""
+        # Force both claude and codebuddy to be detected
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {**PLATFORMS["claude"], "detect": lambda: True},
+                "codebuddy": {**PLATFORMS["codebuddy"], "detect": lambda: True},
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="all")
+
+        # Both platforms reported as configured
+        assert "Claude Code" in configured
+        assert "CodeBuddy Code" in configured
+
+        # But .mcp.json was written exactly once (single server entry)
+        mcp_path = tmp_path / ".mcp.json"
+        assert mcp_path.exists()
+        data = json.loads(mcp_path.read_text())
+        assert "code-review-graph" in data["mcpServers"]
+        # The server entry appears only once — no duplicate writes
+        mcp_text = mcp_path.read_text()
+        # Count server-key occurrences (the "code-review-graph": entry under
+        # mcpServers), not the literal string elsewhere (e.g., args list).
+        # Before dedup, the second pass would append a second mcpServers key.
+        # After dedup, the dict-merge path guarantees exactly one entry.
+        assert mcp_text.count('"code-review-graph":') == 1
+
+    def test_install_all_dedupes_logs_single_write(self, tmp_path, capsys):
+        """Deduplicated platforms should not produce duplicate 'configured'
+        log lines."""
+        with patch.dict(
+            PLATFORMS,
+            {
+                "claude": {**PLATFORMS["claude"], "detect": lambda: True},
+                "codebuddy": {**PLATFORMS["codebuddy"], "detect": lambda: True},
+            },
+        ):
+            install_platform_configs(tmp_path, target="all")
+        out = capsys.readouterr().out
+        # .mcp.json path should appear exactly once in the output
+        mcp_path_str = str(tmp_path / ".mcp.json")
+        assert out.count(mcp_path_str) == 1
+
 
 class TestGeminiCLIInstall:
     def test_install_gemini_cli_hooks_creates_settings_and_scripts(self, tmp_path):

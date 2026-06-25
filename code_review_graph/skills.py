@@ -317,11 +317,28 @@ def install_platform_configs(
         # Workspace-level Kiro detection
         if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
             platforms_to_install["kiro"] = PLATFORMS["kiro"]
+        # Deduplicate platforms that share the same config_path (e.g.,
+        # claude and codebuddy both target <repo>/.mcp.json). The first
+        # platform wins and represents the file in the write loop; all
+        # sharing platforms are credited in `configured`.
+        seen_paths: dict[Path, list[str]] = {}
+        deduped: dict[str, dict[str, Any]] = {}
+        for k, v in platforms_to_install.items():
+            cp = v["config_path"](repo_root)
+            if cp in seen_paths:
+                seen_paths[cp].append(k)
+                continue
+            seen_paths[cp] = [k]
+            deduped[k] = v
+        platforms_to_install = deduped
     else:
         if target not in PLATFORMS:
             logger.error("Unknown platform: %s", target)
             return []
         platforms_to_install = {target: PLATFORMS[target]}
+        # For single-platform installs, seen_paths maps the file to the
+        # singleton platform list — uniform with the all-branch.
+        seen_paths = {PLATFORMS[target]["config_path"](repo_root): [target]}
 
     configured: list[str] = []
 
@@ -339,13 +356,19 @@ def install_platform_configs(
             )
             if not changed:
                 print(f"  {plat['name']}: already configured in {config_path}")
-                configured.append(plat["name"])
+                # Credit all platforms that share this config_path
+                written_path = config_path
+                for name_key in seen_paths.get(written_path, [key]):
+                    configured.append(PLATFORMS[name_key]["name"])
                 continue
             if dry_run:
                 print(f"  [dry-run] {plat['name']}: would write {config_path}")
             else:
                 print(f"  {plat['name']}: configured {config_path}")
-            configured.append(plat["name"])
+            # Credit all platforms that share this config_path
+            written_path = config_path
+            for name_key in seen_paths.get(written_path, [key]):
+                configured.append(PLATFORMS[name_key]["name"])
             continue
 
         # Read existing config
@@ -371,7 +394,10 @@ def install_platform_configs(
             # Check if already present
             if any(isinstance(s, dict) and s.get("name") == "code-review-graph" for s in arr):
                 print(f"  {plat['name']}: already configured in {config_path}")
-                configured.append(plat["name"])
+                # Credit all platforms that share this config_path
+                written_path = config_path
+                for name_key in seen_paths.get(written_path, [key]):
+                    configured.append(PLATFORMS[name_key]["name"])
                 continue
             arr_entry = {"name": "code-review-graph", **server_entry}
             arr.append(arr_entry)
@@ -382,7 +408,10 @@ def install_platform_configs(
                 servers = {}
             if "code-review-graph" in servers:
                 print(f"  {plat['name']}: already configured in {config_path}")
-                configured.append(plat["name"])
+                # Credit all platforms that share this config_path
+                written_path = config_path
+                for name_key in seen_paths.get(written_path, [key]):
+                    configured.append(PLATFORMS[name_key]["name"])
                 continue
             servers["code-review-graph"] = server_entry
             existing[server_key] = servers
@@ -394,7 +423,10 @@ def install_platform_configs(
             config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
             print(f"  {plat['name']}: configured {config_path}")
 
-        configured.append(plat["name"])
+        # Credit all platforms that share this config_path
+        written_path = config_path
+        for name_key in seen_paths.get(written_path, [key]):
+            configured.append(PLATFORMS[name_key]["name"])
 
     return configured
 
