@@ -676,23 +676,23 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
 
-    The generated commands are path-independent: they resolve the
+    The generated commands are path-independent. They resolve the
     ``code-review-graph`` binary from the project's ``.venv`` first (falling
     back to ``PATH``) and exit silently when it is absent, mirroring the
     ``command -v`` guard used by ``install_git_hook``. This avoids the noisy
     "command not found" stderr that Claude Code surfaces as a hook error when
-    the binary is not installed (issue #549). No absolute ``--repo`` path is
-    baked in so the committed ``.claude/settings.json`` is machine-independent
-    (issue #558); the CLI auto-detects the repo root from the working
-    directory and the ``git rev-parse`` guard ensures the hook only runs
-    inside a git repository.
+    the binary is installed only in a project venv and not on ``$PATH`` (issue
+    #549). No absolute ``--repo`` path is baked in: the repo root is resolved
+    at runtime via ``git rev-parse --show-toplevel`` so the committed
+    ``.claude/settings.json`` is shareable across collaborators with different
+    checkout paths (issue #558), and the ``git rev-parse`` guard ensures the
+    hook only runs inside a git repository. ``repo_root`` is retained for
+    backward compatibility but is no longer embedded.
     """
     # Resolve a venv binary first, then fall back to PATH; exit silently when
     # neither is available so the hook never emits "command not found" noise
-    # (#549).  No absolute ``--repo`` path is embedded — the CLI auto-detects
-    # the repo root from the working directory — so the committed
-    # settings.json stays machine-independent (#558) and a non-ASCII repo path
-    # can no longer be mangled into the hook command (#497).
+    # (#549).  The repo root is computed at runtime (git rev-parse) rather than
+    # embedded, so settings.json stays machine-independent (#558).
     resolve = (
         'CRG="$CLAUDE_PROJECT_DIR/.venv/bin/code-review-graph"; '
         'command -v "$CRG" >/dev/null 2>&1 || CRG=code-review-graph; '
@@ -713,6 +713,8 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 + resolve
                                 + "git rev-parse --git-dir >/dev/null 2>&1"
                                 ' && "$CRG" update --skip-flows'
+                                ' --repo "$(git rev-parse --show-toplevel'
+                                ' 2>/dev/null)"'
                                 " || true"
                             ),
                             "timeout": 30,
@@ -731,6 +733,8 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 + resolve
                                 + "git rev-parse --git-dir >/dev/null 2>&1"
                                 ' && "$CRG" status'
+                                ' --repo "$(git rev-parse --show-toplevel'
+                                ' 2>/dev/null)"'
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "timeout": 10,

@@ -197,8 +197,9 @@ class TestGenerateHooksConfig:
         """The shared .claude/settings.json must be machine-independent: no
         absolute --repo path may be interpolated into hook commands (#558).
 
-        The CLI auto-detects the repo root from the working directory and the
-        `git rev-parse` guard ensures the hook only runs inside a git repo.
+        The repo root is resolved at runtime via ``git rev-parse
+        --show-toplevel`` and the ``git rev-parse`` guard ensures the hook only
+        runs inside a git repo.
         """
         config = generate_hooks_config(Path("/my/project"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
@@ -216,12 +217,21 @@ class TestGenerateHooksConfig:
 
     def test_nonascii_repo_path_not_embedded(self):
         """#497/#558: a non-ASCII repo path must not be embedded in the hook
-        command at all (the CLI auto-detects the repo root), so it can never be
-        mangled into a corrupted nested directory tree (e.g. ``u57fa/...``)."""
+        command at all (the repo root is resolved at runtime), so it can never
+        be mangled into a corrupted nested directory tree (e.g. ``u57fa/...``)."""
         config = generate_hooks_config(Path("/repo/基项目"))
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         assert "基项目" not in post_cmd
         assert "\\u" not in post_cmd
+
+    def test_hooks_use_dynamic_repo_root(self):
+        """#558: hooks resolve the repo root at runtime via git rev-parse so
+        settings.json is shareable across collaborators (from PR #565)."""
+        config = generate_hooks_config(Path("/my/specific/checkout/path"))
+        for _hook_type, entries in config["hooks"].items():
+            for entry in entries:
+                for hook in entry["hooks"]:
+                    assert "git rev-parse --show-toplevel" in hook["command"]
 
     def test_entries_use_claude_code_hook_schema(self):
         """Regression guard for the Claude Code hook schema.
