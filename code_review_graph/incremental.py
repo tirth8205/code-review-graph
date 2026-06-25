@@ -111,6 +111,27 @@ def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
         logger.warning("Temporal resolver failed: %s", exc)
         return None
 
+
+# File extensions whose grammars emit resolvable ``Class::method`` scoped-call
+# targets.  Only PHP and Rust produce a dangling Class::method CALLS edge that
+# this pass can rewrite: C++/Ruby emit no CALLS edge for scoped calls (a
+# separate extraction gap), and R's ``pkg::fn`` is external package access with
+# no in-graph target.  Adding those extensions would only trigger wasted
+# full-graph scans, so they are intentionally excluded.
+_SCOPED_CALL_EXTS = (".php", ".rs")
+
+
+def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the scoped/static call (``Class::method``) resolver, swallowing any
+    failure so build never fails because of it. Returns stats or None on error.
+    """
+    try:
+        from .scoped_resolver import resolve_scoped_calls
+        return resolve_scoped_calls(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Scoped call resolver failed: %s", exc)
+        return None
+
 # Default ignore patterns (in addition to .gitignore).
 #
 # `<dir>/**` patterns are matched at any depth by _should_ignore, so
@@ -941,6 +962,7 @@ def full_build(
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
+    scoped_stats = _run_scoped_resolver(store)
 
     return {
         "files_parsed": len(files),
@@ -950,6 +972,7 @@ def full_build(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "scoped_resolution": scoped_stats,
     }
 
 
@@ -1080,6 +1103,9 @@ def incremental_update(
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
 
+    scoped_changed = any(rp.endswith(_SCOPED_CALL_EXTS) for rp in all_files)
+    scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+
     return {
         "files_updated": len(all_files),
         "total_nodes": total_nodes,
@@ -1090,6 +1116,7 @@ def incremental_update(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "scoped_resolution": scoped_stats,
     }
 
 
