@@ -5681,10 +5681,14 @@ class CodeParser:
                     current = current.parent
 
         elif language == "php":
-            # ``use App\Domain\Entity\Job;`` — convert the namespace-separated
-            # FQN to a relative path (backslash -> ``/``) and walk up from the
-            # caller's directory to find the source root. See: #574
-            rel_path = module.replace("\\", "/") + ".php"
+            # ``use App\Domain\Entity\Job;`` — convert namespace separators to
+            # a relative path and walk up from the caller's directory to find
+            # the file, mirroring the Java resolver. PSR-4 layouts where a
+            # namespace segment maps to a real directory (e.g. ``App\Foo`` ->
+            # ``.../App/Foo``) resolve; vendor/global classes (``\Exception``)
+            # and ``use function`` / ``use const`` targets with no matching
+            # file stay unresolved and keep the bare FQN, like JDK imports.
+            rel_path = module.replace("\\", "/").lstrip("/") + ".php"
             current = caller_dir
             while True:
                 target = current / rel_path
@@ -6478,58 +6482,6 @@ class CodeParser:
                             )
         return bases
 
-    @staticmethod
-    def _php_qualified_name_text(node) -> Optional[str]:
-        """Return the FQN text of a PHP ``qualified_name``/``name`` node.
-
-        Strips any leading namespace separator (``\\``) so the result is a
-        stable, root-relative FQN like ``App\\Domain\\Entity\\Job``.
-        """
-        if node is None:
-            return None
-        txt = node.text.decode("utf-8", errors="replace").strip()
-        return txt.lstrip("\\") or None
-
-    def _extract_php_use(self, node, imports: list[str]) -> None:
-        """Extract PHP ``use`` import FQNs from a ``namespace_use_declaration``.
-
-        Records the original FQN (never the alias) so cross-file resolution can
-        map it to a ``.php`` file. Grouped imports (``use A\\{B, C}``) expand to
-        one FQN per clause. ``use function``/``use const`` are treated the same
-        way (the leading ``function``/``const`` keyword is ignored). See: #574
-        """
-        group_prefix: Optional[str] = None
-        for child in node.children:
-            # ``use App\Util\{Helper, Tool};`` — the shared prefix appears as a
-            # ``namespace_name`` sibling of the ``namespace_use_group``.
-            if child.type == "namespace_name":
-                group_prefix = self._php_qualified_name_text(child)
-            elif child.type == "namespace_use_group":
-                for clause in child.children:
-                    if clause.type != "namespace_use_clause":
-                        continue
-                    tail = self._php_use_clause_fqn(clause)
-                    if tail is None:
-                        continue
-                    fqn = f"{group_prefix}\\{tail}" if group_prefix else tail
-                    imports.append(fqn)
-            elif child.type == "namespace_use_clause":
-                fqn = self._php_use_clause_fqn(clause=child)
-                if fqn:
-                    imports.append(fqn)
-
-    def _php_use_clause_fqn(self, clause) -> Optional[str]:
-        """Return the FQN of a single PHP ``namespace_use_clause``.
-
-        The first ``qualified_name``/``name`` child (ignoring leading
-        ``function``/``const`` keywords) is the imported symbol; any trailing
-        ``as <alias>`` is intentionally ignored so the canonical FQN is kept.
-        """
-        for sub in clause.children:
-            if sub.type in ("qualified_name", "name"):
-                return self._php_qualified_name_text(sub)
-        return None
-
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:
         """Extract import targets as module/path strings."""
         imports = []
@@ -6580,13 +6532,6 @@ class CodeParser:
             parts = text.split()
             if len(parts) >= 2:
                 imports.append(parts[-1].rstrip(";"))
-        elif language == "php":
-            # ``use App\Domain\Entity\Job;`` — record the fully-qualified name
-            # (FQN), not the raw statement text. Handles:
-            #   - aliases:      ``use App\Service\Foo as Bar;`` -> FQN ``App\Service\Foo``
-            #   - grouped use:  ``use App\Util\{Helper, Tool};`` -> ``App\Util\Helper``, ...
-            #   - function/const imports: ``use function App\fn\h;`` -> ``App\fn\h``
-            self._extract_php_use(node, imports)
         elif language == "solidity":
             # import "path/to/file.sol" or import {Symbol} from "path"
             for child in node.children:
@@ -6720,6 +6665,47 @@ class CodeParser:
                     txt = child.text.decode("utf-8", errors="replace")
                     if txt and txt != "extends":
                         imports.append(txt)
+        elif language == "php":
+            # ``namespace_use_declaration`` covers several shapes:
+            #   use A\B\C;            use A\B\C as D;
+            #   use function A\b;     use const A\B;
+            #   use A\B, C\D;         (comma-separated clauses)
+            #   use A\B\{C, D as E};  (grouped — clause names are relative to A\B)
+            # Record the fully-qualified name of each imported symbol, ignoring
+            # any ``as`` alias and stripping a leading ``\``, so IMPORTS_FROM
+            # targets are clean FQNs that _do_resolve_module can map to files.
+            # Without this branch PHP falls through to the raw-text fallback and
+            # stores the entire ``use ...;`` statement as the edge target.
+            def _php_clause_fqn(clause) -> Optional[str]:
+                for sub in clause.children:
+                    if sub.type in ("qualified_name", "name"):
+                        return sub.text.decode(
+                            "utf-8", errors="replace",
+                        ).lstrip("\\")
+                return None
+
+            group_node = None
+            prefix = ""
+            for child in node.children:
+                if child.type == "namespace_name":
+                    prefix = child.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip("\\")
+                elif child.type == "namespace_use_group":
+                    group_node = child
+
+            if group_node is not None:
+                for clause in group_node.children:
+                    if clause.type == "namespace_use_clause":
+                        rel = _php_clause_fqn(clause)
+                        if rel:
+                            imports.append(f"{prefix}\\{rel}" if prefix else rel)
+            else:
+                for clause in node.children:
+                    if clause.type == "namespace_use_clause":
+                        fqn = _php_clause_fqn(clause)
+                        if fqn:
+                            imports.append(fqn)
         elif language in self._custom_languages:
             # Custom languages (languages.toml): prefer the grammar's
             # module-ish field over the raw statement text (e.g. Erlang

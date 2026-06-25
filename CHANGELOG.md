@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PHP `use` imports now resolve to files** (`importers_of`, impact radius,
+  call disambiguation): PHP `use` statements had no branch in the parser's
+  import extraction and fell through to the raw-text fallback, storing the whole
+  `use ...;` statement as the `IMPORTS_FROM` edge target (e.g.
+  `"use App\Domain\Entity\Job;"`). As a result `importers_of` / `tests_for` /
+  `inheritors_of` and the upstream side of `get_impact_radius` returned nothing
+  for PHP classes, and the unresolved targets also degraded cross-file `CALLS`
+  disambiguation in `resolve_bare_call_targets`. PHP imports are now recorded as
+  fully-qualified names (handling `as` aliases, grouped `use A\{B, C}`, and
+  `use function` / `use const`) and resolved to absolute `.php` paths by walking
+  up from the importing file, mirroring the existing Java resolver. Vendor/global
+  classes with no local file stay as the bare FQN.
+
 ## [2.3.6] - 2026-06-10
 
 **Community-response release.** Built from a full audit of every open PR,
