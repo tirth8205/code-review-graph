@@ -581,64 +581,6 @@ class GraphStore:
             logger.info("Resolved %d bare-name CALLS targets", resolved)
         return resolved
 
-    def resolve_scoped_call_targets(self) -> int:
-        """Batch-resolve scoped ``Class::method`` CALLS/REFERENCES targets.
-
-        The parser emits unresolved scoped edges (PHP/Rust ``Foo::bar``) whose
-        ``target_qualified`` is ``<BareClass>::<method>`` — a single ``::`` with
-        no dot, where ``Foo`` is the bare class name (last segment) and ``bar``
-        is the method.  These never resolve via :meth:`resolve_bare_call_targets`
-        (which only handles bare names without ``::``), so callers_of /
-        impact-radius / tests_for report zero callers cross-file.
-
-        This method matches each such target against a node whose ``name`` equals
-        the method and whose ``parent_name`` equals the class, and rewrites the
-        edge ``target_qualified`` to that node's qualified name.  Only
-        unambiguous (single-candidate) matches are rewritten.
-
-        Returns the number of resolved edges.
-        """
-        conn = self._conn
-
-        scoped_edges = conn.execute(
-            "SELECT id, target_qualified FROM edges "
-            "WHERE kind IN ('CALLS', 'REFERENCES') "
-            "AND target_qualified LIKE '%::%' "
-            "AND target_qualified NOT LIKE '%.%'"
-        ).fetchall()
-        if not scoped_edges:
-            return 0
-
-        # (class, method) -> list of qualified_names
-        method_lookup: dict[tuple[str, str], list[str]] = {}
-        for row in conn.execute(
-            "SELECT name, parent_name, qualified_name FROM nodes "
-            "WHERE kind IN ('Function', 'Test') AND parent_name IS NOT NULL"
-        ).fetchall():
-            key = (row["parent_name"], row["name"])
-            method_lookup.setdefault(key, []).append(row["qualified_name"])
-
-        resolved = 0
-        for edge in scoped_edges:
-            target = edge["target_qualified"]
-            cls, sep, method = target.rpartition("::")
-            # Require a single ``::`` and a bare (un-dotted) class segment.
-            if not sep or not cls or not method or "::" in cls or "." in cls:
-                continue
-            candidates = method_lookup.get((cls, method), [])
-            if len(candidates) != 1:
-                continue
-            conn.execute(
-                "UPDATE edges SET target_qualified = ? WHERE id = ?",
-                (candidates[0], edge["id"]),
-            )
-            resolved += 1
-
-        if resolved:
-            conn.commit()
-            logger.info("Resolved %d scoped Class::method CALLS targets", resolved)
-        return resolved
-
     def get_all_files(self) -> list[str]:
         rows = self._conn.execute(
             "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File'"

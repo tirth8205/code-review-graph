@@ -12,6 +12,7 @@ import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
+    _validate_repo_root,
     get_affected_flows_func,
     get_architecture_overview_func,
     get_community_func,
@@ -22,7 +23,6 @@ from code_review_graph.tools import (
     list_communities_func,
     list_flows,
     query_graph,
-    _validate_repo_root,
 )
 
 
@@ -1628,49 +1628,3 @@ class TestGetMinimalContext:
             task="refactor auth module", repo_root=str(self.root),
         )
         assert "refactor" in result["next_tool_suggestions"]
-
-
-class TestPostprocessResolvesScopedCalls:
-    """#567 wiring: _run_postprocess must invoke the scoped Class::method
-    resolver so impact-radius and the summary tables (which read stored edges)
-    see real callers, not dangling ``Foo::bar`` targets."""
-
-    def setup_method(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.store = GraphStore(self.tmp.name)
-        # Foo.bar defined in /b.php, called as Foo::bar from /a.php.
-        self.store.upsert_node(NodeInfo(
-            kind="Class", name="Foo", file_path="/b.php",
-            line_start=1, line_end=50, language="php",
-        ))
-        self.store.upsert_node(NodeInfo(
-            kind="Function", name="bar", file_path="/b.php",
-            line_start=5, line_end=20, language="php", parent_name="Foo",
-        ))
-        self.store.upsert_node(NodeInfo(
-            kind="Function", name="caller", file_path="/a.php",
-            line_start=5, line_end=20, language="php",
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="/a.php::caller",
-            target="Foo::bar", file_path="/a.php", line=10,
-        ))
-        self.store.commit()
-
-    def teardown_method(self):
-        self.store.close()
-        Path(self.tmp.name).unlink(missing_ok=True)
-
-    def test_postprocess_resolves_scoped_call_targets(self):
-        from code_review_graph.tools.build import _run_postprocess
-
-        target_qn = "/b.php::Foo.bar"
-        assert self.store.get_edges_by_target(target_qn) == []  # dangling first
-
-        build_result: dict = {}
-        _run_postprocess(self.store, build_result, postprocess="minimal")
-
-        # The wiring ran and rewrote the dangling scoped edge.
-        assert build_result.get("scoped_calls_resolved") == 1
-        edges = self.store.get_edges_by_target(target_qn)
-        assert [e.source_qualified for e in edges] == ["/a.php::caller"]

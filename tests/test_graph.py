@@ -407,12 +407,13 @@ class TestGraphStore:
 
 
 class TestScopedCallResolution:
-    """Regression tests for #567: cross-file ``Class::method`` CALLS resolution.
+    """Regression test for #567: query-time ``Class::method`` callers lookup.
 
     The parser emits unresolved scoped CALLS edges (PHP ``Foo::bar``, Rust
-    ``Foo::bar``) whose target is ``<BareClass>::<method>``.  These must be
-    rewritten to the real node's qualified name so callers_of / impact-radius /
-    tests_for see the caller cross-file.
+    ``Foo::bar``) whose target is ``<BareClass>::<method>``.  Build-time
+    rewriting of the stored edge is handled by ``scoped_resolver`` (PR #568);
+    here we cover the query-time fallback in ``search_edges_by_target_name`` so
+    callers_of still finds the caller even before the resolver has run.
     """
 
     def setup_method(self):
@@ -454,32 +455,6 @@ class TestScopedCallResolution:
         ))
         self.store.commit()
 
-    def test_resolve_scoped_call_rewrites_target(self):
-        self._build_scoped_graph()
-        target_qn = "/b.php::Foo.bar"
-        # Precondition: the edge is dangling (does not point at the real node).
-        assert self.store.get_edges_by_target(target_qn) == []
-
-        resolved = self.store.resolve_scoped_call_targets()
-        assert resolved == 1
-
-        edges = self.store.get_edges_by_target(target_qn)
-        assert len(edges) == 1
-        assert edges[0].source_qualified == "/a.php::caller"
-        assert edges[0].target_qualified == target_qn
-
-    def test_resolve_scoped_call_enables_callers_of(self):
-        self._build_scoped_graph()
-        self.store.resolve_scoped_call_targets()
-
-        # callers_of-style lookup: edges targeting the real node.
-        callers = {
-            e.source_qualified
-            for e in self.store.get_edges_by_target("/b.php::Foo.bar")
-            if e.kind == "CALLS"
-        }
-        assert callers == {"/a.php::caller"}
-
     def test_search_edges_by_target_name_scoped_fallback(self):
         """search_edges_by_target_name must find a dangling ``Class::method``
         edge via a class+method-aware fallback when the bare lookup misses.
@@ -490,49 +465,6 @@ class TestScopedCallResolution:
         assert len(edges) == 1
         assert edges[0].source_qualified == "/a.php::caller"
         assert edges[0].target_qualified == "Foo::bar"
-
-    def test_resolve_scoped_call_ignores_ambiguous_method(self):
-        """If two classes both define the method, do not resolve (no parent
-        match would be unique only if class names differ).
-        """
-        self._build_scoped_graph()
-        # A different file also defines Foo.bar -> ambiguous class match.
-        self.store.upsert_node(NodeInfo(
-            kind="File", name="/c.php", file_path="/c.php",
-            line_start=1, line_end=50, language="php",
-        ))
-        self.store.upsert_node(NodeInfo(
-            kind="Class", name="Foo", file_path="/c.php",
-            line_start=1, line_end=50, language="php",
-        ))
-        self.store.upsert_node(NodeInfo(
-            kind="Function", name="bar", file_path="/c.php",
-            line_start=5, line_end=20, language="php", parent_name="Foo",
-        ))
-        self.store.commit()
-
-        resolved = self.store.resolve_scoped_call_targets()
-        # Ambiguous: two Foo.bar candidates -> leave the edge untouched.
-        assert resolved == 0
-        edges = self.store.get_edges_by_source("/a.php::caller")
-        assert edges[0].target_qualified == "Foo::bar"
-
-    def test_resolve_scoped_call_leaves_dotted_targets_untouched(self):
-        """Already-resolved qualified targets (with a dot) are not rewritten."""
-        self.store.upsert_node(NodeInfo(
-            kind="File", name="/x.php", file_path="/x.php",
-            line_start=1, line_end=50, language="php",
-        ))
-        self.store.upsert_node(NodeInfo(
-            kind="Function", name="g", file_path="/x.php",
-            line_start=5, line_end=20, language="php",
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="/x.php::g",
-            target="/x.php::g", file_path="/x.php", line=10,
-        ))
-        self.store.commit()
-        assert self.store.resolve_scoped_call_targets() == 0
 
 
 class TestImpactRadiusSql:
