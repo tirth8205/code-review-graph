@@ -243,6 +243,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_codebuddy_hooks,
+        install_codebuddy_skills,
         install_codex_hooks,
         install_cursor_hooks,
         install_gemini_cli_hooks,
@@ -290,6 +292,20 @@ def _handle_init(args: argparse.Namespace) -> None:
         qoder_skills_dir = install_qoder_skills(repo_root)
         if qoder_skills_dir:
             print(f"Installed Qoder skills to {qoder_skills_dir}")
+
+    # CodeBuddy Code skills (project-level .codebuddy/skills/)
+    if not skip_skills and target in ("codebuddy", "all"):
+        codebuddy_skills_dir = install_codebuddy_skills(repo_root)
+        print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+
+    # CodeBuddy Code hooks (project-level .codebuddy/settings.json)
+    if not skip_hooks and target in ("codebuddy", "all"):
+        try:
+            codebuddy_settings = install_codebuddy_hooks(repo_root)
+            print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+        except Exception as exc:
+            logger.warning("Could not install CodeBuddy hooks: %s", exc)
+
     if not skip_hooks and target in ("codex", "all"):
         hooks_path = install_codex_hooks(repo_root)
         print(f"Installed Codex hooks in {hooks_path}")
