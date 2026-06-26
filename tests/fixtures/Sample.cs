@@ -98,4 +98,19 @@ namespace SampleApp
         public User FindById(int id) { return null; }
         public void Save(User user) { }
     }
+
+    // primary-constructor class: the base ctor args `(seed)` appear as an
+    // argument_list sibling in base_list and must NOT become a base target.
+    public class SeededRepo(int seed) : InMemoryRepo
+    {
+        public int Seed { get; } = seed;
+    }
+
+    // enum with an underlying type — `: byte` is the storage type, NOT a base.
+    // Must produce no INHERITS edge.
+    public enum Status : byte
+    {
+        Active,
+        Closed,
+    }
 }

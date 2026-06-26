@@ -6101,11 +6101,20 @@ class CodeParser:
             # superclass/super_interfaces nodes the C# grammar never emits,
             # so C# types produced zero INHERITS edges and inheritors_of /
             # get_impact_radius returned empty for .cs files.
+            #
+            # Two things the base_list contains that are NOT base types:
+            #  * `enum E : byte` — the base_list holds the enum's *underlying
+            #    type*, not a base. Enums never inherit, so emit nothing.
+            #  * `class C(int x) : Base(x)` — the primary-constructor arguments
+            #    `(x)` appear as an `argument_list` sibling of the base type
+            #    (and inside `primary_constructor_base_type` for records).
+            if node.type == "enum_declaration":
+                return bases
             for child in node.children:
                 if child.type != "base_list":
                     continue
                 for sub in child.children:
-                    if not sub.is_named:
+                    if not sub.is_named or sub.type == "argument_list":
                         continue
                     if sub.type == "primary_constructor_base_type":
                         # positional record: `record R(...) : Base(args)` —

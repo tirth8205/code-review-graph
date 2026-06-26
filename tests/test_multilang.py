@@ -444,6 +444,18 @@ class TestCSharpParsing:
         assert "ConstrainedHolder" not in by_source, (
             "generic constraint must not produce an INHERITS edge"
         )
+        # primary-constructor class: `: InMemoryRepo` is the base; the ctor
+        # args `(seed)` must NOT leak in as a bogus '(seed)' target.
+        assert by_source.get("SeededRepo") == {"InMemoryRepo"}, by_source.get(
+            "SeededRepo"
+        )
+        for e in inherits:
+            assert not e.target.startswith("("), (
+                f"primary-ctor args must not become a base target: {e.target!r}"
+            )
+        # enum underlying type (`enum Status : byte`) is not inheritance.
+        assert "Status" not in by_source, "enum underlying type must not inherit"
+        assert "byte" not in {e.target for e in inherits}
 
 
 class TestRubyParsing:
