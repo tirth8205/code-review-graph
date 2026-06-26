@@ -1150,9 +1150,10 @@ class TestCodeParser:
         assert "helper" not in test_names
 
     def test_dead_guard_reachable_flag(self):
-        """CALLS edges inside ``if False:`` / ``if TYPE_CHECKING:`` are
-        tagged with ``extra["reachable"] == False``; live calls omit the
-        key entirely.  See: #576."""
+        """CALLS edges inside ``if False:`` / ``if 0:`` /
+        ``if TYPE_CHECKING:`` are tagged with
+        ``extra["reachable"] == False``; live calls omit the key
+        entirely.  See: #576."""
         nodes, edges = self.parser.parse_file(
             FIXTURES / "sample_dead_guard.py",
         )
@@ -1160,6 +1161,7 @@ class TestCodeParser:
 
         live = [e for e in calls if "live_helper" in e.target]
         dead_false = [e for e in calls if "dead_false_call" in e.target]
+        dead_zero = [e for e in calls if "dead_zero_call" in e.target]
         dead_tc = [e for e in calls if "dead_tc_call" in e.target]
 
         # Control: live call has no reachable key
@@ -1169,6 +1171,9 @@ class TestCodeParser:
         # Dead calls carry the flag
         assert len(dead_false) == 1
         assert dead_false[0].extra.get("reachable") is False
+
+        assert len(dead_zero) == 1
+        assert dead_zero[0].extra.get("reachable") is False
 
         assert len(dead_tc) == 1
         assert dead_tc[0].extra.get("reachable") is False
