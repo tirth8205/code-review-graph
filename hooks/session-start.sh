@@ -2,6 +2,9 @@
 # Checks for the code-review-graph knowledge graph and outputs
 # guidance for Claude Code at the start of every session.
 
+# Drain stdin so large hook payloads do not cause BrokenPipeError (#493).
+cat >/dev/null || true
+
 DB_PATH=".code-review-graph/graph.db"
 
 if [ -f "$DB_PATH" ]; then

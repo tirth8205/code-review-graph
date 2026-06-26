@@ -331,7 +331,7 @@ wheels = [
 
 [[package]]
 name = "code-review-graph"
-version = "2.3.5"
+version = "2.3.6"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -397,7 +397,7 @@ requires-dist = [
     { name = "code-review-graph", extras = ["enrichment"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["eval"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["wiki"], marker = "extra == 'all'" },
-    { name = "fastmcp", specifier = ">=3.2.4" },
+    { name = "fastmcp", specifier = ">=3.2.4,<4" },
     { name = "google-generativeai", marker = "extra == 'google-embeddings'", specifier = ">=0.8.0,<1" },
     { name = "igraph", marker = "extra == 'communities'", specifier = ">=0.11.0" },
     { name = "jedi", marker = "extra == 'enrichment'", specifier = ">=0.19.2" },

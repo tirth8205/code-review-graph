@@ -24,6 +24,16 @@
   <a href="https://discord.gg/3p58KXqGFN"><img src="https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
+<p align="center">
+  <a href="docs/USAGE.md">Usage</a> ·
+  <a href="docs/COMMANDS.md">Commands</a> ·
+  <a href="docs/FAQ.md">FAQ</a> ·
+  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> ·
+  <a href="docs/GITHUB_ACTION.md">GitHub Action</a> ·
+  <a href="docs/REPRODUCING.md">Reproducing the benchmarks</a> ·
+  <a href="docs/ROADMAP.md">Roadmap</a>
+</p>
+
 <br>
 
 AI coding tools can end up re-reading large parts of your codebase on review tasks. `code-review-graph` fixes that. It builds a structural map of your code with [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), tracks changes incrementally, and gives your AI assistant precise context via [MCP](https://modelcontextprotocol.io/) so it reads only what matters.
@@ -115,18 +125,61 @@ Large monorepos are where token waste is most painful. The graph cuts through th
 
 Parser support covers functions, classes, imports, call sites, inheritance, and test detection across the current parser surface, using Tree-sitter where available and targeted fallbacks where needed. Current support includes Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
+### Add your own language (no fork needed)
+
+If your repo uses a language the parser does not cover yet, drop a `languages.toml` into `.code-review-graph/` mapping file extensions to any grammar bundled in `tree_sitter_language_pack`, plus the tree-sitter node types for functions, classes, imports, and calls:
+
+```toml
+[languages.erlang]
+extensions = [".erl"]
+grammar = "erlang"
+function_node_types = ["function_clause"]
+class_node_types = ["record_decl"]
+import_node_types = ["import_attribute"]
+call_node_types = ["call"]
+```
+
+The generic tree-sitter walker handles extraction from there — no code changes, and built-in languages can never be overridden. See [docs/CUSTOM_LANGUAGES.md](docs/CUSTOM_LANGUAGES.md) for the schema reference, validation rules, and a worked end-to-end example.
+
+### Risk-scored PR reviews in CI (GitHub Action)
+
+The same analysis runs as a composite GitHub Action — and it stays local-first: the knowledge graph is built and queried entirely on your CI runner, with no source code sent to any external service. On each pull request the action posts a single sticky comment with risk-scored functions, affected execution flows, and test gaps, updated in place on every push. An optional `fail-on-risk` input turns the review into a merge gate.
+
+```yaml
+# .github/workflows/code-review-graph.yml
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: tirth8205/code-review-graph@v2.3.6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+See [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) for inputs, risk levels, and caching details, or the dogfood workflow this repo runs on itself in [`.github/workflows/pr-review.yml`](.github/workflows/pr-review.yml).
+
 ---
 
 ## Benchmarks
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 real repositories: 38x to 528x token reduction, 100% impact recall, 0.71 average F1" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 real repositories: ~82x median per-question token reduction (528x max), 0.71 average impact F1 against graph-derived ground truth" width="85%" />
 </p>
 
-All numbers come from the automated evaluation runner against 6 real open-source repositories (13 commits total). Every config pins an upstream SHA, the Leiden community detector runs with a fixed seed, and embeddings are deterministic on CPU — so two runs on different machines produce identical numbers. The full reproduction recipe with expected outputs is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md).
+**Headline number: the median per-question token reduction across the 6 repos is ~82x** (whole-corpus baseline vs graph query). The frequently quoted **528x is the maximum** — a single best-case repo (fastapi) — not the typical result.
+
+All numbers come from the automated evaluation runner against 6 real open-source repositories (13 commits total). Every config pins an upstream SHA, the Leiden community detector runs with a fixed seed, and embeddings are deterministic on CPU — so two runs on different machines produce identical numbers. The full reproduction recipe with expected outputs is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md). A weekly report-only run on the two smallest configs lives in [`.github/workflows/eval.yml`](.github/workflows/eval.yml).
 
 <details>
-<summary><strong>Token efficiency: 38x – 528x fewer tokens per question (whole-corpus vs graph query)</strong></summary>
+<summary><strong>Token efficiency: ~82x median per-question reduction (range 38x – 528x; whole-corpus vs graph query)</strong></summary>
 <br>
 
 For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, etc.), the graph returns ~2,000–3,500 tokens of targeted search hits + neighbor edges instead of forcing the agent to read every source file. The table below averages over the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
@@ -140,7 +193,9 @@ For a typical agent question (`"how does authentication work"`, `"what is the ma
 | express | `b4ab7d65` | 135,955 | 3,465 | **40.6x** |
 | httpx | `b55d4635` | 89,492 | 2,438 | **38.0x** |
 
-Range across the 6 repos: **38x – 528x** (median per-question reduction ~82x).
+Median per-question reduction across the 6 repos: **~82x**. The range is 38x – 528x, where **528x is the best case** (fastapi, the largest corpus), not the headline.
+
+The whole-corpus baseline above is an upper bound no real agent pays: a competent agent greps for identifiers and reads only the best-matching files. The `agent_baseline` eval benchmark measures that realistic baseline — a pure-python grep over the corpus, top-3 files by match count, token-counted and compared to the graph query cost (`evaluate/results/<repo>_agent_baseline_*.csv`).
 
 The formal `eval/benchmarks/token_efficiency.py` benchmark measures a different scenario — full `get_review_context()` JSON versus just the changed-file content of a commit — and reports ratios below 1 for small commits, because the review-context response carries impact-radius edges plus source snippets that exceed a tiny single-file diff. That is not a bug; the two benchmarks answer different questions. See [`docs/REPRODUCING.md`](docs/REPRODUCING.md) for the full methodology.
 
@@ -149,12 +204,12 @@ Since v2.3.4, review and impact tools attach a compact `context_savings` estimat
 </details>
 
 <details>
-<summary><strong>Impact accuracy: 100% recall, 0.71 average F1</strong></summary>
+<summary><strong>Impact accuracy: 0.71 average F1 against graph-derived ground truth (recall 1.0 is a circular upper bound, not "100% recall")</strong></summary>
 <br>
 
-Blast-radius analysis reaches 100% recall on every one of the 13 evaluation commits. It over-predicts in some cases, which is a conservative trade-off: better to flag too many files than miss a broken dependency.
+Blast-radius analysis recovers every file in the ground truth on all 13 evaluation commits — **but read that as an upper bound, not as "100% recall"**: in this mode the ground truth (changed files + files with call/import edges into them) is derived from the same graph the predictor traverses, so it is circular by construction. The over-prediction visible in the precision column is a deliberate trade-off: better to flag too many files than miss a broken dependency.
 
-| Repo | Commits | Avg F1 | Avg Precision | Recall |
+| Repo | Commits | Avg F1 | Avg Precision | Recall (graph-derived upper bound) |
 |------|--------:|-------:|--------------:|-------:|
 | httpx | 2 | 0.864 | 0.786 | 1.0 |
 | fastapi | 2 | 0.834 | 0.750 | 1.0 |
@@ -163,6 +218,8 @@ Blast-radius analysis reaches 100% recall on every one of the 13 evaluation comm
 | flask | 2 | 0.628 | 0.481 | 1.0 |
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **Average** | **13** | **0.714** | **0.578** | **1.000** |
+
+The benchmark also runs an honest **co-change mode**: the predictor is seeded with a single changed file and graded against the *other* files the author actually touched in the same commit — independent-ish evidence from git history, not from the graph. Both modes appear side by side in the result CSVs (`ground_truth_mode` column). Co-change numbers will be added to the canonical stats once captured by the eval runner; we do not quote them before measuring.
 
 </details>
 
@@ -180,16 +237,13 @@ Blast-radius analysis reaches 100% recall on every one of the 13 evaluation comm
 
 </details>
 
-<details>
-<summary><strong>Limitations and known weaknesses</strong></summary>
-<br>
+### Limitations and known weaknesses
 
+- **Impact "recall 1.0" is graph-derived and circular:** the historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. The honest co-change mode (grade against files actually co-changed in the same commit) is measured alongside it; expect those numbers to be substantially lower.
 - **Small single-file changes:** Graph context can exceed naive file reads for trivial edits (see express results above). The overhead is the structural metadata that enables multi-file analysis.
 - **Search quality (MRR 0.35):** Keyword search finds the right result in the top-4 for most queries, but ranking needs improvement. Express queries return 0 hits due to module-pattern naming.
 - **Flow detection (33% recall):** Only reliably detects entry points in Python repos (fastapi, httpx) where framework patterns are recognized. JavaScript and Go flow detection needs work.
 - **Precision vs recall trade-off:** Impact analysis is deliberately conservative. It flags files that *might* be affected, which means some false positives in large dependency graphs.
-
-</details>
 
 ---
 
@@ -219,6 +273,8 @@ Blast-radius analysis reaches 100% recall on every one of the 13 evaluation comm
 | **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
 | **Architecture overview** | Auto-generated architecture map with coupling warnings |
 | **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows, and test gaps |
+| **Custom languages** | Add new languages via `.code-review-graph/languages.toml` — no fork or code changes needed |
+| **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |
 | **Wiki generation** | Auto-generate markdown wiki from community structure |
 | **Multi-repo registry** | Register multiple repos, search across all of them |
@@ -518,6 +574,18 @@ all tools are available. This is especially useful for MCP client configurations
 </details>
 
 ---
+
+## FAQ & how it compares
+
+Short, honest answers in [docs/FAQ.md](docs/FAQ.md):
+
+- [vs LSP / language servers](docs/FAQ.md#how-is-this-different-from-lsp-and-language-servers) — one persistent cross-language graph instead of per-language daemons; LSP stays more precise per symbol.
+- [vs RAG / embeddings](docs/FAQ.md#isnt-this-just-rag) — structural edges parsed from the AST, not similarity chunks; embeddings are optional and only assist search.
+- [vs grep / agentic search](docs/FAQ.md#why-not-just-grep) — grep wins on one-hop lookups; the graph wins on multi-hop questions (impact radius, callers-of-callers, tests-for, affected flows).
+- [vs Serena, codegraph, claude-context, repomix](docs/FAQ.md#how-does-it-compare-to-serena-codegraph-claude-context-and-repomix) — factual comparison table.
+- [When NOT to use it](docs/FAQ.md#when-should-i-not-use-it) — small repos, trivial single-file diffs, one-off questions.
+- [Does it phone home?](docs/FAQ.md#does-it-phone-home) — no; zero telemetry, cloud embeddings are opt-in.
+- [How do I verify it is working?](docs/FAQ.md#how-do-i-verify-it-is-working) — `status`, `detect-changes --brief`, `/mcp`.
 
 ## Troubleshooting
 

@@ -192,10 +192,63 @@ class TestGenerateHooksConfig:
                     assert "timeout" in hook
 
 
+class TestShippedHooksFiles:
+    """The vestigial hooks/ directory ships in the sdist (see pyproject
+    sdist includes). Its hook commands must drain stdin exactly like the
+    skills.py-generated hooks, or large hook payloads reproduce the
+    BrokenPipeError from bug #493.
+    """
+
+    HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+    STDIN_DRAIN = "cat >/dev/null || true; "
+
+    def test_hooks_json_commands_drain_stdin(self):
+        data = json.loads(
+            (self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8")
+        )
+        commands = [
+            hook["command"]
+            for entries in data.values()
+            for entry in entries
+            for hook in entry.get("hooks", [])
+            if hook.get("type") == "command"
+        ]
+        assert commands, "hooks/hooks.json should define at least one command hook"
+        for command in commands:
+            assert command.startswith(self.STDIN_DRAIN), (
+                f"hooks.json command lacks the stdin drain prefix: {command!r}"
+            )
+
+    def test_session_start_script_drains_stdin(self):
+        script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
+        assert "cat >/dev/null" in script, (
+            "session-start.sh must drain stdin to avoid BrokenPipeError "
+            "on large hook payloads (bug #493)"
+        )
+
+
 class TestInstallGitHook:
     def _make_git_repo(self, tmp_path: Path) -> Path:
         (tmp_path / ".git" / "hooks").mkdir(parents=True)
         return tmp_path
+
+    def _git(self, *args: str, cwd: Path) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    def _init_real_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git("init", cwd=path)
+        return path
 
     def test_creates_executable_pre_commit_hook(self, tmp_path):
         hook_path = install_git_hook(self._make_git_repo(tmp_path))
@@ -224,6 +277,48 @@ class TestInstallGitHook:
 
     def test_no_git_dir_returns_none(self, tmp_path):
         assert install_git_hook(tmp_path) is None
+
+    def test_real_repo_installs_into_git_hooks(self, tmp_path):
+        """Standard repo: unchanged behavior — hook lands in .git/hooks."""
+        repo = self._init_real_repo(tmp_path / "std")
+        hook_path = install_git_hook(repo)
+        assert hook_path is not None
+        expected = repo / ".git" / "hooks" / "pre-commit"
+        assert hook_path.resolve() == expected.resolve()
+        assert os.access(hook_path, os.X_OK)
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+
+    def test_respects_core_hooks_path(self, tmp_path):
+        """core.hooksPath (husky-style): the hook must land where git runs it."""
+        repo = self._init_real_repo(tmp_path / "husky")
+        self._git("config", "core.hooksPath", ".husky", cwd=repo)
+        hook_path = install_git_hook(repo)
+        assert hook_path is not None
+        expected = repo / ".husky" / "pre-commit"
+        assert hook_path.resolve() == expected.resolve()
+        assert os.access(hook_path, os.X_OK)
+        assert "code-review-graph detect-changes" in hook_path.read_text()
+        # The default location must NOT be used — git would never run it.
+        assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+
+    def test_linked_worktree_installs_where_git_runs_hooks(self, tmp_path):
+        """Linked worktree: .git is a file; the hook must still be installed
+        into the hooks path git actually consults (issue #313)."""
+        main = self._init_real_repo(tmp_path / "main")
+        self._git(
+            "-c", "user.email=test@example.com", "-c", "user.name=Test",
+            "commit", "--allow-empty", "-m", "init", cwd=main,
+        )
+        worktree = tmp_path / "wt"
+        self._git("worktree", "add", str(worktree), "-b", "wt-branch", cwd=main)
+        assert (worktree / ".git").is_file()  # precondition: not a directory
+        hook_path = install_git_hook(worktree)
+        assert hook_path is not None
+        git_hooks_dir = worktree / self._git(
+            "rev-parse", "--git-path", "hooks", cwd=worktree
+        )
+        assert hook_path.resolve() == (git_hooks_dir / "pre-commit").resolve()
+        assert "code-review-graph detect-changes" in hook_path.read_text()
 
 
 class TestInstallHooks:

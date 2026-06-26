@@ -41,3 +41,10 @@ multi_hop_tasks:
     traversal_pattern: callers_of
     expected_neighbor_names: ["store_file_nodes_edges"]
     k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does GraphStore upsert_node store a node"
+  - "Where does full_build parse the repository"
+  - "How does hybrid_search rank search results"

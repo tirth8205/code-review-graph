@@ -515,3 +515,118 @@ class TestAnalyzeChangesFunctionCap:
 
         assert len(result["changed_functions"]) == 5
         assert result["functions_truncated"] is False
+
+
+class TestAnalyzeChangesInternalParseRemap:
+    """Regression tests for #528: CLI detect-changes mapped 0 functions.
+
+    The graph stores absolute native paths (see ``full_build``), but
+    ``parse_diff_ranges`` keys are forward-slash paths relative to the
+    repo root.  On Windows the LIKE-suffix fallback can never bridge
+    "src/app.py" to "C:\\repo\\src\\app.py", so analyze_changes must remap
+    internally-parsed diff keys to absolute native paths — mirroring what
+    tools/review.py already does for the MCP path.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func_at(self, abs_path: str) -> None:
+        node = NodeInfo(
+            kind="Function", name="greet", file_path=abs_path,
+            line_start=1, line_end=10, language="python",
+        )
+        self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+
+    def _spy_map_changes(self, captured: dict):
+        """Wrap the real map_changes_to_nodes, capturing changed_ranges."""
+        def _spy(store, changed_ranges):
+            captured["ranges"] = changed_ranges
+            return map_changes_to_nodes(store, changed_ranges)
+        return _spy
+
+    def test_internal_parse_remaps_relative_keys_to_absolute(self, tmp_path):
+        """Forward-slash relative diff keys become absolute native paths."""
+        abs_path = str(tmp_path / "src" / "app.py")
+        self._add_func_at(abs_path)
+
+        captured: dict = {}
+        with (
+            patch(
+                "code_review_graph.changes.parse_diff_ranges",
+                return_value={"src/app.py": [(2, 3)]},
+            ),
+            patch(
+                "code_review_graph.changes.map_changes_to_nodes",
+                side_effect=self._spy_map_changes(captured),
+            ),
+        ):
+            result = analyze_changes(
+                self.store,
+                changed_files=["src/app.py"],
+                repo_root=str(tmp_path),
+            )
+
+        # The internal-parse branch must produce absolute keys under root.
+        assert list(captured["ranges"]) == [abs_path]
+        assert captured["ranges"][abs_path] == [(2, 3)]
+        # And those keys must hit the absolute-stored node directly.
+        assert any(f["name"] == "greet" for f in result["changed_functions"])
+
+    def test_internal_parse_preserves_already_absolute_keys(self, tmp_path):
+        """Keys that are already absolute are not double-joined."""
+        abs_path = str(tmp_path / "src" / "app.py")
+        self._add_func_at(abs_path)
+
+        captured: dict = {}
+        with (
+            patch(
+                "code_review_graph.changes.parse_diff_ranges",
+                return_value={abs_path: [(2, 3)]},
+            ),
+            patch(
+                "code_review_graph.changes.map_changes_to_nodes",
+                side_effect=self._spy_map_changes(captured),
+            ),
+        ):
+            result = analyze_changes(
+                self.store,
+                changed_files=[abs_path],
+                repo_root=str(tmp_path),
+            )
+
+        assert list(captured["ranges"]) == [abs_path]
+        assert any(f["name"] == "greet" for f in result["changed_functions"])
+
+    def test_explicit_changed_ranges_not_remapped(self, tmp_path):
+        """The explicit changed_ranges path (MCP) must stay untouched."""
+        node = NodeInfo(
+            kind="Function", name="rel_func", file_path="app.py",
+            line_start=1, line_end=10, language="python",
+        )
+        self.store.upsert_node(node, file_hash="abc")
+        self.store.commit()
+
+        captured: dict = {}
+        with (
+            patch(
+                "code_review_graph.changes.map_changes_to_nodes",
+                side_effect=self._spy_map_changes(captured),
+            ),
+        ):
+            result = analyze_changes(
+                self.store,
+                changed_files=["app.py"],
+                changed_ranges={"app.py": [(2, 3)]},
+                repo_root=str(tmp_path),
+            )
+
+        # No remapping: keys passed through exactly as the caller gave them.
+        assert list(captured["ranges"]) == ["app.py"]
+        assert any(f["name"] == "rel_func" for f in result["changed_functions"])

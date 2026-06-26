@@ -1,0 +1,156 @@
+{
+  "summary": "Analyzed 2 changed file(s):\n  - 3 changed function(s)/class(es)\n  - 2 affected flow(s)\n  - 1 test gap(s)\n  - Overall risk score: 0.72\n  - Untested: rotate_token",
+  "risk_score": 0.72,
+  "changed_functions": [
+    {
+      "id": 101,
+      "kind": "Function",
+      "name": "rotate_token",
+      "qualified_name": "auth/session.py::rotate_token",
+      "file_path": "auth/session.py",
+      "line_start": 42,
+      "line_end": 78,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.72
+    },
+    {
+      "id": 102,
+      "kind": "Function",
+      "name": "validate_session",
+      "qualified_name": "auth/session.py::validate_session",
+      "file_path": "auth/session.py",
+      "line_start": 80,
+      "line_end": 112,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.41
+    },
+    {
+      "id": 103,
+      "kind": "Function",
+      "name": "format_expiry",
+      "qualified_name": "auth/display.py::format_expiry",
+      "file_path": "auth/display.py",
+      "line_start": 10,
+      "line_end": 18,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.1
+    }
+  ],
+  "affected_flows": [
+    {
+      "id": 7,
+      "name": "login_handler -> rotate_token",
+      "entry_point_id": 90,
+      "depth": 4,
+      "node_count": 6,
+      "file_count": 3,
+      "criticality": 0.83,
+      "path": [90, 95, 101, 102, 110, 111],
+      "steps": [
+        {
+          "node_id": 90,
+          "name": "login_handler",
+          "kind": "Function",
+          "file": "auth/routes.py",
+          "line_start": 12,
+          "line_end": 40,
+          "qualified_name": "auth/routes.py::login_handler"
+        },
+        {
+          "node_id": 101,
+          "name": "rotate_token",
+          "kind": "Function",
+          "file": "auth/session.py",
+          "line_start": 42,
+          "line_end": 78,
+          "qualified_name": "auth/session.py::rotate_token"
+        }
+      ],
+      "created_at": "2026-06-01T10:00:00"
+    },
+    {
+      "id": 9,
+      "name": "cli_main -> validate_session",
+      "entry_point_id": 120,
+      "depth": 3,
+      "node_count": 4,
+      "file_count": 2,
+      "criticality": 0.55,
+      "path": [120, 121, 102, 130],
+      "steps": [
+        {
+          "node_id": 120,
+          "name": "cli_main",
+          "kind": "Function",
+          "file": "cli.py",
+          "line_start": 5,
+          "line_end": 60,
+          "qualified_name": "cli.py::cli_main"
+        }
+      ],
+      "created_at": "2026-06-01T10:00:00"
+    }
+  ],
+  "test_gaps": [
+    {
+      "name": "rotate_token",
+      "qualified_name": "auth/session.py::rotate_token",
+      "file": "auth/session.py",
+      "line_start": 42,
+      "line_end": 78
+    }
+  ],
+  "review_priorities": [
+    {
+      "id": 101,
+      "kind": "Function",
+      "name": "rotate_token",
+      "qualified_name": "auth/session.py::rotate_token",
+      "file_path": "auth/session.py",
+      "line_start": 42,
+      "line_end": 78,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.72
+    },
+    {
+      "id": 102,
+      "kind": "Function",
+      "name": "validate_session",
+      "qualified_name": "auth/session.py::validate_session",
+      "file_path": "auth/session.py",
+      "line_start": 80,
+      "line_end": 112,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.41
+    },
+    {
+      "id": 103,
+      "kind": "Function",
+      "name": "format_expiry",
+      "qualified_name": "auth/display.py::format_expiry",
+      "file_path": "auth/display.py",
+      "line_start": 10,
+      "line_end": 18,
+      "language": "python",
+      "parent_name": null,
+      "is_test": false,
+      "risk_score": 0.1
+    }
+  ],
+  "functions_truncated": false,
+  "context_savings": {
+    "estimated": true,
+    "saved_tokens": 12159,
+    "saved_percent": 94
+  }
+}

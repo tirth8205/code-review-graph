@@ -14,6 +14,7 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 from code_review_graph.eval.benchmarks import (
+    agent_baseline,
     build_performance,
     flow_completeness,
     impact_accuracy,
@@ -31,6 +32,7 @@ BENCHMARK_REGISTRY = {
     "search_quality": search_quality.run,
     "build_performance": build_performance.run,
     "multi_hop_retrieval": multi_hop_retrieval.run,
+    "agent_baseline": agent_baseline.run,
 }
 
 CONFIGS_DIR = Path(__file__).parent / "configs"

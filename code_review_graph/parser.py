@@ -16,6 +16,7 @@ from typing import NamedTuple, Optional
 
 import tree_sitter_language_pack as tslp
 
+from .custom_languages import CustomLanguage, load_custom_languages
 from .tsconfig_resolver import TsconfigResolver
 
 
@@ -408,6 +409,22 @@ _CALL_TYPES: dict[str, list[str]] = {
     "sql": [],
 }
 
+
+def _builtin_language_names() -> frozenset[str]:
+    """All built-in language identifiers.
+
+    Used to stop config-driven custom languages (languages.toml) from
+    shadowing a built-in language name — built-ins always win.
+    """
+    return (
+        frozenset(EXTENSION_TO_LANGUAGE.values())
+        | frozenset(_CLASS_TYPES)
+        | frozenset(_FUNCTION_TYPES)
+        | frozenset(_IMPORT_TYPES)
+        | frozenset(_CALL_TYPES)
+    )
+
+
 # Patterns that indicate a test function
 _TEST_PATTERNS = [
     re.compile(r"^test_"),
@@ -783,18 +800,51 @@ class CodeParser:
 
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
 
-    def __init__(self) -> None:
+    def __init__(self, repo_root: Optional[Path] = None) -> None:
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
+        # Config-driven custom languages (.code-review-graph/languages.toml).
+        # The built-in tables stay shared module-level constants; only when a
+        # repo defines custom languages does this parser switch to merged
+        # copies, so other CodeParser instances (multi-repo registry, worker
+        # processes for other repos) are never affected.  See #320.
+        self._extension_map: dict[str, str] = EXTENSION_TO_LANGUAGE
+        self._class_types: dict[str, list[str]] = _CLASS_TYPES
+        self._function_types: dict[str, list[str]] = _FUNCTION_TYPES
+        self._import_types: dict[str, list[str]] = _IMPORT_TYPES
+        self._call_types: dict[str, list[str]] = _CALL_TYPES
+        self._custom_languages: dict[str, CustomLanguage] = {}
+        if repo_root is not None:
+            self._custom_languages = load_custom_languages(
+                Path(repo_root),
+                builtin_extensions=EXTENSION_TO_LANGUAGE,
+                builtin_languages=_builtin_language_names(),
+            )
+        if self._custom_languages:
+            self._extension_map = dict(EXTENSION_TO_LANGUAGE)
+            self._class_types = dict(_CLASS_TYPES)
+            self._function_types = dict(_FUNCTION_TYPES)
+            self._import_types = dict(_IMPORT_TYPES)
+            self._call_types = dict(_CALL_TYPES)
+            for custom in self._custom_languages.values():
+                for ext in custom.extensions:
+                    self._extension_map[ext] = custom.name
+                self._class_types[custom.name] = list(custom.class_node_types)
+                self._function_types[custom.name] = list(custom.function_node_types)
+                self._import_types[custom.name] = list(custom.import_node_types)
+                self._call_types[custom.name] = list(custom.call_node_types)
 
     def _get_parser(self, language: str):  # type: ignore[arg-type]
         if language not in self._parsers:
+            # Custom languages map their name onto a packaged grammar.
+            custom = self._custom_languages.get(language)
+            grammar = custom.grammar if custom is not None else language
             try:
-                self._parsers[language] = tslp.get_parser(language)  # type: ignore[arg-type]
+                self._parsers[language] = tslp.get_parser(grammar)  # type: ignore[arg-type]
             except (LookupError, ValueError, ImportError) as exc:
                 # language not packaged, or grammar load failed
                 logger.debug("tree-sitter parser unavailable for %s: %s", language, exc)
@@ -812,7 +862,7 @@ class CodeParser:
         has no suffix at all.  See issue #237.
         """
         suffix = path.suffix.lower()
-        lang = EXTENSION_TO_LANGUAGE.get(suffix)
+        lang = self._extension_map.get(suffix)
         if lang is not None:
             return lang
         # Only probe shebang for files without any extension — "README", "LICENSE",
@@ -2183,10 +2233,10 @@ class CodeParser:
         """Recursively walk the AST and extract nodes/edges."""
         if _depth > self._MAX_AST_DEPTH:
             return
-        class_types = set(_CLASS_TYPES.get(language, []))
-        func_types = set(_FUNCTION_TYPES.get(language, []))
-        import_types = set(_IMPORT_TYPES.get(language, []))
-        call_types = set(_CALL_TYPES.get(language, []))
+        class_types = set(self._class_types.get(language, []))
+        func_types = set(self._function_types.get(language, []))
+        import_types = set(self._import_types.get(language, []))
+        call_types = set(self._call_types.get(language, []))
 
         for child in root.children:
             node_type = child.type
@@ -5191,9 +5241,9 @@ class CodeParser:
         import_map: dict[str, str] = {}
         defined_names: set[str] = set()
 
-        class_types = set(_CLASS_TYPES.get(language, []))
-        func_types = set(_FUNCTION_TYPES.get(language, []))
-        import_types = set(_IMPORT_TYPES.get(language, []))
+        class_types = set(self._class_types.get(language, []))
+        func_types = set(self._function_types.get(language, []))
+        import_types = set(self._import_types.get(language, []))
 
         # Node types that wrap a class/function with decorators/annotations
         decorator_wrappers = {"decorated_definition", "decorator"}
@@ -5938,6 +5988,14 @@ class CodeParser:
             for child in node.children:
                 if child.type == "type_spec":
                     return self._get_name(child, language, kind)
+        # Custom languages (languages.toml): grammars often expose the
+        # definition name through a ``name`` field whose child type is
+        # grammar-specific (Erlang ``atom``, Haskell ``variable``) and thus
+        # not in the generic child-type list above.
+        if language in self._custom_languages:
+            name_child = node.child_by_field_name("name")
+            if name_child is not None:
+                return name_child.text.decode("utf-8", errors="replace")
         return None
 
     def _get_go_receiver_type(self, node) -> Optional[str]:
@@ -6336,6 +6394,21 @@ class CodeParser:
                     txt = child.text.decode("utf-8", errors="replace")
                     if txt and txt != "extends":
                         imports.append(txt)
+        elif language in self._custom_languages:
+            # Custom languages (languages.toml): prefer the grammar's
+            # module-ish field over the raw statement text (e.g. Erlang
+            # ``-import(lists, [map/2]).`` → ``lists``; Haskell
+            # ``import Data.List`` → ``Data.List``).
+            for field_name in ("module", "name", "path", "source"):
+                target = node.child_by_field_name(field_name)
+                if target is None:
+                    continue
+                val = target.text.decode("utf-8", errors="replace").strip().strip("'\"")
+                if val:
+                    imports.append(val)
+                    break
+            else:
+                imports.append(text)
         else:
             # Fallback: just record the text
             imports.append(text)
@@ -6498,6 +6571,40 @@ class CodeParser:
         if first.type == "namespace_operator":
             return first.text.decode("utf-8", errors="replace")
 
+        # Custom languages (languages.toml): probe common callee field names
+        # (Erlang ``call`` uses ``expr``; Haskell ``apply`` uses ``function``).
+        if language in self._custom_languages:
+            return self._get_custom_call_name(node)
+
+        return None
+
+    # Callee field names probed for config-driven custom languages, in order.
+    _CUSTOM_CALLEE_FIELDS = ("function", "callee", "expr", "name")
+    _MAX_CUSTOM_CALLEE_DESCENT = 32  # Curried-application depth guard
+
+    def _get_custom_call_name(self, node) -> Optional[str]:
+        """Generic callee extraction for config-driven custom languages.
+
+        Tries common tree-sitter field names for the callee.  When the field
+        child is itself an application node carrying the same field (curried
+        calls, e.g. Haskell ``f x y`` = ``apply(apply(f, x), y)``), descend
+        to the leaf callee.  Multi-line or oversized callee text (a lambda
+        being invoked, for instance) is rejected rather than recorded as a
+        garbage call target.
+        """
+        for field_name in self._CUSTOM_CALLEE_FIELDS:
+            callee = node.child_by_field_name(field_name)
+            if callee is None:
+                continue
+            for _ in range(self._MAX_CUSTOM_CALLEE_DESCENT):
+                inner = callee.child_by_field_name(field_name)
+                if inner is None:
+                    break
+                callee = inner
+            text = callee.text.decode("utf-8", errors="replace").strip()
+            if text and len(text) <= 256 and "\n" not in text:
+                return text
+            return None
         return None
 
     def _get_jsx_component_reference(self, node) -> Optional[tuple[Optional[str], str]]:
