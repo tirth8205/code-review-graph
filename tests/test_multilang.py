@@ -419,6 +419,32 @@ class TestCSharpParsing:
                 f"INHERITS target should be a single type, got: {e.target!r}"
             )
 
+    def test_inheritance_hard_cases(self):
+        """Records, structs and nested-qualified generics reach _get_bases, and
+        generic constraints (`where T : Base`) do NOT produce edges.
+        """
+        inherits = [e for e in self.edges if e.kind == "INHERITS"]
+        by_source = {}
+        for e in inherits:
+            by_source.setdefault(e.source.rsplit("::", 1)[-1], set()).add(e.target)
+
+        # record AuditedUser : User, IRepository  (record_declaration parsed)
+        assert by_source.get("AuditedUser") == {"User", "IRepository"}, by_source.get(
+            "AuditedUser"
+        )
+        # positional record TaggedUser(...) : User  (drop the primary-ctor args)
+        assert by_source.get("TaggedUser") == {"User"}, by_source.get("TaggedUser")
+        # struct Token : IRepository
+        assert "IRepository" in by_source.get("Token", set())
+        # nested-qualified generic base preserved verbatim
+        assert "System.Collections.Generic.List<User>" in {
+            e.target for e in inherits
+        }
+        # `where T : IRepository` is a constraint, not a base — no edge for it.
+        assert "ConstrainedHolder" not in by_source, (
+            "generic constraint must not produce an INHERITS edge"
+        )
+
 
 class TestRubyParsing:
     def setup_method(self):

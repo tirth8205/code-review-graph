@@ -195,6 +195,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
+        "record_declaration", "record_struct_declaration",
     ],
     "ruby": ["class", "module"],
     "r": [],  # Classes detected via call pattern-matching, not AST node types
@@ -6086,23 +6087,43 @@ class CodeParser:
                                 if ident.type in ("type_identifier", "generic_type"):
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language == "csharp":
-            # C#: class_declaration carries a `base_list` child wrapping the
-            # `: Base, IFace, ...` clause. Its `.text` includes the leading
-            # colon and commas, so drill into the named base-type children
-            # (identifier / qualified_name / generic_name) for bare names.
+            # C#: class / record / struct / interface declarations carry a
+            # `base_list` child wrapping the `: Base, IFace, ...` clause. Its
+            # `.text` includes the leading colon and commas, so iterate the
+            # *named* base-type entries and take each one's bare text. Using
+            # is_named (rather than a fixed node-type allowlist) keeps this
+            # robust across tree-sitter-c-sharp versions, which variously emit
+            # identifier / qualified_name / generic_name / alias_qualified_name
+            # / type for a base entry. Punctuation (':' and ',') is unnamed and
+            # skipped. Generic parameter constraints (`where T : Base`) live in
+            # a sibling clause, not base_list, so they are never captured.
             # Without this, the shared handler below looked for
             # superclass/super_interfaces nodes the C# grammar never emits,
-            # so C# classes produced zero INHERITS edges and inheritors_of /
+            # so C# types produced zero INHERITS edges and inheritors_of /
             # get_impact_radius returned empty for .cs files.
             for child in node.children:
-                if child.type == "base_list":
-                    for sub in child.children:
-                        if sub.type in (
-                            "identifier", "qualified_name", "generic_name",
-                        ):
+                if child.type != "base_list":
+                    continue
+                for sub in child.children:
+                    if not sub.is_named:
+                        continue
+                    if sub.type == "primary_constructor_base_type":
+                        # positional record: `record R(...) : Base(args)` —
+                        # keep the type, drop the constructor argument_list.
+                        type_node = sub.child_by_field_name("type")
+                        if type_node is not None:
                             bases.append(
-                                sub.text.decode("utf-8", errors="replace")
+                                type_node.text.decode("utf-8", errors="replace")
                             )
+                        else:
+                            for t in sub.children:
+                                if t.is_named and t.type != "argument_list":
+                                    bases.append(
+                                        t.text.decode("utf-8", errors="replace")
+                                    )
+                                    break
+                        continue
+                    bases.append(sub.text.decode("utf-8", errors="replace"))
         elif language == "kotlin":
             # Look for superclass/interfaces in extends/implements clauses
             for child in node.children:

@@ -66,4 +66,36 @@ namespace SampleApp
     public class UserList : List<User>
     {
     }
+
+    // Nested-qualified generic base (qualified generic_name).
+    public class ScopedUserList : System.Collections.Generic.List<User>
+    {
+    }
+
+    // Generic type parameter constraint — `where T : IRepository` is NOT a base
+    // and must NOT produce an INHERITS edge. ConstrainedHolder itself has no base.
+    public class ConstrainedHolder<T> where T : IRepository
+    {
+        public T Value { get; set; }
+    }
+
+    // record with a base class + interface (record_declaration must be parsed
+    // as a class-like node so its base_list is reached).
+    public record AuditedUser : User, IRepository
+    {
+        public User FindById(int id) { return null; }
+        public void Save(User user) { }
+    }
+
+    // positional record with a primary-constructor base (drop the (args)).
+    public record TaggedUser(int Id, string Tag) : User
+    {
+    }
+
+    // struct implementing an interface.
+    public struct Token : IRepository
+    {
+        public User FindById(int id) { return null; }
+        public void Save(User user) { }
+    }
 }
