@@ -819,6 +819,11 @@ def _parse_single_file(
         return (rel_path, [], [], str(e), "")
 
 
+# Bare class tokens in a CSS selector: every ``.name`` occurrence, ignoring
+# tags, ids, pseudo-classes/elements and attribute selectors.
+_CSS_CLASS_TOKEN_RE = re.compile(r"\.([A-Za-z_-][\w-]*)")
+
+
 def link_css_styles(store: GraphStore) -> int:
     """Create STYLES edges between class references and CSS selectors.
 
@@ -842,36 +847,44 @@ def link_css_styles(store: GraphStore) -> int:
     )
     selector_index: dict[str, list[tuple[str, str]]] = {}
     for sel in selectors:
-        sel_name = sel.name.strip()
-        # Only index class selectors (starting with .)
-        if sel_name.startswith("."):
-            bare = sel_name.lstrip(".")
+        # Index the selector under every bare class token it contains, so
+        # compound (.btn.active), descendant (.card .title) and pseudo
+        # (.btn:hover, .btn::before) selectors all match a plain className.
+        for bare in _CSS_CLASS_TOKEN_RE.findall(sel.name):
             selector_index.setdefault(bare, []).append(
                 (sel.qualified_name, sel.file_path),
             )
-        # For compound selectors, also index by last class segment
-        parts = sel_name.split()
-        if len(parts) > 1:
-            last = parts[-1].strip()
-            if last.startswith("."):
-                bare = last.lstrip(".")
-                selector_index.setdefault(bare, []).append(
-                    (sel.qualified_name, sel.file_path),
-                )
 
     if not selector_index:
         store.commit()
         return 0
 
+    # file_path -> set of stylesheet paths that file imports, for scoping.
+    css_import_map: dict[str, set[str]] = {}
+    for fn in store.get_nodes_by_extra_pattern(
+        '%"css_import_files"%', kind="File",
+    ):
+        files = fn.extra.get("css_import_files", [])
+        if files:
+            css_import_map[fn.file_path] = set(files)
+
+    def _in_scope(node_file: str, sel_file: str) -> bool:
+        # A component links to a selector only when the selector is defined
+        # in the same file or in a stylesheet the component's file imports.
+        return sel_file == node_file or sel_file in css_import_map.get(
+            node_file, (),
+        )
+
     count = 0
 
-    # Link static css_classes references
+    # Link static css_classes references, scoped to imported/same-file sheets
     class_nodes = store.get_nodes_by_extra_pattern('%"css_classes"%')
     for node in class_nodes:
         classes = node.extra.get("css_classes", [])
         for cls_name in classes:
-            matches = selector_index.get(cls_name, [])
-            for sel_qn, sel_file in matches:
+            for sel_qn, sel_file in selector_index.get(cls_name, []):
+                if not _in_scope(node.file_path, sel_file):
+                    continue
                 store.upsert_edge(EdgeInfo(
                     kind="STYLES",
                     source=node.qualified_name,
@@ -885,13 +898,14 @@ def link_css_styles(store: GraphStore) -> int:
                 ))
                 count += 1
 
-    # Link Vue template class references
+    # Link Vue template class references (SFC <style> lives in the same file)
     vue_nodes = store.get_nodes_by_extra_pattern('%"vue_template_classes"%')
     for node in vue_nodes:
         classes = node.extra.get("vue_template_classes", [])
         for cls_name in classes:
-            matches = selector_index.get(cls_name, [])
-            for sel_qn, sel_file in matches:
+            for sel_qn, sel_file in selector_index.get(cls_name, []):
+                if not _in_scope(node.file_path, sel_file):
+                    continue
                 store.upsert_edge(EdgeInfo(
                     kind="STYLES",
                     source=node.qualified_name,
@@ -905,21 +919,17 @@ def link_css_styles(store: GraphStore) -> int:
                 ))
                 count += 1
 
-    # Link CSS Module references
+    # Link CSS Module references. Map import names → module paths per file
+    # once, not per module node.
+    file_mod_imports: dict[str, dict[str, str]] = {}
+    for fn in store.get_nodes_by_extra_pattern(
+        '%"css_module_imports"%', kind="File",
+    ):
+        file_mod_imports[fn.file_path] = fn.extra.get("css_module_imports", {})
+
     module_nodes = store.get_nodes_by_extra_pattern('%"css_module_refs"%')
     for node in module_nodes:
         refs = node.extra.get("css_module_refs", [])
-        # Find the File node for CSS module imports
-        file_nodes = store.get_nodes_by_extra_pattern(
-            '%"css_module_imports"%', kind="File",
-        )
-        # Build a map of import names → module paths per file
-        file_mod_imports: dict[str, dict[str, str]] = {}
-        for fn in file_nodes:
-            file_mod_imports[fn.file_path] = fn.extra.get(
-                "css_module_imports", {},
-            )
-
         mod_imports = file_mod_imports.get(node.file_path, {})
         for ref in refs:
             imp_name = ref.get("import", "")
@@ -931,8 +941,9 @@ def link_css_styles(store: GraphStore) -> int:
                 continue
             # Convert camelCase to kebab-case for selector lookup
             kebab = CodeParser._camel_to_kebab(prop_name)
-            matches = selector_index.get(kebab, [])
-            for sel_qn, sel_file in matches:
+            for sel_qn, sel_file in selector_index.get(kebab, []):
+                if not _in_scope(node.file_path, sel_file):
+                    continue
                 store.upsert_edge(EdgeInfo(
                     kind="STYLES",
                     source=node.qualified_name,

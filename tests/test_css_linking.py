@@ -41,11 +41,12 @@ class TestCamelToKebab:
 
 class TestCSSStylesLinking:
     def test_static_styles_edge(self):
-        """TSX className should create STYLES edge to matching CSS selector."""
+        """TSX className should create STYLES edge to the imported CSS selector."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             store = _build_graph_from_files(tmp_dir, {
                 "App.tsx": b'''
+import './styles.css';
 function App() {
   return <div className="btn">Click</div>;
 }

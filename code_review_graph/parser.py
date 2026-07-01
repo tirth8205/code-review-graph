@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -811,11 +812,12 @@ class CodeParser:
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
         # Per-parse scratch space collecting JSX className/CSS-module refs,
-        # keyed by the qualified name of the enclosing function. Reset at the
-        # start of every parse_bytes() call; not threaded through
-        # _extract_from_tree's recursion (22 call sites) since it is only
-        # ever written by the JSX-attribute branch and read back once parsing
-        # of the current file/script-block finishes.
+        # keyed by the qualified name of the enclosing function. Reset and
+        # consumed only on the generic parse_bytes() path (JS/TS/TSX); the Vue
+        # and Svelte paths return early via _parse_vue/_parse_svelte and never
+        # read it back, so anything the JSX-attribute branch writes during
+        # those parses is inert. Not threaded through _extract_from_tree's
+        # recursion (22 call sites) since a fresh CodeParser is used per file.
         self._jsx_class_collector: dict[str, dict] = {}
         # Config-driven custom languages (.code-review-graph/languages.toml).
         # The built-in tables stay shared module-level constants; only when a
@@ -1068,6 +1070,15 @@ class CodeParser:
             }
             if css_mod_imports:
                 nodes[0].extra["css_module_imports"] = css_mod_imports
+
+        # Record every stylesheet this module imports, resolved to absolute
+        # paths, so STYLES linking can be scoped to the files a component
+        # actually imports rather than matched globally by bare class name.
+        css_import_files = self._collect_css_import_files(
+            tree.root_node, language, path,
+        )
+        if css_import_files:
+            nodes[0].extra["css_import_files"] = css_import_files
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -6374,6 +6385,41 @@ class CodeParser:
                 self._collect_import_names(child, language, source, import_map)
 
         return import_map, defined_names
+
+    def _collect_css_import_files(
+        self, root, language: str, file_path: Path,
+    ) -> list[str]:
+        """Resolved absolute paths of stylesheets this file imports.
+
+        Covers both bound CSS-Module imports (``import s from './x.module.css'``)
+        and plain side-effect imports (``import './x.css'``) — the latter carry
+        no binding and so never appear in the import-name map. Only imports that
+        resolve to an on-disk file are returned. Used to scope STYLES edges.
+        """
+        if language not in ("javascript", "typescript", "tsx"):
+            return []
+        css_exts = (".css", ".scss", ".less", ".sass")
+        import_types = set(self._import_types.get(language, []))
+        # Resolve relative to the caller's path in the SAME convention node
+        # file_paths use (normpath, no symlink canonicalization), so the
+        # results compare equal to selector nodes' file_path in the graph.
+        base_dir = os.path.dirname(str(file_path))
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for child in root.children:
+            if child.type not in import_types:
+                continue
+            for sub in child.children:
+                if sub.type != "string":
+                    continue
+                module = sub.text.decode("utf-8", errors="replace").strip("'\"")
+                if not module.endswith(css_exts) or not module.startswith("."):
+                    continue
+                target = os.path.normpath(os.path.join(base_dir, module))
+                if os.path.isfile(target) and target not in seen:
+                    seen.add(target)
+                    resolved.append(target)
+        return sorted(resolved)
 
     def _collect_js_exported_local_names(
         self, node, defined_names: set[str],
