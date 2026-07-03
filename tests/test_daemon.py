@@ -379,8 +379,8 @@ class TestPidAliveWindows:
 
         kernel32 = _FakeKernel32(handle=1234, wait_result=0x102)
         assert _pid_alive_windows(4242, kernel32) is True
-        # PROCESS_QUERY_LIMITED_INFORMATION, no inherit, the pid
-        assert kernel32.open_calls == [(0x1000, False, 4242)]
+        # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, no inherit, the pid
+        assert kernel32.open_calls == [(0x1000 | 0x00100000, False, 4242)]
         assert kernel32.wait_calls == [(1234, 0)]
         # The handle must always be closed
         assert kernel32.closed == [1234]
@@ -391,6 +391,19 @@ class TestPidAliveWindows:
 
         kernel32 = _FakeKernel32(handle=1234, wait_result=0x0)
         assert _pid_alive_windows(4242, kernel32) is False
+        assert kernel32.closed == [1234]
+
+    def test_alive_when_wait_fails(self):
+        """WAIT_FAILED (0xFFFFFFFF) cannot prove death — presume alive.
+
+        Regression guard: with a QUERY-only access mask the wait always
+        failed, so dead daemons were reported as running forever.
+        """
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=1234, wait_result=0xFFFFFFFF)
+        assert _pid_alive_windows(4242, kernel32) is True
+        # The handle must still be closed on this path
         assert kernel32.closed == [1234]
 
     def test_alive_on_access_denied(self):
