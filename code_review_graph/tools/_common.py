@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,68 @@ def _error_response(
 ) -> dict[str, Any]:
     """Build a standardised error response dict."""
     return {"status": status, "error": message, "summary": message, **extra}
+
+
+def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
+    """Freshness/provenance envelope for a repo's graph, or None.
+
+    Reads build metadata (when the graph was last updated, and on which
+    git branch/commit it was built) so every tool response can carry the
+    context an agent needs to judge whether the answer is stale — a graph
+    built three days ago on another branch answers questions about *that*
+    tree, not the current one.
+
+    Best-effort by design: any failure (no graph, unreadable DB, missing
+    metadata) returns None and must never fail the tool call itself.
+    """
+    try:
+        root = _resolve_root(repo_root)
+        db_path = get_db_path(root)
+        if not db_path.exists():
+            return None
+        # as_uri() percent-escapes URI-significant characters (#, %, ?)
+        # that a plain f-string would hand to SQLite's URI parser raw.
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            rows = dict(conn.execute(
+                "SELECT key, value FROM metadata WHERE key IN "
+                "('last_updated', 'git_branch', 'git_head_sha')"
+            ).fetchall())
+        finally:
+            conn.close()
+        updated_at = rows.get("last_updated")
+        if not updated_at:
+            return None
+        provenance: dict[str, Any] = {"updated_at": updated_at}
+        try:
+            # Stored via time.strftime("%Y-%m-%dT%H:%M:%S") in local time.
+            built = datetime.fromisoformat(updated_at)
+            provenance["age_seconds"] = max(
+                0, int((datetime.now() - built).total_seconds()),
+            )
+        except ValueError:
+            pass
+        if rows.get("git_branch"):
+            provenance["built_on_branch"] = rows["git_branch"]
+        if rows.get("git_head_sha"):
+            provenance["built_at_sha"] = rows["git_head_sha"]
+        return provenance
+    except Exception:
+        return None
+
+
+def with_provenance(result: Any, repo_root: str | None = None) -> Any:
+    """Attach a ``_graph`` provenance envelope to a tool response dict.
+
+    No-op for non-dict results, results that already carry ``_graph``,
+    and repos where provenance cannot be determined.
+    """
+    if not isinstance(result, dict) or "_graph" in result:
+        return result
+    provenance = graph_provenance(repo_root)
+    if provenance:
+        result["_graph"] = provenance
+    return result
 
 # Common JS/TS builtin method names filtered from callers_of results.
 # "Who calls .map()?" returns hundreds of hits and is never useful.

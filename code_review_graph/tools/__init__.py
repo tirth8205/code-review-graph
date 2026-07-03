@@ -49,6 +49,7 @@ from ._common import (
     _BUILTIN_CALL_NAMES,
     _get_store,
     _validate_repo_root,
+    with_provenance,
 )
 
 # -- analysis_tools ---------------------------------------------------------
@@ -107,6 +108,7 @@ __all__ = [
     "_BUILTIN_CALL_NAMES",
     "_get_store",
     "_validate_repo_root",
+    "with_provenance",
     # build
     "build_or_update_graph",
     "run_postprocess",

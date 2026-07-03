@@ -1563,3 +1563,124 @@ class TestGetMinimalContext:
             task="refactor auth module", repo_root=str(self.root),
         )
         assert "refactor" in result["next_tool_suggestions"]
+
+
+class TestProvenance:
+    """graph_provenance / with_provenance freshness envelope (_common.py)."""
+
+    def _make_repo(self, tmp_path, metadata=None):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        graph_dir = repo / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.upsert_node(NodeInfo(
+                kind="Function", name="handle", file_path="src/app.py",
+                line_start=1, line_end=3, language="python",
+            ))
+            for key, value in (metadata or {}).items():
+                store.set_metadata(key, value)
+            store.commit()
+        finally:
+            store.close()
+        return repo
+
+    def test_reads_build_metadata(self, tmp_path):
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "2026-01-02T03:04:05",
+            "git_branch": "feature/x",
+            "git_head_sha": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0",
+        })
+        prov = common_module.graph_provenance(str(repo))
+        assert prov["updated_at"] == "2026-01-02T03:04:05"
+        assert prov["built_on_branch"] == "feature/x"
+        assert prov["built_at_sha"] == "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+        assert prov["age_seconds"] >= 0
+
+    def test_reads_metadata_from_uri_hostile_path(self, tmp_path):
+        # '%' and '#' are significant in SQLite URIs; the read-only
+        # connection must percent-escape the db path (via as_uri).
+        hostile = tmp_path / "repo %40 #frag"
+        hostile.mkdir()
+        (hostile / ".git").mkdir()
+        graph_dir = hostile / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.set_metadata("last_updated", "2026-01-02T03:04:05")
+            store.commit()
+        finally:
+            store.close()
+        prov = common_module.graph_provenance(str(hostile))
+        assert prov is not None
+        assert prov["updated_at"] == "2026-01-02T03:04:05"
+
+    def test_future_timestamp_clamps_age_to_zero(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "2999-01-01T00:00:00"})
+        prov = common_module.graph_provenance(str(repo))
+        assert prov["age_seconds"] == 0
+
+    def test_unparseable_timestamp_omits_age(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "not-a-date"})
+        prov = common_module.graph_provenance(str(repo))
+        assert prov["updated_at"] == "not-a-date"
+        assert "age_seconds" not in prov
+
+    def test_branch_and_sha_optional(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "2026-01-02T03:04:05"})
+        prov = common_module.graph_provenance(str(repo))
+        assert "built_on_branch" not in prov
+        assert "built_at_sha" not in prov
+
+    def test_none_without_last_updated(self, tmp_path):
+        repo = self._make_repo(tmp_path)  # fresh DB only has schema_version
+        assert common_module.graph_provenance(str(repo)) is None
+
+    def test_none_without_graph_db(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        assert common_module.graph_provenance(str(repo)) is None
+
+    def test_none_on_invalid_repo_root(self, tmp_path):
+        assert common_module.graph_provenance(str(tmp_path / "missing")) is None
+
+    def test_with_provenance_attaches_envelope(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "2026-01-02T03:04:05"})
+        result = common_module.with_provenance({"status": "ok"}, str(repo))
+        assert result["status"] == "ok"
+        assert result["_graph"]["updated_at"] == "2026-01-02T03:04:05"
+
+    def test_with_provenance_keeps_result_without_provenance(self, tmp_path):
+        repo = self._make_repo(tmp_path)
+        result = common_module.with_provenance({"status": "ok"}, str(repo))
+        assert result == {"status": "ok"}
+
+    def test_with_provenance_ignores_non_dict_results(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "2026-01-02T03:04:05"})
+        assert common_module.with_provenance([1, 2], str(repo)) == [1, 2]
+        assert common_module.with_provenance(None, str(repo)) is None
+
+    def test_with_provenance_does_not_overwrite_existing_envelope(self, tmp_path):
+        repo = self._make_repo(tmp_path, {"last_updated": "2026-01-02T03:04:05"})
+        result = common_module.with_provenance(
+            {"status": "ok", "_graph": {"updated_at": "existing"}}, str(repo),
+        )
+        assert result["_graph"] == {"updated_at": "existing"}
+
+    def test_registered_tool_response_carries_envelope(self, tmp_path):
+        from code_review_graph.main import list_graph_stats_tool
+
+        repo = self._make_repo(tmp_path, {
+            "last_updated": "2026-01-02T03:04:05",
+            "git_branch": "main",
+        })
+        # @mcp.tool() may return a FunctionTool (callable on .fn) or the
+        # plain function depending on the FastMCP version — same fallback
+        # as test_main.TestLongRunningToolsAreAsync.
+        underlying = getattr(list_graph_stats_tool, "fn", None) or list_graph_stats_tool
+        result = underlying(repo_root=str(repo))
+        assert result["_graph"]["updated_at"] == "2026-01-02T03:04:05"
+        assert result["_graph"]["built_on_branch"] == "main"

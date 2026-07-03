@@ -57,6 +57,7 @@ from .tools import (
     run_postprocess,
     semantic_search_nodes,
     traverse_graph_func,
+    with_provenance,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,14 +123,20 @@ async def build_or_update_graph_tool(
         recurse_submodules: If True, include files from git submodules.
             When None (default), falls back to CRG_RECURSE_SUBMODULES env var.
     """
-    return await asyncio.to_thread(
-        build_or_update_graph,
-        full_rebuild=full_rebuild,
-        repo_root=_resolve_repo_root(repo_root),
-        base=base,
-        postprocess=postprocess,
-        recurse_submodules=recurse_submodules,
-    )
+    root = _resolve_repo_root(repo_root)
+
+    def _run() -> dict:
+        # with_provenance runs inside the worker thread too: it opens the
+        # graph DB, and the event loop must never touch disk (#46, #136).
+        return with_provenance(build_or_update_graph(
+            full_rebuild=full_rebuild,
+            repo_root=root,
+            base=base,
+            postprocess=postprocess,
+            recurse_submodules=recurse_submodules,
+        ), root)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool()
@@ -154,11 +161,15 @@ async def run_postprocess_tool(
         fts: Rebuild FTS index. Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return await asyncio.to_thread(
-        run_postprocess,
-        flows=flows, communities=communities, fts=fts,
-        repo_root=_resolve_repo_root(repo_root),
-    )
+    root = _resolve_repo_root(repo_root)
+
+    def _run() -> dict:
+        return with_provenance(run_postprocess(
+            flows=flows, communities=communities, fts=fts,
+            repo_root=root,
+        ), root)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool()
@@ -180,10 +191,10 @@ def get_minimal_context_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for diff comparison. Default: HEAD~1.
     """
-    return get_minimal_context(
+    return with_provenance(get_minimal_context(
         task=task, changed_files=changed_files,
         repo_root=_resolve_repo_root(repo_root), base=base,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -206,10 +217,10 @@ def get_impact_radius_tool(
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
-    return get_impact_radius(
+    return with_provenance(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -237,10 +248,10 @@ def query_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
-    return query_graph(
+    return with_provenance(query_graph(
         pattern=pattern, target=target, repo_root=_resolve_repo_root(repo_root),
         detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -268,11 +279,11 @@ def get_review_context_tool(
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
     """
-    return get_review_context(
+    return with_provenance(get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
         repo_root=_resolve_repo_root(repo_root), base=base, detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -305,10 +316,10 @@ def semantic_search_nodes_tool(
                   or "minimax". Must match the provider used during embed_graph.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
-    return semantic_search_nodes(
+    return with_provenance(semantic_search_nodes(
         query=query, kind=kind, limit=limit, repo_root=_resolve_repo_root(repo_root),
         model=model, provider=provider, detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -345,12 +356,16 @@ async def embed_graph_tool(
                   CRG_OPENAI_MODEL env vars and accepts any OpenAI-compatible
                   endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, etc.).
     """
-    return await asyncio.to_thread(
-        embed_graph,
-        repo_root=_resolve_repo_root(repo_root),
-        model=model,
-        provider=provider,
-    )
+    root = _resolve_repo_root(repo_root)
+
+    def _run() -> dict:
+        return with_provenance(embed_graph(
+            repo_root=root,
+            model=model,
+            provider=provider,
+        ), root)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool()
@@ -365,7 +380,10 @@ def list_graph_stats_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return list_graph_stats(repo_root=_resolve_repo_root(repo_root))
+    return with_provenance(
+        list_graph_stats(repo_root=_resolve_repo_root(repo_root)),
+        _resolve_repo_root(repo_root),
+    )
 
 
 @mcp.tool()
@@ -411,10 +429,10 @@ def find_large_functions_tool(
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return find_large_functions(
+    return with_provenance(find_large_functions(
         min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
         limit=limit, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -439,10 +457,10 @@ def list_flows_tool(
                       returns only name, criticality, and node_count per flow.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return list_flows(
+    return with_provenance(list_flows(
         repo_root=_resolve_repo_root(repo_root), sort_by=sort_by, limit=limit, kind=kind,
         detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -465,10 +483,10 @@ def get_flow_tool(
         include_source: Include source code snippets for each step. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_flow(
+    return with_provenance(get_flow(
         flow_id=flow_id, flow_name=flow_name,
         include_source=include_source, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -488,9 +506,9 @@ def get_affected_flows_tool(
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_affected_flows_func(
+    return with_provenance(get_affected_flows_func(
         changed_files=changed_files, base=base, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -514,10 +532,10 @@ def list_communities_tool(
                       per community.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return list_communities_func(
+    return with_provenance(list_communities_func(
         repo_root=_resolve_repo_root(repo_root), sort_by=sort_by, min_size=min_size,
         detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -541,10 +559,10 @@ def get_community_tool(
         include_members: Include full member node details. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_community_func(
+    return with_provenance(get_community_func(
         community_name=community_name, community_id=community_id,
         include_members=include_members, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -565,10 +583,10 @@ def get_architecture_overview_tool(
                       community pair (typical reduction: 600KB -> <5KB);
                       "standard" returns full per-edge detail.
     """
-    return get_architecture_overview_func(
+    return with_provenance(get_architecture_overview_func(
         repo_root=_resolve_repo_root(repo_root),
         detail_level=detail_level,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -599,12 +617,16 @@ async def detect_changes_tool(
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
     """
-    coro = asyncio.to_thread(
-        detect_changes_func,
-        base=base, changed_files=changed_files,
-        include_source=include_source, max_depth=max_depth,
-        repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
-    )
+    root = _resolve_repo_root(repo_root)
+
+    def _run() -> dict:
+        return with_provenance(detect_changes_func(
+            base=base, changed_files=changed_files,
+            include_source=include_source, max_depth=max_depth,
+            repo_root=root, detail_level=detail_level,
+        ), root)
+
+    coro = asyncio.to_thread(_run)
     tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
     if tool_timeout > 0:
         try:
@@ -615,11 +637,12 @@ async def detect_changes_tool(
                 "Reduce scope with CRG_MAX_CHANGED_FUNCS / CRG_MAX_TRANSITIVE_FRONTIER, "
                 "or increase CRG_TOOL_TIMEOUT."
             )
-            return {
+            error_response = {
                 "status": "error",
                 "error": message,
                 "summary": message,
             }
+            return await asyncio.to_thread(with_provenance, error_response, root)
     return await coro
 
 
@@ -653,10 +676,10 @@ def refactor_tool(
         file_pattern: (dead_code) Filter by file path substring.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return refactor_func(
+    return with_provenance(refactor_func(
         mode=mode, old_name=old_name, new_name=new_name,
         kind=kind, file_pattern=file_pattern, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -683,10 +706,10 @@ def apply_refactor_tool(
             dry_run. Use this for a human-in-the-loop review before
             committing changes to disk. See: #176
     """
-    return apply_refactor_func(
+    return with_provenance(apply_refactor_func(
         refactor_id=refactor_id, repo_root=_resolve_repo_root(repo_root),
         dry_run=dry_run,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -708,11 +731,15 @@ async def generate_wiki_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         force: If True, regenerate all pages even if content unchanged. Default: False.
     """
-    return await asyncio.to_thread(
-        generate_wiki_func,
-        repo_root=_resolve_repo_root(repo_root),
-        force=force,
-    )
+    root = _resolve_repo_root(repo_root)
+
+    def _run() -> dict:
+        return with_provenance(generate_wiki_func(
+            repo_root=root,
+            force=force,
+        ), root)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool()
@@ -729,9 +756,9 @@ def get_wiki_page_tool(
         community_name: Community name to look up.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_wiki_page_func(
+    return with_provenance(get_wiki_page_func(
         community_name=community_name, repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -748,9 +775,9 @@ def get_hub_nodes_tool(
         top_n: Number of top hubs to return. Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_hub_nodes_func(
+    return with_provenance(get_hub_nodes_func(
         repo_root=_resolve_repo_root(repo_root), top_n=top_n,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -768,9 +795,9 @@ def get_bridge_nodes_tool(
         top_n: Number of top bridges to return. Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_bridge_nodes_func(
+    return with_provenance(get_bridge_nodes_func(
         repo_root=_resolve_repo_root(repo_root), top_n=top_n,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -786,9 +813,9 @@ def get_knowledge_gaps_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_knowledge_gaps_func(
+    return with_provenance(get_knowledge_gaps_func(
         repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -806,9 +833,9 @@ def get_surprising_connections_tool(
         top_n: Number of top surprises to return. Default: 15.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_surprising_connections_func(
+    return with_provenance(get_surprising_connections_func(
         repo_root=_resolve_repo_root(repo_root), top_n=top_n,
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -824,9 +851,9 @@ def get_suggested_questions_tool(
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_suggested_questions_func(
+    return with_provenance(get_suggested_questions_func(
         repo_root=_resolve_repo_root(repo_root),
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
@@ -852,11 +879,11 @@ def traverse_graph_tool(
             Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return traverse_graph_func(
+    return with_provenance(traverse_graph_func(
         query=query, mode=mode, depth=depth,
         token_budget=token_budget,
         repo_root=_resolve_repo_root(repo_root) or "",
-    )
+    ), _resolve_repo_root(repo_root))
 
 
 @mcp.tool()
