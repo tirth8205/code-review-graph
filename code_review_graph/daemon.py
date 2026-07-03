@@ -164,6 +164,40 @@ def load_config(path: Path | None = None) -> DaemonConfig:
 # ---------------------------------------------------------------------------
 
 
+# TOML basic strings have named escapes for these; everything else in
+# the control range must use the \uXXXX form.
+_TOML_SHORT_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _toml_str(value: object) -> str:
+    """Render *value* as a TOML basic string.
+
+    Backslashes and double quotes are escape characters in TOML basic
+    strings, so Windows paths like ``C:\\Users\\x`` must be escaped or
+    the file fails to parse on the next load. Control characters
+    (U+0000-U+001F, U+007F) are forbidden unescaped by the TOML spec,
+    so they are escaped too — ``tomllib`` rejects the file otherwise.
+    """
+    chars: list[str] = []
+    for ch in str(value):
+        esc = _TOML_SHORT_ESCAPES.get(ch)
+        if esc is not None:
+            chars.append(esc)
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            chars.append(f"\\u{ord(ch):04X}")
+        else:
+            chars.append(ch)
+    return '"' + "".join(chars) + '"'
+
+
 def _serialize_toml(config: DaemonConfig) -> str:
     """Serialize a :class:`DaemonConfig` to TOML text.
 
@@ -171,15 +205,15 @@ def _serialize_toml(config: DaemonConfig) -> str:
     """
     lines: list[str] = [
         "[daemon]",
-        f'session_name = "{config.session_name}"',
-        f'log_dir = "{config.log_dir}"',
+        f"session_name = {_toml_str(config.session_name)}",
+        f"log_dir = {_toml_str(config.log_dir)}",
         f"poll_interval = {config.poll_interval}",
     ]
     for repo in config.repos:
         lines.append("")
         lines.append("[[repos]]")
-        lines.append(f'path = "{repo.path}"')
-        lines.append(f'alias = "{repo.alias}"')
+        lines.append(f"path = {_toml_str(repo.path)}")
+        lines.append(f"alias = {_toml_str(repo.alias)}")
     lines.append("")  # trailing newline
     return "\n".join(lines)
 
