@@ -19,6 +19,7 @@ from code_review_graph.parser import EdgeInfo, NodeInfo
 class TestFlows:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):

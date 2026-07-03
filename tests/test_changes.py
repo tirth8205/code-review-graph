@@ -19,6 +19,7 @@ from code_review_graph.parser import EdgeInfo, NodeInfo
 class TestChanges:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):
@@ -438,11 +439,11 @@ class TestChanges:
             patch("code_review_graph.tools.review._get_store") as mock_get_store,
             patch("code_review_graph.tools.review.get_changed_files", return_value=[]),
             patch("code_review_graph.tools.review.get_staged_and_unstaged", return_value=[]),
+            # Prevent the tool from closing our shared store; patch.object
+            # restores close() afterwards so teardown can really close it.
+            patch.object(self.store, "close"),
         ):
             mock_get_store.return_value = (self.store, Path("/fake/repo"))
-            # Prevent the store from being closed by the tool
-            # (our teardown handles it).
-            self.store.close = lambda: None
 
             result = detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
             assert result["status"] == "ok"
@@ -463,9 +464,9 @@ class TestChanges:
                 "code_review_graph.tools.review.parse_git_diff_ranges",
                 return_value={"app.py": [(1, 10)]},
             ),
+            patch.object(self.store, "close"),
         ):
             mock_get_store.return_value = (self.store, Path("/fake/repo"))
-            self.store.close = lambda: None
 
             result = detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
             assert result["status"] == "ok"
@@ -480,6 +481,7 @@ class TestAnalyzeChangesFunctionCap:
 
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):
@@ -530,6 +532,7 @@ class TestAnalyzeChangesInternalParseRemap:
 
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):

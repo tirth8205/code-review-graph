@@ -21,6 +21,7 @@ def _get_signature(store, qualified_name):
 class TestRunPostProcessing:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
         self._seed_data()
 
@@ -174,6 +175,7 @@ class TestRunPostProcessing:
 
     def test_empty_store_no_crash(self):
         empty_tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        empty_tmp.close()  # close the OS handle so Windows can unlink it below
         empty_store = GraphStore(empty_tmp.name)
         try:
             result = run_post_processing(empty_store)
@@ -213,6 +215,7 @@ class TestRunPostProcessing:
 class TestPostProcessingStepIsolation:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
         self.store.upsert_node(
             NodeInfo(

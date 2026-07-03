@@ -268,6 +268,7 @@ class TestPIDManagement:
         clear_pid(pid_path)
         assert not pid_path.exists()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
     @patch("os.kill")
     def test_is_daemon_running_alive(self, mock_kill, pid_path):
         """os.kill(pid, 0) succeeds — daemon is running."""

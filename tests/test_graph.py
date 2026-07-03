@@ -12,6 +12,7 @@ from code_review_graph.parser import EdgeInfo, NodeInfo
 class TestGraphStore:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):
@@ -283,6 +284,7 @@ class TestImpactRadiusSql:
 
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
         self._build_chain()
 
@@ -347,6 +349,7 @@ class TestGetTransitiveTestsFrontierCap:
 
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # close the OS handle so Windows can unlink it in teardown
         self.store = GraphStore(self.tmp.name)
 
     def teardown_method(self):
