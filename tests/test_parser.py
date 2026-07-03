@@ -1458,3 +1458,184 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+class TestDocstringExtraction:
+    """Docstrings / doc comments land in NodeInfo.extra["docstring"]."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _node(self, nodes, name):
+        return next(n for n in nodes if n.name == name)
+
+    def test_python_function_docstring_first_paragraph(self):
+        src = (
+            b'def add(a, b):\n'
+            b'    """Add two numbers.\n'
+            b'\n'
+            b'    Longer details that must not appear.\n'
+            b'    """\n'
+            b'    return a + b\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert self._node(nodes, "add").extra["docstring"] == "Add two numbers."
+
+    def test_python_class_and_method_docstrings(self):
+        src = (
+            b'class Calculator:\n'
+            b'    """Stateful calculator."""\n'
+            b'\n'
+            b'    def run(self):\n'
+            b'        """Run it."""\n'
+            b'        pass\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        calc = self._node(nodes, "Calculator")
+        assert calc.extra["docstring"] == "Stateful calculator."
+        assert self._node(nodes, "run").extra["docstring"] == "Run it."
+
+    def test_python_function_without_docstring_has_no_key(self):
+        src = b"def add(a, b):\n    return a + b\n"
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert "docstring" not in self._node(nodes, "add").extra
+
+    def test_python_docstring_is_capped(self):
+        body = "word " * 200
+        src = f'def f():\n    """{body}"""\n'.encode()
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert len(self._node(nodes, "f").extra["docstring"]) == 400
+
+    def test_jsdoc_block_comment(self):
+        src = (
+            b"/** Adds two numbers. */\n"
+            b"function add(a, b) { return a + b; }\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.js"), src)
+        assert self._node(nodes, "add").extra["docstring"] == "Adds two numbers."
+
+    def test_plain_js_line_comment_is_ignored(self):
+        src = (
+            b"// helper, do not document\n"
+            b"function add(a, b) { return a + b; }\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.js"), src)
+        assert "docstring" not in self._node(nodes, "add").extra
+
+    def test_go_plain_doc_comment_block(self):
+        src = (
+            b"package main\n"
+            b"\n"
+            b"// Add returns the sum\n"
+            b"// of both arguments.\n"
+            b"func Add(a int, b int) int { return a + b }\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.go"), src)
+        doc = self._node(nodes, "Add").extra["docstring"]
+        assert doc == "Add returns the sum of both arguments."
+
+    def test_rust_doc_comment_skips_attribute(self):
+        src = (
+            b"/// Returns the sum.\n"
+            b"#[inline]\n"
+            b"fn add(a: i32, b: i32) -> i32 { a + b }\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.rs"), src)
+        assert self._node(nodes, "add").extra["docstring"] == "Returns the sum."
+
+    def test_javadoc_first_paragraph_only(self):
+        src = (
+            b"class Job {\n"
+            b"    /**\n"
+            b"     * Runs the job.\n"
+            b"     *\n"
+            b"     * @param retries how many times\n"
+            b"     */\n"
+            b"    void run(int retries) {}\n"
+            b"}\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("Job.java"), src)
+        assert self._node(nodes, "run").extra["docstring"] == "Runs the job."
+
+    def test_blank_line_detaches_comment(self):
+        src = (
+            b"/** Module-level banner. */\n"
+            b"\n"
+            b"function add(a, b) { return a + b; }\n"
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.js"), src)
+        assert "docstring" not in self._node(nodes, "add").extra
+
+    def test_rust_inner_line_doc_not_attached_to_item(self):
+        # //! documents the enclosing module, never the following item.
+        src = (
+            b'//! Module-level auth helpers.\n'
+            b'pub fn login() {}\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.rs"), src)
+        assert "docstring" not in (self._node(nodes, "login").extra or {})
+
+    def test_rust_inner_block_doc_not_attached_to_item(self):
+        src = (
+            b'/*! Module-level auth helpers. */\n'
+            b'pub fn login() {}\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.rs"), src)
+        assert "docstring" not in (self._node(nodes, "login").extra or {})
+
+    def test_rust_outer_doc_survives_leading_inner_doc(self):
+        src = (
+            b'//! Module docs.\n'
+            b'/// Validates the login.\n'
+            b'pub fn login() {}\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.rs"), src)
+        assert self._node(nodes, "login").extra["docstring"] == (
+            "Validates the login."
+        )
+
+    def test_python_bytes_literal_is_not_a_docstring(self):
+        src = (
+            b'def f():\n'
+            b'    b"not a docstring"\n'
+            b'    return 1\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert "docstring" not in (self._node(nodes, "f").extra or {})
+
+    def test_python_fstring_literal_is_not_a_docstring(self):
+        src = (
+            b'def f():\n'
+            b'    f"not {1} a docstring"\n'
+            b'    return 1\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert "docstring" not in (self._node(nodes, "f").extra or {})
+
+    def test_python_parenthesized_concatenated_docstring(self):
+        # CPython treats implicitly concatenated parenthesized literals
+        # as the docstring; so do we.
+        src = (
+            b'def f():\n'
+            b'    ("This is a "\n'
+            b'     "concatenated docstring.")\n'
+            b'    return 42\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.py"), src)
+        assert self._node(nodes, "f").extra["docstring"] == (
+            "This is a concatenated docstring."
+        )
+
+    def test_js_exported_function_doc_comment(self):
+        # The doc block sits above the export statement, not the inner
+        # function declaration node.
+        src = (
+            b'/** Adds two numbers. */\n'
+            b'export function add(a, b) {\n'
+            b'  return a + b;\n'
+            b'}\n'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("m.js"), src)
+        assert self._node(nodes, "add").extra["docstring"] == (
+            "Adds two numbers."
+        )

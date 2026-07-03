@@ -105,6 +105,18 @@ class TestNodeToText:
         # File kind should not add "file" as a kind label
         assert "file.py" in text
 
+    def test_docstring_included(self):
+        node = self._make_node(
+            extra={"docstring": "Parses PDF rate sheets into rows."},
+        )
+        text = _node_to_text(node)
+        assert "Parses PDF rate sheets into rows." in text
+
+    def test_docstring_absent_text_unchanged(self):
+        plain = _node_to_text(self._make_node())
+        empty_extra = _node_to_text(self._make_node(extra={}))
+        assert plain == empty_extra
+
 
 class TestEmbeddingStore:
     def test_store_initializes(self, tmp_path):

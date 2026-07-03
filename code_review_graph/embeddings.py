@@ -802,8 +802,9 @@ def _node_to_text(node: GraphNode) -> str:
     Designed so natural-language queries land on the right node, not just on
     the enclosing class. We include the dotted ``Parent.name`` form, the
     identifier split into words, an explicit ``"in <Parent>"`` phrase, the
-    enclosing module directory, and the language. Tested by the
-    ``multi_hop_retrieval`` benchmark — see ``docs/REPRODUCING.md``.
+    docstring summary when the parser extracted one, the enclosing module
+    directory, and the language. Tested by the ``multi_hop_retrieval``
+    benchmark — see ``docs/REPRODUCING.md``.
     """
     parts: list[str] = []
 
@@ -836,14 +837,22 @@ def _node_to_text(node: GraphNode) -> str:
     if node.return_type:
         parts.append(f"returns {node.return_type}")
 
-    # 7. Module / directory context from the file path — gives queries a
+    # 7. Docstring / doc comment summary — the author's own description of
+    # what the node does, and the only part written in the same natural
+    # language as the queries. Extracted by the parser (first paragraph,
+    # capped) into extra["docstring"].
+    docstring = node.extra.get("docstring") if node.extra else None
+    if docstring:
+        parts.append(str(docstring))
+
+    # 8. Module / directory context from the file path — gives queries a
     # term like "routing" or "client" to anchor against.
     if node.file_path:
         parent_dir = Path(node.file_path).parent.name
         if parent_dir and parent_dir not in (".", "src", "lib"):
             parts.append(parent_dir)
 
-    # 8. Language
+    # 9. Language
     if node.language:
         parts.append(node.language)
 

@@ -785,6 +785,72 @@ def _is_test_function(
     return False
 
 
+# -- Docstring / doc comment helpers ---------------------------------------
+
+# Hard cap on stored docstring length. Docstrings feed semantic-search
+# embedding text, where the first sentence or two carry nearly all the
+# signal; storing whole multi-page docstrings would bloat the DB and drown
+# the name/signature terms.
+_MAX_DOCSTRING_CHARS = 400
+
+_PY_STRING_PREFIX_RE = re.compile(r"^[rRbBuUfF]{0,2}")
+_LINE_COMMENT_MARKER_RE = re.compile(r"^//[/!]*\s?")
+
+
+def _strip_python_string_literal(text: str) -> Optional[str]:
+    """Strip prefix letters and quotes from a Python string literal.
+
+    Returns None for bytes and f-string literals: CPython does not treat
+    them as docstrings (``__doc__`` stays None), so neither do we.
+    """
+    prefix = _PY_STRING_PREFIX_RE.match(text).group(0)
+    if "b" in prefix.lower() or "f" in prefix.lower():
+        return None
+    text = _PY_STRING_PREFIX_RE.sub("", text)
+    for quote in ('"""', "'''", '"', "'"):
+        if text.startswith(quote) and text.endswith(quote) and len(text) >= 2 * len(quote):
+            return text[len(quote):-len(quote)]
+    return text
+
+
+def _strip_block_comment(text: str) -> str:
+    """Strip ``/** ... */`` (or ``/*! ... */``) wrappers and leading ``*``."""
+    if text.startswith(("/**", "/*!")):
+        text = text[3:]
+    elif text.startswith("/*"):
+        text = text[2:]
+    if text.endswith("*/"):
+        text = text[:-2]
+    lines = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("*"):
+            stripped = stripped[1:]
+            if stripped.startswith(" "):
+                stripped = stripped[1:]
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _clean_docstring(raw: str) -> str:
+    """Reduce a raw docstring to its first paragraph, collapsed and capped.
+
+    The first paragraph is the summary by every doc convention (PEP 257,
+    JSDoc, godoc, rustdoc); later paragraphs document parameters and
+    details that add noise, not signal, to an embedding.
+    """
+    lines = [line.strip() for line in raw.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    paragraph: list[str] = []
+    for line in lines:
+        if not line:
+            break
+        paragraph.append(line)
+    collapsed = " ".join(" ".join(paragraph).split())
+    return collapsed[:_MAX_DOCSTRING_CHARS]
+
+
 def file_hash(path: Path) -> str:
     """SHA-256 hash of file contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -4240,6 +4306,154 @@ class CodeParser:
                         extra={"kafka_type": ann_name},
                     ))
 
+    # -- Docstring / doc comment extraction ------------------------------
+
+    _DOC_COMMENT_NODE_TYPES = frozenset({
+        "comment", "block_comment", "line_comment", "doc_comment",
+    })
+    # Sibling node types allowed between a definition and its doc comment
+    # (attributes and decorators sit there in Rust / JS / TS).
+    _DOC_COMMENT_SKIP_TYPES = frozenset({
+        "attribute_item", "decorator",
+    })
+
+    def _get_docstring(self, node, language: str) -> Optional[str]:
+        """Extract the documentation summary for a definition node.
+
+        Python reads the real docstring (first string expression of the
+        body). Other languages read the doc comment block directly above
+        the definition: ``/** ... */`` (JSDoc / Javadoc / Doxygen),
+        ``///`` / ``//!`` doc lines (C#, Swift, Doxygen), or — Go only,
+        matching godoc — a contiguous plain ``//`` block. Plain ``//``
+        comments in other languages are ignored as noise. Rust inner doc
+        comments (``//!``, ``/*! ... */``) document the enclosing
+        module/crate, so they are never attached to the following item.
+
+        Returns the first paragraph, whitespace-collapsed and capped at
+        ``_MAX_DOCSTRING_CHARS``, or None.
+        """
+        if language == "python":
+            raw = self._python_docstring(node)
+        else:
+            raw = self._preceding_doc_comment(node, language)
+        if not raw:
+            return None
+        return _clean_docstring(raw) or None
+
+    def _python_docstring(self, node) -> Optional[str]:
+        """Return the raw docstring of a Python function/class body."""
+        body = node.child_by_field_name("body")
+        if body is None:
+            return None
+        for stmt in body.children:
+            if stmt.type == "comment":
+                continue
+            # Only the first real statement can be the docstring.
+            return self._python_string_expr(stmt)
+        return None
+
+    def _python_string_expr(self, expr) -> Optional[str]:
+        """Resolve a statement node to its docstring text, or None.
+
+        Depending on the grammar version the docstring is a bare
+        ``string`` child of the block or wrapped in an
+        ``expression_statement``. CPython also accepts parenthesized and
+        implicitly concatenated literals as docstrings, so both are
+        unwrapped here.
+        """
+        while expr is not None and expr.type in (
+            "expression_statement", "parenthesized_expression",
+        ):
+            inner = [
+                c for c in expr.children
+                if c.type not in ("(", ")", "comment")
+            ]
+            if len(inner) != 1:
+                return None
+            expr = inner[0]
+        if expr is None:
+            return None
+        if expr.type == "string":
+            text = expr.text.decode("utf-8", errors="replace")
+            return _strip_python_string_literal(text)
+        if expr.type == "concatenated_string":
+            parts = []
+            for piece in expr.children:
+                if piece.type != "string":
+                    continue
+                stripped = _strip_python_string_literal(
+                    piece.text.decode("utf-8", errors="replace")
+                )
+                if stripped is None:
+                    return None  # a bytes/f-string piece disqualifies
+                parts.append(stripped)
+            return "".join(parts) if parts else None
+        return None
+
+    def _preceding_doc_comment(self, node, language: str) -> Optional[str]:
+        """Return the raw doc comment block directly above ``node``.
+
+        Walks preceding siblings, skipping decorators/attributes, and
+        collects comments that are line-adjacent (no blank line between
+        the comment block and the definition).
+        """
+        # Doc comments for exported declarations sit above the export
+        # statement, not the inner declaration node.
+        while node.parent is not None and node.parent.type == "export_statement":
+            node = node.parent
+
+        comments: list = []
+        current_line = node.start_point[0]
+        sib = node.prev_sibling
+        while sib is not None:
+            if sib.end_point[0] < current_line - 1:
+                break  # blank line separates — not this definition's doc
+            if sib.type in self._DOC_COMMENT_SKIP_TYPES:
+                current_line = sib.start_point[0]
+                sib = sib.prev_sibling
+                continue
+            if sib.type in self._DOC_COMMENT_NODE_TYPES:
+                comments.append(sib)
+                current_line = sib.start_point[0]
+                sib = sib.prev_sibling
+                continue
+            break
+        if not comments:
+            return None
+        comments.reverse()
+
+        texts = [
+            c.text.decode("utf-8", errors="replace").strip() for c in comments
+        ]
+        # Block comment: use the nearest one alone; require doc style
+        # (/** or /*!) so ordinary block comments aren't hoovered up.
+        last = texts[-1]
+        if last.startswith("/*"):
+            # Rust's ``/*! ... */`` is an *inner* doc comment: it documents
+            # the enclosing module/crate, never the following item.
+            doc_markers = ("/**",) if language == "rust" else ("/**", "/*!")
+            if last.startswith(doc_markers):
+                return _strip_block_comment(last)
+            return None
+        # Line comments: godoc reads plain ``//`` blocks; everything else
+        # must use explicit doc markers (/// or //!) on every line.
+        if all(t.startswith("//") for t in texts):
+            if language == "rust":
+                # ``//!`` is an inner doc comment in Rust (see above) —
+                # drop leading module docs, keep only ``///`` item docs.
+                while texts and texts[0].startswith("//!"):
+                    texts.pop(0)
+                if not texts or not all(t.startswith("///") for t in texts):
+                    return None
+            elif language != "go" and not all(
+                t.startswith(("///", "//!")) for t in texts
+            ):
+                return None
+            return "\n".join(
+                _LINE_COMMENT_MARKER_RE.sub("", t) for t in texts
+            )
+        return None
+
     def _extract_classes(
         self,
         child,
@@ -4295,6 +4509,10 @@ class CodeParser:
                 is_wf = "WorkflowInterface" in temporal_roles
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
+
+        docstring = self._get_docstring(child, language)
+        if docstring:
+            extra["docstring"] = docstring
 
         node = NodeInfo(
             kind="Class",
@@ -4444,6 +4662,10 @@ class CodeParser:
                 self._emit_kafka_edges_from_method(
                     child, name, enclosing_class, file_path, edges,
                 )
+
+        docstring = self._get_docstring(child, language)
+        if docstring:
+            method_extra["docstring"] = docstring
 
         node = NodeInfo(
             kind=kind,
