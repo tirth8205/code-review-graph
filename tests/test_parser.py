@@ -357,6 +357,24 @@ class TestCodeParser:
         tested_by = [e for e in edges if e.kind == "TESTED_BY"]
         assert len(tested_by) >= 1
 
+    def test_tested_by_edges_point_from_production_to_test(self):
+        """TESTED_BY direction: source = production symbol, target = the test.
+
+        Consumers (tests_for, get_transitive_tests, test-gap detection,
+        flow criticality) query by source_qualified, so a flipped edge
+        silently breaks all of them.
+        """
+        nodes, edges = self.parser.parse_file(FIXTURES / "test_sample.py")
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert tested_by
+        for e in tested_by:
+            assert "::test_" in e.target, (
+                f"TESTED_BY target must be the test, got {e.target!r}"
+            )
+            assert "::test_" not in e.source, (
+                f"TESTED_BY source must be production code, got {e.source!r}"
+            )
+
     def test_recursion_depth_guard(self):
         """Parser should not crash on deeply nested code."""
         # Generate Python code with many nested functions (> _MAX_AST_DEPTH)

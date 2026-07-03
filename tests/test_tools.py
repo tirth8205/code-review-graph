@@ -265,6 +265,56 @@ class TestQueryGraphCallTargetFallbacks:
         }
 
 
+class TestQueryGraphTestsFor:
+    """Regression tests for tests_for reading TESTED_BY in the parser's
+    direction (production -> test)."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir).resolve()
+        (self.root / ".git").mkdir()
+        (self.root / ".code-review-graph").mkdir()
+
+        self.prod_file = str(self.root / "billing.py")
+        self.test_file = str(self.root / "test_billing.py")
+        self.db_path = str(self.root / ".code-review-graph" / "graph.db")
+        with GraphStore(self.db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Function", name="compute_total", file_path=self.prod_file,
+                line_start=1, line_end=10, language="python",
+            ))
+            # Deliberately NOT named test_compute_total so the naming
+            # convention fallback cannot find it -- only the edge can.
+            store.upsert_node(NodeInfo(
+                kind="Test", name="test_sums_line_items", file_path=self.test_file,
+                line_start=1, line_end=8, language="python", is_test=True,
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="TESTED_BY",
+                source=f"{self.prod_file}::compute_total",
+                target=f"{self.test_file}::test_sums_line_items",
+                file_path=self.test_file,
+                line=3,
+            ))
+            store.commit()
+
+    def teardown_method(self):
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_tests_for_follows_production_to_test_edges(self):
+        result = query_graph(
+            pattern="tests_for",
+            target=f"{self.prod_file}::compute_total",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        names = {r["name"] for r in result["results"]}
+        assert "test_sums_line_items" in names
+
+
 def _seed_repo_relative_graph(root: Path) -> None:
     """Seed graph data with cwd-relative paths, as eval repos currently do."""
     graph_dir = root / ".code-review-graph"
@@ -1216,8 +1266,8 @@ class TestComputeSummaries:
         Shape (auth.py community, community_id=1):
             login  ->  check_token   (CALLS, internal)
             logout ->  check_token   (CALLS, internal)
-            test_login -> login      (TESTED_BY)
-            test_login -> logout     (TESTED_BY)
+            login  -> test_login     (TESTED_BY, production -> test)
+            logout -> test_login     (TESTED_BY, production -> test)
             (login is called from db.py::query to force cross-community
              edges into caller_counts)
 
@@ -1276,7 +1326,8 @@ class TestComputeSummaries:
             target="auth.py::login", file_path="db.py", line=3,
         ))
 
-        # TESTED_BY edges from the Test node back to auth functions.
+        # TESTED_BY edges from the auth functions to their Test node
+        # (the parser emits production -> test).
         self.store.upsert_edge(EdgeInfo(
             kind="TESTED_BY", source="auth.py::login",
             target="tests/test_auth.py::test_login",

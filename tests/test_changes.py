@@ -64,10 +64,11 @@ class TestChanges:
         self.store.commit()
 
     def _add_tested_by(self, test_qn: str, target_qn: str, path: str = "app.py") -> None:
+        # The parser emits TESTED_BY as production (target_qn) -> test (test_qn).
         edge = EdgeInfo(
             kind="TESTED_BY",
-            source=test_qn,
-            target=target_qn,
+            source=target_qn,
+            target=test_qn,
             file_path=path,
             line=1,
         )

@@ -830,8 +830,8 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
     cross_counts: Counter[tuple[int, int]] = Counter()
 
     for e in all_edges:
-        # TESTED_BY edges are expected cross-community coupling (test → code),
-        # not an architectural smell.
+        # TESTED_BY edges are expected cross-community coupling (code and
+        # its tests), not an architectural smell.
         if e.kind == "TESTED_BY":
             continue
         src_comm = node_to_community.get(e.source_qualified)

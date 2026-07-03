@@ -492,19 +492,29 @@ def find_dead_code(
                 if _is_plausible_caller(e.file_path, node.file_path, node.name)
             ]
             incoming = incoming + all_bare
-        if not any(e.kind == "TESTED_BY" for e in incoming):
-            bare_tb = store.search_edges_by_target_name(node.name, kind="TESTED_BY")
-            bare_tb = [
-                e for e in bare_tb
+        # TESTED_BY edges point production -> test, so a node's test
+        # references are its OUTGOING edges. The edge source inherits the
+        # CALLS target, which can be a bare name when unresolved cross-file.
+        test_refs = [
+            e for e in store.get_edges_by_source(node.qualified_name)
+            if e.kind == "TESTED_BY"
+        ]
+        if not test_refs:
+            bare_tb_rows = conn.execute(
+                "SELECT * FROM edges WHERE kind = 'TESTED_BY'"
+                " AND source_qualified = ?",
+                (node.name,),
+            ).fetchall()
+            test_refs = [
+                e for e in (store._row_to_edge(r) for r in bare_tb_rows)
                 if _is_plausible_caller(e.file_path, node.file_path, node.name)
             ]
-            incoming = incoming + bare_tb
         # Check INHERITS -- classes with subclasses are not dead.
         if node.kind == "Class" and not any(e.kind == "INHERITS" for e in incoming):
             bare_inh = store.search_edges_by_target_name(node.name, kind="INHERITS")
             incoming = incoming + bare_inh
         has_callers = any(e.kind == "CALLS" for e in incoming)
-        has_test_refs = any(e.kind == "TESTED_BY" for e in incoming)
+        has_test_refs = bool(test_refs)
         has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
         has_references = any(e.kind == "REFERENCES" for e in incoming)
         has_subclasses = any(e.kind == "INHERITS" for e in incoming)

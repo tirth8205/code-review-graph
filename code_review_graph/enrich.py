@@ -158,11 +158,11 @@ def _format_node_context(
     if flow_names:
         lines.append(f"  Flows: {', '.join(flow_names)}")
 
-    # Tests
+    # Tests (TESTED_BY edges point production -> test)
     tests: list[str] = []
-    for e in store.get_edges_by_target(qn):
+    for e in store.get_edges_by_source(qn):
         if e.kind == "TESTED_BY" and len(tests) < 3:
-            t = store.get_node(e.source_qualified)
+            t = store.get_node(e.target_qualified)
             if t:
                 tests.append(t.name)
     if tests:

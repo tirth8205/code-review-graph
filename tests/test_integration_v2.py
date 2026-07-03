@@ -180,8 +180,8 @@ class TestV2Integration:
 
         # --- Edges: tested_by ---
         s.upsert_edge(EdgeInfo(
-            kind="TESTED_BY", source="test_auth.py::test_login",
-            target="auth.py::login", file_path="test_auth.py", line=5,
+            kind="TESTED_BY", source="auth.py::login",
+            target="test_auth.py::test_login", file_path="test_auth.py", line=5,
         ))
 
         s.commit()
