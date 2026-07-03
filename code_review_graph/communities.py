@@ -539,15 +539,33 @@ def _split_oversized(
 
             parent_id = comm.get("id", 0)
             comm_name = comm.get("name", "")
-            for sub_members in sub_communities.values():
+            # Name each split from its own members (the parent's name plus
+            # a "-subN" counter tells a reader nothing), and compute real
+            # cohesion against the full edge set instead of stamping 0.0.
+            qn_to_node = {n.qualified_name: n for n in member_nodes}
+            sub_member_lists = list(sub_communities.values())
+            sub_cohesions = _compute_cohesion_batch(
+                [set(m) for m in sub_member_lists], edges,
+            )
+            for sub_members, sub_cohesion in zip(
+                sub_member_lists, sub_cohesions,
+            ):
+                sub_nodes = [
+                    qn_to_node[qn]
+                    for qn in sub_members
+                    if qn in qn_to_node
+                ]
+                sub_name = _generate_community_name(sub_nodes)
+                if not sub_name or sub_name == "cluster":
+                    sub_name = f"{comm_name}-{next_id}"
                 sub_comm = {
                     "id": next_id,
-                    "name": comm_name + f"-sub{next_id}",
+                    "name": sub_name,
                     "level": comm.get("level", 0) + 1,
                     "parent_id": parent_id,
                     "members": sub_members,
                     "size": len(sub_members),
-                    "cohesion": 0.0,
+                    "cohesion": sub_cohesion,
                     "dominant_language": comm.get(
                         "dominant_language"
                     ),
@@ -575,6 +593,52 @@ def _split_oversized(
             result.append(comm)
 
     return result
+
+
+def _dedupe_community_names(
+    communities: list[dict],
+    nodes: list[GraphNode],
+) -> None:
+    """Rename communities so every name is unique (in place).
+
+    Within a collision group the largest community keeps the bare name.
+    Each other member is suffixed with its most distinctive keyword that
+    isn't already part of the name; if that still collides (or no keyword
+    exists), a numeric suffix is the deterministic fallback.
+    """
+    nodes_by_qn = {n.qualified_name: n for n in nodes}
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for comm in communities:
+        by_name[comm.get("name", "")].append(comm)
+
+    taken = {name for name in by_name if name}
+    for name, group in sorted(by_name.items()):
+        if not name or len(group) <= 1:
+            continue
+        group.sort(key=lambda c: (-c.get("size", 0), c.get("id", 0)))
+        name_parts = set(name.split("-"))
+        for comm in group[1:]:
+            members = [
+                nodes_by_qn[qn]
+                for qn in comm.get("members", [])
+                if qn in nodes_by_qn
+            ]
+            new_name = ""
+            for keyword in _extract_keywords(members):
+                slug = _to_slug(keyword)
+                if not slug or slug in name_parts:
+                    continue
+                candidate = f"{name}-{slug}"
+                if candidate not in taken:
+                    new_name = candidate
+                    break
+            if not new_name:
+                counter = 2
+                while f"{name}-{counter}" in taken:
+                    counter += 1
+                new_name = f"{name}-{counter}"
+            comm["name"] = new_name
+            taken.add(new_name)
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +685,10 @@ def detect_communities(
     results = _split_oversized(
         results, unique_nodes, all_edges,
     )
+
+    # Disambiguate duplicate names: get_community resolves by name match,
+    # so two communities sharing a name makes one of them unreachable.
+    _dedupe_community_names(results, unique_nodes)
 
     # Convert member_qns (internal set) to a list for serialization safety,
     # then strip it from the returned dicts to avoid leaking internal state.

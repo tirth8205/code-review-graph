@@ -9,8 +9,10 @@ from code_review_graph.communities import (
     IGRAPH_AVAILABLE,
     _compute_cohesion,
     _compute_cohesion_batch,
+    _dedupe_community_names,
     _detect_file_based,
     _generate_community_name,
+    _split_oversized,
     detect_communities,
     get_architecture_overview,
     get_communities,
@@ -590,3 +592,166 @@ class TestCommunities:
         # Pass a file that IS part of existing communities
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
+
+
+def _naming_node(nid: int, name: str, fp: str) -> GraphNode:
+    return GraphNode(
+        id=nid, kind="Function", name=name,
+        qualified_name=f"{fp}::{name}",
+        file_path=fp, line_start=1, line_end=10, language="python",
+        parent_name=None, params=None, return_type=None, is_test=False,
+        file_hash="h", extra={},
+    )
+
+
+def _naming_edge(eid: int, src: str, tgt: str) -> GraphEdge:
+    return GraphEdge(
+        id=eid, kind="CALLS", source_qualified=src,
+        target_qualified=tgt, file_path="x.py", line=1, extra={},
+    )
+
+
+class TestSplitOversizedNaming:
+    """Splits are named from their own members, with real cohesion."""
+
+    def _dumbbell(self):
+        """One oversized community holding two dense, distinct clusters."""
+        auth = [
+            _naming_node(i, f"login_step_{i}", "auth/session.py")
+            for i in range(1, 7)
+        ]
+        db = [
+            _naming_node(i + 10, f"query_shard_{i}", "db/pool.py")
+            for i in range(1, 7)
+        ]
+        nodes = auth + db
+        edges = []
+        eid = 0
+        for cluster in (auth, db):
+            for a in cluster:
+                for b in cluster:
+                    if a.id < b.id:
+                        eid += 1
+                        edges.append(_naming_edge(
+                            eid, a.qualified_name, b.qualified_name,
+                        ))
+        # single weak bridge between the clusters
+        eid += 1
+        edges.append(_naming_edge(
+            eid, auth[0].qualified_name, db[0].qualified_name,
+        ))
+        community = {
+            "id": 1,
+            "name": "mono",
+            "level": 0,
+            "members": [n.qualified_name for n in nodes],
+            "size": len(nodes),
+            "cohesion": 1.0,
+            "dominant_language": "python",
+            "description": "everything",
+        }
+        return [community], nodes, edges
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_splits_are_named_from_members_not_subn(self):
+        communities, nodes, edges = self._dumbbell()
+        result = _split_oversized(communities, nodes, edges)
+
+        assert len(result) == 2
+        names = sorted(c["name"] for c in result)
+        assert all("-sub" not in n for n in names)
+        assert names[0].startswith("auth")
+        assert names[1].startswith("db")
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_splits_get_real_cohesion_not_zero(self):
+        communities, nodes, edges = self._dumbbell()
+        result = _split_oversized(communities, nodes, edges)
+
+        for comm in result:
+            # 15 internal edges, 1 bridge -> 15/16
+            assert comm["cohesion"] == pytest.approx(15 / 16)
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_splits_keep_parent_lineage(self):
+        communities, nodes, edges = self._dumbbell()
+        result = _split_oversized(communities, nodes, edges)
+
+        for comm in result:
+            assert comm["parent_id"] == 1
+            assert comm["level"] == 1
+            assert comm["description"] == "Split from mono"
+
+
+class TestDedupeCommunityNames:
+    def _comm(self, cid: int, name: str, members: list[GraphNode]) -> dict:
+        return {
+            "id": cid,
+            "name": name,
+            "size": len(members),
+            "members": [n.qualified_name for n in members],
+        }
+
+    def test_duplicate_names_become_unique_largest_keeps_bare_name(self):
+        big = [
+            _naming_node(i, f"poll_chunk_{i}", "services/job.py")
+            for i in range(1, 4)
+        ]
+        small = [
+            _naming_node(i + 10, f"retry_backoff_{i}", "services/job2.py")
+            for i in range(1, 3)
+        ]
+        communities = [
+            self._comm(1, "services-job", big),
+            self._comm(2, "services-job", small),
+        ]
+        _dedupe_community_names(communities, big + small)
+
+        assert communities[0]["name"] == "services-job"
+        assert communities[1]["name"] == "services-job-retry"
+
+    def test_keyword_exhaustion_falls_back_to_numeric_suffix(self):
+        a = [_naming_node(1, "job", "services/job.py")]
+        b = [_naming_node(2, "job", "services/job2.py")]
+        communities = [
+            self._comm(1, "services-job", a),
+            self._comm(2, "services-job", b),
+        ]
+        _dedupe_community_names(communities, a + b)
+
+        names = {c["name"] for c in communities}
+        assert names == {"services-job", "services-job-2"}
+
+    def test_unique_names_are_untouched(self):
+        a = [_naming_node(1, "poll_chunk", "services/job.py")]
+        b = [_naming_node(2, "render_page", "web/views.py")]
+        communities = [
+            self._comm(1, "services-job", a),
+            self._comm(2, "web-render", b),
+        ]
+        _dedupe_community_names(communities, a + b)
+
+        assert [c["name"] for c in communities] == [
+            "services-job", "web-render",
+        ]
+
+    def test_keyword_suffix_avoids_existing_community_name(self):
+        # The keyword-derived candidate collides with a third community's
+        # name, so dedup must skip it rather than create a new collision.
+        big = [
+            _naming_node(i, f"poll_chunk_{i}", "services/job.py")
+            for i in range(1, 4)
+        ]
+        small = [_naming_node(11, "poll_tick", "services/job2.py")]
+        other = [_naming_node(21, "poll_all", "services/poll.py")]
+        communities = [
+            self._comm(1, "services-job", big),
+            self._comm(2, "services-job", small),
+            self._comm(3, "services-job-poll", other),
+        ]
+        _dedupe_community_names(communities, big + small + other)
+
+        names = [c["name"] for c in communities]
+        assert len(set(names)) == 3
+        assert names[2] == "services-job-poll"
+        assert names[1] != "services-job-poll"
