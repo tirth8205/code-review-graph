@@ -1131,3 +1131,155 @@ class TestGetProviderOpenAI:
             get_provider("openai")
         captured = capsys.readouterr()
         assert "cloud" in captured.err.lower()
+
+
+class _StubProvider:
+    """Deterministic in-memory provider for refresh tests."""
+
+    name = "stub:mini"
+    dimension = 2
+
+    def embed(self, texts):
+        return [[float(len(t)), 1.0] for t in texts]
+
+    def embed_query(self, text):
+        return [1.0, 0.0]
+
+
+class TestPurgeOrphans:
+    def test_removes_vectors_for_deleted_nodes(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        db = tmp_path / "graph.db"
+        gstore = GraphStore(db)
+        gstore.upsert_node(NodeInfo(
+            kind="Function", name="keep", file_path="/r/a.py",
+            line_start=1, line_end=2, language="python",
+        ))
+        gstore.commit()
+
+        with patch("code_review_graph.embeddings.get_provider",
+                   return_value=_StubProvider()):
+            estore = EmbeddingStore(db)
+        for qn in ("/r/a.py::keep", "/r/a.py::ghost"):
+            estore._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash,"
+                " provider) VALUES (?, ?, ?, ?)",
+                (qn, b"\x00\x00\x00\x00", "h", "stub:mini"),
+            )
+        estore._conn.commit()
+
+        assert estore.purge_orphans() == 1
+        rows = estore._conn.execute(
+            "SELECT qualified_name FROM embeddings"
+        ).fetchall()
+        assert [r["qualified_name"] for r in rows] == ["/r/a.py::keep"]
+        estore.close()
+        gstore.close()
+
+    def test_noop_without_nodes_table(self, tmp_path):
+        with patch("code_review_graph.embeddings.get_provider",
+                   return_value=_StubProvider()):
+            estore = EmbeddingStore(tmp_path / "standalone.db")
+        assert estore.purge_orphans() == 0
+        estore.close()
+
+
+class TestRefreshEmbeddings:
+    def _graph_with_node(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        gstore = GraphStore(tmp_path / "graph.db")
+        # embed_all_nodes discovers nodes via File nodes (get_all_files),
+        # so seed one like the parser always does.
+        gstore.upsert_node(NodeInfo(
+            kind="File", name="/r/a.py", file_path="/r/a.py",
+            line_start=1, line_end=20, language="python",
+        ))
+        gstore.upsert_node(NodeInfo(
+            kind="Function", name="existing", file_path="/r/a.py",
+            line_start=1, line_end=2, language="python",
+        ))
+        gstore.commit()
+        return gstore
+
+    def test_returns_none_when_never_embedded(self, tmp_path):
+        from code_review_graph.embeddings import refresh_embeddings
+
+        gstore = self._graph_with_node(tmp_path)
+        try:
+            assert refresh_embeddings(gstore) is None
+        finally:
+            gstore.close()
+
+    def test_skips_when_stored_provider_cannot_be_resolved(self, tmp_path):
+        """Legacy rows are tagged 'unknown'; the provider must not be guessed."""
+        from code_review_graph.embeddings import refresh_embeddings
+
+        gstore = self._graph_with_node(tmp_path)
+        with patch("code_review_graph.embeddings.get_provider",
+                   return_value=_StubProvider()):
+            estore = EmbeddingStore(gstore.db_path)
+        estore._conn.execute(
+            "INSERT INTO embeddings (qualified_name, vector, text_hash,"
+            " provider) VALUES (?, ?, ?, ?)",
+            ("/r/a.py::existing", b"\x00\x00\x00\x00", "h", "unknown"),
+        )
+        estore._conn.commit()
+        estore.close()
+
+        try:
+            # Real get_provider raises ValueError for the 'unknown' name.
+            assert refresh_embeddings(gstore) is None
+        finally:
+            gstore.close()
+
+    def test_skips_when_provider_identity_differs(self, tmp_path):
+        from code_review_graph.embeddings import refresh_embeddings
+
+        gstore = self._graph_with_node(tmp_path)
+        with patch("code_review_graph.embeddings.get_provider",
+                   return_value=_StubProvider()):
+            estore = EmbeddingStore(gstore.db_path)
+            estore._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash,"
+                " provider) VALUES (?, ?, ?, ?)",
+                ("/r/a.py::existing", b"\x00\x00\x00\x00", "h", "stub:other"),
+            )
+            estore._conn.commit()
+            estore.close()
+
+            # get_provider resolves to "stub:mini" != stored "stub:other".
+            assert refresh_embeddings(gstore) is None
+        gstore.close()
+
+    def test_embeds_new_nodes_and_purges_orphans(self, tmp_path):
+        from code_review_graph.embeddings import refresh_embeddings
+        from code_review_graph.parser import NodeInfo
+
+        gstore = self._graph_with_node(tmp_path)
+        stub = _StubProvider()
+        with patch("code_review_graph.embeddings.get_provider",
+                   return_value=stub):
+            estore = EmbeddingStore(gstore.db_path)
+            estore.embed_nodes(gstore.get_nodes_by_file("/r/a.py"))
+            estore._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash,"
+                " provider) VALUES (?, ?, ?, ?)",
+                ("/r/a.py::ghost", b"\x00\x00\x00\x00", "stale", stub.name),
+            )
+            estore._conn.commit()
+            estore.close()
+
+            gstore.upsert_node(NodeInfo(
+                kind="Function", name="added_later", file_path="/r/a.py",
+                line_start=5, line_end=8, language="python",
+            ))
+            gstore.commit()
+
+            out = refresh_embeddings(gstore)
+
+        assert out == {"embedded": 1, "purged": 1}
+        gstore.close()

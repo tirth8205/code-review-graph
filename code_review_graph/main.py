@@ -137,6 +137,7 @@ async def run_postprocess_tool(
     flows: bool = True,
     communities: bool = True,
     fts: bool = True,
+    embeddings: bool = True,
     repo_root: Optional[str] = None,
 ) -> dict:
     """Run post-processing on existing graph (flows, communities, FTS index).
@@ -152,11 +153,14 @@ async def run_postprocess_tool(
         flows: Run flow detection. Default: True.
         communities: Run community detection. Default: True.
         fts: Rebuild FTS index. Default: True.
+        embeddings: Refresh semantic embeddings when the graph already
+            has them (no-op otherwise). Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
     """
     return await asyncio.to_thread(
         run_postprocess,
         flows=flows, communities=communities, fts=fts,
+        embeddings=embeddings,
         repo_root=_resolve_repo_root(repo_root),
     )
 

@@ -1194,6 +1194,98 @@ class TestBuildPostprocess:
         assert "communities_detected" in result
 
 
+class TestBuildRefreshesEmbeddings:
+    """The build and postprocess tools must run the embedding refresh.
+
+    The refresh itself is opt-in by construction (it acts only when the
+    graph already has embeddings), so these tests pin the *wiring*, not
+    the policy: the tool paths must invoke it and surface its counts.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = Path(self.tmp)
+        (self.root / ".git").mkdir()
+        (self.root / "sample.py").write_text(
+            "def hello():\n    pass\n\nclass Foo:\n    pass\n"
+        )
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, postprocess: str, refresh_mock):
+        from unittest.mock import patch
+
+        from code_review_graph.tools.build import build_or_update_graph
+
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=["sample.py"],
+        ), patch(
+            "code_review_graph.embeddings.refresh_embeddings",
+            refresh_mock,
+        ):
+            return build_or_update_graph(
+                full_rebuild=True, repo_root=str(self.root),
+                postprocess=postprocess,
+            )
+
+    def test_build_full_invokes_embedding_refresh(self):
+        refresh = MagicMock(return_value={"embedded": 2, "purged": 1})
+        result = self._build("full", refresh)
+
+        refresh.assert_called_once()
+        assert result["embeddings_refreshed"] == 2
+        assert result["embeddings_purged"] == 1
+
+    def test_build_minimal_skips_embedding_refresh(self):
+        refresh = MagicMock(return_value={"embedded": 2, "purged": 1})
+        result = self._build("minimal", refresh)
+
+        refresh.assert_not_called()
+        assert "embeddings_refreshed" not in result
+
+    def test_build_without_prior_embeddings_reports_nothing(self):
+        refresh = MagicMock(return_value=None)  # never-embedded graph
+        result = self._build("full", refresh)
+
+        refresh.assert_called_once()
+        assert "embeddings_refreshed" not in result
+        assert "warnings" not in result
+
+    def test_refresh_failure_is_a_warning_not_a_build_failure(self):
+        refresh = MagicMock(side_effect=RuntimeError("provider exploded"))
+        result = self._build("full", refresh)
+
+        assert result["status"] == "ok"
+        assert any("Embedding refresh failed" in w for w in result["warnings"])
+
+    def test_run_postprocess_embeddings_flag(self):
+        from unittest.mock import patch
+
+        from code_review_graph.tools.build import run_postprocess
+
+        refresh = MagicMock(return_value={"embedded": 3, "purged": 0})
+        self._build("none", MagicMock(return_value=None))
+
+        with patch(
+            "code_review_graph.embeddings.refresh_embeddings", refresh
+        ):
+            skipped = run_postprocess(
+                flows=False, communities=False, fts=False,
+                embeddings=False, repo_root=str(self.root),
+            )
+            refresh.assert_not_called()
+            ran = run_postprocess(
+                flows=False, communities=False, fts=False,
+                repo_root=str(self.root),
+            )
+        refresh.assert_called_once()
+        assert "embeddings_refreshed" not in skipped
+        assert ran["embeddings_refreshed"] == 3
+
+
 class TestComputeSummaries:
     """Tests for _compute_summaries: pins the contents of the three
     summary tables so that the batch-aggregate refactor can't silently

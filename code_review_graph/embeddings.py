@@ -966,14 +966,40 @@ class EmbeddingStore:
         )
         self._conn.commit()
 
+    def purge_orphans(self) -> int:
+        """Delete vectors whose node no longer exists in the graph.
+
+        The embeddings table lives in the same SQLite file as the graph,
+        so deleted or renamed nodes leave stale vectors behind that keep
+        surfacing in semantic search. Returns the number of rows removed;
+        no-op when there is no ``nodes`` table (standalone embedding DBs).
+        """
+        has_nodes = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nodes'"
+        ).fetchone()
+        if not has_nodes:
+            return 0
+        cur = self._conn.execute(
+            "DELETE FROM embeddings WHERE qualified_name NOT IN "
+            "(SELECT qualified_name FROM nodes)"
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
 
 
 def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) -> int:
-    """Embed all non-file nodes in the graph."""
+    """Embed all non-file nodes in the graph.
+
+    Also drops vectors whose node no longer exists, so deleted or renamed
+    symbols stop surfacing in semantic search.
+    """
     if not embedding_store.available:
         return 0
+
+    embedding_store.purge_orphans()
 
     all_files = graph_store.get_all_files()
     all_nodes: list[GraphNode] = []
@@ -981,6 +1007,65 @@ def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) ->
         all_nodes.extend(graph_store.get_nodes_by_file(f))
 
     return embedding_store.embed_nodes(all_nodes)
+
+
+def refresh_embeddings(graph_store: GraphStore) -> dict[str, int] | None:
+    """Incrementally refresh an existing embedding set after a build.
+
+    Opt-in by construction: this runs only when the graph already contains
+    embeddings (the user ran ``embed`` at least once), and only with the
+    provider that produced them. If that provider cannot be resolved
+    (missing extras or env vars) or resolves to a different identity
+    (other model or endpoint), the refresh is skipped — a build must never
+    trigger a surprise full re-embed, or cloud spend, under a new identity.
+
+    Returns:
+        ``{"embedded": n, "purged": m}`` when a refresh ran, else ``None``.
+    """
+    try:
+        row = graph_store._conn.execute(
+            "SELECT provider, COUNT(*) AS n FROM embeddings "
+            "GROUP BY provider ORDER BY n DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None  # embeddings table absent -> the user never embedded
+    if row is None:
+        return None
+
+    tag = row["provider"]
+    key, _, model = tag.partition(":")
+    if key == "openai" and "@" in model:
+        # openai tags are "openai:<model>@<host>"; the host part comes from
+        # CRG_OPENAI_BASE_URL and is re-derived by the provider itself.
+        model = model.split("@", 1)[0]
+
+    try:
+        embedding_store = EmbeddingStore(
+            graph_store.db_path, provider=key, model=model or None,
+        )
+    except ValueError as exc:
+        logger.info("Embedding refresh skipped: %s", exc)
+        return None
+    try:
+        if not embedding_store.available or embedding_store.provider.name != tag:
+            resolved = (
+                embedding_store.provider.name
+                if embedding_store.available else "unavailable"
+            )
+            logger.info(
+                "Embedding refresh skipped: existing vectors were made by %r "
+                "but the resolved provider is %r",
+                tag,
+                resolved,
+            )
+            return None
+        # embed_all_nodes purges again on entry; that second pass is a
+        # no-op DELETE — this call exists to capture the purge count.
+        purged = embedding_store.purge_orphans()
+        embedded = embed_all_nodes(graph_store, embedding_store)
+        return {"embedded": embedded, "purged": purged}
+    finally:
+        embedding_store.close()
 
 
 def semantic_search(

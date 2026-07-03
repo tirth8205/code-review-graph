@@ -113,6 +113,18 @@ def _run_postprocess(
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 
+    # -- Refresh semantic embeddings (no-op unless the graph was embedded) --
+    try:
+        from code_review_graph.embeddings import refresh_embeddings
+
+        refreshed = refresh_embeddings(store)
+        if refreshed is not None:
+            build_result["embeddings_refreshed"] = refreshed.get("embedded", 0)
+            build_result["embeddings_purged"] = refreshed.get("purged", 0)
+    except Exception as e:  # provider/transport errors vary by backend
+        logger.warning("Embedding refresh failed: %s", e)
+        warnings.append(f"Embedding refresh failed: {type(e).__name__}: {e}")
+
     # -- Compute pre-computed summary tables --
     try:
         _compute_summaries(store)
@@ -441,6 +453,7 @@ def run_postprocess(
     flows: bool = True,
     communities: bool = True,
     fts: bool = True,
+    embeddings: bool = True,
     repo_root: str | None = None,
 ) -> dict[str, Any]:
     """Run post-processing steps on an existing graph.
@@ -453,6 +466,8 @@ def run_postprocess(
         flows: Run flow detection. Default: True.
         communities: Run community detection. Default: True.
         fts: Rebuild FTS index. Default: True.
+        embeddings: Refresh semantic embeddings when the graph already
+            has them (no-op otherwise). Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
 
     Returns:
@@ -528,6 +543,19 @@ def run_postprocess(
                 store.rollback()
                 logger.warning("Community detection failed: %s", e)
                 warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+
+        if embeddings:
+            try:
+                from code_review_graph.embeddings import refresh_embeddings
+
+                refreshed = refresh_embeddings(store)
+                if refreshed is not None:
+                    result["embeddings_refreshed"] = refreshed.get("embedded", 0)
+                    result["embeddings_purged"] = refreshed.get("purged", 0)
+            except Exception as e:  # provider/transport errors vary by backend
+                store.rollback()
+                logger.warning("Embedding refresh failed: %s", e)
+                warnings.append(f"Embedding refresh failed: {type(e).__name__}: {e}")
 
         store.set_metadata(
             "last_postprocessed_at",

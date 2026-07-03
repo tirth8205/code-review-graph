@@ -325,3 +325,49 @@ class TestWatchCallbackIntegration:
             callback.assert_not_called()
         finally:
             store.close()
+
+
+class TestEmbeddingRefreshStep:
+    def _store_with_node(self, tmp_path):
+        store = GraphStore(tmp_path / "graph.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="fn", file_path="/repo/a.py",
+            line_start=1, line_end=5, language="python",
+        ))
+        store.commit()
+        return store
+
+    def test_skipped_when_never_embedded(self, tmp_path):
+        store = self._store_with_node(tmp_path)
+        try:
+            result = run_post_processing(store)
+        finally:
+            store.close()
+        assert "embeddings_refreshed" not in result
+        assert "warnings" not in result
+
+    def test_reports_counts_when_refresh_runs(self, tmp_path):
+        store = self._store_with_node(tmp_path)
+        try:
+            with patch(
+                "code_review_graph.embeddings.refresh_embeddings",
+                return_value={"embedded": 3, "purged": 2},
+            ):
+                result = run_post_processing(store)
+        finally:
+            store.close()
+        assert result["embeddings_refreshed"] == 3
+        assert result["embeddings_purged"] == 2
+
+    def test_refresh_failure_is_warning_not_fatal(self, tmp_path):
+        store = self._store_with_node(tmp_path)
+        try:
+            with patch(
+                "code_review_graph.embeddings.refresh_embeddings",
+                side_effect=RuntimeError("provider exploded"),
+            ):
+                result = run_post_processing(store)
+        finally:
+            store.close()
+        assert result["signatures_computed"] == 1
+        assert any("Embedding refresh" in w for w in result["warnings"])

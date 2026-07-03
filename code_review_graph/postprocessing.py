@@ -1,12 +1,13 @@
 """Shared post-build processing pipeline.
 
-After the core Tree-sitter parse (full_build or incremental_update), four
+After the core Tree-sitter parse (full_build or incremental_update), five
 post-processing steps must run to populate derived tables:
 
 1. Compute node signatures
 2. Rebuild FTS5 search index
 3. Trace execution flows
 4. Detect code communities
+5. Refresh semantic embeddings (only when the graph was embedded before)
 
 This module extracts that pipeline so every entry point — MCP tool, CLI
 commands, and watch mode — produces identical results.
@@ -43,6 +44,7 @@ def run_post_processing(store: GraphStore) -> dict[str, Any]:
     _rebuild_fts_index(store, result, warnings)
     _trace_flows(store, result, warnings)
     _detect_communities(store, result, warnings)
+    _refresh_embeddings(store, result, warnings)
 
     if warnings:
         result["warnings"] = warnings
@@ -132,3 +134,27 @@ def _detect_communities(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+
+
+def _refresh_embeddings(
+    store: GraphStore,
+    result: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    """Incrementally refresh semantic embeddings after a build.
+
+    Runs only when the graph already has embeddings (see
+    :func:`code_review_graph.embeddings.refresh_embeddings`). This step can
+    hit an embedding model or a network endpoint, so any failure is
+    downgraded to a warning — a build must never fail on embedding refresh.
+    """
+    try:
+        from .embeddings import refresh_embeddings
+
+        refreshed = refresh_embeddings(store)
+        if refreshed is not None:
+            result["embeddings_refreshed"] = refreshed["embedded"]
+            result["embeddings_purged"] = refreshed["purged"]
+    except Exception as e:
+        logger.warning("Embedding refresh failed: %s", e)
+        warnings.append(f"Embedding refresh failed: {type(e).__name__}: {e}")
