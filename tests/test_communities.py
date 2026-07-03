@@ -10,7 +10,9 @@ from code_review_graph.communities import (
     _compute_cohesion,
     _compute_cohesion_batch,
     _detect_file_based,
+    _detect_leiden,
     _generate_community_name,
+    _reassign_test_nodes,
     detect_communities,
     get_architecture_overview,
     get_communities,
@@ -590,3 +592,300 @@ class TestCommunities:
         # Pass a file that IS part of existing communities
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
+
+
+class TestNamingIgnoresTestVocabulary:
+    """Naming must not be hijacked by test members (BDD grammar, tests/ dirs)."""
+
+    def _node(
+        self, nid: int, kind: str, name: str, fp: str, is_test: bool = False
+    ) -> GraphNode:
+        return GraphNode(
+            id=nid, kind=kind, name=name, qualified_name=f"{fp}::{name}",
+            file_path=fp, line_start=1, line_end=10, language="python",
+            parent_name=None, params=None, return_type=None, is_test=is_test,
+            file_hash="x", extra={},
+        )
+
+    def test_mixed_community_named_from_production_members(self):
+        """Tests outnumbering production must not steal the prefix or keyword."""
+        members = [
+            self._node(1, "Function", "parse_invoice", "src/billing/invoice.py"),
+            self._node(2, "Function", "total_invoice", "src/billing/invoice.py"),
+            self._node(
+                3, "Test", "test_should_parse_invoice_when_valid",
+                "tests/test_invoice.py", is_test=True,
+            ),
+            self._node(
+                4, "Test", "test_should_raise_when_invoice_missing",
+                "tests/test_invoice.py", is_test=True,
+            ),
+            self._node(
+                5, "Test", "test_should_return_zero_when_empty",
+                "tests/test_invoice.py", is_test=True,
+            ),
+        ]
+        name = _generate_community_name(members)
+        assert name.startswith("billing")
+        assert "invoice" in name
+        assert "should" not in name
+        assert "tests" not in name
+
+    def test_pure_test_community_still_gets_a_name(self):
+        """All-test communities keep working; BDD grammar is just filtered."""
+        members = [
+            self._node(
+                1, "Test", "test_should_parse_invoice",
+                "tests/test_invoice.py", is_test=True,
+            ),
+            self._node(
+                2, "Test", "test_should_total_invoice",
+                "tests/test_invoice.py", is_test=True,
+            ),
+        ]
+        name = _generate_community_name(members)
+        assert name
+        assert "invoice" in name
+        assert "should" not in name
+
+    def test_bdd_grammar_words_are_stop_words(self):
+        """'should'/'when'/'return' never become the community keyword."""
+        members = [
+            self._node(
+                i, "Test", f"test_should_return_widget_when_ready_{i}x",
+                "tests/test_w.py", is_test=True,
+            )
+            for i in range(1, 4)
+        ]
+        name = _generate_community_name(members)
+        assert "should" not in name
+        assert "when" not in name
+        assert "widget" in name
+
+
+class TestReassignTestNodes:
+    """_reassign_test_nodes moves Test vertices to their subjects' cluster."""
+
+    def _node(
+        self, nid: int, kind: str, name: str, fp: str, is_test: bool = False
+    ) -> GraphNode:
+        return GraphNode(
+            id=nid, kind=kind, name=name, qualified_name=f"{fp}::{name}",
+            file_path=fp, line_start=1, line_end=10, language="python",
+            parent_name=None, params=None, return_type=None, is_test=is_test,
+            file_hash="x", extra={},
+        )
+
+    def _edge(self, eid: int, kind: str, src: str, tgt: str) -> GraphEdge:
+        return GraphEdge(
+            id=eid, kind=kind, source_qualified=src, target_qualified=tgt,
+            file_path="f.py", line=1, extra={},
+        )
+
+    def _two_cluster_fixture(self):
+        """Production (a, b) in cluster 0, their tests (t1, t2) in cluster 1."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/app.py"),
+            self._node(2, "Test", "test_parse", "tests/test_app.py", is_test=True),
+            self._node(3, "Test", "test_render", "tests/test_app.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        return nodes, qn_to_idx, idx_to_node
+
+    def test_tests_move_to_subject_cluster(self):
+        """Tests clustered apart from their subjects get pulled over."""
+        nodes, qn_to_idx, idx_to_node = self._two_cluster_fixture()
+        clusters = [[0, 1], [2, 3]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[0].qualified_name, nodes[2].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[1].qualified_name, nodes[3].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert sorted(result[0]) == [0, 1, 2, 3]
+        assert result[1] == []
+
+    def test_direction_agnostic(self):
+        """Same outcome when the parser emits test -> production edges."""
+        nodes, qn_to_idx, idx_to_node = self._two_cluster_fixture()
+        clusters = [[0, 1], [2, 3]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[2].qualified_name, nodes[0].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[3].qualified_name, nodes[1].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert sorted(result[0]) == [0, 1, 2, 3]
+        assert result[1] == []
+
+    def test_majority_vote_wins(self):
+        """A test covering subjects in several communities follows the majority."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/app.py"),
+            self._node(2, "Function", "connect", "src/db.py"),
+            self._node(3, "Test", "test_everything", "tests/test_all.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        clusters = [[0, 1], [2], [3]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[0].qualified_name, nodes[3].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[1].qualified_name, nodes[3].qualified_name),
+            self._edge(3, "TESTED_BY", nodes[2].qualified_name, nodes[3].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert 3 in result[0]
+        assert result[2] == []
+
+    def test_own_cluster_votes_keep_test_in_place(self):
+        """A test whose subjects mostly live with it already stays put."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/app.py"),
+            self._node(2, "Function", "connect", "src/db.py"),
+            self._node(3, "Test", "test_app", "tests/test_app.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        clusters = [[0, 1, 3], [2]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[0].qualified_name, nodes[3].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[1].qualified_name, nodes[3].qualified_name),
+            self._edge(3, "TESTED_BY", nodes[2].qualified_name, nodes[3].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert 3 in result[0]
+        assert result[1] == [2]
+
+    def test_no_tested_by_edges_is_a_noop(self):
+        """CALLS-only graphs come back with the exact same clusters."""
+        nodes, qn_to_idx, idx_to_node = self._two_cluster_fixture()
+        clusters = [[0, 1], [2, 3]]
+        edges = [
+            self._edge(1, "CALLS", nodes[0].qualified_name, nodes[1].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert result == [[0, 1], [2, 3]]
+
+    def test_edges_between_two_tests_are_ignored(self):
+        """A TESTED_BY edge with no production endpoint casts no vote."""
+        nodes, qn_to_idx, idx_to_node = self._two_cluster_fixture()
+        clusters = [[0, 1], [2, 3]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[2].qualified_name, nodes[3].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert result == [[0, 1], [2, 3]]
+
+    def test_bare_endpoint_resolves_by_unique_node_name(self):
+        """TESTED_BY sources inherited from unresolved calls can be bare names."""
+        nodes, qn_to_idx, idx_to_node = self._two_cluster_fixture()
+        clusters = [[0, 1], [2, 3]]
+        edges = [
+            # Source is the bare name "parse", not "src/app.py::parse".
+            self._edge(1, "TESTED_BY", "parse", nodes[2].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert 2 in result[0]
+        assert result[1] == [3]
+
+    def test_ambiguous_bare_endpoint_casts_no_vote(self):
+        """A bare name shared by several nodes cannot be resolved safely."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "parse", "src/other.py"),
+            self._node(2, "Test", "test_parse", "tests/test_app.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        clusters = [[0], [1], [2]]
+        edges = [
+            self._edge(1, "TESTED_BY", "parse", nodes[2].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert result == [[0], [1], [2]]
+
+    def test_tie_prefers_current_cluster(self):
+        """A test split evenly between home and elsewhere stays home."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/ui.py"),
+            self._node(2, "Test", "test_both", "tests/test_all.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        clusters = [[0], [1, 2]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[0].qualified_name, nodes[2].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[1].qualified_name, nodes[2].qualified_name),
+        ]
+        result = _reassign_test_nodes(clusters, idx_to_node, qn_to_idx, edges)
+        assert result == [[0], [1, 2]]
+
+    def test_tie_between_foreign_clusters_is_deterministic(self):
+        """Ties away from home resolve to the lowest cluster, whatever the edge order."""
+        nodes = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/ui.py"),
+            self._node(2, "Test", "test_both", "tests/test_all.py", is_test=True),
+        ]
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        idx_to_node = dict(enumerate(nodes))
+        clusters = [[0], [1], [2]]
+        edges = [
+            self._edge(1, "TESTED_BY", nodes[0].qualified_name, nodes[2].qualified_name),
+            self._edge(2, "TESTED_BY", nodes[1].qualified_name, nodes[2].qualified_name),
+        ]
+        assert _reassign_test_nodes(
+            clusters, idx_to_node, qn_to_idx, edges
+        ) == [[0, 2], [1], []]
+        assert _reassign_test_nodes(
+            clusters, idx_to_node, qn_to_idx, list(reversed(edges))
+        ) == [[0, 2], [1], []]
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_leiden_communities_include_tests_with_their_subjects(self):
+        """End to end: Leiden output places tests with the code they cover."""
+        prod = [
+            self._node(0, "Function", "parse", "src/app.py"),
+            self._node(1, "Function", "render", "src/app.py"),
+            self._node(2, "Function", "layout", "src/app.py"),
+        ]
+        tests = [
+            self._node(3, "Test", "test_parse", "tests/test_app.py", is_test=True),
+            self._node(4, "Test", "test_render", "tests/test_app.py", is_test=True),
+            self._node(5, "Test", "test_layout", "tests/test_app.py", is_test=True),
+        ]
+        nodes = prod + tests
+        eid = 0
+        edges = []
+        # Dense CALLS inside each group so Leiden separates them...
+        for group in (prod, tests):
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    eid += 1
+                    edges.append(self._edge(
+                        eid, "CALLS",
+                        group[i].qualified_name, group[j].qualified_name,
+                    ))
+        # ...linked only by weak TESTED_BY pairs.
+        for p, t in zip(prod, tests):
+            eid += 1
+            edges.append(self._edge(
+                eid, "TESTED_BY", p.qualified_name, t.qualified_name,
+            ))
+
+        communities = _detect_leiden(nodes, edges, min_size=2)
+
+        assert communities
+        by_member = {
+            m: set(c["members"]) for c in communities for m in c["members"]
+        }
+        assert "tests/test_app.py::test_parse" in by_member.get(
+            "src/app.py::parse", set()
+        )
+        for comm in communities:
+            members = set(comm["members"])
+            if any(m.startswith("tests/") for m in members):
+                assert any(m.startswith("src/") for m in members)
