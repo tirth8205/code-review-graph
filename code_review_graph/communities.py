@@ -149,9 +149,28 @@ def _split_name(name: str) -> list[str]:
     return [p for p in re.split(r"[_\-.\s]+", s) if p]
 
 
+_SLUG_MAX_LEN = 30
+
+
 def _to_slug(s: str) -> str:
-    """Convert a string to a short lowercase slug."""
-    return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:30]
+    """Convert a string to a short lowercase slug.
+
+    CamelCase and snake_case inputs are split into hyphenated words, and
+    truncation happens at a word boundary so a slug never ends mid-word:
+    ``TestBuildPreAnalysisPromptBlock`` becomes
+    ``test-build-pre-analysis-prompt`` rather than
+    ``testbuildpreanalysispromptbloc``.
+    """
+    normalized = re.sub(r"[^A-Za-z0-9]+", " ", s)
+    slug = "-".join(w.lower() for w in _split_name(normalized))
+    if len(slug) <= _SLUG_MAX_LEN:
+        return slug
+    cut = slug[:_SLUG_MAX_LEN]
+    if slug[_SLUG_MAX_LEN] != "-":
+        head, sep, _ = cut.rpartition("-")
+        if sep:
+            cut = head
+    return cut.rstrip("-")
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from code_review_graph.communities import (
     _compute_cohesion_batch,
     _detect_file_based,
     _generate_community_name,
+    _to_slug,
     detect_communities,
     get_architecture_overview,
     get_communities,
@@ -590,3 +591,46 @@ class TestCommunities:
         # Pass a file that IS part of existing communities
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
+
+
+class TestToSlug:
+    """Slug generation: word splitting and word-boundary truncation."""
+
+    def test_short_snake_case_unchanged(self):
+        assert _to_slug("rate_sheet") == "rate-sheet"
+
+    def test_camel_case_split_into_words(self):
+        assert _to_slug("AuthService") == "auth-service"
+
+    def test_long_camel_case_truncates_at_word_boundary(self):
+        # Lowercased raw form is 31+ chars; the old implementation produced
+        # the mid-word cut "testbuildpreanalysispromptbloc".
+        result = _to_slug("TestBuildPreAnalysisPromptBlock")
+        assert result == "test-build-pre-analysis-prompt"
+
+    def test_truncation_never_ends_mid_word(self):
+        result = _to_slug("normalize_service_level_values_for_carrier")
+        assert len(result) <= 30
+        # Every word in the slug must be a complete word of the input.
+        input_words = set("normalize_service_level_values_for_carrier".split("_"))
+        assert set(result.split("-")) <= input_words
+
+    def test_exact_boundary_cut_keeps_full_word(self):
+        # 30th char lands exactly on a hyphen: keep all complete words.
+        result = _to_slug("aaaaaaaaaa_bbbbbbbbbb_cccccccc_dd")
+        assert result == "aaaaaaaaaa-bbbbbbbbbb-cccccccc"
+
+    def test_mid_word_cut_drops_partial_word(self):
+        # The 30-char cut lands inside the third word: drop the fragment.
+        result = _to_slug("aaaaaaaaaa_bbbbbbbbbb_ccccccccc")
+        assert result == "aaaaaaaaaa-bbbbbbbbbb"
+
+    def test_single_overlong_word_falls_back_to_hard_cut(self):
+        result = _to_slug("a" * 40)
+        assert result == "a" * 30
+
+    def test_punctuation_becomes_word_separator(self):
+        assert _to_slug("foo/bar.baz") == "foo-bar-baz"
+
+    def test_empty_string_gives_empty_slug(self):
+        assert _to_slug("") == ""
