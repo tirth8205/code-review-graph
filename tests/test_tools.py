@@ -1563,3 +1563,83 @@ class TestGetMinimalContext:
             task="refactor auth module", repo_root=str(self.root),
         )
         assert "refactor" in result["next_tool_suggestions"]
+
+
+def _seed_scored_impact_graph(root: Path) -> None:
+    """Seed a graph where one impact target is called and one is imported."""
+    graph_dir = root / ".code-review-graph"
+    graph_dir.mkdir()
+    store = GraphStore(graph_dir / "graph.db")
+    app = "fixtures/sample_repo/src/app.py"
+    callee = "fixtures/sample_repo/src/callee.py"
+    imported = "fixtures/sample_repo/src/imported.py"
+    try:
+        store.upsert_node(NodeInfo(
+            kind="File", name=app, file_path=app,
+            line_start=1, line_end=6, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name="handle", file_path=app,
+            line_start=1, line_end=3, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name="callee", file_path=callee,
+            line_start=1, line_end=3, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name="imported", file_path=imported,
+            line_start=1, line_end=3, language="python",
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=f"{app}::handle",
+            target=f"{callee}::callee", file_path=app, line=2,
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="IMPORTS_FROM", source=f"{app}::handle",
+            target=f"{imported}::imported", file_path=app, line=1,
+        ))
+        store.commit()
+    finally:
+        store.close()
+
+
+class TestImpactRadiusScoring:
+    """impact_score surfaces on impacted nodes, best-first."""
+
+    def _repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "fixtures" / "sample_repo"
+        repo.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (repo / "src").mkdir()
+        (repo / "src" / "app.py").write_text(
+            "def handle():\n    return 'ok'\n",
+            encoding="utf-8",
+        )
+        _seed_scored_impact_graph(repo)
+        return repo
+
+    def test_impacted_nodes_carry_scores_sorted_best_first(self, tmp_path):
+        repo = self._repo(tmp_path)
+
+        result = get_impact_radius(
+            changed_files=["src/app.py"],
+            repo_root=str(repo),
+        )
+
+        impacted = result["impacted_nodes"]
+        assert impacted, "expected impacted nodes"
+        scores = [n["impact_score"] for n in impacted]
+        assert scores == sorted(scores, reverse=True)
+        by_name = {n["name"]: n["impact_score"] for n in impacted}
+        assert by_name["callee"] > by_name["imported"]
+
+    def test_minimal_key_entities_lead_with_top_scored_node(self, tmp_path):
+        repo = self._repo(tmp_path)
+
+        result = get_impact_radius(
+            changed_files=["src/app.py"],
+            repo_root=str(repo),
+            detail_level="minimal",
+        )
+
+        assert result["key_entities"][0] == "callee"

@@ -5,6 +5,8 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -414,3 +416,148 @@ class TestGetTransitiveTestsFrontierCap:
         assert len(indirect_default) == 1
         assert len(indirect_capped) == 1
         assert indirect_default[0]["name"] == indirect_capped[0]["name"]
+
+
+class TestWeightedImpactScoring:
+    """Weighted impact-radius scoring: edge weights, decay, floor, ordering."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name: str, path: str) -> str:
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=10, language="python",
+        ))
+        return f"{path}::{name}"
+
+    def _add_edge(self, kind: str, source: str, target: str) -> None:
+        self.store.upsert_edge(EdgeInfo(
+            kind=kind, source=source, target=target,
+            file_path="/a.py", line=1,
+        ))
+
+    def _scores(self, result) -> dict:
+        return result["impact_scores"]
+
+    def test_calls_scores_higher_than_imports(self):
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        c = self._add_func("func_c", "/c.py")
+        self._add_edge("CALLS", a, b)
+        self._add_edge("IMPORTS_FROM", a, c)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(["/a.py"], max_depth=2)
+        scores = self._scores(result)
+        assert scores[b] == pytest.approx(0.6)     # 1.0 (CALLS) * 0.6 decay
+        assert scores[c] == pytest.approx(0.3)     # 0.5 (IMPORTS_FROM) * 0.6
+        ordered = [n.qualified_name for n in result["impacted_nodes"]]
+        assert ordered == [b, c]
+
+    def test_depth_decay_lowers_score_per_hop(self):
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        c = self._add_func("func_c", "/c.py")
+        self._add_edge("CALLS", a, b)
+        self._add_edge("CALLS", b, c)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(["/a.py"], max_depth=2)
+        scores = self._scores(result)
+        assert scores[b] == pytest.approx(0.6)
+        assert scores[c] == pytest.approx(0.36)
+
+    def test_truncation_keeps_highest_scoring_nodes(self):
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        c = self._add_func("func_c", "/c.py")
+        self._add_edge("CALLS", a, b)
+        self._add_edge("IMPORTS_FROM", a, c)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(
+            ["/a.py"], max_depth=2, max_nodes=1,
+        )
+        kept = [n.qualified_name for n in result["impacted_nodes"]]
+        assert kept == [b]  # CALLS edge outranks IMPORTS_FROM
+
+    def test_deeper_strong_path_beats_shallow_weak_path(self):
+        a = self._add_func("func_a", "/a.py")
+        m = self._add_func("func_m", "/m.py")
+        x = self._add_func("func_x", "/x.py")
+        self._add_edge("CONTAINS", a, x)   # depth 1: 0.3 * 0.6 = 0.18
+        self._add_edge("CALLS", a, m)
+        self._add_edge("CALLS", m, x)      # depth 2: 0.6 * 0.6 = 0.36
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/a.py"], max_depth=2)
+        nx_r = self.store._get_impact_radius_networkx(["/a.py"], max_depth=2)
+        assert self._scores(sql)[x] == pytest.approx(0.36)
+        assert self._scores(nx_r)[x] == pytest.approx(0.36)
+
+    def test_score_floor_stops_expansion(self):
+        # CALLS chain decays 0.6 per hop; hop 6 scores 0.047 <= floor 0.05.
+        qns = [self._add_func(f"f{i}", f"/f{i}.py") for i in range(8)]
+        for src, tgt in zip(qns, qns[1:]):
+            self._add_edge("CALLS", src, tgt)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(["/f0.py"], max_depth=8)
+        scores = self._scores(result)
+        assert qns[5] in scores            # 0.6**5 = 0.0778 > floor
+        assert qns[6] not in scores        # 0.6**6 = 0.0467 <= floor
+
+    def test_sql_and_networkx_scores_match(self):
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        c = self._add_func("func_c", "/c.py")
+        t = self._add_func("test_b", "/tests.py")
+        self._add_edge("CALLS", a, b)
+        self._add_edge("IMPORTS_FROM", b, c)
+        self._add_edge("TESTED_BY", b, t)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/a.py"], max_depth=3)
+        nx_r = self.store._get_impact_radius_networkx(["/a.py"], max_depth=3)
+        assert self._scores(sql) == self._scores(nx_r)
+        sql_order = [n.qualified_name for n in sql["impacted_nodes"]]
+        nx_order = [n.qualified_name for n in nx_r["impacted_nodes"]]
+        assert sql_order == nx_order
+
+    def test_unknown_edge_kind_uses_default_weight(self):
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        self._add_edge("MYSTERY_KIND", a, b)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(["/a.py"], max_depth=1)
+        assert self._scores(result)[b] == pytest.approx(0.3)  # 0.5 * 0.6
+
+    def test_empty_changed_files_returns_empty_scores(self):
+        result = self.store.get_impact_radius_sql([], max_depth=2)
+        assert result["impact_scores"] == {}
+
+    def test_parallel_edge_kinds_keep_engines_aligned(self):
+        # Two edges of different kinds between the same pair: DiGraph keeps
+        # one edge per pair, and before the strongest-kind collapse the last
+        # inserted kind won arbitrarily. CALLS first, CONTAINS second makes
+        # the old behavior score b at 0.18 instead of 0.6.
+        a = self._add_func("func_a", "/a.py")
+        b = self._add_func("func_b", "/b.py")
+        c = self._add_func("func_c", "/c.py")
+        self._add_edge("CALLS", a, b)
+        self._add_edge("CONTAINS", a, b)
+        self._add_edge("CALLS", b, c)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/a.py"], max_depth=2)
+        nx_r = self.store._get_impact_radius_networkx(["/a.py"], max_depth=2)
+        assert self._scores(nx_r)[b] == pytest.approx(0.6)
+        assert self._scores(sql) == self._scores(nx_r)
