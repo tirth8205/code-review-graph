@@ -1,6 +1,8 @@
 name: express
 url: https://github.com/expressjs/express
-commit: HEAD
+# Pinned to the latest test_commit SHA so the snapshot is deterministic and
+# every test_commit below is reachable as an ancestor.
+commit: b4ab7d65d7724d9309b6faaaf82ad492da2a6d35
 language: javascript
 size_category: small
 
@@ -23,3 +25,21 @@ search_queries:
     expected: "lib/response.js::res"
   - query: "request"
     expected: "lib/request.js::req"
+
+# Express has only one task — JS modules use prototypes + module.exports
+# heavily, so most "method" callers are not represented as proper Function
+# edges in the graph. createApplication is the cleanest anchor.
+multi_hop_tasks:
+  - id: express-create-application-callees
+    nl_query: "What express does when constructing an application"
+    anchor_qualified_suffix: "lib/express.js::createapplication"
+    traversal_pattern: callees_of
+    expected_neighbor_names: ["mixin", "create", "init"]
+    k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does app.handle process the middleware stack"
+  - "Where does res.send write the response body"
+  - "How does createApplication initialize an app"

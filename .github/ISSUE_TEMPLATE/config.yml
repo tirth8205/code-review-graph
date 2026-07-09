@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas (GitHub Discussions)
+    url: https://github.com/tirth8205/code-review-graph/discussions
+    about: Ask questions, share setups, and discuss ideas before filing an issue.
+  - name: Troubleshooting guide
+    url: https://github.com/tirth8205/code-review-graph/blob/main/docs/TROUBLESHOOTING.md
+    about: Fixes for common installation, build, and MCP connection problems.

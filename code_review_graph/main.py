@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -549,6 +550,7 @@ def get_community_tool(
 @mcp.tool()
 def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
+    detail_level: str = "minimal",
 ) -> dict:
     """Generate an architecture overview based on community structure.
 
@@ -558,8 +560,15 @@ def get_architecture_overview_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "minimal" (default) drops community member lists
+                      and aggregates cross-community edges to one row per
+                      community pair (typical reduction: 600KB -> <5KB);
+                      "standard" returns full per-edge detail.
     """
-    return get_architecture_overview_func(repo_root=_resolve_repo_root(repo_root))
+    return get_architecture_overview_func(
+        repo_root=_resolve_repo_root(repo_root),
+        detail_level=detail_level,
+    )
 
 
 @mcp.tool()
@@ -590,12 +599,28 @@ async def detect_changes_tool(
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
     """
-    return await asyncio.to_thread(
+    coro = asyncio.to_thread(
         detect_changes_func,
         base=base, changed_files=changed_files,
         include_source=include_source, max_depth=max_depth,
         repo_root=_resolve_repo_root(repo_root), detail_level=detail_level,
     )
+    tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
+    if tool_timeout > 0:
+        try:
+            return await asyncio.wait_for(coro, timeout=tool_timeout)
+        except asyncio.TimeoutError:
+            message = (
+                f"detect_changes_tool timed out after {tool_timeout}s. "
+                "Reduce scope with CRG_MAX_CHANGED_FUNCS / CRG_MAX_TRANSITIVE_FRONTIER, "
+                "or increase CRG_TOOL_TIMEOUT."
+            )
+            return {
+                "status": "error",
+                "error": message,
+                "summary": message,
+            }
+    return await coro
 
 
 @mcp.tool()
@@ -1024,6 +1049,15 @@ def main(
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        # Pre-warm sentence-transformers on the main thread before fastmcp's
+        # event loop starts. Lazy-loading ``torch`` + tokenizers inside an
+        # executor worker thread deadlocks ``semantic_search_nodes_tool`` on
+        # Windows stdio MCP (DLL init / OpenMP thread-pool registration grabs
+        # locks the loop needs). #385 added ``asyncio.to_thread`` to peer
+        # tools but cannot fix this case — the dangerous initialization has
+        # to happen on the main thread before any worker thread is spawned.
+        from .embeddings import prewarm_local_embeddings
+        prewarm_local_embeddings()
 
     try:
         if transport == "stdio":

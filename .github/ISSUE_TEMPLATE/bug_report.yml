@@ -1,0 +1,94 @@
+name: Bug report
+description: Report a defect in code-review-graph (CLI, MCP server, parser, or graph store)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Before filing, please check the
+        [troubleshooting guide](https://github.com/tirth8205/code-review-graph/blob/main/docs/TROUBLESHOOTING.md)
+        and search existing issues for duplicates.
+  - type: input
+    id: crg-version
+    attributes:
+      label: code-review-graph version
+      description: >-
+        Output of `pip show code-review-graph` (or the version reported by
+        `code-review-graph status`).
+      placeholder: "2.3.5"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other (describe in "Additional context")
+    validations:
+      required: true
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+      description: Output of `python --version`. Python 3.10+ is required.
+      placeholder: "3.12.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: ai-platform
+    attributes:
+      label: AI platform
+      description: Which AI coding tool were you using when you hit the bug?
+      options:
+        - claude-code
+        - cursor
+        - codex
+        - windsurf
+        - zed
+        - opencode
+        - copilot
+        - other (describe in "Additional context")
+    validations:
+      required: true
+  - type: textarea
+    id: status-output
+    attributes:
+      label: Output of `code-review-graph status`
+      description: >-
+        Run `code-review-graph status` in the affected repository and paste the full
+        output. If the command itself fails, paste the error instead.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions, in order, that trigger the bug.
+      placeholder: |
+        1. code-review-graph build
+        2. code-review-graph detect-changes --brief
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual behavior
+      description: What did you expect to happen, and what happened instead?
+      placeholder: |
+        Expected: ...
+        Actual: ...
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Logs, stack traces, screenshots, or anything else that helps.
+    validations:
+      required: false

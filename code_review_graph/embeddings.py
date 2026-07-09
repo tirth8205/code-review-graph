@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import sqlite3
 import struct
 import sys
@@ -65,6 +66,50 @@ class EmbeddingProvider(ABC):
 LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 
+# Process-wide cache of loaded sentence-transformer models, keyed by model name.
+# Populated by ``prewarm_local_embeddings()`` at server startup (see ``main.main``)
+# and by ``LocalEmbeddingProvider._get_model`` on first lazy load. Sharing the
+# loaded model across ``LocalEmbeddingProvider`` instances avoids re-importing
+# ``sentence_transformers`` + ``torch`` from worker threads, which deadlocks
+# ``semantic_search_nodes_tool`` on Windows stdio MCP (#385 fixed the peer
+# tools via ``asyncio.to_thread``; this cache fixes the remaining case where
+# torch DLL / OpenMP init runs inside an executor thread).
+_MODEL_CACHE: dict[str, Any] = {}
+
+
+def prewarm_local_embeddings(model_name: str | None = None) -> None:
+    """Eagerly load the local sentence-transformer model on the calling thread.
+
+    Call this from the **main thread** before entering an asyncio event loop
+    (e.g. before ``mcp.run()``) on Windows to prevent a deadlock where lazy-
+    loading ``sentence_transformers`` + ``torch`` inside a FastMCP executor
+    worker thread blocks indefinitely on DLL init / OpenMP thread-pool
+    registration.
+
+    No-op when ``sentence-transformers`` is not installed (cloud-provider
+    setups remain unaffected) or when the configured model is already cached.
+
+    Args:
+        model_name: Optional override; falls back to the ``CRG_EMBEDDING_MODEL``
+            environment variable and then to ``LOCAL_DEFAULT_MODEL``.
+    """
+    try:
+        from sentence_transformers import SentenceTransformer  # noqa: F401
+    except ImportError:
+        return  # cloud-only setup: nothing to pre-warm
+
+    resolved = model_name or os.environ.get(
+        "CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL
+    )
+    if resolved in _MODEL_CACHE:
+        return
+
+    try:
+        _MODEL_CACHE[resolved] = LocalEmbeddingProvider(resolved)._get_model()
+    except Exception as exc:  # pragma: no cover — best-effort startup hook
+        logger.warning("prewarm_local_embeddings(%s) skipped: %s", resolved, exc)
+
+
 class LocalEmbeddingProvider(EmbeddingProvider):
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or os.environ.get(
@@ -74,6 +119,12 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
     def _get_model(self):
         if self._model is None:
+            # Check the process-wide cache first — populated either by a prior
+            # provider instance or by ``prewarm_local_embeddings`` at startup.
+            cached = _MODEL_CACHE.get(self._model_name)
+            if cached is not None:
+                self._model = cached
+                return self._model
             try:
                 from sentence_transformers import SentenceTransformer
                 # Check environment variable, default to False to prevent RCE
@@ -84,6 +135,7 @@ class LocalEmbeddingProvider(EmbeddingProvider):
                     self._model_name,
                     trust_remote_code=allow_remote_code,
                 )
+                _MODEL_CACHE[self._model_name] = self._model
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
@@ -574,6 +626,9 @@ def _warn_cloud_egress(provider_name: str) -> None:
     )
 
 
+_VALID_PROVIDERS = {"local", "openai", "google", "minimax"}
+
+
 def get_provider(
     provider: str | None = None,
     model: str | None = None,
@@ -582,7 +637,9 @@ def get_provider(
 
     Args:
         provider: Provider name. One of "local", "google", "minimax", "openai",
-                  or None for local.
+                  or None for local. Names are case-insensitive and surrounding
+                  whitespace is ignored; unknown names raise ValueError instead
+                  of silently falling back to the local provider.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
                   OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
@@ -595,8 +652,19 @@ def get_provider(
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
                For Google provider this is a Gemini model ID.
                For OpenAI provider this overrides CRG_OPENAI_MODEL.
+
+    Raises:
+        ValueError: If the provider name is not one of the known providers,
+                    or if required environment variables are missing.
     """
-    if provider == "openai":
+    name = provider.strip().lower() if provider else ""
+    if name and name not in _VALID_PROVIDERS:
+        raise ValueError(
+            f"Unknown embedding provider '{name}'. "
+            "Valid: local, openai, google, minimax"
+        )
+
+    if name == "openai":
         api_key = os.environ.get("CRG_OPENAI_API_KEY")
         base_url = os.environ.get("CRG_OPENAI_BASE_URL")
         resolved_model = model or os.environ.get("CRG_OPENAI_MODEL")
@@ -626,7 +694,7 @@ def get_provider(
             batch_size=batch_size,
         )
 
-    if provider == "minimax":
+    if name == "minimax":
         api_key = os.environ.get("MINIMAX_API_KEY")
         if not api_key:
             raise ValueError(
@@ -636,7 +704,7 @@ def get_provider(
         _warn_cloud_egress("minimax")
         return MiniMaxEmbeddingProvider(api_key=api_key)
 
-    if provider == "google":
+    if name == "google":
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise ValueError(
@@ -653,6 +721,8 @@ def get_provider(
             return None
 
     # Default: local
+    if not _check_available():
+        return None
     try:
         return LocalEmbeddingProvider(model_name=model)
     except ImportError:
@@ -705,19 +775,78 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_IDENTIFIER_SPLIT_RE = re.compile(r"([a-z])([A-Z])|[_./\-]+")
+
+
+def _split_identifier(name: str) -> str:
+    """Split snake_case / camelCase / PascalCase / dotted into space-separated words.
+
+    Examples:
+        get_route_handler -> "get route handler"
+        APIRoute          -> "API Route"
+        dispatch_request  -> "dispatch request"
+        full_dispatch_request -> "full dispatch request"
+    """
+    if not name:
+        return ""
+    # Insert space between lowercase->uppercase transitions, then collapse
+    # snake_case / dotted / hyphenated separators.
+    spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
+    spaced = re.sub(r"[_./\-]+", " ", spaced)
+    return " ".join(spaced.split())
+
+
 def _node_to_text(node: GraphNode) -> str:
-    """Convert a node to a searchable text representation."""
-    parts = [node.name]
+    """Convert a node to a searchable text representation.
+
+    Designed so natural-language queries land on the right node, not just on
+    the enclosing class. We include the dotted ``Parent.name`` form, the
+    identifier split into words, an explicit ``"in <Parent>"`` phrase, the
+    enclosing module directory, and the language. Tested by the
+    ``multi_hop_retrieval`` benchmark — see ``docs/REPRODUCING.md``.
+    """
+    parts: list[str] = []
+
+    # 1. Dotted form first — strongest lexical signal for "method in class"
+    if node.parent_name and node.kind != "File":
+        parts.append(f"{node.parent_name}.{node.name}")
+
+    # 2. Bare name (always present)
+    parts.append(node.name)
+
+    # 3. Split-words form of the name (only if it differs from the bare name)
+    name_split = _split_identifier(node.name)
+    if name_split and name_split.lower() != node.name.lower():
+        parts.append(name_split)
+
+    # 4. Kind ("function", "class", "test", ...)
     if node.kind != "File":
         parts.append(node.kind.lower())
+
+    # 5. Parent context with the split form too
     if node.parent_name:
         parts.append(f"in {node.parent_name}")
+        parent_split = _split_identifier(node.parent_name)
+        if parent_split and parent_split.lower() != node.parent_name.lower():
+            parts.append(parent_split)
+
+    # 6. Signature bits
     if node.params:
         parts.append(node.params)
     if node.return_type:
         parts.append(f"returns {node.return_type}")
+
+    # 7. Module / directory context from the file path — gives queries a
+    # term like "routing" or "client" to anchor against.
+    if node.file_path:
+        parent_dir = Path(node.file_path).parent.name
+        if parent_dir and parent_dir not in (".", "src", "lib"):
+            parts.append(parent_dir)
+
+    # 8. Language
     if node.language:
         parts.append(node.language)
+
     return " ".join(parts)
 
 

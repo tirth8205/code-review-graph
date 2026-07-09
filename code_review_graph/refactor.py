@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from .flows import _has_framework_decorator, _matches_entry_name
 from .graph import GraphStore, _sanitize_name
@@ -241,6 +241,7 @@ def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
+    root: Optional[Union[str, Path]] = None,
 ) -> list[dict[str, Any]]:
     """Find functions/classes with no callers, no test refs, no importers, and no references.
 
@@ -260,10 +261,11 @@ def find_dead_code(
         store: The GraphStore instance.
         kind: Optional filter (e.g. ``"Function"`` or ``"Class"``).
         file_pattern: Optional file-path substring filter.
+        root: Optional repo root path for computing ``relative_path``.
 
     Returns:
-        List of dead-code dicts with name, qualified_name, kind, file, line,
-        and a top-level ``caveats`` note.
+        List of dead-code dicts with name, qualified_name, kind, file_path,
+        relative_path, line, and language fields.
     """
     # Query candidate nodes.
     candidates = store.get_nodes_by_kind(
@@ -555,12 +557,22 @@ def find_dead_code(
                             break
 
             if not has_callers:
+                if root:
+                    try:
+                        rel = str(Path(node.file_path).relative_to(root))
+                    except ValueError:
+                        rel = node.file_path
+                else:
+                    rel = node.file_path
                 dead.append({
                     "name": _sanitize_name(node.name),
                     "qualified_name": _sanitize_name(node.qualified_name),
                     "kind": node.kind,
                     "file": node.file_path,
+                    "file_path": node.file_path,
+                    "relative_path": rel,
                     "line": node.line_start,
+                    "language": node.language,
                 })
 
     logger.info("find_dead_code: found %d dead symbols", len(dead))

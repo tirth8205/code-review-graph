@@ -1,6 +1,8 @@
 name: fastapi
 url: https://github.com/tiangolo/fastapi
-commit: HEAD
+# Pinned to the latest test_commit SHA so the snapshot is deterministic and
+# every test_commit below is reachable as an ancestor.
+commit: 0227991a01e61bf5cdd93cc00e9e243f52b47a4a
 language: python
 size_category: medium
 
@@ -23,3 +25,24 @@ search_queries:
     expected: "fastapi/routing.py::APIRoute"
   - query: "Depends injection"
     expected: "fastapi/params.py::Depends"
+
+multi_hop_tasks:
+  - id: fastapi-route-handler-callers
+    nl_query: "How fastapi binds a route handler to an APIRoute"
+    anchor_qualified_suffix: "fastapi/routing.py::apiroute.get_route_handler"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["__init__"]
+    k: 10
+  - id: fastapi-get-dependant-callers
+    nl_query: "Where fastapi resolves dependency declarations into a tree"
+    anchor_qualified_suffix: "fastapi/dependencies/utils.py::get_dependant"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["get_parameterless_sub_dependant", "solve_dependencies"]
+    k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does include_router register routes on the application"
+  - "Where does APIRoute build its route handler"
+  - "How does solve_dependencies resolve Depends parameters"

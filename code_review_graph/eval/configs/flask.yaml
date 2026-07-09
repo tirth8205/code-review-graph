@@ -1,6 +1,8 @@
 name: flask
 url: https://github.com/pallets/flask
-commit: HEAD
+# Pinned to the latest test_commit SHA so the snapshot is deterministic and
+# every test_commit below is reachable as an ancestor.
+commit: a29f88ce6f2f9843bd6fcbbfce1390a2071965d6
 language: python
 size_category: small
 
@@ -23,3 +25,26 @@ search_queries:
     expected: "src/flask/ctx.py::AppContext"
   - query: "create logger"
     expected: "src/flask/logging.py::create_logger"
+
+# Multi-hop retrieval tasks (semantic_search → query_graph one-hop)
+# See docs/REPRODUCING.md for the schema.
+multi_hop_tasks:
+  - id: flask-dispatch-callers
+    nl_query: "Where Flask dispatches HTTP requests"
+    anchor_qualified_suffix: "src/flask/app.py::flask.dispatch_request"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["full_dispatch_request"]
+    k: 10
+  - id: flask-exception-callers
+    nl_query: "Where Flask handles uncaught exceptions"
+    anchor_qualified_suffix: "src/flask/app.py::flask.handle_exception"
+    traversal_pattern: callers_of
+    expected_neighbor_names: ["wsgi_app"]
+    k: 10
+
+# Questions for the agent_baseline benchmark (pure-python grep top-k vs graph
+# query). See docs/REPRODUCING.md for the methodology.
+agent_questions:
+  - "How does dispatch_request route an incoming HTTP request"
+  - "Where is the AppContext pushed and popped"
+  - "How does create_logger configure application logging"

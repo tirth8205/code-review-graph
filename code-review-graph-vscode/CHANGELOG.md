@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 - 2026-04-11
+
+### Fixed
+- Compatible with VS Code 1.115 / Electron 39 by updating the extension SQLite dependency stack.
+
 ## 0.2.1 — 2026-04-08
 
 ### Fixed

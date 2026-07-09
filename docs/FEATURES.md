@@ -1,21 +1,45 @@
 # Features
 
-## v2.2.1 (Current)
-- **24 MCP tools** (up from 22): Added `get_minimal_context` and `run_postprocess`.
-- **Parallel parsing**: `ProcessPoolExecutor` for 3-5x faster builds on large repos.
-- **Lazy post-processing**: `postprocess="full"|"minimal"|"none"` to skip expensive steps.
-- **SQLite-native BFS**: Recursive CTE replaces NetworkX for impact analysis (faster on large graphs).
-- **Token-efficient output**: `detail_level="minimal"` on 8 tools for 40-60% token reduction.
-- **`get_minimal_context`**: Ultra-compact entry point (~100 tokens) with task-based tool routing.
-- **Incremental flow/community updates**: Only re-trace affected flows, skip community re-detection when unaffected.
-- **Visualization aggregation**: Community/file/auto modes with drill-down for 5k+ node graphs.
-- **Token-efficiency benchmarks**: 5 workflow benchmarks in eval framework.
-- **Pre-computed summary tables**: DB schema v6 with `community_summaries`, `flow_snapshots`, `risk_index`.
-- **Configurable limits**: `CRG_MAX_IMPACT_NODES`, `CRG_MAX_IMPACT_DEPTH`, `CRG_DEPENDENT_HOPS`, etc.
-- **Multi-hop dependents**: N-hop dependent discovery (default 2) with 500-file cap.
-- **615 tests** across 22 test files.
+## v2.3.6 (Current)
+- **Custom languages without forking**: drop a `.code-review-graph/languages.toml` into your repo to index any grammar shipped by tree-sitter-language-pack — extension map plus node-type lists, validated and capped, with built-in languages always winning. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
+- **GitHub Action for risk-scored PR reviews**: composite `action.yml` builds/restores the graph from CI cache, runs `detect-changes` against the PR base, and upserts a sticky comment with risk table, affected flows, test gaps, and the Token Savings line. Optional `fail-on-risk` merge gate. Dogfooded on this repo via `.github/workflows/pr-review.yml`. See [GITHUB_ACTION.md](GITHUB_ACTION.md).
+- **`agent_baseline` eval benchmark**: compares graph queries against a realistic grep-and-read-top-k agent baseline instead of the whole-corpus strawman; wired into all six pinned eval configs.
+- **Co-change ground truth for `impact_accuracy`**: predictions are also graded against files actually co-changed in the same commit; the legacy metric is explicitly labelled "graph-derived (circular — upper bound)".
+- **Weekly eval CI**: `.github/workflows/eval.yml` runs a report-only cron of the two smallest pinned configs with CSV artifacts and a job summary.
+- **docs/FAQ.md**: how CRG compares to LSP, RAG, grep/agentic search, and adjacent tools; when NOT to use it; verification steps; monorepo/worktree and registry guidance.
+- **Contribution scaffolding**: GitHub issue forms (bug/feature/platform), a PR template mirroring the CONTRIBUTING checklist, and dependabot config for pip + GitHub Actions.
+- **Windows fixes**: `daemon status` no longer crashes with WinError 87 (#511), and CLI `detect-changes` maps diff paths to absolute native paths so it no longer reports 0 functions (#528).
+- **Provider-name validation**: unknown embedding provider names raise a clear error listing valid providers instead of silently falling back to the local model.
+- **Store-leak fixes**: the five analysis MCP tools and the wiki-page tool no longer leak SQLite connections (try/finally `store.close()`).
+- **`fastmcp<4` cap**: the next fastmcp major can no longer silently break the server.
+- **Worktree-safe git hooks**: `install` resolves the real hooks directory via `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath` (husky) setups get a working pre-commit hook.
 
-## v2.1.0
+## v2.3.5
+- **Token Savings panel on every brief CLI call**: `code-review-graph detect-changes --brief` and the new `code-review-graph update --brief` print a boxed `Token Savings` panel — full-context baseline, graph response, saved tokens, percent, and per-category breakdown (Functions / Tests / Risk / Other) that sums exactly to the graph response size.
+- **`--verify` flag**: cross-checks the displayed numbers against OpenAI's `cl100k_base` tokenizer (the GPT-4 family). Adds a second `Verified (tiktoken)` row showing real token counts. Calibration across 222 mixed-language files shows the estimate is within ~1% of real tokens in aggregate.
+- **`update --brief`**: incremental update + the same risk panel in one command. Distinct from `detect-changes --brief` (which is read-only against the existing graph) — use update when the graph might be stale (post-rebase, large change set).
+- **`code-review-graph embed` CLI subcommand**: explicit shell-level access to embedding generation. Previously only reachable via MCP.
+- **Deterministic eval pipeline**: all 6 eval configs pin upstream SHAs, `eval/runner.py` uses full clones with explicit `returncode` checks, and Leiden community detection uses a fixed seed (`CRG_LEIDEN_SEED=42`). Two runs on different machines produce identical numbers.
+- **`multi_hop_retrieval` benchmark**: 11 hand-curated 2-step tool-chain tasks (`hybrid_search` → `query_graph`) across the 6 test repos. Average score 0.909.
+- **Richer semantic search**: `embeddings._node_to_text` now includes the dotted form (`Module.Class.method`), word-split identifiers, and enclosing module directory. Search ranking on natural-language queries improved from 0.545 → 0.909 on the multi-hop benchmark.
+- **Identifier-aware search boost**: `extract_query_identifiers` pulls dotted / snake_case / CamelCase tokens out of NL queries and boosts matching qualified-names ×2.0 in hybrid search.
+- **Path normalization fix**: `eval/runner.py` now resolves repo paths absolutely before storing, so the eval-built graph matches the CLI/MCP-built graph and `update` doesn't create duplicate nodes for the same source location.
+- **Test-gap dedup**: the `Untested:` line in the brief summary dedupes by bare name (defensive guard if duplicate qualified_names slip in).
+- **FTS5 auto-rebuild in eval**: the eval framework now calls `run_post_processing` after `full_build`, so FTS5 is populated automatically instead of leaving the index empty.
+
+## v2.3.4
+- **Estimated context savings**: Review, impact, detect-changes, and compact architecture responses include tiny `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) where a baseline can be estimated.
+- **Compact architecture overview by default**: `get_architecture_overview_tool` defaults to `detail_level="minimal"` to avoid huge member lists and per-edge payloads. Use `detail_level="standard"` for full detail.
+- **Bounded change analysis**: `CRG_MAX_CHANGED_FUNCS`, `CRG_MAX_TRANSITIVE_FRONTIER`, and `CRG_TOOL_TIMEOUT` help keep large MCP review calls responsive.
+- **Windows MCP reliability**: Local embedding models are pre-warmed on Windows before FastMCP starts worker dispatch to avoid semantic-search deadlocks.
+- **Parser correctness**: Rust `#[test]` and common async test attributes now produce `Test` nodes.
+- **Graph lookup correctness**: Review, impact, and file-summary tools resolve user-facing paths to stored graph paths; `callers_of` includes cross-file callers even when same-file callers exist.
+- **Install/runtime reliability**: Generated Codex/Claude hooks drain stdin, bundled docs are available from wheels, missing local embeddings report unavailable status, and `.svn` roots pass validation.
+- **CLI reliability**: `build --skip-postprocess` and `update --skip-flows` honor the requested post-processing level.
+- **Broad parser surface**: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks, and Perl XS files.
+- **Local-first by design**: SQLite graph storage remains local, with no telemetry and no cloud-default behavior.
+
+## v2.0.0
 - **22 MCP tools** (up from 9): 13 new tools for flows, communities, architecture, refactoring, wiki, multi-repo, and risk-scored change detection.
 - **5 MCP prompts**: `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check` workflow templates.
 - **18 languages** (up from 15): Added Dart, R, Perl support.
@@ -124,7 +148,8 @@
 - **FastMCP 3.0 compatible** stdio MCP server
 
 ## Privacy & Data
-- All data stays 100% local
+- Core graph data is stored locally
 - Graph stored in `.code-review-graph/graph.db` (SQLite), auto-gitignored
-- No telemetry, no network calls
+- No telemetry; core graph/review workflows do not require network access
+- Optional embedding and wiki features may call configured local or remote services when explicitly enabled
 - Respects `.gitignore` and `.code-review-graphignore`

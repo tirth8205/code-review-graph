@@ -1,0 +1,3 @@
+repo,commit,description,changed_files,naive_tokens,standard_tokens,graph_tokens,naive_to_graph_ratio,standard_to_graph_ratio
+code-review-graph,528801f841e519567ef54d6e52e9b9831d162e1b,feat: add multi-platform MCP server installation support,3,10858,4147,215154,0.1,0.0
+code-review-graph,84bde35459c52e1e0c4b25c6c4799743021e0fc7,feat: add Google Antigravity platform support for MCP install,2,8113,394,203906,0.0,0.0
