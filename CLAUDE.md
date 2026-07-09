@@ -90,7 +90,8 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_tools.py` — MCP tool integration tests
 - `tests/test_visualization.py` — Export, HTML generation, C++ resolution
 - `tests/test_incremental.py` — Build, update, migration, git ops
-- `tests/test_multilang.py` — Broad language parsing tests, including SFCs, notebooks, SQL, Perl XS, and modern systems/web languages
+- `tests/test_multilang.py` — Broad language parsing tests, including SFCs, notebooks, SQL, CSS/SCSS/LESS, Perl XS, and modern systems/web languages
+- `tests/test_css_linking.py` — Cross-file CSS linking (STYLES edges, CSS Modules, POTENTIAL_CONFLICT detection)
 - `tests/test_custom_languages.py` — Config-driven custom languages (languages.toml loader + end-to-end Erlang parse)
 - `tests/test_embeddings.py` — Vector encode/decode, similarity, store
 - `tests/test_flows.py` — Execution flow detection and criticality

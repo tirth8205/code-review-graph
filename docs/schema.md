@@ -123,6 +123,33 @@ A value-level reference to another symbol, often used for function-as-value patt
 ### INJECTS
 A dependency-injection relationship, currently used by Java/Spring enrichment for injected fields and constructor parameters.
 
+### OVERRIDES
+A CSS selector overrides another selector's properties within the same file (higher specificity, later source order, or `!important`).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| source | string | Overriding selector qualified name |
+| target | string | Overridden selector qualified name |
+| extra | json | Overridden properties and specificity details |
+
+### STYLES
+A component or function references a CSS class that a selector defines. Sources are JSX functions (`className`), Vue/Svelte files (static template classes), or CSS Modules references.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| source | string | Referencing component/function/file qualified name |
+| target | string | CSS selector qualified name |
+| extra | json | `class_name` and `resolution` ("static" or "css_module") |
+
+### POTENTIAL_CONFLICT
+Two selectors in different files target the same class name and may conflict.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| source | string | First selector qualified name |
+| target | string | Second selector qualified name |
+| extra | json | `class_name`, both specificities, `conflict_confidence` |
+
 ### CONSUMES / PRODUCES
 Data or event flow relationships emitted by specialised parsers when a source consumes or produces a named resource.
 

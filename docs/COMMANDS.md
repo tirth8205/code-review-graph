@@ -63,7 +63,9 @@ Relevant responses may include compact estimated `context_savings` metadata.
 #### `query_graph_tool`
 ```
 pattern: str    # callers_of, callees_of, imports_of, importers_of,
-                # children_of, tests_for, inheritors_of, file_summary
+                # children_of, tests_for, inheritors_of, overrides_of,
+                # overridden_by, styles_of, styled_by, conflicts_of,
+                # file_summary
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
