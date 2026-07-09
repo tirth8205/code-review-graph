@@ -1,0 +1,46 @@
+@import 'variables';
+@import 'mixins';
+
+$primary-color: #3498db;
+$font-size: 16px;
+$spacing: 1rem;
+
+@mixin flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@mixin responsive($breakpoint) {
+  @media (max-width: $breakpoint) {
+    @content;
+  }
+}
+
+.btn {
+  padding: $spacing;
+  font-size: $font-size;
+  @include flex-center;
+  color: $primary-color;
+
+  &-primary {
+    background: $primary-color;
+    color: white;
+  }
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+.card {
+  border: 1px solid #ccc;
+
+  .card-title {
+    font-weight: bold;
+  }
+
+  .card-body {
+    padding: $spacing;
+  }
+}

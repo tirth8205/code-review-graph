@@ -267,6 +267,14 @@ def _generate_review_guidance(
             "Check for Liskov substitution violations."
         )
 
+    # Check for CSS override changes
+    override_edges = [e for e in impact["edges"] if e.kind == "OVERRIDES"]
+    if override_edges:
+        guidance_parts.append(
+            f"- {len(override_edges)} CSS override relationship(s) affected. "
+            "Check for specificity conflicts and unintended style changes."
+        )
+
     # Check for cross-file impact
     impacted_file_count = len(impact["impacted_files"])
     if impacted_file_count > 3:

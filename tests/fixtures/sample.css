@@ -1,0 +1,60 @@
+@import "reset.css";
+@import url("components.css");
+
+:root {
+  --primary-color: #3498db;
+  --font-size: 16px;
+  --spacing-md: 1rem;
+}
+
+body {
+  font-size: var(--font-size);
+  color: var(--primary-color);
+}
+
+.btn {
+  padding: 10px 20px;
+  border-radius: 4px;
+  color: blue;
+}
+
+.btn-primary {
+  background: blue;
+  color: white;
+}
+
+#main-header {
+  display: flex;
+  align-items: center;
+}
+
+h1, h2 {
+  font-weight: bold;
+  color: var(--primary-color);
+}
+
+.nav .nav-item {
+  padding: var(--spacing-md);
+}
+
+@media (max-width: 768px) {
+  .btn {
+    padding: 5px 10px;
+  }
+  .sidebar {
+    display: none;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.card {
+  animation: fadeIn 0.3s;
+}
+
+.important-thing {
+  color: red !important;
+}

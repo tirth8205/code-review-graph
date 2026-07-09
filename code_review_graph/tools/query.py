@@ -28,6 +28,11 @@ _QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "overrides_of": "Find all CSS selectors that a given selector overrides",
+    "overridden_by": "Find all CSS selectors that override a given selector",
+    "styles_of": "Find CSS selectors that style a component or function",
+    "styled_by": "Find components/functions that use a given CSS selector",
+    "conflicts_of": "Find potential cross-file CSS conflicts for a selector",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -152,7 +157,9 @@ def query_graph(
 
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
-                 importers_of, children_of, tests_for, inheritors_of, file_summary.
+                 importers_of, children_of, tests_for, inheritors_of,
+                 overrides_of, overridden_by, styles_of, styled_by,
+                 conflicts_of, file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -324,6 +331,52 @@ def query_graph(
                         if child:
                             results.append(node_to_dict(child))
                         edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overrides_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "OVERRIDES":
+                    overridden = store.get_node(e.target_qualified)
+                    if overridden:
+                        results.append(node_to_dict(overridden))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "overridden_by":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "OVERRIDES":
+                    overrider = store.get_node(e.source_qualified)
+                    if overrider:
+                        results.append(node_to_dict(overrider))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "styles_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "STYLES":
+                    styled = store.get_node(e.target_qualified)
+                    if styled:
+                        results.append(node_to_dict(styled))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "styled_by":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "STYLES":
+                    styler = store.get_node(e.source_qualified)
+                    if styler:
+                        results.append(node_to_dict(styler))
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "conflicts_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "POTENTIAL_CONFLICT":
+                    conflict = store.get_node(e.target_qualified)
+                    if conflict:
+                        results.append(node_to_dict(conflict))
+                    edges_out.append(edge_to_dict(e))
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "POTENTIAL_CONFLICT":
+                    conflict = store.get_node(e.source_qualified)
+                    if conflict:
+                        results.append(node_to_dict(conflict))
+                    edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])

@@ -728,7 +728,9 @@ def _single_hop_dependents(store: GraphStore, file_path: str) -> set[str]:
     nodes = store.get_nodes_by_file(file_path)
     for node in nodes:
         for e in store.get_edges_by_target(node.qualified_name):
-            if e.kind in ("CALLS", "IMPORTS_FROM", "INHERITS", "IMPLEMENTS"):
+            if e.kind in (
+                "CALLS", "IMPORTS_FROM", "INHERITS", "IMPLEMENTS", "STYLES",
+            ):
                 dependents.add(e.file_path)
 
     dependents.discard(file_path)
@@ -817,6 +819,209 @@ def _parse_single_file(
         return (rel_path, [], [], str(e), "")
 
 
+def link_css_styles(store: GraphStore) -> int:
+    """Create STYLES edges between class references and CSS selectors.
+
+    Queries the graph for:
+    1. All CSS selector nodes (css_kind == "selector")
+    2. All nodes with css_classes or vue_template_classes in extra
+
+    Creates STYLES edges from the referencing component/function to
+    the matching CSS selector node.
+
+    Returns count of STYLES edges created.
+    """
+    from .parser import CodeParser, EdgeInfo  # noqa: F811 (avoid circular)
+
+    # Clean up previous STYLES edges
+    store.delete_edges_by_kind("STYLES")
+
+    # Build selector index: bare class name → list of (qualified_name, file_path)
+    selectors = store.get_nodes_by_extra_pattern(
+        '%"css_kind":%"selector"%', kind="Class",
+    )
+    selector_index: dict[str, list[tuple[str, str]]] = {}
+    for sel in selectors:
+        sel_name = sel.name.strip()
+        # Only index class selectors (starting with .)
+        if sel_name.startswith("."):
+            bare = sel_name.lstrip(".")
+            selector_index.setdefault(bare, []).append(
+                (sel.qualified_name, sel.file_path),
+            )
+        # For compound selectors, also index by last class segment
+        parts = sel_name.split()
+        if len(parts) > 1:
+            last = parts[-1].strip()
+            if last.startswith("."):
+                bare = last.lstrip(".")
+                selector_index.setdefault(bare, []).append(
+                    (sel.qualified_name, sel.file_path),
+                )
+
+    if not selector_index:
+        store.commit()
+        return 0
+
+    count = 0
+
+    # Link static css_classes references
+    class_nodes = store.get_nodes_by_extra_pattern('%"css_classes"%')
+    for node in class_nodes:
+        classes = node.extra.get("css_classes", [])
+        for cls_name in classes:
+            matches = selector_index.get(cls_name, [])
+            for sel_qn, sel_file in matches:
+                store.upsert_edge(EdgeInfo(
+                    kind="STYLES",
+                    source=node.qualified_name,
+                    target=sel_qn,
+                    file_path=node.file_path,
+                    line=node.line_start or 0,
+                    extra={
+                        "class_name": cls_name,
+                        "resolution": "static",
+                    },
+                ))
+                count += 1
+
+    # Link Vue template class references
+    vue_nodes = store.get_nodes_by_extra_pattern('%"vue_template_classes"%')
+    for node in vue_nodes:
+        classes = node.extra.get("vue_template_classes", [])
+        for cls_name in classes:
+            matches = selector_index.get(cls_name, [])
+            for sel_qn, sel_file in matches:
+                store.upsert_edge(EdgeInfo(
+                    kind="STYLES",
+                    source=node.qualified_name,
+                    target=sel_qn,
+                    file_path=node.file_path,
+                    line=node.line_start or 0,
+                    extra={
+                        "class_name": cls_name,
+                        "resolution": "static",
+                    },
+                ))
+                count += 1
+
+    # Link CSS Module references
+    module_nodes = store.get_nodes_by_extra_pattern('%"css_module_refs"%')
+    for node in module_nodes:
+        refs = node.extra.get("css_module_refs", [])
+        # Find the File node for CSS module imports
+        file_nodes = store.get_nodes_by_extra_pattern(
+            '%"css_module_imports"%', kind="File",
+        )
+        # Build a map of import names → module paths per file
+        file_mod_imports: dict[str, dict[str, str]] = {}
+        for fn in file_nodes:
+            file_mod_imports[fn.file_path] = fn.extra.get(
+                "css_module_imports", {},
+            )
+
+        mod_imports = file_mod_imports.get(node.file_path, {})
+        for ref in refs:
+            imp_name = ref.get("import", "")
+            prop_name = ref.get("property", "")
+            if not imp_name or not prop_name:
+                continue
+            # Find the module path
+            if imp_name not in mod_imports:
+                continue
+            # Convert camelCase to kebab-case for selector lookup
+            kebab = CodeParser._camel_to_kebab(prop_name)
+            matches = selector_index.get(kebab, [])
+            for sel_qn, sel_file in matches:
+                store.upsert_edge(EdgeInfo(
+                    kind="STYLES",
+                    source=node.qualified_name,
+                    target=sel_qn,
+                    file_path=node.file_path,
+                    line=node.line_start or 0,
+                    extra={
+                        "class_name": kebab,
+                        "resolution": "css_module",
+                        "import_name": imp_name,
+                        "property": prop_name,
+                    },
+                ))
+                count += 1
+
+    store.commit()
+    return count
+
+
+def detect_cross_file_conflicts(store: GraphStore) -> int:
+    """Detect potential CSS conflicts across files.
+
+    Scans for CSS selectors across different files that target the same
+    class name. Creates POTENTIAL_CONFLICT edges when found.
+
+    Returns count of conflict edges created.
+    """
+    from .parser import EdgeInfo  # noqa: F811
+
+    store.delete_edges_by_kind("POTENTIAL_CONFLICT")
+
+    selectors = store.get_nodes_by_extra_pattern(
+        '%"css_kind":%"selector"%', kind="Class",
+    )
+
+    # Group by bare class name
+    by_class: dict[str, list[tuple[str, str, list]]] = {}
+    for sel in selectors:
+        sel_name = sel.name.strip()
+        if not sel_name.startswith("."):
+            continue
+        bare = sel_name.lstrip(".")
+        specificity = sel.extra.get("specificity", [0, 0, 0])
+        by_class.setdefault(bare, []).append(
+            (sel.qualified_name, sel.file_path, specificity),
+        )
+
+    count = 0
+    max_pairs_per_class = 50
+
+    for bare, entries in by_class.items():
+        # Only flag if selectors appear in 2+ different files
+        files_seen = {fp for _, fp, _ in entries}
+        if len(files_seen) < 2:
+            continue
+
+        pairs = 0
+        for i, (src_qn, src_fp, src_spec) in enumerate(entries):
+            for tgt_qn, tgt_fp, tgt_spec in entries[i + 1:]:
+                if src_fp == tgt_fp:
+                    continue
+                if pairs >= max_pairs_per_class:
+                    break
+                # Conflict confidence label; keyed as conflict_confidence
+                # because extra["confidence"] is reserved for the numeric
+                # edge-confidence score read by GraphStore.upsert_edge.
+                conflict_confidence = "high"  # same bare class name
+                store.upsert_edge(EdgeInfo(
+                    kind="POTENTIAL_CONFLICT",
+                    source=src_qn,
+                    target=tgt_qn,
+                    file_path="<cross-file>",
+                    line=0,
+                    extra={
+                        "class_name": f".{bare}",
+                        "source_specificity": src_spec,
+                        "target_specificity": tgt_spec,
+                        "conflict_confidence": conflict_confidence,
+                    },
+                ))
+                count += 1
+                pairs += 1
+            if pairs >= max_pairs_per_class:
+                break
+
+    store.commit()
+    return count
+
+
 def full_build(
     repo_root: Path,
     store: GraphStore,
@@ -896,6 +1101,14 @@ def full_build(
                 if i % 200 == 0 or i == file_count:
                     logger.info("Progress: %d/%d files parsed", i, file_count)
 
+    # Post-build: cross-file CSS linking and conflict detection
+    styles_count = link_css_styles(store)
+    conflicts_count = detect_cross_file_conflicts(store)
+    logger.info(
+        "CSS linking: %d STYLES edges, %d POTENTIAL_CONFLICT edges",
+        styles_count, conflicts_count,
+    )
+
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
     _store_vcs_metadata(repo_root, store)
@@ -909,6 +1122,8 @@ def full_build(
         "files_parsed": len(files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
+        "styles_edges": styles_count,
+        "conflict_edges": conflicts_count,
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
@@ -1026,6 +1241,10 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
+    # Post-build: cross-file CSS linking and conflict detection
+    styles_count = link_css_styles(store)
+    conflicts_count = detect_cross_file_conflicts(store)
+
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
     _store_vcs_metadata(repo_root, store)
@@ -1047,6 +1266,8 @@ def incremental_update(
         "files_updated": len(all_files),
         "total_nodes": total_nodes,
         "total_edges": total_edges,
+        "styles_edges": styles_count,
+        "conflict_edges": conflicts_count,
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "errors": errors,

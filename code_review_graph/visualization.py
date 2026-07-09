@@ -746,7 +746,7 @@ var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#
 var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
 var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
 var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", OVERRIDES:"#f778ba", STYLES:"#79c0ff", POTENTIAL_CONFLICT:"#f85149" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -867,7 +867,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"},{id:"arrow-overrides",color:"#f778ba"},{id:"arrow-styles",color:"#79c0ff"},{id:"arrow-conflict",color:"#f85149"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -894,6 +894,9 @@ var EDGE_CFG = {
   IMPLEMENTS:   { dash:"4,3", width:1.5, opacity:0.65, marker:"url(#arrow-implements)" },
   TESTED_BY:    { dash:"2,4", width:1.5, opacity:0.6, marker:"url(#arrow-tested_by)" },
   DEPENDS_ON:   { dash:"8,4", width:1, opacity:0.6, marker:"url(#arrow-depends_on)" },
+  OVERRIDES:    { dash:"2,4", width:1.5, opacity:0.65, marker:"url(#arrow-overrides)" },
+  STYLES:       { dash:"4,4", width:1.5, opacity:0.6, marker:"url(#arrow-styles)" },
+  POTENTIAL_CONFLICT: { dash:"2,2", width:2, opacity:0.8, marker:"url(#arrow-conflict)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -1468,6 +1471,9 @@ _AGGREGATED_HTML_TEMPLATE = r"""<!DOCTYPE html>
   .l-imports { border-top: 2px dashed #f0883e; }
   .l-inherits { border-top: 2.5px dotted #d2a8ff; }
   .l-contains { border-top: 1.5px solid rgba(139,148,158,0.3); }
+  .l-overrides { border-top: 2px dotted #f778ba; }
+  .l-styles { border-top: 2px dashed #79c0ff; }
+  .l-conflict { border-top: 2px dotted #f85149; }
   #stats-bar {
     position: absolute; bottom: 0; left: 0; right: 0;
     background: rgba(13,17,23,0.95); border-top: 1px solid #21262d;
@@ -1622,7 +1628,8 @@ var KIND_COLOR = {
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
   CALLS: "#3fb950", IMPORTS_FROM: "#f0883e",
-  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)"
+  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)",
+  OVERRIDES: "#f778ba", STYLES: "#79c0ff", POTENTIAL_CONFLICT: "#f85149"
 };
 var EDGE_CFG = {
   CROSS_COMMUNITY: { dash: null, width: 2, opacity: 0.6, marker: "" },
@@ -1631,6 +1638,9 @@ var EDGE_CFG = {
   CALLS:           { dash: null, width: 1.5, opacity: 0.7, marker: "url(#arrow-calls)" },
   IMPORTS_FROM:    { dash: "6,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-imports)" },
   INHERITS:        { dash: "3,4", width: 2, opacity: 0.7, marker: "url(#arrow-inherits)" },
+  OVERRIDES:       { dash: "2,4", width: 1.5, opacity: 0.65, marker: "url(#arrow-overrides)" },
+  STYLES:          { dash: "4,4", width: 1.5, opacity: 0.6, marker: "url(#arrow-styles)" },
+  POTENTIAL_CONFLICT: { dash: "2,2", width: 2, opacity: 0.8, marker: "url(#arrow-conflict)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || { dash: null, width: 1, opacity: 0.3, marker: "" }; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -1654,7 +1664,7 @@ function buildLegend(nodeKinds, edgeKinds) {
   edgeKinds.forEach(function(k) {
     var div = document.createElement("div");
     div.className = "legend-item";
-    var cls = k === "CROSS_COMMUNITY" ? "l-cross" : k === "DEPENDS_ON" ? "l-dep" : k === "CALLS" ? "l-calls" : k === "IMPORTS_FROM" ? "l-imports" : k === "INHERITS" ? "l-inherits" : "l-contains";
+    var cls = k === "CROSS_COMMUNITY" ? "l-cross" : k === "DEPENDS_ON" ? "l-dep" : k === "CALLS" ? "l-calls" : k === "IMPORTS_FROM" ? "l-imports" : k === "INHERITS" ? "l-inherits" : k === "OVERRIDES" ? "l-overrides" : k === "STYLES" ? "l-styles" : k === "POTENTIAL_CONFLICT" ? "l-conflict" : "l-contains";
     var line = document.createElement("span");
     line.className = "legend-line " + cls;
     div.appendChild(line);
@@ -1712,7 +1722,8 @@ function showTooltip(ev, d) {
   kindSpan.className = "tt-kind";
   kindSpan.style.background = bg;
   kindSpan.style.color = "#0d1117";
-  kindSpan.textContent = d.kind;
+  var ex = d.extra || {};
+  kindSpan.textContent = ex.css_kind ? ("CSS " + ex.css_kind) : d.kind;
   tooltip.appendChild(kindSpan);
   function addRow(label, value) {
     var row = document.createElement("div");
@@ -1741,6 +1752,10 @@ function showTooltip(ev, d) {
   if (d.params) addRow("Params", d.params);
   if (d.return_type) addRow("Returns", d.return_type);
   if (d.weight != null) addRow("Weight", d.weight);
+  if (ex.specificity) {
+    var sp = ex.specificity;
+    addRow("Specificity", "(" + (Array.isArray(sp) ? sp.join(",") : sp) + ")");
+  }
   tooltip.classList.add("visible");
   moveTooltip(ev);
 }
@@ -1767,7 +1782,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-overrides",color:"#f778ba"},{id:"arrow-styles",color:"#79c0ff"},{id:"arrow-conflict",color:"#f85149"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -1882,8 +1897,9 @@ function renderGraph(nodesData, edgesData, drillDown) {
   enter.append("circle").attr("class", "node-circle")
     .attr("r", function(d) { return nodeRadius(d); })
     .attr("fill", function(d) { return nodeColor(d); })
-    .attr("stroke", "rgba(255,255,255,0.15)")
+    .attr("stroke", function(d) { return (d.extra||{}).css_kind ? "#f778ba" : "rgba(255,255,255,0.15)"; })
     .attr("stroke-width", 2)
+    .attr("stroke-dasharray", function(d) { return (d.extra||{}).css_kind ? "3,2" : null; })
     .attr("cursor", "pointer");
   enter
     .on("mouseover", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })

@@ -826,6 +826,27 @@ class TestVueParsing:
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 1
 
+    def test_vue_style_block_parsing(self):
+        parser = CodeParser()
+        vue_with_style = b"""<template><div>Hello</div></template>
+<script setup>
+const x = 1;
+</script>
+<style scoped>
+.app { color: red; }
+.app .btn { padding: 10px; }
+</style>
+"""
+        nodes, edges = parser.parse_bytes(
+            Path("/tmp/test_style.vue"), vue_with_style,
+        )
+        css_selectors = [
+            n for n in nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        assert len(css_selectors) >= 2
+        for sel in css_selectors:
+            assert sel.language == "vue"
 
 class TestRParsing:
     def setup_method(self):
@@ -2548,3 +2569,291 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+
+class TestCSSParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.css")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("styles.css")) == "css"
+
+    def test_finds_selectors(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {c.name for c in classes}
+        assert ".btn" in names
+        assert ".btn-primary" in names
+        assert "#main-header" in names
+        assert "body" in names
+
+    def test_comma_separated_selectors_split(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {c.name for c in classes}
+        assert "h1" in names
+        assert "h2" in names
+
+    def test_finds_custom_properties(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("css_kind") == "custom_property"
+        ]
+        names = {f.name for f in funcs}
+        assert "--primary-color" in names
+        assert "--font-size" in names
+        assert "--spacing-md" in names
+
+    def test_finds_media_queries(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "media_query"
+        ]
+        assert len(classes) >= 1
+
+    def test_finds_keyframes(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "keyframes"
+        ]
+        names = {c.name for c in classes}
+        assert "@keyframes(fadeIn)" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "reset.css" in targets
+        assert "components.css" in targets
+
+    def test_finds_var_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        # body calls --font-size and --primary-color
+        assert len(calls) >= 2
+
+    def test_finds_contains(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        assert len(contains) >= 5
+
+    def test_specificity_computed(self):
+        classes = {
+            n.name: n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+            and n.parent_name is None  # top-level only
+        }
+        assert classes[".btn"].extra["specificity"] == [0, 1, 0]
+        assert classes["#main-header"].extra["specificity"] == [1, 0, 0]
+        assert classes["body"].extra["specificity"] == [0, 0, 1]
+
+    def test_override_edges_exist(self):
+        overrides = [e for e in self.edges if e.kind == "OVERRIDES"]
+        assert len(overrides) >= 1
+
+    def test_bem_override(self):
+        overrides = [e for e in self.edges if e.kind == "OVERRIDES"]
+        bem = [
+            e for e in overrides
+            if e.extra.get("mechanism") == "bem_refinement"
+        ]
+        assert len(bem) >= 1
+        # .btn-primary overrides .btn
+        targets = {e.target.split("::")[-1] for e in bem}
+        assert ".btn" in targets
+
+    def test_important_override(self):
+        overrides = [e for e in self.edges if e.kind == "OVERRIDES"]
+        important = [
+            e for e in overrides
+            if e.extra.get("mechanism") == "important"
+        ]
+        assert len(important) >= 1
+
+    def test_nodes_have_css_language(self):
+        for node in self.nodes:
+            assert node.language == "css"
+
+
+class TestSCSSParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "sample.scss")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("styles.scss")) == "scss"
+
+    def test_finds_mixins(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("css_kind") == "mixin"
+        ]
+        names = {f.name for f in funcs}
+        assert "flex-center" in names
+        assert "responsive" in names
+
+    def test_finds_scss_variables(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("css_kind") == "scss_variable"
+        ]
+        names = {f.name for f in funcs}
+        assert "$primary-color" in names
+        assert "$font-size" in names
+        assert "$spacing" in names
+
+    def test_finds_include_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert any("flex-center" in t for t in targets)
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "variables" in targets
+        assert "mixins" in targets
+
+    def test_finds_selectors(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {c.name for c in classes}
+        assert ".btn" in names
+        assert ".card" in names
+
+    def test_nodes_have_scss_language(self):
+        for node in self.nodes:
+            assert node.language == "scss"
+
+
+class TestJSXClassExtraction:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample_button.tsx",
+        )
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Component.tsx")) == "tsx"
+
+    def test_extracts_static_classname(self):
+        funcs = {n.name: n for n in self.nodes if n.kind == "Function"}
+        button = funcs.get("Button")
+        assert button is not None
+        classes = button.extra.get("css_classes", [])
+        assert "btn" in classes
+        assert "btn-primary" in classes
+
+    def test_extracts_css_module_refs(self):
+        funcs = {n.name: n for n in self.nodes if n.kind == "Function"}
+        styled = funcs.get("StyledButton")
+        assert styled is not None
+        refs = styled.extra.get("css_module_refs", [])
+        assert len(refs) >= 1
+        assert any(
+            r["import"] == "styles" and r["property"] == "btnOutline"
+            for r in refs
+        )
+
+    def test_skips_dynamic_classname(self):
+        """Ternary expressions should not produce css_classes."""
+        funcs = {n.name: n for n in self.nodes if n.kind == "Function"}
+        dynamic = funcs.get("DynamicButton")
+        assert dynamic is not None
+        # Dynamic ternary should not be in css_classes
+        classes = dynamic.extra.get("css_classes", [])
+        assert "active" not in classes or "inactive" not in classes
+
+    def test_classname_on_correct_function(self):
+        """Classes should attach to the enclosing function, not file."""
+        file_node = [n for n in self.nodes if n.kind == "File"][0]
+        assert "css_classes" not in file_node.extra
+
+    def test_css_module_imports_on_file_node(self):
+        file_node = [n for n in self.nodes if n.kind == "File"][0]
+        mod_imports = file_node.extra.get("css_module_imports", {})
+        assert "styles" in mod_imports
+        assert "button.module.css" in mod_imports["styles"]
+
+
+class TestVueTemplateClassExtraction:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample_vue_classes.vue",
+        )
+
+    def test_extracts_static_classes(self):
+        file_node = [n for n in self.nodes if n.kind == "File"][0]
+        classes = file_node.extra.get("vue_template_classes", [])
+        assert "container" in classes
+        assert "main-layout" in classes
+        assert "title" in classes
+        assert "description" in classes
+
+    def test_skips_dynamic_class(self):
+        """Dynamic :class bindings should not appear in static class list."""
+        file_node = [n for n in self.nodes if n.kind == "File"][0]
+        classes = file_node.extra.get("vue_template_classes", [])
+        assert "active" not in classes
+
+    def test_vue_has_style_selectors(self):
+        """Both template classes and style selectors should be extracted."""
+        selectors = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {s.name for s in selectors}
+        assert ".container" in names
+        assert ".title" in names
+        assert ".description" in names
+
+
+class TestLESSParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample.less",
+        )
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("styles.less")) == "less"
+
+    def test_finds_selectors(self):
+        classes = [
+            n for n in self.nodes
+            if n.kind == "Class" and n.extra.get("css_kind") == "selector"
+        ]
+        names = {c.name for c in classes}
+        assert ".btn" in names
+        assert ".card" in names
+
+    def test_finds_variables(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function"
+            and n.extra.get("css_kind") == "less_variable"
+        ]
+        names = {f.name for f in funcs}
+        assert "@primary-color" in names
+        assert "@font-size" in names
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        assert "variables" in targets
+
+    def test_finds_mixins(self):
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("css_kind") == "mixin"
+        ]
+        names = {f.name for f in funcs}
+        assert ".mixin-flex" in names
+
+    def test_nodes_have_less_language(self):
+        for node in self.nodes:
+            assert node.language == "less"

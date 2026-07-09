@@ -1,0 +1,29 @@
+@import 'variables';
+
+@primary-color: #3498db;
+@font-size: 16px;
+
+.mixin-flex() {
+  display: flex;
+  align-items: center;
+}
+
+.btn {
+  padding: 10px;
+  font-size: @font-size;
+  color: @primary-color;
+  .mixin-flex();
+
+  &-primary {
+    background: @primary-color;
+    color: white;
+  }
+}
+
+.card {
+  border: 1px solid #ccc;
+
+  .card-title {
+    font-weight: bold;
+  }
+}

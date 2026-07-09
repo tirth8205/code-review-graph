@@ -1,7 +1,8 @@
 """SQLite-backed knowledge graph storage and query engine.
 
 Stores code structure as nodes (File, Class, Function, Type, Test) and
-edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
+edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON,
+REFERENCES, OVERRIDES, STYLES, POTENTIAL_CONFLICT).
 Supports impact-radius queries and subgraph extraction.
 """
 
@@ -1279,6 +1280,32 @@ class GraphStore:
             nodes_by_id=nodes_by_id,
         )
 
+    def delete_edges_by_kind(self, kind: str) -> int:
+        """Delete all edges of the given kind. Returns count of deleted rows."""
+        cur = self._conn.execute("DELETE FROM edges WHERE kind = ?", (kind,))
+        self._invalidate_cache()
+        return cur.rowcount
+
+    def get_nodes_by_extra_pattern(
+        self, pattern: str, kind: str | None = None,
+    ) -> list[GraphNode]:
+        """Find nodes where extra JSON matches a LIKE pattern.
+
+        Args:
+            pattern: SQL LIKE pattern, e.g. '%"css_kind":"selector"%'.
+            kind: Optional node kind filter (Class, Function, etc.).
+        """
+        if kind:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE extra LIKE ? AND kind = ?",
+                (pattern, kind),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM nodes WHERE extra LIKE ?", (pattern,),
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     # --- Internal helpers ---
 
     def _build_networkx_graph(self) -> nx.DiGraph:
@@ -1352,6 +1379,21 @@ def _sanitize_name(s: str, max_len: int = 256) -> str:
     return cleaned[:max_len]
 
 
+def _sanitize_extra(extra: dict) -> dict:
+    """Sanitize string values in extra dict for safe display."""
+    if not extra:
+        return {}
+
+    def _sanitize_value(v):  # type: ignore[no-untyped-def]
+        if isinstance(v, str):
+            return _sanitize_name(v)
+        if isinstance(v, list):
+            return [_sanitize_value(item) for item in v]
+        return v
+
+    return {k: _sanitize_value(v) for k, v in extra.items()}
+
+
 def node_to_dict(n: GraphNode) -> dict:
     return {
         "id": n.id, "kind": n.kind, "name": _sanitize_name(n.name),
@@ -1360,6 +1402,7 @@ def node_to_dict(n: GraphNode) -> dict:
         "language": n.language,
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
+        "extra": _sanitize_extra(n.extra),
     }
 
 
@@ -1370,4 +1413,5 @@ def edge_to_dict(e: GraphEdge) -> dict:
         "target": _sanitize_name(e.target_qualified),
         "file_path": e.file_path, "line": e.line,
         "confidence": e.confidence, "confidence_tier": e.confidence_tier,
+        "extra": _sanitize_extra(e.extra),
     }
