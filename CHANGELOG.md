@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Incremental Git change discovery now preserves literal non-ASCII and
+  arrow-containing paths instead of returning quoted or truncated filenames.
+
 ## [2.3.6] - 2026-06-10
 
 **Community-response release.** Built from a full audit of every open PR,

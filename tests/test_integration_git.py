@@ -23,6 +23,7 @@ from code_review_graph.incremental import (
     full_build,
     get_all_tracked_files,
     get_changed_files,
+    get_staged_and_unstaged,
     incremental_update,
 )
 from code_review_graph.wiki import get_wiki_page
@@ -79,6 +80,44 @@ def test_get_changed_files_real_git(git_repo: Path) -> None:
     """get_changed_files should list hello.py as changed between HEAD~1..HEAD."""
     changed = get_changed_files(git_repo, base="HEAD~1")
     assert "hello.py" in changed
+
+
+@pytest.fixture()
+def git_repo_with_unicode_path(tmp_path: Path) -> Path:
+    """Create a Git repo containing a committed non-ASCII Python path."""
+    repo = tmp_path / "unicode-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "café.py").write_text("value = 1\n", encoding="utf-8")
+    _git(repo, "add", "--", "café.py")
+    _git(repo, "commit", "-m", "add unicode path")
+    return repo
+
+
+def test_get_changed_files_preserves_unicode_path(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Committed changes should use the literal path, not Git's quoted form."""
+    source = git_repo_with_unicode_path / "café.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+    _git(git_repo_with_unicode_path, "add", "--", "café.py")
+    _git(git_repo_with_unicode_path, "commit", "-m", "modify unicode path")
+
+    assert get_changed_files(git_repo_with_unicode_path, base="HEAD~1") == [
+        "café.py"
+    ]
+
+
+def test_get_staged_and_unstaged_preserves_unicode_path(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Working-tree changes should use the literal non-ASCII path."""
+    source = git_repo_with_unicode_path / "café.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+
+    assert get_staged_and_unstaged(git_repo_with_unicode_path) == ["café.py"]
 
 
 # ------------------------------------------------------------------
