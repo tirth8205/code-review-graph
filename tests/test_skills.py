@@ -963,6 +963,11 @@ class TestGeminiCLIInstall:
 class TestCursorHooksConfig:
     """Tests for generate_cursor_hooks_config()."""
 
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
+
     def test_has_version_1(self):
         config = generate_cursor_hooks_config()
         assert config["version"] == 1
@@ -1006,8 +1011,42 @@ class TestCursorHooksConfig:
                 )
 
 
+class TestCursorHooksConfigWindows:
+    """Windows-specific tests for generate_cursor_hooks_config()."""
+
+    @pytest.fixture(autouse=True)
+    def _windows_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+            yield
+
+    def test_uses_powershell_commands(self):
+        config = generate_cursor_hooks_config()
+        for event, entries in config["hooks"].items():
+            for entry in entries:
+                command = entry["command"]
+                assert command.startswith("powershell -NoProfile -ExecutionPolicy Bypass -File ")
+                assert command.endswith(".ps1")
+
+    def test_after_file_edit_points_to_update_ps1(self):
+        config = generate_cursor_hooks_config()
+        assert "crg-update.ps1" in config["hooks"]["afterFileEdit"][0]["command"]
+
+    def test_session_start_points_to_session_start_ps1(self):
+        config = generate_cursor_hooks_config()
+        assert "crg-session-start.ps1" in config["hooks"]["sessionStart"][0]["command"]
+
+    def test_before_shell_execution_points_to_pre_commit_ps1(self):
+        config = generate_cursor_hooks_config()
+        assert "crg-pre-commit.ps1" in config["hooks"]["beforeShellExecution"][0]["command"]
+
+
 class TestCursorHookScripts:
     """Tests for _cursor_hook_scripts()."""
+
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
 
     def test_returns_three_scripts(self):
         scripts = _cursor_hook_scripts()
@@ -1047,8 +1086,63 @@ class TestCursorHookScripts:
         assert "code-review-graph detect-changes --brief" in scripts["crg-pre-commit.sh"]
 
 
+class TestCursorHookScriptsWindows:
+    """Windows-specific tests for _cursor_hook_scripts()."""
+
+    @pytest.fixture(autouse=True)
+    def _windows_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+            yield
+
+    def test_returns_three_powershell_scripts(self):
+        scripts = _cursor_hook_scripts()
+        assert set(scripts.keys()) == {
+            "crg-update.ps1",
+            "crg-session-start.ps1",
+            "crg-pre-commit.ps1",
+        }
+
+    def test_scripts_exit_zero(self):
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "exit 0" in content, f"{name} missing 'exit 0'"
+
+    def test_scripts_consume_stdin(self):
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "[Console]::In.ReadToEnd()" in content, f"{name} missing stdin consumption"
+
+    def test_scripts_emit_json_with_convert_to_json(self):
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "ConvertTo-Json -Compress" in content, f"{name} missing JSON output"
+
+    def test_scripts_do_not_require_python(self):
+        scripts = _cursor_hook_scripts()
+        for name, content in scripts.items():
+            assert "python" not in content.lower(), f"{name} should not depend on Python"
+
+    def test_update_script_runs_update(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph update --skip-flows" in scripts["crg-update.ps1"]
+
+    def test_session_start_script_runs_status(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph status" in scripts["crg-session-start.ps1"]
+        assert "graph not built yet" in scripts["crg-session-start.ps1"]
+
+    def test_pre_commit_script_runs_detect_changes(self):
+        scripts = _cursor_hook_scripts()
+        assert "code-review-graph detect-changes --brief" in scripts["crg-pre-commit.ps1"]
+
+
 class TestInstallCursorHooks:
     """Tests for install_cursor_hooks()."""
+
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
 
     def test_creates_hooks_json(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
@@ -1068,6 +1162,7 @@ class TestInstallCursorHooks:
         assert (hooks_dir / "crg-session-start.sh").exists()
         assert (hooks_dir / "crg-pre-commit.sh").exists()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows does not honor Unix execute bits")
     def test_scripts_are_executable(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
             install_cursor_hooks()
@@ -1123,6 +1218,46 @@ class TestInstallCursorHooks:
         assert result.exists()
         data = json.loads(result.read_text())
         assert data["version"] == 1
+
+
+class TestInstallCursorHooksWindows:
+    """Windows-specific tests for install_cursor_hooks()."""
+
+    @pytest.fixture(autouse=True)
+    def _windows_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+            yield
+
+    def test_creates_powershell_hook_scripts(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+        hooks_dir = tmp_path / ".cursor" / "hooks"
+        assert (hooks_dir / "crg-update.ps1").exists()
+        assert (hooks_dir / "crg-session-start.ps1").exists()
+        assert (hooks_dir / "crg-pre-commit.ps1").exists()
+        assert not (hooks_dir / "crg-update.sh").exists()
+
+    def test_hooks_json_uses_powershell_commands(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+        data = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
+        for event, entries in data["hooks"].items():
+            for entry in entries:
+                if "crg-" in entry.get("command", ""):
+                    assert entry["command"].startswith(
+                        "powershell -NoProfile -ExecutionPolicy Bypass -File "
+                    )
+                    assert entry["command"].endswith(".ps1")
+
+    def test_no_duplicate_on_reinstall(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            install_cursor_hooks()
+            install_cursor_hooks()
+
+        data = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
+        for event, entries in data["hooks"].items():
+            crg_hooks = [h for h in entries if "crg-" in h.get("command", "")]
+            assert len(crg_hooks) == 1, f"{event} has {len(crg_hooks)} crg hooks after reinstall"
 
 
 class TestKiroPlatform:

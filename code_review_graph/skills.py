@@ -1147,36 +1147,66 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
 # --- Cursor hooks ---
 
 
+def _is_windows() -> bool:
+    """Return True when running on Windows."""
+    return platform.system() == "Windows"
+
+
+def _cursor_hooks_dir() -> Path:
+    """Return the user-level Cursor hooks script directory."""
+    return Path.home() / ".cursor" / "hooks"
+
+
+def _cursor_hook_command(script_path: Path) -> str:
+    """Return the hooks.json command string for a hook script."""
+    if _is_windows():
+        return (
+            "powershell -NoProfile -ExecutionPolicy Bypass -File "
+            f"{script_path.resolve()}"
+        )
+    return str(script_path)
+
+
 def generate_cursor_hooks_config() -> dict[str, Any]:
     """Generate Cursor hooks.json configuration.
 
     Returns a dict conforming to the Cursor hooks schema (version 1) with
     hooks for afterFileEdit, sessionStart, and beforeShellExecution.
-    Each hook points to a shell script in ~/.cursor/hooks/.
+    Each hook points to a native script in ~/.cursor/hooks/ (``.sh`` on
+    Linux/macOS, ``.ps1`` on Windows).
 
     Returns:
         Dict suitable for writing as ~/.cursor/hooks.json.
     """
-    hooks_dir = str(Path.home() / ".cursor" / "hooks")
+    hooks_dir = _cursor_hooks_dir()
+    if _is_windows():
+        update_script = hooks_dir / "crg-update.ps1"
+        session_start_script = hooks_dir / "crg-session-start.ps1"
+        pre_commit_script = hooks_dir / "crg-pre-commit.ps1"
+    else:
+        update_script = hooks_dir / "crg-update.sh"
+        session_start_script = hooks_dir / "crg-session-start.sh"
+        pre_commit_script = hooks_dir / "crg-pre-commit.sh"
+
     return {
         "version": 1,
         "hooks": {
             "afterFileEdit": [
                 {
-                    "command": f"{hooks_dir}/crg-update.sh",
+                    "command": _cursor_hook_command(update_script),
                     "timeout": 5,
                 },
             ],
             "sessionStart": [
                 {
-                    "command": f"{hooks_dir}/crg-session-start.sh",
+                    "command": _cursor_hook_command(session_start_script),
                     "timeout": 5,
                 },
             ],
             "beforeShellExecution": [
                 {
                     "matcher": "^git\\s+commit",
-                    "command": f"{hooks_dir}/crg-pre-commit.sh",
+                    "command": _cursor_hook_command(pre_commit_script),
                     "timeout": 10,
                 },
             ],
@@ -1184,20 +1214,8 @@ def generate_cursor_hooks_config() -> dict[str, Any]:
     }
 
 
-def _cursor_hook_scripts() -> dict[str, str]:
-    """Return a mapping of filename -> shell script content for Cursor hooks.
-
-    Three scripts are generated:
-    - crg-update.sh: runs ``code-review-graph update --skip-flows`` after file edits
-    - crg-session-start.sh: runs ``code-review-graph status`` on session start
-    - crg-pre-commit.sh: runs ``code-review-graph detect-changes --brief`` before
-      git commit commands
-
-    All scripts:
-    - Read stdin (Cursor passes JSON context) and discard it
-    - Fail gracefully (exit 0) so they never block the editor
-    - Emit valid JSON on stdout per the Cursor hooks protocol
-    """
+def _cursor_hook_scripts_unix() -> dict[str, str]:
+    """Return Bash hook scripts for Linux/macOS Cursor hooks."""
     update_script = """\
 #!/usr/bin/env bash
 # code-review-graph: auto-update graph after file edits (Cursor hook)
@@ -1270,12 +1288,110 @@ exit 0
     }
 
 
+def _cursor_hook_scripts_windows() -> dict[str, str]:
+    """Return PowerShell hook scripts for Windows Cursor hooks."""
+    update_script = """\
+# code-review-graph: auto-update graph after file edits (Cursor hook)
+# Fails gracefully — never blocks the editor.
+
+# Consume stdin (Cursor sends JSON context)
+$null = [Console]::In.ReadToEnd()
+
+# Run update; swallow errors so the hook always succeeds.
+try {
+    $null = & code-review-graph update --skip-flows 2>&1
+} catch {
+    # Ignore failures — hook must never block the editor.
+}
+
+# Emit valid JSON on stdout per Cursor hooks protocol.
+@{ message = 'graph updated'; passed = $true } | ConvertTo-Json -Compress
+exit 0
+"""
+
+    session_start_script = """\
+# code-review-graph: show graph status on session start (Cursor hook)
+# Fails gracefully — never blocks the editor.
+
+# Consume stdin (Cursor sends JSON context)
+$null = [Console]::In.ReadToEnd()
+
+# Capture status output; fall back when the graph is not built yet.
+try {
+    $output = & code-review-graph status 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $message = 'graph not built yet'
+    } else {
+        $message = ($output | Out-String).Trim()
+        if (-not $message) {
+            $message = 'graph not built yet'
+        }
+    }
+} catch {
+    $message = 'graph not built yet'
+}
+
+# Emit valid JSON on stdout per Cursor hooks protocol.
+@{ message = $message; passed = $true } | ConvertTo-Json -Compress
+exit 0
+"""
+
+    pre_commit_script = """\
+# code-review-graph: detect changes before git commit (Cursor hook)
+# Fails gracefully — never blocks the editor.
+
+# Consume stdin (Cursor sends JSON context)
+$null = [Console]::In.ReadToEnd()
+
+# Run detect-changes; swallow errors.
+try {
+    $output = & code-review-graph detect-changes --brief 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $message = ''
+    } else {
+        $message = ($output | Out-String).Trim()
+    }
+} catch {
+    $message = ''
+}
+
+# Emit valid JSON on stdout per Cursor hooks protocol.
+@{ message = $message; passed = $true } | ConvertTo-Json -Compress
+exit 0
+"""
+
+    return {
+        "crg-update.ps1": update_script,
+        "crg-session-start.ps1": session_start_script,
+        "crg-pre-commit.ps1": pre_commit_script,
+    }
+
+
+def _cursor_hook_scripts() -> dict[str, str]:
+    """Return platform-native Cursor hook scripts.
+
+    Three scripts are generated:
+    - crg-update: runs ``code-review-graph update --skip-flows`` after file edits
+    - crg-session-start: runs ``code-review-graph status`` on session start
+    - crg-pre-commit: runs ``code-review-graph detect-changes --brief`` before
+      git commit commands
+
+    All scripts:
+    - Read stdin (Cursor passes JSON context) and discard it
+    - Fail gracefully (exit 0) so they never block the editor
+    - Emit valid JSON on stdout per the Cursor hooks protocol
+    """
+    if _is_windows():
+        return _cursor_hook_scripts_windows()
+    return _cursor_hook_scripts_unix()
+
+
 def install_cursor_hooks() -> Path:
     """Install Cursor hooks configuration and scripts at user level.
 
     Writes ``~/.cursor/hooks.json`` (merging code-review-graph hooks
-    into any existing configuration) and creates executable shell scripts
-    in ``~/.cursor/hooks/``.
+    into any existing configuration) and creates native hook scripts
+    in ``~/.cursor/hooks/`` (``.sh`` on Linux/macOS, ``.ps1`` on Windows).
 
     Returns:
         Path to the hooks.json file that was written.
@@ -1329,8 +1445,11 @@ def install_cursor_hooks() -> Path:
     for filename, content in scripts.items():
         script_path = hooks_script_dir / filename
         script_path.write_text(content, encoding="utf-8")
-        # Make executable (owner rwx, group rx, other rx)
-        script_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        if not _is_windows():
+            # Make executable (owner rwx, group rx, other rx)
+            script_path.chmod(
+                stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+            )
         logger.info("Wrote Cursor hook script: %s", script_path)
 
     return hooks_json_path
