@@ -611,11 +611,23 @@ class GraphStore:
     def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
         """Resolve a bare edge endpoint only when one candidate has evidence."""
         if endpoint == "target_qualified":
-            select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path "
-                "FROM edges WHERE kind = ? "
-                "AND target_qualified NOT LIKE '%::%'"
-            )
+            if kind == "CALLS":
+                # Also pull in CALLS_ACTION edges: their targets are bare action
+                # names (e.g. "transfer") produced by check() << "action" in
+                # Antelope contracts, which need the same bare-name resolution.
+                select_sql = (
+                    "SELECT id, source_qualified, target_qualified, file_path, "
+                    "line, kind "
+                    "FROM edges WHERE (kind = 'CALLS' "
+                    "AND target_qualified NOT LIKE '%::%') "
+                    "OR kind = 'CALLS_ACTION'"
+                )
+            else:
+                select_sql = (
+                    "SELECT id, source_qualified, target_qualified, file_path "
+                    "FROM edges WHERE kind = ? "
+                    "AND target_qualified NOT LIKE '%::%'"
+                )
             update_sql = "UPDATE edges SET target_qualified = ? WHERE id = ?"
         elif endpoint == "source_qualified":
             select_sql = (
@@ -629,7 +641,7 @@ class GraphStore:
 
         conn = self._conn
 
-        bare_edges = conn.execute(select_sql, (kind,)).fetchall()
+        bare_edges = conn.execute(select_sql, (kind,) if kind != "CALLS" else ()).fetchall()
         if not bare_edges:
             return 0
 
@@ -655,7 +667,12 @@ class GraphStore:
 
         resolved = 0
         for edge in bare_edges:
-            bare_name = edge[endpoint]
+            # CALLS_ACTION targets are bare action names (e.g. "transfer");
+            # everything else uses the resolved endpoint column.
+            if edge["kind"] == "CALLS_ACTION":
+                bare_name = edge["target_qualified"].rsplit("::", 1)[-1]
+            else:
+                bare_name = edge[endpoint]
             candidates = node_lookup.get(bare_name, [])
             if not candidates:
                 continue

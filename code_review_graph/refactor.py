@@ -44,6 +44,25 @@ _MOCK_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+
+@functools.lru_cache(maxsize=2048)
+def _antelope_runtime_symbols(file_path: str) -> tuple[frozenset[str], bool]:
+    """Find ABI actions, notification handlers, and static APIs for a contract."""
+    if "/contracts/" not in file_path.replace("\\", "/"):
+        return frozenset(), False
+    path = Path(file_path)
+    text = ""
+    for candidate in (path, path.with_suffix(".hpp"), path.with_suffix(".cpp")):
+        try:
+            text += "\n" + candidate.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    names = set(re.findall(r"\bACTION\s+(?:[A-Za-z_]\w*::)?([A-Za-z_]\w*)\s*\(", text))
+    names.update(re.findall(r"\[\[\s*eosio::on_notify[^\]]*\]\][^;{()]*?\b([A-Za-z_]\w*)\s*\(", text, re.DOTALL))
+    names.update(re.findall(r"\bstatic\s+[^;{()]+?\b((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
+    names.update(re.findall(r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
+    return frozenset(names), ("TABLE " in text or "multi_index<" in text)
+
 # ---------------------------------------------------------------------------
 # Thread-safe pending refactors storage
 # ---------------------------------------------------------------------------
@@ -193,6 +212,14 @@ def _is_entry_point(node: Any) -> bool:
     if _has_framework_decorator(node):
         return True
     if _matches_entry_name(node):
+        return True
+    antelope_kind = node.extra.get("antelope_kind") if node.extra else None
+    if antelope_kind in {"action", "notification", "cross_contract_getter", "table_schema"}:
+        return True
+    names, has_tables = _antelope_runtime_symbols(node.file_path)
+    if node.name in names:
+        return True
+    if has_tables and (node.name in ("TABLE", "primary_key") or node.name.startswith("by_")):
         return True
     return False
 

@@ -2360,6 +2360,12 @@ class CodeParser:
             tree.root_node, source, language, file_path_str, nodes, edges,
             import_map=import_map, defined_names=defined_names,
         )
+        if language == "cpp":
+            self._annotate_antelope_contract(source, file_path_str, nodes, edges)
+        if language in ("javascript", "typescript", "tsx"):
+            self._annotate_antelope_action_submissions(
+                source, file_path_str, nodes, edges,
+            )
 
         if language == "php":
             self._extract_php_laravel_edges(
@@ -2443,6 +2449,107 @@ class CodeParser:
                 extra={"blade_directive": directive},
             ))
         return nodes, edges
+
+    def _annotate_antelope_contract(
+        self, source: bytes, file_path: str, nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Model Antelope ABI/runtime surfaces that have no normal C++ caller."""
+        normalized = file_path.replace("\\", "/")
+        if "/contracts/" not in normalized:
+            return
+        text = source.decode("utf-8", errors="ignore")
+        if not any(x in text for x in ("ACTION ", "TABLE ", "multi_index<", "on_notify")):
+            return
+        actions = set(re.findall(
+            r"\bACTION\s+(?:[A-Za-z_]\w*::)?([A-Za-z_]\w*)\s*\(", text,
+        ))
+        notifications = set(re.findall(
+            r"\[\[\s*eosio::on_notify\s*\([^\)]*\)\s*\]\]"
+            r"[^;{()]*?\b([A-Za-z_]\w*)\s*\(", text, re.DOTALL,
+        ))
+        header = Path(file_path).with_suffix(".hpp")
+        try:
+            header_text = header.read_text(encoding="utf-8")
+        except OSError:
+            header_text = ""
+        if header_text:
+            actions.update(re.findall(
+                r"\bACTION\s+(?:[A-Za-z_]\w*::)?([A-Za-z_]\w*)\s*\(",
+                header_text,
+            ))
+            notifications.update(re.findall(
+                r"\[\[\s*eosio::on_notify\s*\([^\)]*\)\s*\]\]"
+                r"[^;{()]*?\b([A-Za-z_]\w*)\s*\(", header_text, re.DOTALL,
+            ))
+        getters = set(re.findall(
+            r"\bstatic\s+[^;{()]+?\b((?:get|has|is)_[A-Za-z0-9_]*)\s*\(",
+            text + "\n" + header_text,
+        ))
+        getters.update(re.findall(
+            r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text,
+        ))
+        has_tables = "TABLE " in text or "multi_index<" in text
+        for node in nodes:
+            tags = []
+            if node.name in actions:
+                tags.append("action")
+            if node.name in notifications:
+                tags.append("notification")
+            if node.name in getters:
+                tags.append("cross_contract_getter")
+            if has_tables and (
+                node.name in ("TABLE", "primary_key") or node.name.startswith("by_")
+            ):
+                tags.append("table_schema")
+            if not tags:
+                continue
+            node.extra = dict(node.extra)
+            node.extra["antelope_kind"] = tags[0]
+            node.extra["antelope_runtime"] = tuple(tags)
+            if tags[0] != "table_schema":
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{file_path}::antelope::{tags[0]}",
+                    target=self._qualify(node.name, node.file_path, node.parent_name),
+                    file_path=file_path, line=node.line_start,
+                    extra={"antelope": True, "runtime": tags[0]},
+                ))
+
+        for match in re.finditer(
+            r"eosio::action\s*\([^;]*?[\"']([a-z][a-z0-9_]*)_n[\"']",
+            text, re.DOTALL,
+        ):
+            line = text.count("\n", 0, match.start()) + 1
+            owner = next((n for n in nodes if n.kind == "Function"
+                          and n.line_start <= line <= n.line_end), None)
+            source_qn = (self._qualify(owner.name, owner.file_path, owner.parent_name)
+                         if owner else file_path)
+            edges.append(EdgeInfo(
+                kind="CALLS_ACTION", source=source_qn, target=match.group(1),
+                file_path=file_path, line=line, extra={"antelope": True},
+            ))
+
+    def _annotate_antelope_action_submissions(
+        self, source: bytes, file_path: str, nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Record EOSJS action objects in dapps, scripts, and tests."""
+        text = source.decode("utf-8", errors="ignore")
+        if "actions:" not in text and "api.transact" not in text:
+            return
+        for match in re.finditer(
+            r"\b(?:name|action)\s*:\s*[\"']([a-z][a-z0-9_]*)[\"']", text,
+        ):
+            line = text.count("\n", 0, match.start()) + 1
+            owner = next((n for n in nodes if n.kind in ("Function", "Test")
+                          and n.line_start <= line <= n.line_end), None)
+            source_qn = (self._qualify(owner.name, owner.file_path, owner.parent_name)
+                         if owner else file_path)
+            edges.append(EdgeInfo(
+                kind="CALLS_ACTION", source=source_qn, target=match.group(1),
+                file_path=file_path, line=line, extra={"antelope": True},
+            ))
 
     def _parse_vue(
         self, path: Path, source: bytes,
