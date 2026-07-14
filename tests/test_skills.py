@@ -377,6 +377,8 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "update" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["commandWindows"].startswith("cmd.exe ")
+        assert "code-review-graph update --skip-flows" in inner["commandWindows"]
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -388,6 +390,8 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "status" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["commandWindows"].startswith("cmd.exe ")
+        assert "code-review-graph status" in inner["commandWindows"]
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
 
