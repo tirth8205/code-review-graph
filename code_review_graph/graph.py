@@ -365,6 +365,23 @@ class GraphStore:
         ).fetchall()
         return [self._row_to_edge(r) for r in rows]
 
+    def get_config_consumers(self, key: str) -> list[GraphEdge]:
+        """Find direct and ConfigurationProperties-prefix consumers of a key."""
+        parts = key.split(".")
+        targets = [f"config:{key}", f"config:{key}.*"]
+        targets.extend(
+            f"config:{'.'.join(parts[:index])}.*"
+            for index in range(1, len(parts))
+        )
+        rows = []
+        for target in dict.fromkeys(targets):
+            rows.extend(self._conn.execute(
+                "SELECT * FROM edges WHERE kind = 'DEPENDS_ON_CONFIG' "
+                "AND target_qualified = ? ORDER BY id",
+                (target,),
+            ).fetchall())
+        return [self._row_to_edge(row) for row in rows]
+
     def search_edges_by_target_name(self, name: str, kind: str = "CALLS") -> list[GraphEdge]:
         """Search for edges where target_qualified matches an unqualified name.
 
