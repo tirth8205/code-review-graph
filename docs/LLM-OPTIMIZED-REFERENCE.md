@@ -42,7 +42,7 @@ Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
 </section>
 
 <section name="embeddings">
-Optional: pip install code-review-graph[embeddings]
+Optional: pip install "code-review-graph[embeddings]"
 Then call embed_graph_tool to compute vectors.
 semantic_search_nodes_tool auto-uses vectors when available, falls back to keyword + FTS5.
 Providers: local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, and MiniMax.

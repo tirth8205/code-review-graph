@@ -313,6 +313,7 @@ def hybrid_search(
     context_files: Optional[list[str]] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    _out_mode: Optional[list[str]] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -326,11 +327,18 @@ def hybrid_search(
         limit: Maximum results to return (default 20).
         context_files: Optional list of file paths. Nodes in these files
             receive a 1.5x score boost.
+        _out_mode: Optional output list. If provided, a single string is
+            appended indicating which search path(s) contributed:
+            ``"hybrid"`` (FTS + embeddings), ``"fts"`` (FTS only),
+            ``"semantic"`` (embeddings only), ``"keyword"`` (LIKE fallback),
+            or ``"none"`` (empty query, or all search paths returned 0 results).
 
     Returns:
         List of dicts with node metadata and ``score`` field.
     """
     if not query or not query.strip():
+        if _out_mode is not None:
+            _out_mode.append("none")
         return []
 
     # NOTE: hybrid_search uses store._conn for FTS5 and keyword queries
@@ -362,11 +370,22 @@ def hybrid_search(
         if emb_results:
             lists_to_merge.append(emb_results)
         merged = rrf_merge(*lists_to_merge)
+        if _out_mode is not None:
+            if fts_results and emb_results:
+                _out_mode.append("hybrid")
+            elif fts_results:
+                _out_mode.append("fts")
+            else:
+                _out_mode.append("semantic")
     else:
         # Fallback: keyword LIKE matching
         keyword_results = _keyword_search(conn, query, limit=fetch_limit)
         if not keyword_results:
+            if _out_mode is not None:
+                _out_mode.append("none")
             return []
+        if _out_mode is not None:
+            _out_mode.append("keyword")
         merged = keyword_results
 
     # ------ Phase 3+4: Batch-fetch nodes, apply boosting and kind filter ------

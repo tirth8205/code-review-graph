@@ -151,7 +151,7 @@ locally. The streamable-HTTP MCP transport binds to localhost by default.
 
 The only network activity is opt-in:
 
-- **Local embeddings** (`pip install code-review-graph[embeddings]`) download the
+- **Local embeddings** (`pip install "code-review-graph[embeddings]"`) download the
   sentence-transformers model from HuggingFace on first use. Your code does not leave
   the machine.
 - **Cloud embeddings** (OpenAI-compatible, Google Gemini, MiniMax) send the text being

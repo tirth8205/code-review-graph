@@ -37,7 +37,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: tirth8205/code-review-graph@v2.3.6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -45,6 +45,10 @@ jobs:
 
 That is the whole setup. The default `GITHUB_TOKEN` provided by Actions is
 sufficient — no PAT, no API key, no third-party service.
+
+Self-hosted runners must be version `2.327.1` or newer. The composite action
+uses Node 24-based GitHub actions, including `actions/setup-python@v6`,
+`actions/cache@v6`, and the recommended `actions/checkout@v7` example.
 
 To turn the review into a merge gate:
 

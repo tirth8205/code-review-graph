@@ -45,4 +45,50 @@ namespace SampleApp
             return _repo.FindById(id);
         }
     }
+
+    // Inheritance coverage for C# base_list clauses.
+    public class CachedRepo : InMemoryRepo, IRepository
+    {
+        public new User FindById(int id) { return base.FindById(id); }
+    }
+
+    public class DisposableService : System.IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    public class UserList : List<User> { }
+    public class ScopedUserList : System.Collections.Generic.List<User> { }
+
+    // A generic constraint is not an inheritance clause.
+    public class ConstrainedHolder<T> where T : IRepository
+    {
+        public T Value { get; set; }
+    }
+
+    public record AuditedUser : User, IRepository
+    {
+        public User FindById(int id) { return null; }
+        public void Save(User user) { }
+    }
+
+    public record TaggedUser(int Id, string Tag) : User { }
+
+    public struct Token : IRepository
+    {
+        public User FindById(int id) { return null; }
+        public void Save(User user) { }
+    }
+
+    // Constructor arguments and enum storage types are not bases.
+    public class SeededRepo(int seed) : InMemoryRepo
+    {
+        public int Seed { get; } = seed;
+    }
+
+    public enum Status : byte
+    {
+        Active,
+        Closed,
+    }
 }

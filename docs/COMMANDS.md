@@ -107,7 +107,7 @@ repo_root: str | None
 model: str | None    # Embedding model name
 provider: str | None # local, openai, google, minimax
 ```
-Local embeddings require: `pip install code-review-graph[embeddings]`. Cloud providers use stdlib HTTP clients and require their provider environment variables.
+Local embeddings require: `pip install "code-review-graph[embeddings]"`. Cloud providers use stdlib HTTP clients and require their provider environment variables.
 
 #### `list_graph_stats_tool`
 ```

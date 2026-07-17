@@ -284,6 +284,32 @@ def query_graph(
                         "file": e.file_path,
                     })
                     edges_out.append(edge_to_dict(e))
+            # C# fallback: `using X.Y;` directives produce IMPORTS_FROM edges
+            # whose target is the raw namespace string, not a file path, so
+            # the path lookup above misses them. Resolve the target file's
+            # declared namespace(s) and also search edges by namespace.
+            # See: #310
+            if node is not None and node.language == "csharp":
+                declared_ns: list[str] = []
+                for n in store.get_nodes_by_file(node.file_path):
+                    if n.kind == "File":
+                        declared_ns = list(
+                            n.extra.get("csharp_namespaces", []) or []
+                        )
+                        break
+                seen_sources = {r.get("importer") for r in results}
+                for ns in declared_ns:
+                    for e in store.get_edges_by_target(ns):
+                        if e.kind != "IMPORTS_FROM":
+                            continue
+                        if e.source_qualified in seen_sources:
+                            continue
+                        results.append({
+                            "importer": e.source_qualified,
+                            "file": e.file_path,
+                        })
+                        edges_out.append(edge_to_dict(e))
+                        seen_sources.add(e.source_qualified)
 
         elif pattern == "children_of":
             for e in store.get_edges_by_source(qn):
@@ -293,9 +319,11 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
-            for e in store.get_edges_by_target(qn):
+            # TESTED_BY edges are stored as source=production, target=test
+            # by the parser, so look them up by source. See: #515
+            for e in store.get_edges_by_source(qn):
                 if e.kind == "TESTED_BY":
-                    test = store.get_node(e.source_qualified)
+                    test = store.get_node(e.target_qualified)
                     if test:
                         results.append(node_to_dict(test))
             # Also search by naming convention
@@ -403,14 +431,13 @@ def semantic_search_nodes(
     """
     store, root = _get_store(repo_root)
     try:
+        mode_out: list[str] = []
         results = hybrid_search(
             store, query, kind=kind, limit=limit, context_files=context_files,
-            model=model, provider=provider,
+            model=model, provider=provider, _out_mode=mode_out,
         )
 
-        search_mode = "hybrid"
-        if not results:
-            search_mode = "keyword"
+        search_mode = mode_out[0] if mode_out else "keyword"
 
         summary = f"Found {len(results)} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""

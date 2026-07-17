@@ -13,9 +13,9 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
       - name: Install dependencies
@@ -26,9 +26,9 @@ jobs:
   type-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
       - name: Install dependencies
@@ -39,9 +39,9 @@ jobs:
   security:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
       - name: Install bandit
@@ -52,7 +52,7 @@ jobs:
   schema-sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check Python/VSCode schema versions match
         run: |
           PY_VER=$(grep -oP 'LATEST_VERSION\s*=\s*max\(MIGRATIONS\.keys\(\)\)' code_review_graph/migrations.py > /dev/null && python3 -c "
@@ -77,12 +77,43 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: pip install -e ".[dev]" pytest-cov
       - name: Run tests with coverage
         run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+
+  windows-native:
+    name: Windows daemon and file handles
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run native daemon and resource-handle tests
+        run: >-
+          python -m pytest --tb=short -q
+          tests/test_windows_compat.py
+          tests/test_daemon.py
+          tests/test_changes.py
+          tests/test_communities.py
+          tests/test_flows.py
+          tests/test_graph.py
+          tests/test_integration_v2.py
+          tests/test_migrations.py
+          tests/test_postprocessing.py
+          tests/test_refactor.py
+          tests/test_search.py
+          tests/test_tools.py
+          tests/test_wiki.py
+          tests/test_skills.py::TestInstallCodexHooks
+          tests/test_skills.py::TestInstallCursorHooks

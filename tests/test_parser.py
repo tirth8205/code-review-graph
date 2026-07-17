@@ -357,6 +357,39 @@ class TestCodeParser:
         tested_by = [e for e in edges if e.kind == "TESTED_BY"]
         assert len(tested_by) >= 1
 
+    def test_tested_by_edge_direction(self):
+        """Regression for #515: TESTED_BY must point production -> test.
+
+        Producer-side guard. Reads naturally as "X is tested by Y":
+        source = production code, target = the test that covers it.
+        Consumer-side queries (tests_for, get_transitive_tests,
+        test-gap detection, flow criticality, dead-code) were fixed in
+        #515 to match this canonical direction. Without this assertion the
+        parser could silently flip the direction and every consumer
+        test would still pass against the inverted edges.
+        """
+        nodes, edges = self.parser.parse_file(FIXTURES / "test_sample.py")
+        tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+        assert len(tested_by) >= 1, "fixture should yield at least one TESTED_BY edge"
+
+        test_file = str(FIXTURES / "test_sample.py")
+        test_qualified = {
+            f"{test_file}::{n.name}" for n in nodes if n.kind == "Test"
+        }
+        assert test_qualified, "fixture should yield at least one Test node"
+
+        for edge in tested_by:
+            assert edge.target in test_qualified, (
+                f"TESTED_BY edge has wrong direction: target={edge.target!r} "
+                f"is not a Test node from {test_file}. "
+                f"Expected target in {sorted(test_qualified)}. "
+                f"Edge: kind={edge.kind} source={edge.source} target={edge.target}"
+            )
+            assert edge.source not in test_qualified, (
+                f"TESTED_BY edge points test -> test: "
+                f"{edge.source} -> {edge.target}"
+            )
+
     def test_recursion_depth_guard(self):
         """Parser should not crash on deeply nested code."""
         # Generate Python code with many nested functions (> _MAX_AST_DEPTH)

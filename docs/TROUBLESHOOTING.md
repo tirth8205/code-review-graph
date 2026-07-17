@@ -147,7 +147,7 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 - Check that hooks are configured in `.claude/settings.json` (re-run `code-review-graph install` to regenerate)
 
 ## Embeddings not working
-- Install with: `pip install code-review-graph[embeddings]`
+- Install with: `pip install "code-review-graph[embeddings]"`
 - Run `embed_graph_tool` to compute vectors
 - First embedding run downloads the model (~90MB, one time)
 
@@ -168,23 +168,23 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 
 ## Community detection requires igraph
 
-- Install with: `pip install code-review-graph[communities]`
+- Install with: `pip install "code-review-graph[communities]"`
 - Without igraph, community detection falls back to file-based grouping (less precise but functional)
 
 ## Wiki generation with LLM summaries
 
-- Install with: `pip install code-review-graph[wiki]`
+- Install with: `pip install "code-review-graph[wiki]"`
 - Requires a running Ollama instance for LLM-powered summaries
 - Without Ollama, wiki pages are generated with structural information only (no prose summaries)
 
 ## Optional dependency groups
 
 If a tool returns an ImportError, install the relevant optional group:
-- `pip install code-review-graph[embeddings]` for semantic search
-- `pip install code-review-graph[google-embeddings]` for Google Gemini embeddings
+- `pip install "code-review-graph[embeddings]"` for semantic search
+- `pip install "code-review-graph[google-embeddings]"` for Google Gemini embeddings
 - OpenAI-compatible and MiniMax embeddings use stdlib HTTP clients and require only their environment variables
-- `pip install code-review-graph[communities]` for igraph-based community detection
-- `pip install code-review-graph[enrichment]` for Python call-resolution enrichment via Jedi
-- `pip install code-review-graph[eval]` for evaluation benchmarks (matplotlib)
-- `pip install code-review-graph[wiki]` for wiki LLM summaries (ollama)
-- `pip install code-review-graph[all]` for everything
+- `pip install "code-review-graph[communities]"` for igraph-based community detection
+- `pip install "code-review-graph[enrichment]"` for Python call-resolution enrichment via Jedi
+- `pip install "code-review-graph[eval]"` for evaluation benchmarks (matplotlib)
+- `pip install "code-review-graph[wiki]"` for wiki LLM summaries (ollama)
+- `pip install "code-review-graph[all]"` for everything

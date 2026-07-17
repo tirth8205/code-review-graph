@@ -267,13 +267,13 @@ node_modules/**
 オプションの依存グループ：
 
 ```bash
-pip install code-review-graph[embeddings]          # ローカルベクトル埋め込み (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini埋め込み
-pip install code-review-graph[communities]         # コミュニティ検出 (igraph)
-pip install code-review-graph[enrichment]          # Python呼び出し解決の補強 (Jedi)
-pip install code-review-graph[eval]                # 評価ベンチマーク (matplotlib)
-pip install code-review-graph[wiki]                # LLMサマリー付きWiki生成 (ollama)
-pip install code-review-graph[all]                 # 全オプション依存
+pip install "code-review-graph[embeddings]"          # ローカルベクトル埋め込み (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini埋め込み
+pip install "code-review-graph[communities]"         # コミュニティ検出 (igraph)
+pip install "code-review-graph[enrichment]"          # Python呼び出し解決の補強 (Jedi)
+pip install "code-review-graph[eval]"                # 評価ベンチマーク (matplotlib)
+pip install "code-review-graph[wiki]"                # LLMサマリー付きWiki生成 (ollama)
+pip install "code-review-graph[all]"                 # 全オプション依存
 ```
 
 OpenAI互換の埋め込み（本家OpenAI、Azure、または自前のゲートウェイ: new-api / LiteLLM / vLLM / LocalAI / Ollama openaiモード）は追加インストール不要です。環境変数を設定し、`embed_graph` に `provider="openai"` を渡すだけで動作します：

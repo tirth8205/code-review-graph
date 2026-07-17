@@ -131,9 +131,10 @@ def get_docs_section(
             search_roots.append(_validate_repo_root(Path(repo_root)))
         except ValueError:
             pass
-    elif in_pkg_docs.exists():
+    if in_pkg_docs.exists():
         in_pkg_root = in_pkg_docs.parent.parent
-        search_roots.append(in_pkg_root)
+        if in_pkg_root not in search_roots:
+            search_roots.append(in_pkg_root)
 
     if not repo_root:
         project_root = find_project_root()

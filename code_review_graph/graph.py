@@ -377,7 +377,10 @@ class GraphStore:
     ) -> list[dict]:
         """Find tests covering a node, including indirect (transitive) coverage.
 
-        1. Direct: TESTED_BY edges targeting this node (+ bare-name fallback).
+        TESTED_BY edges are stored as source=production, target=test by
+        the parser, so look them up by source_qualified. See: #515
+
+        1. Direct: TESTED_BY edges originating at this node (+ bare-name fallback).
         2. Indirect: follow outgoing CALLS edges up to *max_depth* hops,
            then collect TESTED_BY edges on each callee.
 
@@ -421,31 +424,31 @@ class GraphStore:
                 "indirect": indirect,
             }
 
-        # Direct TESTED_BY
+        # Direct TESTED_BY (source=production, target=test). See: #515
         for qn in input_qns:
             for row in conn.execute(
-                "SELECT source_qualified FROM edges "
-                "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                "SELECT target_qualified FROM edges "
+                "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
                 (qn,),
             ).fetchall():
-                src = row["source_qualified"]
-                if src not in seen:
-                    seen.add(src)
-                    d = _node_dict(src, indirect=False)
+                tgt = row["target_qualified"]
+                if tgt not in seen:
+                    seen.add(tgt)
+                    d = _node_dict(tgt, indirect=False)
                     if d:
                         results.append(d)
 
         # Bare-name fallback for direct
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         for row in conn.execute(
-            "SELECT source_qualified FROM edges "
-            "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+            "SELECT target_qualified FROM edges "
+            "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
             (bare,),
         ).fetchall():
-            src = row["source_qualified"]
-            if src not in seen:
-                seen.add(src)
-                d = _node_dict(src, indirect=False)
+            tgt = row["target_qualified"]
+            if tgt not in seen:
+                seen.add(tgt)
+                d = _node_dict(tgt, indirect=False)
                 if d:
                     results.append(d)
 
@@ -464,14 +467,14 @@ class GraphStore:
                 next_frontier = set(list(next_frontier)[:max_frontier])
             for callee in next_frontier:
                 for row in conn.execute(
-                    "SELECT source_qualified FROM edges "
-                    "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                    "SELECT target_qualified FROM edges "
+                    "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
                     (callee,),
                 ).fetchall():
-                    src = row["source_qualified"]
-                    if src not in seen:
-                        seen.add(src)
-                        d = _node_dict(src, indirect=True)
+                    tgt = row["target_qualified"]
+                    if tgt not in seen:
+                        seen.add(tgt)
+                        d = _node_dict(tgt, indirect=True)
                         if d:
                             results.append(d)
             frontier = next_frontier
@@ -1269,8 +1272,8 @@ class GraphStore:
             kind, src, tgt = row["kind"], row["source_qualified"], row["target_qualified"]
             if kind == "CALLS":
                 calls_out.setdefault(src, []).append(tgt)
-            else:  # TESTED_BY
-                has_tested_by.add(tgt)
+            else:  # TESTED_BY: source is the production node being tested. See: #515
+                has_tested_by.add(src)
 
         return FlowAdjacency(
             calls_out=calls_out,

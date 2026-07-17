@@ -267,13 +267,13 @@ node_modules/**
 선택적 의존성 그룹:
 
 ```bash
-pip install code-review-graph[embeddings]          # 로컬 벡터 임베딩 (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini 임베딩
-pip install code-review-graph[communities]         # 커뮤니티 감지 (igraph)
-pip install code-review-graph[enrichment]          # Python 호출 해결 보강 (Jedi)
-pip install code-review-graph[eval]                # 평가 벤치마크 (matplotlib)
-pip install code-review-graph[wiki]                # LLM 요약 위키 생성 (ollama)
-pip install code-review-graph[all]                 # 모든 선택적 의존성
+pip install "code-review-graph[embeddings]"          # 로컬 벡터 임베딩 (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini 임베딩
+pip install "code-review-graph[communities]"         # 커뮤니티 감지 (igraph)
+pip install "code-review-graph[enrichment]"          # Python 호출 해결 보강 (Jedi)
+pip install "code-review-graph[eval]"                # 평가 벤치마크 (matplotlib)
+pip install "code-review-graph[wiki]"                # LLM 요약 위키 생성 (ollama)
+pip install "code-review-graph[all]"                 # 모든 선택적 의존성
 ```
 
 OpenAI 호환 임베딩(실제 OpenAI, Azure, 또는 자체 호스팅 게이트웨이 new-api / LiteLLM / vLLM / LocalAI / Ollama openai 모드)은 추가 설치가 필요하지 않습니다. 환경 변수만 설정하고 `embed_graph`에 `provider="openai"`를 전달하면 됩니다:

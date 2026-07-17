@@ -1,5 +1,5 @@
 ---
-name: Refactor Safely
+name: refactor-safely
 description: Plan and execute safe refactoring using dependency analysis
 ---
 

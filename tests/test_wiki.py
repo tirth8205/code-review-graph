@@ -17,6 +17,7 @@ from code_review_graph.wiki import (
 class TestWiki:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # release the handle before GraphStore reopens it on Windows
         self.store = GraphStore(self.tmp.name)
         self.wiki_dir = tempfile.mkdtemp()
 
