@@ -45,12 +45,26 @@ def _require_yaml():
         raise ImportError("pyyaml is required: pip install code-review-graph[eval]")
 
 
+def _validate_config(config: object, path: Path) -> dict:
+    """Validate snapshot invariants required for reproducible benchmarks."""
+    if not isinstance(config, dict):
+        raise ValueError(f"{path}: evaluation config must be a mapping")
+    test_commits = config.get("test_commits", [])
+    if test_commits:
+        latest = test_commits[-1].get("sha")
+        if not latest or config.get("commit") != latest:
+            raise ValueError(
+                f"{path}: commit pin must equal latest test_commit {latest}"
+            )
+    return config
+
+
 def load_config(name: str) -> dict:
     """Load a single benchmark config by name."""
     _require_yaml()
     path = CONFIGS_DIR / f"{name}.yaml"
     with open(path) as f:
-        return yaml.safe_load(f)
+        return _validate_config(yaml.safe_load(f), path)
 
 
 def load_all_configs() -> list[dict]:
@@ -59,7 +73,7 @@ def load_all_configs() -> list[dict]:
     configs = []
     for p in sorted(CONFIGS_DIR.glob("*.yaml")):
         with open(p) as f:
-            configs.append(yaml.safe_load(f))
+            configs.append(_validate_config(yaml.safe_load(f), p))
     return configs
 
 

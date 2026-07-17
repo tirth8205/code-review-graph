@@ -17,10 +17,12 @@ from code_review_graph.eval.reporter import (
 try:
     import yaml as _yaml  # noqa: F401
 
-    from code_review_graph.eval.runner import write_csv
+    from code_review_graph.eval.runner import load_all_configs, load_config, write_csv
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False
+    load_all_configs = None  # type: ignore[assignment]
+    load_config = None  # type: ignore[assignment]
     write_csv = None  # type: ignore[assignment]
 from code_review_graph.eval.scorer import (
     compute_mrr,
@@ -152,6 +154,41 @@ def test_load_config():
         assert len(config["search_queries"]) == 1
     finally:
         os.unlink(tmp_path)
+
+
+@pytest.mark.skipif(not _HAS_YAML, reason="pyyaml not installed")
+def test_shipped_eval_configs_pin_the_latest_test_commit():
+    """The cloned snapshot must contain every configured benchmark commit."""
+    for config in load_all_configs():
+        test_commits = config.get("test_commits", [])
+        if test_commits:
+            assert config["commit"] == test_commits[-1]["sha"], config["name"]
+
+
+@pytest.mark.skipif(not _HAS_YAML, reason="pyyaml not installed")
+def test_load_config_rejects_a_pin_before_the_latest_test_commit(
+    tmp_path,
+    monkeypatch,
+):
+    """An inconsistent snapshot must fail instead of yielding invalid metrics."""
+    import yaml
+
+    config_path = tmp_path / "bad.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "name": "bad",
+            "commit": "older",
+            "test_commits": [
+                {"sha": "older", "changed_files": 10},
+                {"sha": "newer", "changed_files": 12},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("code_review_graph.eval.runner.CONFIGS_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="latest test_commit newer"):
+        load_config("bad")
 
 
 @pytest.mark.skipif(not _HAS_YAML, reason="pyyaml not installed")

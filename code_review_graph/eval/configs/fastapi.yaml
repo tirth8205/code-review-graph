@@ -2,17 +2,17 @@ name: fastapi
 url: https://github.com/tiangolo/fastapi
 # Pinned to the latest test_commit SHA so the snapshot is deterministic and
 # every test_commit below is reachable as an ancestor.
-commit: 0227991a01e61bf5cdd93cc00e9e243f52b47a4a
+commit: 22381558446c5d1ac376680a6581dd63b3a04119
 language: python
 size_category: medium
 
 test_commits:
-  - sha: fa3588c38c7473aca7536b12d686102de4b0f407
-    description: "Fix typo for client_secret in OAuth2 form docstrings"
-    changed_files: 1
-  - sha: 0227991a01e61bf5cdd93cc00e9e243f52b47a4a
-    description: "Exclude spam comments from statistics in scripts/people.py"
-    changed_files: 1
+  - sha: 749cefdeb1428ba5c3911b03c4a72993f7eb3747
+    description: "Add streaming JSON Lines and binary yield support (#15022)"
+    changed_files: 21
+  - sha: 22381558446c5d1ac376680a6581dd63b3a04119
+    description: "Add Server-Sent Events support (#15030)"
+    changed_files: 23
 
 entry_points:
   - "fastapi/applications.py::FastAPI"
