@@ -609,6 +609,10 @@ _KAFKA_PRODUCER_TYPES = frozenset({
     "KafkaSender",
 })
 
+# Spring scheduling annotations. ``Scheduled`` is repeatable; ``Schedules``
+# is its explicit Java container form.
+_SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
+
 
 # ---------------------------------------------------------------------------
 # ReScript regex patterns and helpers (no tree-sitter grammar bundled)
@@ -5459,6 +5463,114 @@ class CodeParser:
                         extra=extra,
                     ))
 
+    @staticmethod
+    def _java_annotation_name(annotation_node) -> Optional[str]:
+        """Return the simple name of a Java annotation AST node."""
+        for child in annotation_node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type in ("scoped_identifier", "qualified_name"):
+                return child.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
+        return None
+
+    def _scheduled_annotations(self, method_node) -> list:
+        """Collect direct and ``@Schedules``-contained ``@Scheduled`` nodes."""
+        found: list = []
+
+        def visit(node) -> None:
+            if node.type == "annotation":
+                name = self._java_annotation_name(node)
+                if name == "Scheduled":
+                    found.append(node)
+                    return
+                if name != "Schedules":
+                    return
+            for child in node.children:
+                visit(child)
+
+        for child in method_node.children:
+            if child.type == "modifiers":
+                visit(child)
+        return found
+
+    @staticmethod
+    def _java_annotation_attributes(annotation_node) -> dict[str, str]:
+        """Extract named Java annotation arguments without evaluating them."""
+        attributes: dict[str, str] = {}
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for pair in child.children:
+                if pair.type != "element_value_pair":
+                    continue
+                named = [part for part in pair.children if part.is_named]
+                if len(named) < 2 or named[0].type != "identifier":
+                    continue
+                key = named[0].text.decode("utf-8", errors="replace")
+                value_node = named[-1]
+                value = value_node.text.decode("utf-8", errors="replace")
+                if value_node.type == "string_literal" and len(value) >= 2:
+                    value = value[1:-1]
+                attributes[key] = value
+        return attributes
+
+    @staticmethod
+    def _spring_schedule_kind(attributes: dict[str, str]) -> str:
+        """Classify one Spring schedule by the trigger attribute it uses."""
+        for key, kind in (
+            ("cron", "cron"),
+            ("fixedRate", "fixedRate"),
+            ("fixedRateString", "fixedRate"),
+            ("fixedDelay", "fixedDelay"),
+            ("fixedDelayString", "fixedDelay"),
+            ("initialDelay", "initialDelay"),
+            ("initialDelayString", "initialDelay"),
+        ):
+            if key in attributes:
+                return kind
+        return "scheduled"
+
+    def _emit_scheduled_nodes_from_method(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit one addressable Scheduler node and TRIGGERS edge per schedule."""
+        annotations = self._scheduled_annotations(method_node)
+        target = self._qualify(method_name, file_path, class_name)
+        for index, annotation in enumerate(annotations):
+            attributes = self._java_annotation_attributes(annotation)
+            schedule_kind = self._spring_schedule_kind(attributes)
+            schedule_name = f"{method_name}@Scheduled[{index}]:{schedule_kind}"
+            metadata = {
+                "annotation": "Scheduled",
+                "schedule_kind": schedule_kind,
+                **attributes,
+            }
+            nodes.append(NodeInfo(
+                kind="Scheduler",
+                name=schedule_name,
+                file_path=file_path,
+                line_start=annotation.start_point[0] + 1,
+                line_end=annotation.end_point[0] + 1,
+                language="java",
+                parent_name=class_name,
+                extra=metadata,
+            ))
+            edges.append(EdgeInfo(
+                kind="TRIGGERS",
+                source=self._qualify(schedule_name, file_path, class_name),
+                target=target,
+                file_path=file_path,
+                line=annotation.start_point[0] + 1,
+                extra=metadata,
+            ))
+        return len(annotations)
+
     def _emit_temporal_stub_fields(
         self,
         class_node,
@@ -5922,6 +6034,21 @@ class CodeParser:
                 self._emit_kafka_edges_from_method(
                     child, name, enclosing_class, file_path, edges,
                 )
+            if any(
+                annotation.split("(", 1)[0] in _SPRING_SCHEDULED_ANNOTATIONS
+                for annotation in deco_list
+            ):
+                schedule_count = self._emit_scheduled_nodes_from_method(
+                    child,
+                    name,
+                    enclosing_class,
+                    file_path,
+                    nodes,
+                    edges,
+                )
+                if schedule_count:
+                    method_extra["scheduled"] = True
+                    method_extra["schedule_count"] = schedule_count
 
         # Persist annotations/decorators so consumers can filter on them
         # (e.g. "show me all @Composable functions").  Stored in BOTH

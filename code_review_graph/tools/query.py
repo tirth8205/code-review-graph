@@ -28,6 +28,8 @@ _QUERY_PATTERNS = {
     "children_of": "Find all nodes contained in a file or class",
     "tests_for": "Find all tests for a given function or class",
     "inheritors_of": "Find all classes that inherit from a given class",
+    "triggers_of": "Find methods invoked by a scheduler or other trigger",
+    "triggered_by": "Find schedulers or other triggers that invoke a method",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -159,7 +161,8 @@ def query_graph(
 
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
-                 importers_of, children_of, tests_for, inheritors_of, file_summary.
+                 importers_of, children_of, tests_for, inheritors_of,
+                 triggers_of, triggered_by, file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -367,6 +370,24 @@ def query_graph(
                         if child:
                             results.append(node_to_dict(child))
                         edges_out.append(edge_to_dict(e))
+
+        elif pattern == "triggers_of":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != "TRIGGERS":
+                    continue
+                triggered = store.get_node(edge.target_qualified)
+                if triggered:
+                    results.append(node_to_dict(triggered))
+                edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "triggered_by":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != "TRIGGERS":
+                    continue
+                trigger = store.get_node(edge.source_qualified)
+                if trigger:
+                    results.append(node_to_dict(trigger))
+                edges_out.append(edge_to_dict(edge))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])
