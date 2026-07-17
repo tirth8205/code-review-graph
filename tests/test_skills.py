@@ -1432,6 +1432,11 @@ class TestGeminiCLIInstall:
 class TestCursorHooksConfig:
     """Tests for generate_cursor_hooks_config()."""
 
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
+
     def test_has_version_1(self):
         config = generate_cursor_hooks_config()
         assert config["version"] == 1
@@ -1478,6 +1483,11 @@ class TestCursorHooksConfig:
 class TestCursorHookScripts:
     """Tests for _cursor_hook_scripts()."""
 
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
+
     def test_returns_three_scripts(self):
         scripts = _cursor_hook_scripts()
         assert set(scripts.keys()) == {
@@ -1518,6 +1528,11 @@ class TestCursorHookScripts:
 
 class TestInstallCursorHooks:
     """Tests for install_cursor_hooks()."""
+
+    @pytest.fixture(autouse=True)
+    def _unix_platform(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+            yield
 
     def test_creates_hooks_json(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
@@ -1673,11 +1688,13 @@ class TestInstallCursorHooks:
 
     @staticmethod
     def _run_windows_hook(command, *, cwd, payload, env):
-        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        # Cursor hands this command string to the Windows shell. Passing it as
+        # a sequence makes Python backslash-escape quotes that cmd treats literally.
         proc = subprocess.Popen(
-            [comspec, "/d", "/s", "/c", command],
+            command,
             cwd=cwd,
             env=env,
+            shell=True,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
