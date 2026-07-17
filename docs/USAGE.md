@@ -33,7 +33,7 @@ code-review-graph install --platform codebuddy
 | **Zed** | `.zed/settings.json` |
 | **Continue** | `.continue/config.json` |
 | **OpenCode** | `opencode.jsonc` (preferred) or `opencode.json` |
-| **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
+| **Antigravity** | `~/.gemini/antigravity/mcp_config.json` + `.agents/skills/<name>/SKILL.md` |
 | **Gemini CLI** | `.gemini/settings.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |
 | **Kiro** | `.kiro/settings/mcp.json` |
@@ -47,6 +47,12 @@ The CodeBuddy project layout follows its official documentation for
 [hooks](https://www.codebuddy.ai/docs/cli/hooks). The shared `.mcp.json` is
 merged with JSONC awareness, while hook commands resolve the repository at
 runtime so committed settings do not contain one developer's checkout path.
+
+Antigravity workspace skills use its documented
+[`.agents/skills` location](https://antigravity.google/docs/skills?app=antigravity-ide).
+Copilot CLI uses the documented `mcpServers` schema in
+[`~/.copilot/mcp-config.json`](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers);
+the VS Code integration remains workspace-scoped in `.vscode/mcp.json`.
 
 ## Core Workflow
 

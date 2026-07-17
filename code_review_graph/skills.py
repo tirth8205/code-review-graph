@@ -32,6 +32,21 @@ def _zed_settings_path() -> Path:
     return Path.home() / ".config" / "zed" / "settings.json"
 
 
+def _copilot_vscode_detected() -> bool:
+    """Return whether a GitHub Copilot extension is installed for VS Code."""
+    home = Path.home()
+    for extensions_dir in (
+        home / ".vscode" / "extensions",
+        home / ".vscode-insiders" / "extensions",
+    ):
+        try:
+            if any(path.name.startswith("github.copilot-") for path in extensions_dir.iterdir()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
     for name in ("opencode.jsonc", "opencode.json"):
@@ -142,17 +157,19 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "GitHub Copilot",
         "config_path": lambda root: root / ".vscode" / "mcp.json",
         "key": "servers",
-        "detect": lambda: (Path.home() / ".vscode").exists(),
+        "detect": _copilot_vscode_detected,
         "format": "object",
         "needs_type": True,
     },
     "copilot-cli": {
         "name": "GitHub Copilot CLI",
         "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
-        "key": "servers",
+        "key": "mcpServers",
         "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
+        "server_type": "local",
+        "entry_fields": {"tools": ["*"]},
     },
     "codebuddy": {
         "name": "CodeBuddy Code",
@@ -262,7 +279,8 @@ def _build_server_entry(
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
-        entry["type"] = "stdio"
+        entry["type"] = plat.get("server_type", "stdio")
+    entry.update(plat.get("entry_fields", {}))
     return entry
 
 
@@ -1322,6 +1340,29 @@ def install_gemini_cli_skills(repo_root: Path) -> Path:
         )
         skill_path.write_text(content, encoding="utf-8")
         logger.info("Wrote Gemini CLI skill: %s", skill_path)
+
+    return skills_root
+
+
+def install_antigravity_skills(repo_root: Path) -> Path:
+    """Install workspace-scoped Antigravity skills in .agents/skills/."""
+    skills_root = repo_root / ".agents" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote Antigravity skill: %s", skill_path)
 
     return skills_root
 
