@@ -77,6 +77,17 @@ def _run_postprocess(
         )
         return warnings
 
+    # Resolve only same-file/import-backed targets before derived graph steps.
+    try:
+        resolved = store.resolve_bare_call_targets()
+        resolved += store.resolve_bare_tested_by_sources()
+        build_result["bare_edges_resolved"] = resolved
+    except sqlite3.OperationalError as e:
+        logger.warning("Bare-endpoint resolution failed: %s", e)
+        warnings.append(
+            f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+        )
+
     # -- Signatures + FTS (fast, always run unless "none") --
     timing: dict[str, float] = {}
     stage_started = time.perf_counter()
@@ -565,6 +576,16 @@ def run_postprocess(
     warnings: list[str] = []
 
     try:
+        try:
+            resolved = store.resolve_bare_call_targets()
+            resolved += store.resolve_bare_tested_by_sources()
+            result["bare_edges_resolved"] = resolved
+        except sqlite3.OperationalError as e:
+            logger.warning("Bare-endpoint resolution failed: %s", e)
+            warnings.append(
+                f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+            )
+
         try:
             rows = store.get_nodes_without_signature()
             for row in rows:

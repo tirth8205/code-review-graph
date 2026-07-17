@@ -737,3 +737,149 @@ class TestGetTransitiveTestsFrontierCap:
         assert len(indirect_default) == 1
         assert len(indirect_capped) == 1
         assert indirect_default[0]["name"] == indirect_capped[0]["name"]
+
+
+class TestResolveBareEndpoints:
+    """Only graph evidence may turn a bare call/test endpoint into a node."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _func(self, name: str, path: str, *, is_test: bool = False) -> str:
+        self.store.upsert_node(NodeInfo(
+            kind="Test" if is_test else "Function",
+            name=name,
+            file_path=path,
+            line_start=1,
+            line_end=5,
+            language="python",
+            is_test=is_test,
+        ))
+        return f"{path}::{name}"
+
+    def _edge(
+        self, kind: str, source: str, target: str, file_path: str,
+    ) -> None:
+        self.store.upsert_edge(EdgeInfo(
+            kind=kind,
+            source=source,
+            target=target,
+            file_path=file_path,
+            line=1,
+        ))
+
+    def _endpoints(self, kind: str) -> list[tuple[str, str]]:
+        rows = self.store._conn.execute(
+            "SELECT source_qualified, target_qualified FROM edges "
+            "WHERE kind = ? ORDER BY id",
+            (kind,),
+        ).fetchall()
+        return [
+            (row["source_qualified"], row["target_qualified"])
+            for row in rows
+        ]
+
+    def test_unique_tested_by_source_without_evidence_stays_bare(self):
+        """A globally unique name in an unrelated file is still not evidence."""
+        self._func("parse", "/repo/src/app.py")
+        test_qn = self._func(
+            "test_parse", "/repo/tests/test_other.py", is_test=True,
+        )
+        self._edge("TESTED_BY", "parse", test_qn, "/repo/tests/test_other.py")
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 0
+        assert self._endpoints("TESTED_BY") == [("parse", test_qn)]
+
+    def test_unique_tested_by_source_resolves_with_import_evidence(self):
+        source_qn = self._func("parse", "/repo/src/app.py")
+        test_file = "/repo/tests/test_app.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "/repo/src/app.py", test_file)
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 1
+        assert self._endpoints("TESTED_BY") == [(source_qn, test_qn)]
+
+    def test_ambiguous_tested_by_source_uses_one_imported_candidate(self):
+        source_qn = self._func("parse", "/repo/src/app.py")
+        self._func("parse", "/repo/vendor/app.py")
+        test_file = "/repo/tests/test_app.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "/repo/src/app.py", test_file)
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 1
+        assert self._endpoints("TESTED_BY") == [(source_qn, test_qn)]
+
+    def test_same_file_call_target_is_strong_evidence(self):
+        file_path = "/repo/src/app.py"
+        caller_qn = self._func("caller", file_path)
+        helper_qn = self._func("helper", file_path)
+        self._edge("CALLS", caller_qn, "helper", file_path)
+        self.store.commit()
+
+        assert self.store.resolve_bare_call_targets() == 1
+        assert self._endpoints("CALLS") == [(caller_qn, helper_qn)]
+
+    def test_unique_unrelated_call_target_stays_bare(self):
+        caller_file = "/repo/src/app.py"
+        caller_qn = self._func("caller", caller_file)
+        self._func("helper", "/repo/unrelated/util.py")
+        self._edge("CALLS", caller_qn, "helper", caller_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_call_targets() == 0
+        assert self._endpoints("CALLS") == [(caller_qn, "helper")]
+
+    def test_tests_for_does_not_guess_unrelated_bare_source(self):
+        source_qn = self._func("parse", "/repo/src/app.py")
+        test_file = "/repo/tests/test_other.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.get_transitive_tests(source_qn, max_depth=0) == []
+
+    def test_tests_for_accepts_unique_import_backed_bare_source(self):
+        source_qn = self._func("parse", "/repo/src/app.py")
+        test_file = "/repo/tests/test_app.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "/repo/src/app.py", test_file)
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        results = self.store.get_transitive_tests(source_qn, max_depth=0)
+        assert [result["qualified_name"] for result in results] == [test_qn]
+
+    def test_tests_for_rejects_bare_source_with_two_imported_candidates(self):
+        first_qn = self._func("parse", "/repo/src/app.py")
+        second_qn = self._func("parse", "/repo/vendor/app.py")
+        test_file = "/repo/tests/test_app.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "/repo/src/app.py", test_file)
+        self._edge("IMPORTS_FROM", test_file, "/repo/vendor/app.py", test_file)
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.get_transitive_tests(first_qn, max_depth=0) == []
+        assert self.store.get_transitive_tests(second_qn, max_depth=0) == []
+
+    def test_transitive_tests_do_not_follow_unresolved_bare_callee(self):
+        hub_qn = self._func("hub", "/repo/src/hub.py")
+        self._func("parse", "/repo/unrelated/app.py")
+        test_file = "/repo/tests/test_app.py"
+        test_qn = self._func("test_parse", test_file, is_test=True)
+        self._edge("CALLS", hub_qn, "parse", "/repo/src/hub.py")
+        self._edge("TESTED_BY", "parse", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.get_transitive_tests(hub_qn, max_depth=1) == []

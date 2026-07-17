@@ -446,13 +446,48 @@ class GraphStore:
                     if d:
                         results.append(d)
 
-        # Bare-name fallback for direct
+        # Evidence-gated bare-name fallback for old/minimal graphs that have
+        # not run endpoint resolution yet. A matching name alone is not enough.
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
+        candidate_cache: dict[str, list[tuple[str, str]]] = {}
+        import_cache: dict[str, set[str]] = {}
+
+        def _candidate_for_context(name: str, context_file: str) -> str | None:
+            if name not in candidate_cache:
+                candidate_cache[name] = [
+                    (candidate["qualified_name"], candidate["file_path"])
+                    for candidate in conn.execute(
+                        "SELECT qualified_name, file_path FROM nodes "
+                        "WHERE name = ? "
+                        "AND kind IN ('Function', 'Test', 'Class')",
+                        (name,),
+                    ).fetchall()
+                ]
+            if context_file not in import_cache:
+                imported_files: set[str] = set()
+                for imported in conn.execute(
+                    "SELECT target_qualified FROM edges "
+                    "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
+                    (context_file,),
+                ).fetchall():
+                    target = imported["target_qualified"]
+                    imported_files.add(
+                        target.split("::", 1)[0] if "::" in target else target
+                    )
+                import_cache[context_file] = imported_files
+            return self._select_evidence_backed_candidate(
+                candidate_cache[name],
+                context_file,
+                import_cache[context_file],
+            )
+
         for row in conn.execute(
-            "SELECT target_qualified FROM edges "
+            "SELECT target_qualified, file_path FROM edges "
             "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
             (bare,),
         ).fetchall():
+            if _candidate_for_context(bare, row["file_path"]) != qualified_name:
+                continue
             tgt = row["target_qualified"]
             if tgt not in seen:
                 seen.add(tgt)
@@ -474,6 +509,11 @@ class GraphStore:
             if len(next_frontier) > max_frontier:
                 next_frontier = set(list(next_frontier)[:max_frontier])
             for callee in next_frontier:
+                # A bare callee has no stable identity. Endpoint resolution
+                # qualifies it when graph evidence exists; otherwise following
+                # TESTED_BY here would attribute every same-named test.
+                if "::" not in callee:
+                    continue
                 for row in conn.execute(
                     "SELECT target_qualified FROM edges "
                     "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
@@ -489,38 +529,81 @@ class GraphStore:
 
         return results
 
+    @staticmethod
+    def _select_evidence_backed_candidate(
+        candidates: list[tuple[str, str]],
+        context_file: str,
+        imported_files: set[str],
+    ) -> str | None:
+        """Return the sole same-file/import-backed candidate, if one exists."""
+        supported = [
+            qualified
+            for qualified, candidate_file in candidates
+            if candidate_file == context_file or candidate_file in imported_files
+        ]
+        return supported[0] if len(supported) == 1 else None
+
     def resolve_bare_call_targets(self) -> int:
-        """Batch-resolve bare-name CALLS targets using the global node table.
+        """Resolve bare CALLS targets backed by same-file or import evidence.
 
         After parsing, some CALLS edges have bare targets (no ``::`` separator)
-        because the parser couldn't resolve cross-file.  This method matches
-        them against nodes and updates unambiguous matches in-place.
-
-        Disambiguation strategy:
-          1. Single node with that name -> resolve directly
-          2. Multiple candidates -> prefer one whose file is imported by the
-             source file (via IMPORTS_FROM edges)
+        because the parser couldn't resolve cross-file. A globally unique name
+        is not sufficient evidence: unrelated repositories often contain one
+        matching helper by coincidence. The candidate must be in the call-site
+        file or in exactly one file imported by that file.
 
         Returns the number of resolved edges.
         """
+        return self._resolve_bare_endpoints("CALLS", "target_qualified")
+
+    def resolve_bare_tested_by_sources(self) -> int:
+        """Resolve bare TESTED_BY sources backed by graph evidence.
+
+        TESTED_BY edges copy the target of a test's CALLS edge, so unresolved
+        cross-file calls also leave a bare production source. The test call-site
+        file must import the candidate file (or contain the candidate itself)
+        before this method qualifies that source.
+
+        Returns the number of resolved edges.
+        """
+        return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
+
+    def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
+        """Resolve a bare edge endpoint only when one candidate has evidence."""
+        if endpoint == "target_qualified":
+            select_sql = (
+                "SELECT id, source_qualified, target_qualified, file_path "
+                "FROM edges WHERE kind = ? "
+                "AND target_qualified NOT LIKE '%::%'"
+            )
+            update_sql = "UPDATE edges SET target_qualified = ? WHERE id = ?"
+        elif endpoint == "source_qualified":
+            select_sql = (
+                "SELECT id, source_qualified, target_qualified, file_path "
+                "FROM edges WHERE kind = ? "
+                "AND source_qualified NOT LIKE '%::%'"
+            )
+            update_sql = "UPDATE edges SET source_qualified = ? WHERE id = ?"
+        else:
+            raise ValueError(f"Invalid edge endpoint column: {endpoint!r}")
+
         conn = self._conn
 
-        bare_edges = conn.execute(
-            "SELECT id, source_qualified, target_qualified, file_path "
-            "FROM edges WHERE kind = 'CALLS' AND target_qualified NOT LIKE '%::%'"
-        ).fetchall()
+        bare_edges = conn.execute(select_sql, (kind,)).fetchall()
         if not bare_edges:
             return 0
 
-        # bare_name -> list of qualified_names
-        node_lookup: dict[str, list[str]] = {}
+        # bare_name -> [(qualified_name, defining_file)]
+        node_lookup: dict[str, list[tuple[str, str]]] = {}
         for row in conn.execute(
-            "SELECT name, qualified_name FROM nodes "
+            "SELECT name, qualified_name, file_path FROM nodes "
             "WHERE kind IN ('Function', 'Test', 'Class')"
         ).fetchall():
-            node_lookup.setdefault(row["name"], []).append(row["qualified_name"])
+            node_lookup.setdefault(row["name"], []).append(
+                (row["qualified_name"], row["file_path"]),
+            )
 
-        # source_file -> set of imported files (for disambiguation)
+        # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
         for row in conn.execute(
             "SELECT DISTINCT file_path, target_qualified FROM edges "
@@ -532,39 +615,35 @@ class GraphStore:
 
         resolved = 0
         for edge in bare_edges:
-            bare_name = edge["target_qualified"]
+            bare_name = edge[endpoint]
             candidates = node_lookup.get(bare_name, [])
             if not candidates:
                 continue
 
-            if len(candidates) == 1:
-                qualified = candidates[0]
-            else:
-                # Disambiguate via imports
-                src_qn = edge["source_qualified"]
-                src_file = (
-                    src_qn.split("::", 1)[0] if "::" in src_qn
-                    else edge["file_path"]
-                )
-                imported_files = import_targets.get(src_file, set())
-                imported = [
-                    c for c in candidates
-                    if c.split("::", 1)[0] in imported_files
-                ]
-                if len(imported) == 1:
-                    qualified = imported[0]
-                else:
-                    continue
-
-            conn.execute(
-                "UPDATE edges SET target_qualified = ? WHERE id = ?",
-                (qualified, edge["id"]),
+            context_file = edge["file_path"]
+            imported_files = import_targets.get(context_file, set())
+            qualified = self._select_evidence_backed_candidate(
+                candidates,
+                context_file,
+                imported_files,
             )
+            if qualified is None:
+                continue
+
+            conn.execute(update_sql, (qualified, edge["id"]))
             resolved += 1
 
         if resolved:
             conn.commit()
-            logger.info("Resolved %d bare-name CALLS targets", resolved)
+            endpoint_label = (
+                "sources" if endpoint == "source_qualified" else "targets"
+            )
+            logger.info(
+                "Resolved %d evidence-backed bare %s %s",
+                resolved,
+                kind,
+                endpoint_label,
+            )
         return resolved
 
     def get_all_files(self) -> list[str]:
