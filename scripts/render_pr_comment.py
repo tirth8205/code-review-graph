@@ -75,6 +75,8 @@ def relativize_path(value: Any) -> str:
       3. Otherwise return the input untouched — never guess-mangle a path.
     """
     text = str(value)
+    # Split off a trailing "::symbol" qualifier (e.g. "path::MyClass.method")
+    # so only the path portion is relativized; the symbol is reattached as-is.
     path_part, sep, symbol = text.partition("::")
     # Only touch absolute, POSIX-style runner paths; leave everything else.
     if not path_part.startswith("/"):
@@ -88,6 +90,8 @@ def relativize_path(value: Any) -> str:
 
 def _strip_workspace_prefix(path_part: str) -> str | None:
     """Return ``path_part`` made repo-relative, or None when nothing matches."""
+    # Preferred path: GitHub Actions' checkout action sets GITHUB_WORKSPACE
+    # to the absolute repo root, so a simple prefix strip is exact.
     workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
     if workspace:
         prefix = workspace.rstrip("/") + "/"
@@ -103,6 +107,7 @@ def _strip_workspace_prefix(path_part: str) -> str | None:
         if idx != -1:
             return path_part[idx + len(marker):]
 
+    # Neither strategy matched — signal "leave it alone" to the caller.
     return None
 
 
@@ -116,7 +121,10 @@ def md_escape(value: Any, limit: int = _MAX_CELL) -> str:
     """
     text = str(value)
     text = _CONTROL_CHARS.sub("", text)
+    # Newlines/carriage returns would break a markdown table row; flatten them.
     text = text.replace("\r", " ").replace("\n", " ")
+    # Escape the backslash itself first, then markdown/table special characters,
+    # so escaping one doesn't accidentally clobber another.
     text = text.replace("\\", "\\\\")
     for ch in ("|", "`", "*", "_", "[", "]", "<", ">"):
         text = text.replace(ch, "\\" + ch)
@@ -142,6 +150,14 @@ def _functions_table(
     gap_names: set[str],
     max_functions: int,
 ) -> list[str]:
+    """Build the "Risk-scored changes" markdown table.
+
+    Renders one row per changed symbol (up to ``max_functions``), showing its
+    risk score, risk level, qualified name, source location, and whether it
+    has direct test coverage (looked up via membership in ``gap_names``).
+    Returns a list of markdown lines (not yet joined) so the caller can
+    splice them into the overall comment body.
+    """
     lines = [
         "### Risk-scored changes",
         "",
@@ -151,6 +167,9 @@ def _functions_table(
     for entry in priorities[:max_functions]:
         score = float(entry.get("risk_score") or 0.0)
         name = entry.get("qualified_name") or entry.get("name") or "?"
+        # "Tested" column: test functions themselves are marked distinctly
+        # from production code, which is either covered ("yes") or listed
+        # in the test-gaps set ("no").
         if entry.get("is_test"):
             tested = "(test)"
         elif name in gap_names:
@@ -161,6 +180,7 @@ def _functions_table(
             f"| {score:.2f} | {risk_level(score)} | {md_escape(relativize_path(name))} "
             f"| {_location(entry)} | {tested} |"
         )
+    # If there are more changed symbols than the row cap, note how many were omitted.
     if len(priorities) > max_functions:
         lines.append("")
         lines.append(f"...and {len(priorities) - max_functions} more changed symbol(s).")
@@ -168,6 +188,12 @@ def _functions_table(
 
 
 def _flows_section(flows: list[dict[str, Any]], max_flows: int) -> list[str]:
+    """Build the "Affected execution flows" markdown bullet list.
+
+    Renders up to ``max_flows`` flows, each showing its name, criticality
+    score (or "n/a" when absent), and how many nodes/files it spans.
+    Returns a list of markdown lines to splice into the comment body.
+    """
     lines = ["### Affected execution flows", ""]
     for flow in flows[:max_flows]:
         name = md_escape(flow.get("name") or "?")
@@ -182,15 +208,24 @@ def _flows_section(flows: list[dict[str, Any]], max_flows: int) -> list[str]:
         lines.append(
             f"- **{name}** — {crit_txt}, {node_count} node(s) across {file_count} file(s)"
         )
+    # Note any flows beyond the display cap rather than silently dropping them.
     if len(flows) > max_flows:
         lines.append(f"- ...and {len(flows) - max_flows} more affected flow(s)")
     return lines
 
 
 def _gaps_section(gaps: list[dict[str, Any]], max_gaps: int = 5) -> list[str]:
+    """Build the "Test gaps" markdown bullet list.
+
+    De-duplicates gaps by qualified/plain name (the same symbol can appear
+    more than once in the raw ``gaps`` list), then renders up to
+    ``max_gaps`` entries with their file:line location. Returns a list of
+    markdown lines to splice into the comment body.
+    """
     lines = ["### Test gaps", ""]
     seen: set[str] = set()
     shown: list[dict[str, Any]] = []
+    # First pass: collect up to max_gaps unique-by-name entries.
     for gap in gaps:
         name = str(gap.get("qualified_name") or gap.get("name") or "?")
         if name in seen:
@@ -199,9 +234,12 @@ def _gaps_section(gaps: list[dict[str, Any]], max_gaps: int = 5) -> list[str]:
         shown.append(gap)
         if len(shown) >= max_gaps:
             break
+    # Second pass: render the collected entries as bullet points.
     for gap in shown:
         name = gap.get("qualified_name") or gap.get("name") or "?"
         lines.append(f"- {md_escape(relativize_path(name))} ({_location(gap)})")
+    # `remaining` counts against the raw (non-deduplicated) gap list, so it
+    # reflects "how many more gap records exist" rather than unique symbols.
     remaining = len(gaps) - len(shown)
     if remaining > 0:
         lines.append(f"- ...and {remaining} more without direct tests")
@@ -219,11 +257,15 @@ def render_markdown(
     changed = report.get("changed_functions") or []
     flows = report.get("affected_flows") or []
     gaps = report.get("test_gaps") or []
+    # review_priorities is the risk-sorted list; fall back to raw changed
+    # functions if the report doesn't include it (older CLI versions).
     priorities = report.get("review_priorities") or changed
     gap_names = {
         str(g.get("qualified_name") or g.get("name") or "") for g in gaps
     }
 
+    # Hidden marker line lets the CI action locate and update this exact
+    # comment on subsequent pushes instead of posting duplicates.
     lines: list[str] = [MARKER, "", "## code-review-graph review", ""]
     lines.append(
         f"**Overall risk: {score:.2f} ({risk_level(score).upper()})** — "
@@ -231,6 +273,7 @@ def render_markdown(
         f"{len(flows)} affected flow(s), {len(gaps)} test gap(s)"
     )
 
+    # Each section is optional and only rendered when the report has data for it.
     if priorities:
         lines.append("")
         lines.extend(_functions_table(priorities, gap_names, max_functions))
@@ -261,6 +304,9 @@ def render_markdown(
 
     lines.extend(["", "---", "", FOOTER])
     body = "\n".join(lines)
+    # Enforce GitHub's comment body size limit as a final safety net, even
+    # though the per-section max_functions/max_flows caps should normally
+    # keep bodies well under this.
     if len(body) > _MAX_BODY:
         body = body[:_MAX_BODY] + "\n\n*Report truncated.*\n\n" + FOOTER
     return body
@@ -299,6 +345,13 @@ def load_report(text: str) -> dict[str, Any] | None:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the CLI argument parser for this script.
+
+    Defines all supported flags (input/output locations, the risk gate,
+    display caps, and quiet mode) and their defaults/help text. Kept
+    separate from ``main`` so the parser can be introspected or reused
+    (e.g. in tests) without invoking the full program.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--input",
@@ -338,9 +391,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point: parse args, render the comment, write it, apply the risk gate.
+
+    Flow:
+      1. Read detect-changes JSON from ``--input`` (file or stdin).
+      2. Parse it; fall back to a "no changes" comment if it's not valid JSON.
+      3. Render the markdown body and write it to ``--output`` (unless ``--quiet``).
+      4. If ``--fail-on-risk`` is set and the report's risk score meets/exceeds
+         the corresponding threshold, return exit code 3 to fail the CI step.
+
+    Returns a process exit code: 0 on success, 2 on I/O failure, 3 on a
+    breached risk gate.
+    """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = build_arg_parser().parse_args(argv)
 
+    # Step 1: load the raw detect-changes output from stdin or a file.
     if args.input == "-":
         text = sys.stdin.read()
     else:
@@ -350,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("Cannot read input file %s: %s", args.input, exc)
             return 2
 
+    # Step 2: parse it into a report dict, or treat non-JSON as "no changes".
     report = load_report(text)
     if report is None:
         body = render_no_changes()
@@ -360,6 +427,7 @@ def main(argv: list[str] | None = None) -> int:
             max_flows=args.max_flows,
         )
 
+    # Step 3: write the rendered markdown, unless --quiet (gate-only mode).
     if not args.quiet:
         if args.output == "-":
             sys.stdout.write(body + "\n")
@@ -370,6 +438,7 @@ def main(argv: list[str] | None = None) -> int:
                 logger.error("Cannot write output file %s: %s", args.output, exc)
                 return 2
 
+    # Step 4: apply the risk gate, if configured and a report was parsed.
     if args.fail_on_risk != "none" and report is not None:
         score = float(report.get("risk_score") or 0.0)
         threshold = RISK_THRESHOLDS[args.fail_on_risk]
