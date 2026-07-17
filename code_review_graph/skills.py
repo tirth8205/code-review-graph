@@ -1379,36 +1379,62 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
 # --- Cursor hooks ---
 
 
+def _is_windows() -> bool:
+    """Return whether hook installation is running on Windows."""
+    return platform.system() == "Windows"
+
+
+def _cursor_hooks_dir() -> Path:
+    """Return Cursor's user-level hook script directory."""
+    return Path.home() / ".cursor" / "hooks"
+
+
+def _cursor_hook_command(script_path: Path) -> str:
+    """Return the platform-native command used by Cursor to run a hook."""
+    if _is_windows():
+        resolved = script_path.resolve()
+        return (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            f'-ExecutionPolicy Bypass -File "{resolved}"'
+        )
+    return str(script_path)
+
+
 def generate_cursor_hooks_config() -> dict[str, Any]:
     """Generate Cursor hooks.json configuration.
 
     Returns a dict conforming to the Cursor hooks schema (version 1) with
     hooks for afterFileEdit, sessionStart, and beforeShellExecution.
-    Each hook points to a shell script in ~/.cursor/hooks/.
+    Each hook points to a native script in ~/.cursor/hooks/.
 
     Returns:
         Dict suitable for writing as ~/.cursor/hooks.json.
     """
-    hooks_dir = str(Path.home() / ".cursor" / "hooks")
+    hooks_dir = _cursor_hooks_dir()
+    suffix = ".ps1" if _is_windows() else ".sh"
     return {
         "version": 1,
         "hooks": {
             "afterFileEdit": [
                 {
-                    "command": f"{hooks_dir}/crg-update.sh",
+                    "command": _cursor_hook_command(hooks_dir / f"crg-update{suffix}"),
                     "timeout": 5,
                 },
             ],
             "sessionStart": [
                 {
-                    "command": f"{hooks_dir}/crg-session-start.sh",
+                    "command": _cursor_hook_command(
+                        hooks_dir / f"crg-session-start{suffix}"
+                    ),
                     "timeout": 5,
                 },
             ],
             "beforeShellExecution": [
                 {
                     "matcher": "^git\\s+commit",
-                    "command": f"{hooks_dir}/crg-pre-commit.sh",
+                    "command": _cursor_hook_command(
+                        hooks_dir / f"crg-pre-commit{suffix}"
+                    ),
                     "timeout": 10,
                 },
             ],
@@ -1416,8 +1442,8 @@ def generate_cursor_hooks_config() -> dict[str, Any]:
     }
 
 
-def _cursor_hook_scripts() -> dict[str, str]:
-    """Return a mapping of filename -> shell script content for Cursor hooks.
+def _cursor_hook_scripts_unix() -> dict[str, str]:
+    """Return a mapping of filename -> Bash script content for Cursor hooks.
 
     Three scripts are generated:
     - crg-update.sh: runs ``code-review-graph update --skip-flows`` after file edits
@@ -1502,11 +1528,99 @@ exit 0
     }
 
 
+def _cursor_hook_scripts_windows() -> dict[str, str]:
+    """Return native PowerShell scripts for Cursor hooks on Windows."""
+    update_script = """\
+# code-review-graph: auto-update graph after file edits (Cursor hook)
+# Consume Cursor's JSON event before doing any work.
+$null = [Console]::In.ReadToEnd()
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+try {
+    $null = & code-review-graph update --skip-flows 2>&1
+} catch {
+    # Hooks are fail-open and must never block Cursor.
+}
+
+@{} | ConvertTo-Json -Compress
+exit 0
+"""
+
+    session_start_script = """\
+# code-review-graph: show graph status on session start (Cursor hook)
+$null = [Console]::In.ReadToEnd()
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$message = 'graph not built yet'
+
+try {
+    $output = & code-review-graph status 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $candidate = ($output | Out-String).Trim()
+        if ($candidate) {
+            $message = $candidate
+        }
+    }
+} catch {
+    # Keep the fail-open fallback message.
+}
+
+@{ additional_context = $message } | ConvertTo-Json -Compress
+exit 0
+"""
+
+    pre_commit_script = """\
+# code-review-graph: detect changes before git commit (Cursor hook)
+$null = [Console]::In.ReadToEnd()
+$OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$message = ''
+
+try {
+    $output = & code-review-graph detect-changes --brief 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $message = ($output | Out-String).Trim()
+    }
+} catch {
+    # Hooks are fail-open and must never block Cursor.
+}
+
+@{
+    'continue' = $true
+    'permission' = 'allow'
+    'agent_message' = $message
+} | ConvertTo-Json -Compress
+exit 0
+"""
+
+    return {
+        "crg-update.ps1": update_script,
+        "crg-session-start.ps1": session_start_script,
+        "crg-pre-commit.ps1": pre_commit_script,
+    }
+
+
+def _cursor_hook_scripts() -> dict[str, str]:
+    """Return platform-native Cursor hook scripts."""
+    if _is_windows():
+        return _cursor_hook_scripts_windows()
+    return _cursor_hook_scripts_unix()
+
+
+def _is_crg_cursor_hook(command: Any, script_stem: str) -> bool:
+    """Return whether a command targets CRG's exact user-level hook path."""
+    if not isinstance(command, str):
+        return False
+    normalized = command.strip().removesuffix('"').replace("\\", "/")
+    return any(
+        normalized.endswith(f"/.cursor/hooks/{script_stem}{suffix}")
+        for suffix in (".sh", ".ps1")
+    )
+
+
 def install_cursor_hooks() -> Path:
     """Install Cursor hooks configuration and scripts at user level.
 
     Writes ``~/.cursor/hooks.json`` (merging code-review-graph hooks
-    into any existing configuration) and creates executable shell scripts
+    into any existing configuration) and creates platform-native scripts
     in ``~/.cursor/hooks/``.
 
     Returns:
@@ -1538,11 +1652,31 @@ def install_cursor_hooks() -> Path:
         event_hooks = existing_hooks.get(event, [])
         if not isinstance(event_hooks, list):
             event_hooks = []
-        # De-duplicate: skip if a hook with the same command already exists
-        existing_commands = {h.get("command", "") for h in event_hooks if isinstance(h, dict)}
         for entry in entries:
-            if entry["command"] not in existing_commands:
-                event_hooks.append(entry)
+            script_stem = {
+                "afterFileEdit": "crg-update",
+                "sessionStart": "crg-session-start",
+                "beforeShellExecution": "crg-pre-commit",
+            }[event]
+            migrated = False
+            merged_event_hooks: list[Any] = []
+            for existing_entry in event_hooks:
+                command = (
+                    existing_entry.get("command")
+                    if isinstance(existing_entry, dict)
+                    else None
+                )
+                if _is_crg_cursor_hook(command, script_stem):
+                    if not migrated:
+                        merged_entry = dict(existing_entry)
+                        merged_entry.update(entry)
+                        merged_event_hooks.append(merged_entry)
+                        migrated = True
+                    continue
+                merged_event_hooks.append(existing_entry)
+            if not migrated:
+                merged_event_hooks.append(entry)
+            event_hooks = merged_event_hooks
         existing_hooks[event] = event_hooks
 
     existing["hooks"] = existing_hooks
@@ -1561,8 +1695,15 @@ def install_cursor_hooks() -> Path:
     for filename, content in scripts.items():
         script_path = hooks_script_dir / filename
         script_path.write_text(content, encoding="utf-8")
-        # Make executable (owner rwx, group rx, other rx)
-        script_path.chmod(stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+        if not _is_windows():
+            # Make Bash scripts executable (owner rwx, group rx, other rx).
+            script_path.chmod(
+                stat.S_IRWXU
+                | stat.S_IRGRP
+                | stat.S_IXGRP
+                | stat.S_IROTH
+                | stat.S_IXOTH
+            )
         logger.info("Wrote Cursor hook script: %s", script_path)
 
     return hooks_json_path
