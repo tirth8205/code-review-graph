@@ -547,7 +547,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
     if detect_vcs(repo_root) == "svn":
         return _get_svn_changed_files(repo_root, base if _SAFE_SVN_REV.match(base) else None)
     # Git path
-    if not _SAFE_GIT_REF.match(base):
+    if base.startswith("-") or not _SAFE_GIT_REF.fullmatch(base):
         logger.warning("Invalid git ref rejected: %s", base)
         return []
     try:
@@ -626,7 +626,13 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         return _get_svn_changed_files(repo_root)
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain=v1", "-z"],
+            [
+                "git",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ],
             capture_output=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,

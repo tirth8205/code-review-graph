@@ -124,6 +124,19 @@ def test_get_staged_and_unstaged_preserves_unicode_path(
     assert get_staged_and_unstaged(git_repo_with_unicode_path) == ["café.py"]
 
 
+def test_get_staged_and_unstaged_expands_new_untracked_directories(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """A new directory reports its files, not an unusable directory placeholder."""
+    nested = git_repo_with_unicode_path / "new" / "nested.py"
+    nested.parent.mkdir()
+    nested.write_text("value = 1\n", encoding="utf-8")
+
+    assert get_staged_and_unstaged(git_repo_with_unicode_path) == [
+        "new/nested.py",
+    ]
+
+
 def test_get_staged_and_unstaged_uses_rename_destination(
     git_repo_with_unicode_path: Path,
 ) -> None:

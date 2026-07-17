@@ -566,6 +566,11 @@ class TestGitOperations:
         assert result == []
 
     @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_rejects_option_like_base(self, mock_run, tmp_path):
+        assert get_changed_files(tmp_path, base="--no-index") == []
+        mock_run.assert_not_called()
+
+    @patch("code_review_graph.incremental.subprocess.run")
     def test_get_staged_and_unstaged(self, mock_run, tmp_path):
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -588,6 +593,8 @@ class TestGitOperations:
         # Rename/copy sources should NOT be in results (destination-only).
         assert "old.py" not in result
         assert "source.py" not in result
+        command = mock_run.call_args.args[0]
+        assert "--untracked-files=all" in command
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_staged_and_unstaged_rejects_failed_status(
