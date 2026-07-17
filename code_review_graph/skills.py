@@ -1169,6 +1169,8 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
 
 # --- Gemini CLI hooks + skills (workspace-level: .gemini/) ---
 
+_GEMINI_CLI_HOOK_FILENAMES = ("crg-session-start.sh", "crg-update.sh")
+
 
 def install_gemini_cli_hooks(repo_root: Path) -> Path:
     """Install Gemini CLI hooks in .gemini/settings.json and write hook scripts.
@@ -1229,11 +1231,11 @@ exit 0
 """
     update_script = update_script.replace("__CRG_REPO__", repo_arg)
 
-    session_start_path = hooks_dir / "crg-session-start.sh"
+    session_start_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[0]
     session_start_path.write_text(session_start_script, encoding="utf-8")
     session_start_path.chmod(0o755)
 
-    update_path = hooks_dir / "crg-update.sh"
+    update_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[1]
     update_path.write_text(update_script, encoding="utf-8")
     update_path.chmod(0o755)
 
@@ -1283,14 +1285,14 @@ exit 0
     _ensure_group(
         event_name="SessionStart",
         matcher="",
-        hook_command="bash .gemini/hooks/crg-session-start.sh",
+        hook_command=f"bash .gemini/hooks/{_GEMINI_CLI_HOOK_FILENAMES[0]}",
         name="code-review-graph status",
         timeout=10_000,
     )
     _ensure_group(
         event_name="AfterTool",
         matcher="write_file|replace",
-        hook_command="bash .gemini/hooks/crg-update.sh",
+        hook_command=f"bash .gemini/hooks/{_GEMINI_CLI_HOOK_FILENAMES[1]}",
         name="code-review-graph update",
         timeout=30_000,
     )

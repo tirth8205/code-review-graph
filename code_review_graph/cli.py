@@ -3,6 +3,7 @@
 Usage:
     code-review-graph install
     code-review-graph init
+    code-review-graph uninstall [--dry-run] [--yes] [--repo PATH]
     code-review-graph build [--base BASE]
     code-review-graph update [--base BASE]
     code-review-graph watch
@@ -450,6 +451,42 @@ def main() -> None:
         help="Target platform for MCP config (default: all detected)",
     )
 
+    uninstall_cmd = sub.add_parser(
+        "uninstall",
+        help="Safely remove code-review-graph data, configs, hooks, and generated skills",
+    )
+    uninstall_cmd.add_argument(
+        "--repo",
+        default=None,
+        help="Path inside a Git/SVN repository to clean (default: current directory)",
+    )
+    uninstall_cmd.add_argument(
+        "--all-repos",
+        action="store_true",
+        help="Also clean every repository listed in the CRG registry",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-data",
+        action="store_true",
+        help="Keep graph databases while removing installed integrations",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-user-configs",
+        action="store_true",
+        help="Clean repositories only; do not edit files under the user home",
+    )
+    uninstall_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print every planned action without writing or deleting anything",
+    )
+    uninstall_cmd.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        help="Apply without an interactive confirmation",
+    )
+
     # build
     build_cmd = sub.add_parser("build", help="Full graph build (re-parse all files)")
     build_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
@@ -886,6 +923,56 @@ def main() -> None:
             )
             print(f"\nCompleted {len(results)} benchmark(s).")
             print("Run 'code-review-graph eval --report' to generate tables.")
+        return
+
+    if args.command == "uninstall":
+        from .uninstall import UninstallReport
+        from .uninstall import run as run_uninstall
+
+        target_repo = Path(args.repo).expanduser() if args.repo else None
+        options = {
+            "repo": target_repo,
+            "all_repos": args.all_repos,
+            "keep_data": args.keep_data,
+            "keep_user_configs": args.keep_user_configs,
+        }
+
+        def _print_report(report: UninstallReport) -> None:
+            for action in report.removed_paths:
+                print(f"  delete  {action}")
+            for action in report.edited_paths:
+                print(f"  edit    {action}")
+            for action in report.skipped_paths:
+                print(f"  skip    {action}")
+            for error in report.errors:
+                print(f"  error   {error}")
+
+        preview = run_uninstall(**options, dry_run=True)
+        print("code-review-graph uninstall — planned actions:")
+        _print_report(preview)
+        if preview.total_actions == 0:
+            if preview.errors:
+                raise SystemExit(1)
+            print("  (nothing to do — no code-review-graph artifacts found)")
+            return
+        if args.dry_run:
+            print("\n[dry-run] No changes made.")
+            if preview.errors:
+                raise SystemExit(1)
+            return
+        if not args.yes and not _confirm_yes_no("\nProceed with uninstall?", default_yes=False):
+            print("Aborted.")
+            return
+
+        uninstall_result = run_uninstall(**options, dry_run=False)
+        print("\nApplied actions:")
+        _print_report(uninstall_result)
+        print(
+            f"Done. Removed {len(uninstall_result.removed_paths)} path(s); "
+            f"edited {len(uninstall_result.edited_paths)} shared file(s)."
+        )
+        if uninstall_result.errors:
+            raise SystemExit(1)
         return
 
     if args.command in ("init", "install"):

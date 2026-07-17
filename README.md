@@ -73,6 +73,22 @@ code-review-graph install --platform codebuddy    # configure only CodeBuddy Cod
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
 
+To remove CRG from a Git or SVN project, use the symmetric uninstall command
+from anywhere inside its working tree. The target is normalized to the working
+tree root, and non-repository directories are refused. It removes only
+CRG-owned files and entries; unrelated MCP servers, hooks, skills, and JSONC
+comments remain untouched. Shared configuration changes use atomic replacement
+so a failed write leaves the original file intact.
+
+```bash
+code-review-graph uninstall --dry-run    # preview every action; write nothing
+code-review-graph uninstall              # preview, ask for confirmation, then apply
+code-review-graph uninstall --yes        # apply without prompting
+code-review-graph uninstall --all-repos  # also clean every registered repository
+code-review-graph uninstall --keep-data  # remove integrations but keep graph databases
+code-review-graph uninstall --keep-user-configs --repo .  # clean this project only
+```
+
 Then open your project and ask your AI assistant:
 
 ```
@@ -314,6 +330,7 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 ```bash
 code-review-graph install          # Auto-detect and configure all platforms
 code-review-graph install --platform <name>  # Target a specific platform
+code-review-graph uninstall --dry-run  # Preview safe removal of installed artifacts
 code-review-graph build            # Parse entire codebase
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics

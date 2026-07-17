@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `code-review-graph uninstall` as a safe, symmetric counterpart to
+  `install` (#482, replacing PR #491). It derives MCP cleanup from the live
+  platform specifications, preserves unrelated shared configuration and JSONC
+  comments, commits shared-file edits with atomic replacement, removes only
+  CRG-owned hook/skill files, requires and normalizes Git/SVN repository roots,
+  enforces repository/home boundaries, and supports dry-run,
+  registered-repository, data-retention, and user-config-retention modes.
+
 ### Fixed
 
 - Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
