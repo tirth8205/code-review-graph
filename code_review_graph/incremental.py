@@ -82,6 +82,16 @@ def _run_spring_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Spring application-event resolver without failing a build."""
+    try:
+        from .event_resolver import resolve_spring_events
+        return resolve_spring_events(store)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Spring event resolver failed: %s", exc)
+        return None
+
+
 def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Temporal workflow/activity call resolver, swallowing any failure so
     build never fails because of it. Returns stats or None on error.
@@ -947,6 +957,7 @@ def full_build(
 
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
+    spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
 
     return {
@@ -956,6 +967,7 @@ def full_build(
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
     }
 
@@ -1085,6 +1097,9 @@ def incremental_update(
 
     spring_changed = any(rp.endswith(".java") for rp in all_files)
     spring_stats = _run_spring_resolver(store) if spring_changed else None
+    spring_event_stats = (
+        _run_spring_event_resolver(store) if spring_changed else None
+    )
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
 
     return {
@@ -1096,6 +1111,7 @@ def incremental_update(
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
     }
 

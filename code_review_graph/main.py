@@ -238,6 +238,8 @@ def query_graph_tool(
     - inheritors_of: Find classes inheriting from the target
     - triggers_of: Find methods invoked by a scheduler or other trigger
     - triggered_by: Find schedulers or other triggers that invoke the target
+    - publishers_of: Find methods that publish an event
+    - listeners_of: Find methods that listen for an event
     - file_summary: Get all nodes in a file
 
     Args:

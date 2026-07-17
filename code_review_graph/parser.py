@@ -613,6 +613,10 @@ _KAFKA_PRODUCER_TYPES = frozenset({
 # is its explicit Java container form.
 _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 
+_SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
+_SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
+_JAVA_PACKAGE_KEY = "__crg_java_package__"
+
 
 # ---------------------------------------------------------------------------
 # ReScript regex patterns and helpers (no tree-sitter grammar bundled)
@@ -5571,6 +5575,187 @@ class CodeParser:
             ))
         return len(annotations)
 
+    def _java_annotations_named(self, method_node, names: frozenset[str]) -> list:
+        """Return direct Java method annotations whose simple names match."""
+        matches: list = []
+        for child in method_node.children:
+            if child.type != "modifiers":
+                continue
+            for annotation in child.children:
+                if annotation.type not in ("annotation", "marker_annotation"):
+                    continue
+                if self._java_annotation_name(annotation) in names:
+                    matches.append(annotation)
+        return matches
+
+    @staticmethod
+    def _java_type_name(node) -> Optional[str]:
+        """Extract the outer Java reference type from a type-bearing AST node."""
+        if node.type in ("type_identifier", "scoped_type_identifier"):
+            return node.text.decode("utf-8", errors="replace")
+        for child in node.children:
+            found = CodeParser._java_type_name(child)
+            if found:
+                return found
+        return None
+
+    @staticmethod
+    def _resolve_java_type_identity(
+        type_name: str,
+        import_map: dict[str, str],
+    ) -> str:
+        """Resolve a Java type to a stable package-qualified identity."""
+        normalized = type_name.strip()
+        if not normalized:
+            return normalized
+        head, separator, tail = normalized.partition(".")
+        imported = import_map.get(head)
+        if imported:
+            return f"{imported}.{tail}" if separator else imported
+        if separator and head[:1].islower():
+            return normalized
+        package = import_map.get(_JAVA_PACKAGE_KEY, "")
+        return f"{package}.{normalized}" if package else normalized
+
+    @staticmethod
+    def _descendants_of_type(node, node_type: str) -> list:
+        matches: list = []
+        if node.type == node_type:
+            matches.append(node)
+        for child in node.children:
+            matches.extend(CodeParser._descendants_of_type(child, node_type))
+        return matches
+
+    def _emit_spring_event_listener_edges(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        import_map: dict[str, str],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit package-qualified HANDLES edges for ``@EventListener``."""
+        emitted = 0
+        source = self._qualify(method_name, file_path, class_name)
+        for annotation in self._java_annotations_named(
+            method_node,
+            _SPRING_EVENT_LISTENER_ANNOTATIONS,
+        ):
+            type_names: list[str] = []
+            for class_literal in self._descendants_of_type(annotation, "class_literal"):
+                type_name = self._java_type_name(class_literal)
+                if type_name:
+                    type_names.append(type_name)
+
+            if not type_names:
+                parameters = next(
+                    (
+                        child for child in method_node.children
+                        if child.type == "formal_parameters"
+                    ),
+                    None,
+                )
+                if parameters is not None:
+                    parameter = next(
+                        (
+                            child for child in parameters.children
+                            if child.type == "formal_parameter"
+                        ),
+                        None,
+                    )
+                    if parameter is not None:
+                        type_name = self._java_type_name(parameter)
+                        if type_name:
+                            type_names.append(type_name)
+
+            attributes = self._java_annotation_attributes(annotation)
+            seen: set[str] = set()
+            for type_name in type_names:
+                identity = self._resolve_java_type_identity(type_name, import_map)
+                if not identity or identity in seen:
+                    continue
+                seen.add(identity)
+                extra = {
+                    "event_type": identity,
+                    "resolution": "spring_event_listener",
+                }
+                for key in ("condition", "id", "defaultExecution"):
+                    if key in attributes:
+                        extra[key] = attributes[key]
+                edges.append(EdgeInfo(
+                    kind="HANDLES",
+                    source=source,
+                    target=f"event::{identity}",
+                    file_path=file_path,
+                    line=annotation.start_point[0] + 1,
+                    extra=extra,
+                ))
+                emitted += 1
+        return emitted
+
+    def _emit_spring_event_publish_edges(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        import_map: dict[str, str],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit PUBLISHES edges for direct ``publishEvent(new Event())`` calls."""
+        source = self._qualify(method_name, file_path, class_name)
+        emitted = 0
+
+        def visit(node) -> None:
+            nonlocal emitted
+            if node.type == "method_invocation":
+                receiver, invoked = self._get_member_call_receiver_method(node, "java")
+                if invoked in _SPRING_EVENT_PUBLISH_METHODS:
+                    arguments = next(
+                        (
+                            child for child in node.children
+                            if child.type == "argument_list"
+                        ),
+                        None,
+                    )
+                    if arguments is not None:
+                        for argument in arguments.children:
+                            if argument.type != "object_creation_expression":
+                                continue
+                            type_name = self._java_type_name(argument)
+                            if not type_name:
+                                continue
+                            identity = self._resolve_java_type_identity(
+                                type_name,
+                                import_map,
+                            )
+                            extra = {
+                                "event_type": identity,
+                                "resolution": "spring_publish_event",
+                            }
+                            if receiver:
+                                extra["receiver"] = receiver
+                            edges.append(EdgeInfo(
+                                kind="PUBLISHES",
+                                source=source,
+                                target=f"event::{identity}",
+                                file_path=file_path,
+                                line=node.start_point[0] + 1,
+                                extra=extra,
+                            ))
+                            emitted += 1
+            for child in node.children:
+                visit(child)
+
+        body = next(
+            (child for child in method_node.children if child.type == "block"),
+            None,
+        )
+        if body is not None:
+            visit(body)
+        return emitted
+
     def _emit_temporal_stub_fields(
         self,
         class_node,
@@ -6049,6 +6234,41 @@ class CodeParser:
                 if schedule_count:
                     method_extra["scheduled"] = True
                     method_extra["schedule_count"] = schedule_count
+            listener_count = self._emit_spring_event_listener_edges(
+                child,
+                name,
+                enclosing_class,
+                file_path,
+                import_map or {},
+                edges,
+            )
+            if listener_count:
+                method_extra["spring_event_listener"] = True
+                method_extra["spring_event_type_count"] = listener_count
+
+            publish_count = self._emit_spring_event_publish_edges(
+                child,
+                name,
+                enclosing_class,
+                file_path,
+                import_map or {},
+                edges,
+            )
+            if publish_count:
+                method_extra["spring_event_publisher"] = True
+                method_extra["spring_event_publish_count"] = publish_count
+        elif language == "java":
+            publish_count = self._emit_spring_event_publish_edges(
+                child,
+                name,
+                enclosing_class,
+                file_path,
+                import_map or {},
+                edges,
+            )
+            if publish_count:
+                method_extra["spring_event_publisher"] = True
+                method_extra["spring_event_publish_count"] = publish_count
 
         # Persist annotations/decorators so consumers can filter on them
         # (e.g. "show me all @Composable functions").  Stored in BOTH
@@ -7456,6 +7676,13 @@ class CodeParser:
 
         for child in root.children:
             node_type = child.type
+
+            if language == "java" and node_type == "package_declaration":
+                package = child.text.decode("utf-8", errors="replace").strip()
+                package = package.removeprefix("package ").removesuffix(";").strip()
+                if package:
+                    import_map[_JAVA_PACKAGE_KEY] = package
+                continue
 
             # Kotlin groups top-level imports under an ``import_list`` node,
             # while the generic import table contains ``import_header``.

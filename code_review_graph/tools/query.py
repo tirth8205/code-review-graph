@@ -30,6 +30,8 @@ _QUERY_PATTERNS = {
     "inheritors_of": "Find all classes that inherit from a given class",
     "triggers_of": "Find methods invoked by a scheduler or other trigger",
     "triggered_by": "Find schedulers or other triggers that invoke a method",
+    "publishers_of": "Find methods that publish an event",
+    "listeners_of": "Find methods that listen for an event",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -162,7 +164,8 @@ def query_graph(
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
                  importers_of, children_of, tests_for, inheritors_of,
-                 triggers_of, triggered_by, file_summary.
+                 triggers_of, triggered_by, publishers_of, listeners_of,
+                 file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -387,6 +390,16 @@ def query_graph(
                 trigger = store.get_node(edge.source_qualified)
                 if trigger:
                     results.append(node_to_dict(trigger))
+                edges_out.append(edge_to_dict(edge))
+
+        elif pattern in ("publishers_of", "listeners_of"):
+            edge_kind = "PUBLISHES" if pattern == "publishers_of" else "HANDLES"
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != edge_kind:
+                    continue
+                source = store.get_node(edge.source_qualified)
+                if source:
+                    results.append(node_to_dict(source))
                 edges_out.append(edge_to_dict(edge))
 
         elif pattern == "file_summary":
