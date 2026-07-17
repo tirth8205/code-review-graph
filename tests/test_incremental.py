@@ -194,7 +194,7 @@ class TestIgnorePatterns:
 
     def test_custom_ignore_file(self, tmp_path):
         ignore = tmp_path / ".code-review-graphignore"
-        ignore.write_text("custom/**\n# comment\n\nvendor/**\n")
+        ignore.write_text("custom/\n# comment\n\nvendor/**\n")
         patterns = _load_ignore_patterns(tmp_path)
         assert "custom/**" in patterns
         assert "vendor/**" in patterns
@@ -208,6 +208,17 @@ class TestIgnorePatterns:
         assert _should_ignore("test.pyc", patterns)
         assert _should_ignore(".git/HEAD", patterns)
         assert not _should_ignore("src/main.py", patterns)
+
+    def test_should_ignore_directory_trailing_slash_pattern(self, tmp_path):
+        ignore = tmp_path / ".code-review-graphignore"
+        ignore.write_text("vendor/\ngenerated/\n")
+
+        patterns = _load_ignore_patterns(tmp_path)
+        assert "vendor/**" in patterns
+        assert "generated/**" in patterns
+        assert _should_ignore("vendor/autoload.php", patterns)
+        assert _should_ignore("generated/code.js", patterns)
+        assert not _should_ignore("src/vendorized/file.php", patterns)
 
     def test_should_ignore_nested_dependency_dirs(self):
         """Nested node_modules / vendor / .gradle should be ignored (#91)."""

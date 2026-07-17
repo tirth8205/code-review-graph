@@ -359,7 +359,14 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
         for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                patterns.append(line)
+                # Treat plain directory entries like `.venv/` or `vendor/` as
+                # recursive globs, matching `.gitignore` behavior for directories.
+                if line.startswith("/"):
+                    line = line[1:]
+                if line.endswith("/"):
+                    line = f"{line}**"
+                if line:
+                    patterns.append(line)
     return patterns
 
 
