@@ -20,6 +20,9 @@
 - Incremental Git change discovery now reads NUL-delimited byte output, so
   Unicode, whitespace, newline, and literal arrow paths are preserved while
   rename/copy records keep destination-only semantics (PR #618).
+- Heavy `get_minimal_context` work now uses the same explicit worker-thread
+  wrapper as the other long-running MCP tools, independent of FastMCP's sync
+  dispatch behavior (replacing PR #394).
 - Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
   consumers, with a parser-to-store-to-query regression (#527/#559/#598 class).
 - C# receiver calls now capture bare, chained, member, and null-conditional

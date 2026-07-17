@@ -167,7 +167,7 @@ async def run_postprocess_tool(
 
 
 @mcp.tool()
-def get_minimal_context_tool(
+async def get_minimal_context_tool(
     task: str = "",
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
@@ -179,6 +179,10 @@ def get_minimal_context_tool(
     next tools in a single compact response. Use this as the entry point
     before any other graph tool to minimize token usage.
 
+    Offloaded via ``asyncio.to_thread`` for consistency with the other
+    heavy tools and to keep this wrapper independent of FastMCP's current
+    sync-dispatch implementation.
+
     Args:
         task: What you are doing (e.g. "review PR #42", "debug login timeout").
         changed_files: Explicit list of changed files. Auto-detected if omitted.
@@ -186,10 +190,14 @@ def get_minimal_context_tool(
         base: Git ref for diff comparison. Default: HEAD~1.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_minimal_context(
-        task=task, changed_files=changed_files,
-        repo_root=root, base=base,
-    ), root)
+
+    def _run() -> dict:
+        return with_provenance(get_minimal_context(
+            task=task, changed_files=changed_files,
+            repo_root=root, base=base,
+        ), root)
+
+    return await asyncio.to_thread(_run)
 
 
 @mcp.tool()

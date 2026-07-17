@@ -140,6 +140,7 @@ class TestLongRunningToolsAreAsync:
     HEAVY_TOOLS = {
         "build_or_update_graph_tool",
         "run_postprocess_tool",
+        "get_minimal_context_tool",
         "embed_graph_tool",
         "detect_changes_tool",
         "generate_wiki_tool",
@@ -148,13 +149,14 @@ class TestLongRunningToolsAreAsync:
     HEAVY_TOOL_IMPLS = {
         "build_or_update_graph_tool": "build_or_update_graph",
         "run_postprocess_tool": "run_postprocess",
+        "get_minimal_context_tool": "get_minimal_context",
         "embed_graph_tool": "embed_graph",
         "detect_changes_tool": "detect_changes_func",
         "generate_wiki_tool": "generate_wiki_func",
     }
 
     def test_heavy_tools_are_coroutines(self):
-        """Regression guard for #46/#136: the 5 long-running MCP tools must
+        """Regression guard for #46/#136: the 6 long-running MCP tools must
         stay ``async def`` so FastMCP can offload their blocking work via
         ``asyncio.to_thread`` and keep the stdio event loop responsive.
 
