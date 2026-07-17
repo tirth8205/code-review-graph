@@ -1369,6 +1369,105 @@ class TestBuildPostprocess:
         assert capsys.readouterr().out == ""
 
 
+class TestBuildPostprocessResolvesBareEndpoints:
+    """Every explicit build/postprocess path applies safe endpoint resolution."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.db_path = Path(self.tmp.name)
+        self.store = GraphStore(self.db_path)
+        app_file = "/repo/src/app.py"
+        test_file = "/repo/tests/test_app.py"
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="parse",
+            file_path=app_file,
+            line_start=1,
+            line_end=5,
+            language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Test",
+            name="test_parse",
+            file_path=test_file,
+            line_start=1,
+            line_end=5,
+            language="python",
+            is_test=True,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="IMPORTS_FROM",
+            source=test_file,
+            target=app_file,
+            file_path=test_file,
+            line=1,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="parse",
+            target=f"{test_file}::test_parse",
+            file_path=test_file,
+            line=2,
+        ))
+        self.store.commit()
+
+    def teardown_method(self):
+        try:
+            self.store.close()
+        except Exception:
+            pass
+        self.db_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _tested_by_source(store: GraphStore) -> str:
+        row = store._conn.execute(
+            "SELECT source_qualified FROM edges WHERE kind = 'TESTED_BY'"
+        ).fetchone()
+        return row["source_qualified"]
+
+    def test_minimal_build_postprocess_resolves(self):
+        from code_review_graph.tools.build import _run_postprocess
+
+        result: dict = {}
+        warnings = _run_postprocess(self.store, result, "minimal")
+
+        assert warnings == []
+        assert result["bare_edges_resolved"] == 1
+        assert self._tested_by_source(self.store) == "/repo/src/app.py::parse"
+
+    def test_none_build_postprocess_skips_resolution(self):
+        from code_review_graph.tools.build import _run_postprocess
+
+        result: dict = {}
+        _run_postprocess(self.store, result, "none")
+
+        assert "bare_edges_resolved" not in result
+        assert self._tested_by_source(self.store) == "parse"
+
+    def test_manual_run_postprocess_resolves(self, monkeypatch):
+        import code_review_graph.tools.build as build_module
+
+        monkeypatch.setattr(
+            build_module,
+            "_get_store",
+            lambda _repo_root: (self.store, Path("/repo")),
+        )
+        result = build_module.run_postprocess(
+            flows=False,
+            communities=False,
+            fts=False,
+            repo_root="/repo",
+        )
+
+        assert result["bare_edges_resolved"] == 1
+        reopened = GraphStore(self.db_path)
+        try:
+            assert self._tested_by_source(reopened) == "/repo/src/app.py::parse"
+        finally:
+            reopened.close()
+
+
 class TestComputeSummaries:
     """Tests for _compute_summaries: pins the contents of the three
     summary tables so that the batch-aggregate refactor can't silently

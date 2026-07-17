@@ -1,12 +1,13 @@
 """Shared post-build processing pipeline.
 
-After the core Tree-sitter parse (full_build or incremental_update), four
+After the core Tree-sitter parse (full_build or incremental_update), five
 post-processing steps must run to populate derived tables:
 
-1. Compute node signatures
-2. Rebuild FTS5 search index
-3. Trace execution flows
-4. Detect code communities
+1. Resolve evidence-backed bare edge endpoints
+2. Compute node signatures
+3. Rebuild FTS5 search index
+4. Trace execution flows
+5. Detect code communities
 
 This module extracts that pipeline so every entry point — MCP tool, CLI
 commands, and watch mode — produces identical results.
@@ -39,6 +40,7 @@ def run_post_processing(store: GraphStore) -> dict[str, Any]:
     result: dict[str, Any] = {}
     warnings: list[str] = []
 
+    _resolve_bare_endpoints(store, result, warnings)
     _compute_signatures(store, result, warnings)
     _rebuild_fts_index(store, result, warnings)
     _trace_flows(store, result, warnings)
@@ -50,6 +52,23 @@ def run_post_processing(store: GraphStore) -> dict[str, Any]:
 
 
 # -- Individual steps (private) ------------------------------------------
+
+
+def _resolve_bare_endpoints(
+    store: GraphStore,
+    result: dict[str, Any],
+    warnings: list[str],
+) -> None:
+    """Qualify bare CALLS/TESTED_BY endpoints before derived graph steps."""
+    try:
+        resolved = store.resolve_bare_call_targets()
+        resolved += store.resolve_bare_tested_by_sources()
+        result["bare_edges_resolved"] = resolved
+    except sqlite3.OperationalError as e:
+        logger.warning("Bare-endpoint resolution failed: %s", e)
+        warnings.append(
+            f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+        )
 
 
 def _compute_signatures(

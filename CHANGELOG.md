@@ -23,6 +23,10 @@
 - Heavy `get_minimal_context` work now uses the same explicit worker-thread
   wrapper as the other long-running MCP tools, independent of FastMCP's sync
   dispatch behavior (replacing PR #394).
+- Bare CALLS targets and TESTED_BY sources are qualified during postprocessing
+  only when same-file or import evidence identifies exactly one node. Query-time
+  fallbacks apply the same rule, preventing unrelated same-named functions from
+  inheriting tests (replacing the unsound subset of PR #601).
 - Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
   consumers, with a parser-to-store-to-query regression (#527/#559/#598 class).
 - C# receiver calls now capture bare, chained, member, and null-conditional
