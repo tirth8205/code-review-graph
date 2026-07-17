@@ -86,3 +86,21 @@ jobs:
         run: pip install -e ".[dev]" pytest-cov
       - name: Run tests with coverage
         run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+
+  windows-codex-hooks:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run Codex hook tests through cmd.exe
+        run: >-
+          python -m pytest --tb=short -q
+          tests/test_skills.py::TestGenerateCodexHooksConfig::test_windows_command_executes_in_git_repo_and_drains_stdin
+          tests/test_skills.py::TestGenerateCodexHooksConfig::test_windows_command_fails_open_outside_git_repo
+          tests/test_skills.py::TestInstallCodexHooks::test_upgrades_existing_hooks_with_windows_commands

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex hook installation now emits native Windows commands that drain the
+  hook event from stdin, fail open outside Git repositories, and upgrade
+  existing Unix-only hook entries without duplicating or replacing user hooks
+  (#620, PR #621).
+
 ## [2.3.6] - 2026-06-10
 
 **Community-response release.** Built from a full audit of every open PR,
