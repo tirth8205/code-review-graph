@@ -539,3 +539,134 @@ impl MemoryRepository {
             )
         finally:
             store.close()
+
+
+class TestPHPScopedCallReconciliation:
+    def test_same_file_and_self_calls_resolve_without_cross_class_collisions(
+        self, tmp_path,
+    ):
+        path = tmp_path / "Services.php"
+        _, edges = _parse(
+            path,
+            """<?php
+class FirstService {
+    public static function run(): void {}
+}
+
+class SecondService {
+    public static function run(): void {}
+
+    public function dispatch(): void {
+        self::run();
+        FirstService::run();
+    }
+}
+""",
+        )
+
+        targets = {
+            edge.target
+            for edge in edges
+            if edge.kind == "CALLS"
+            and edge.source == f"{path}::SecondService.dispatch"
+        }
+        assert targets == {
+            f"{path}::SecondService.run",
+            f"{path}::FirstService.run",
+        }
+
+    def test_import_alias_and_fully_qualified_calls_use_composer_evidence(
+        self, tmp_path,
+    ):
+        (tmp_path / "composer.json").write_text(
+            '{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
+            encoding="utf-8",
+        )
+        mailer = tmp_path / "app" / "Service" / "Mailer.php"
+        mailer.parent.mkdir(parents=True)
+        mailer.write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "class Mailer { public static function send(): void {} }\n",
+            encoding="utf-8",
+        )
+        caller = tmp_path / "app" / "Controller" / "SignupController.php"
+        caller.parent.mkdir(parents=True)
+        caller.write_text(
+            "<?php\nnamespace App\\Controller;\n"
+            "use App\\Service\\Mailer as Delivery;\n"
+            "class SignupController {\n"
+            "  public function register(): void {\n"
+            "    Delivery::send();\n"
+            "    \\App\\Service\\Mailer::send();\n"
+            "  }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        _, edges = CodeParser(repo_root=tmp_path).parse_file(caller)
+        target = f"{mailer.resolve()}::Mailer.send"
+        calls = [
+            edge for edge in edges
+            if edge.kind == "CALLS" and edge.source.endswith("::SignupController.register")
+        ]
+        assert [edge.target for edge in calls].count(target) == 2
+        assert {edge.extra["scoped_resolution"] for edge in calls} == {
+            "import", "fully_qualified",
+        }
+
+    def test_global_cross_file_call_without_evidence_stays_unresolved(self, tmp_path):
+        (tmp_path / "Mailer.php").write_text(
+            "<?php class Mailer { public static function send(): void {} }\n",
+            encoding="utf-8",
+        )
+        caller = tmp_path / "Caller.php"
+        caller.write_text(
+            "<?php function register(): void { Mailer::send(); }\n",
+            encoding="utf-8",
+        )
+        _, edges = CodeParser(repo_root=tmp_path).parse_file(caller)
+
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        assert len(calls) == 1
+        assert calls[0].target == "Mailer::send"
+
+    def test_incremental_update_reresolves_only_changed_php_file(
+        self, tmp_path, monkeypatch,
+    ):
+        from code_review_graph.incremental import full_build, incremental_update
+
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "composer.json").write_text(
+            '{"autoload":{"psr-4":{"App\\\\":"app/"}}}',
+            encoding="utf-8",
+        )
+        mailer = tmp_path / "app" / "Mailer.php"
+        mailer.parent.mkdir()
+        mailer.write_text(
+            "<?php namespace App; "
+            "class Mailer { public static function send(): void {} }\n",
+            encoding="utf-8",
+        )
+        caller = tmp_path / "app" / "Signup.php"
+        source = (
+            "<?php namespace App; use App\\Mailer; "
+            "function register(): void { Mailer::send(); }\n"
+        )
+        caller.write_text(source, encoding="utf-8")
+        target = f"{mailer.resolve()}::Mailer.send"
+
+        store = GraphStore(":memory:")
+        try:
+            assert full_build(tmp_path, store)["errors"] == []
+            caller.write_text(source.replace("function", "\nfunction"), encoding="utf-8")
+            result = incremental_update(
+                tmp_path, store, changed_files=["app/Signup.php"],
+            )
+            assert result["errors"] == []
+            assert any(
+                edge.kind == "CALLS" and edge.target_qualified == target
+                for edge in store.get_edges_by_source(f"{caller.resolve()}::register")
+            )
+        finally:
+            store.close()

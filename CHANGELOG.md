@@ -29,6 +29,10 @@
 
 ### Fixed
 
+- PHP scoped/static calls now resolve during parsing when backed by same-file,
+  enclosing-class, import, qualified-name, or namespace evidence. This keeps
+  incremental work bounded to changed files and leaves unrelated globally
+  unique `Class::method` names unresolved (safe subset of PR #568).
 - Incremental Git change discovery now reads NUL-delimited byte output, so
   Unicode, whitespace, newline, and literal arrow paths are preserved while
   rename/copy records keep destination-only semantics (PR #618).

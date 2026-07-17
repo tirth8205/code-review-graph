@@ -1552,6 +1552,12 @@ class CodeParser:
                 file_path_str,
                 edges,
             )
+            edges = self._resolve_php_scoped_calls(
+                tree.root_node,
+                nodes,
+                edges,
+                file_path_str,
+            )
 
         edges = self._apply_typed_call_targets(edges, typed_call_targets)
 
@@ -7049,6 +7055,227 @@ class CodeParser:
     # PHP / Laravel semantic constructs
     # ------------------------------------------------------------------
 
+    def _resolve_php_scoped_calls(
+        self,
+        root,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        file_path: str,
+    ) -> list[EdgeInfo]:
+        """Resolve PHP ``Class::method`` calls from lexical file evidence.
+
+        Resolution happens during parsing, so incremental updates touch only
+        the changed file. Bare cross-file class names are deliberately left
+        unresolved; accepted evidence is a same-file method, ``self``/``static``,
+        an explicit import, a qualified name, or the current PHP namespace.
+        """
+        methods: dict[tuple[str, str], list[str]] = {}
+        for node in nodes:
+            if (
+                node.language != "php"
+                or node.kind not in ("Function", "Test")
+                or not node.parent_name
+            ):
+                continue
+            key = (node.parent_name.casefold(), node.name.casefold())
+            methods.setdefault(key, []).append(
+                self._qualify(node.name, file_path, node.parent_name),
+            )
+
+        def same_file_target(class_name: str, method: str) -> Optional[str]:
+            candidates = methods.get(
+                (class_name.casefold(), method.casefold()),
+                [],
+            )
+            return candidates[0] if len(candidates) == 1 else None
+
+        def resolve_target(
+            scope: str,
+            method: str,
+            namespace: str,
+            imports: dict[str, str],
+            enclosing_class: Optional[str],
+        ) -> tuple[Optional[str], Optional[str]]:
+            normalized = scope.strip("\\")
+            lowered = normalized.casefold()
+            if lowered in ("self", "static"):
+                if not enclosing_class:
+                    return None, None
+                return (
+                    same_file_target(enclosing_class, method),
+                    "enclosing_class",
+                )
+            if lowered == "parent":
+                return None, None
+
+            if "\\" not in normalized:
+                local = same_file_target(normalized, method)
+                if local is not None:
+                    return local, "same_file"
+
+            head = normalized.partition("\\")[0]
+            imported = imports.get(head.casefold())
+            absolute = scope.startswith("\\")
+            if imported:
+                qualified = self._php_resolve_class_reference(
+                    scope, namespace, imports,
+                )
+                evidence = "import"
+            elif absolute:
+                qualified = normalized
+                evidence = "fully_qualified"
+            elif "\\" in normalized:
+                qualified = self._php_resolve_class_reference(
+                    scope, namespace, imports,
+                )
+                evidence = "qualified"
+            elif namespace:
+                qualified = f"{namespace}\\{normalized}"
+                evidence = "same_namespace"
+            else:
+                return None, None
+
+            resolved_file = self._resolve_module_to_file(
+                qualified, file_path, "php",
+            )
+            if resolved_file is None:
+                return None, None
+            class_name = qualified.rsplit("\\", 1)[-1]
+            return (
+                f"{self._qualify(class_name, resolved_file, None)}.{method}",
+                evidence,
+            )
+
+        resolutions: dict[tuple[int, str, str], tuple[str, str]] = {}
+
+        def walk_node(
+            node,
+            namespace: str,
+            imports: dict[str, str],
+            enclosing_class: Optional[str],
+            enclosing_func: Optional[str],
+            depth: int = 0,
+        ) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type in self._class_types["php"]:
+                class_name = self._get_name(node, "php", "class")
+                for child in node.children:
+                    walk_node(
+                        child,
+                        namespace,
+                        imports,
+                        class_name or enclosing_class,
+                        None,
+                        depth + 1,
+                    )
+                return
+
+            if node.type in self._function_types["php"]:
+                function_name = self._get_name(node, "php", "function")
+                for child in node.children:
+                    walk_node(
+                        child,
+                        namespace,
+                        imports,
+                        enclosing_class,
+                        function_name or enclosing_func,
+                        depth + 1,
+                    )
+                return
+
+            scope, method = self._php_scoped_call_parts(node)
+            if scope and method:
+                target, evidence = resolve_target(
+                    scope,
+                    method,
+                    namespace,
+                    imports,
+                    enclosing_class,
+                )
+                if target is not None and evidence is not None:
+                    stable_scope = scope.lstrip("\\")
+                    source_name = (
+                        self._qualify(
+                            enclosing_func, file_path, enclosing_class,
+                        )
+                        if enclosing_func
+                        else file_path
+                    )
+                    resolutions[(
+                        node.start_point[0] + 1,
+                        source_name,
+                        f"{stable_scope}::{method}",
+                    )] = (target, evidence)
+
+            for child in node.children:
+                walk_node(
+                    child,
+                    namespace,
+                    imports,
+                    enclosing_class,
+                    enclosing_func,
+                    depth + 1,
+                )
+
+        def walk_sequence(
+            container, namespace: str = "", depth: int = 0,
+        ) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            current_namespace = namespace
+            imports: dict[str, str] = {}
+            for child in container.children:
+                if child.type == "namespace_definition":
+                    child_namespace = self._php_namespace_name(child)
+                    block = next(
+                        (
+                            part for part in child.children
+                            if part.type == "compound_statement"
+                        ),
+                        None,
+                    )
+                    if block is not None:
+                        walk_sequence(block, child_namespace, depth + 1)
+                    else:
+                        current_namespace = child_namespace
+                        imports = {}
+                    continue
+                if child.type == "namespace_use_declaration":
+                    imports.update(self._php_import_bindings(child))
+                    continue
+                walk_node(
+                    child,
+                    current_namespace,
+                    imports,
+                    enclosing_class=None,
+                    enclosing_func=None,
+                    depth=depth + 1,
+                )
+
+        walk_sequence(root)
+        if not resolutions:
+            return edges
+
+        resolved: list[EdgeInfo] = []
+        for edge in edges:
+            resolution = resolutions.get((edge.line, edge.source, edge.target))
+            if edge.kind != "CALLS" or resolution is None:
+                resolved.append(edge)
+                continue
+            target, evidence = resolution
+            extra = dict(edge.extra)
+            extra["scoped_resolution"] = evidence
+            resolved.append(EdgeInfo(
+                kind=edge.kind,
+                source=edge.source,
+                target=target,
+                file_path=edge.file_path,
+                line=edge.line,
+                extra=extra,
+            ))
+        return resolved
+
     def _extract_php_laravel_edges(
         self,
         root,
@@ -7301,15 +7528,16 @@ class CodeParser:
 
     @staticmethod
     def _php_scoped_call_parts(node) -> tuple[Optional[str], Optional[str]]:
-        named = [
-            child for child in node.children
-            if child.type in ("name", "qualified_name")
-        ]
-        if len(named) < 2:
+        """Return the static receiver and method for a PHP scoped call."""
+        if node.type != "scoped_call_expression":
             return None, None
-        receiver = named[0].text.decode("utf-8", errors="replace")
-        method = named[-1].text.decode("utf-8", errors="replace")
-        return receiver, method
+        scope = node.child_by_field_name("scope")
+        name = node.child_by_field_name("name")
+        if scope is None or name is None:
+            return None, None
+        receiver = scope.text.decode("utf-8", errors="replace")
+        method = name.text.decode("utf-8", errors="replace")
+        return receiver or None, method or None
 
     @staticmethod
     def _php_class_constant_reference(node) -> Optional[str]:
@@ -10665,16 +10893,10 @@ class CodeParser:
                 return None
 
             if node.type == "scoped_call_expression":
-                parts = []
-                for child in node.children:
-                    if child.type in ("name", "qualified_name"):
-                        raw = child.text.decode("utf-8", errors="replace")
-                        parts.append(_normalize_php_name(raw))
-                if len(parts) >= 2:
-                    return f"{parts[0]}::{parts[-1]}"
-                if parts:
-                    return parts[0]
-                return None
+                scope, method = self._php_scoped_call_parts(node)
+                if not scope or not method:
+                    return None
+                return f"{_normalize_php_name(scope)}::{method}"
 
             if node.type == "object_creation_expression":
                 for child in node.children:

@@ -693,8 +693,14 @@ class TestPHPParsing:
         assert "search" in target_names
 
         # Scoped/static calls
-        assert "QueryUtils::fetchRecords" in targets
-        assert "EncounterService::create" in targets
+        assert any(
+            target.endswith("sample.php::QueryUtils.fetchRecords")
+            for target in targets
+        )
+        assert any(
+            target.endswith("sample.php::EncounterService.create")
+            for target in targets
+        )
         assert any(t.endswith("__construct") for t in run_queries_targets)
         assert any(t.endswith("factory") for t in run_queries_targets)
 
