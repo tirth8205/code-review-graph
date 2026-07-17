@@ -24,6 +24,8 @@
   repeated implementation blocks. Nested/aliased `use` trees, `Self` and
   turbofish calls, and bounded cached Cargo path/workspace dependency resolution
   now retain their original graph targets (replacing PR #526).
+- Added IBM Bob Shell and Bob IDE MCP installation using their distinct,
+  documented configuration paths and command-based STDIO schema (PR #540).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).

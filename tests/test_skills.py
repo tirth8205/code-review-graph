@@ -1560,6 +1560,121 @@ class TestKiroPlatform:
         assert not config_path.exists()
 
 
+class TestBobPlatforms:
+    """Tests for IBM Bob Shell and Bob IDE MCP configuration."""
+
+    def test_bob_platform_entries_follow_current_ibm_contracts(self, tmp_path):
+        bob_shell = PLATFORMS["bob-shell"]
+        bob_ide = PLATFORMS["bob-ide"]
+
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            assert bob_shell["config_path"](tmp_path) == tmp_path / ".bob" / "mcp_settings.json"
+        assert bob_shell["name"] == "Bob Shell"
+        assert bob_ide["name"] == "Bob IDE"
+        assert bob_ide["config_path"](tmp_path) == tmp_path / ".bob" / "mcp.json"
+        for platform_spec in (bob_shell, bob_ide):
+            assert platform_spec["key"] == "mcpServers"
+            assert platform_spec["format"] == "object"
+            assert platform_spec["needs_type"] is False
+
+    def test_install_bob_shell_uses_global_settings_without_stdio_type(self, tmp_path):
+        fake_home = tmp_path / "home"
+        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+            configured = install_platform_configs(tmp_path, target="bob-shell")
+
+        config_path = fake_home / ".bob" / "mcp_settings.json"
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["code-review-graph"]
+        assert configured == ["Bob Shell"]
+        assert "type" not in entry
+        assert entry["cwd"] == str(tmp_path)
+        assert "serve" in entry["args"]
+
+    def test_install_bob_ide_uses_project_settings_without_stdio_type(self, tmp_path):
+        configured = install_platform_configs(tmp_path, target="bob-ide")
+
+        config_path = tmp_path / ".bob" / "mcp.json"
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        entry = data["mcpServers"]["code-review-graph"]
+        assert configured == ["Bob IDE"]
+        assert "type" not in entry
+        assert entry["cwd"] == str(tmp_path)
+        assert "serve" in entry["args"]
+
+    @pytest.mark.parametrize("target", ["bob-shell", "bob-ide"])
+    def test_bob_install_preserves_existing_servers_and_is_idempotent(self, tmp_path, target):
+        fake_home = tmp_path / "home"
+        config_path = (
+            fake_home / ".bob" / "mcp_settings.json"
+            if target == "bob-shell"
+            else tmp_path / ".bob" / "mcp.json"
+        )
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"mcpServers": {"existing": {"command": "existing"}}}),
+            encoding="utf-8",
+        )
+
+        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+            install_platform_configs(tmp_path, target=target)
+            first = config_path.read_text(encoding="utf-8")
+            install_platform_configs(tmp_path, target=target)
+
+        assert config_path.read_text(encoding="utf-8") == first
+        data = json.loads(first)
+        assert data["mcpServers"]["existing"] == {"command": "existing"}
+        assert list(data["mcpServers"]).count("code-review-graph") == 1
+
+    def test_all_detects_bob_ide_from_workspace_directory(self, tmp_path):
+        (tmp_path / ".bob").mkdir()
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.shutil.which", return_value=None),
+        ):
+            configured = install_platform_configs(tmp_path, target="all")
+
+        assert "Bob IDE" in configured
+        data = json.loads((tmp_path / ".bob" / "mcp.json").read_text(encoding="utf-8"))
+        assert "type" not in data["mcpServers"]["code-review-graph"]
+
+    def test_all_detects_bob_shell_from_executable(self, tmp_path):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        def find_executable(name):
+            return "/usr/local/bin/bob" if name == "bob" else None
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.shutil.which", side_effect=find_executable),
+        ):
+            configured = install_platform_configs(tmp_path, target="all")
+
+        assert "Bob Shell" in configured
+        data = json.loads(
+            (fake_home / ".bob" / "mcp_settings.json").read_text(encoding="utf-8")
+        )
+        assert "type" not in data["mcpServers"]["code-review-graph"]
+
+    def test_all_does_not_create_bob_files_without_detection_signal(self, tmp_path):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.shutil.which", return_value=None),
+        ):
+            configured = install_platform_configs(tmp_path, target="all")
+
+        assert "Bob Shell" not in configured
+        assert "Bob IDE" not in configured
+        assert not (fake_home / ".bob" / "mcp_settings.json").exists()
+        assert not (tmp_path / ".bob" / "mcp.json").exists()
+
+
 class TestCopilotPlatform:
     """Tests for GitHub Copilot platform support."""
 

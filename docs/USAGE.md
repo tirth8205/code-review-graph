@@ -19,6 +19,8 @@ code-review-graph install --platform codex
 code-review-graph install --platform cursor
 code-review-graph install --platform claude-code
 code-review-graph install --platform codebuddy
+code-review-graph install --platform bob-shell
+code-review-graph install --platform bob-ide
 ```
 
 ### Supported Platforms
@@ -40,6 +42,15 @@ code-review-graph install --platform codebuddy
 | **Qoder** | `.qoder/mcp.json` |
 | **GitHub Copilot** | `.vscode/mcp.json` |
 | **GitHub Copilot CLI** | `~/.copilot/mcp-config.json` |
+| **IBM Bob Shell** | `~/.bob/mcp_settings.json` |
+| **IBM Bob IDE** | `.bob/mcp.json` |
+
+The IBM Bob paths and command-based STDIO entries follow the official
+[Bob Shell MCP](https://bob.ibm.com/docs/shell/configuration/mcp/mcp-bobshell)
+and [Bob IDE MCP](https://bob.ibm.com/docs/ide/configuration/mcp/mcp-in-bob)
+contracts. `install --platform all` configures Bob only when its executable,
+global MCP file, or workspace `.bob` directory already provides a detection
+signal.
 
 The CodeBuddy project layout follows its official documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),
