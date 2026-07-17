@@ -481,7 +481,12 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "julia": [
         "struct_definition", "abstract_definition", "module_definition",
     ],
-    "verilog": ["module_declaration", "interface_declaration", "class_declaration"],
+    "verilog": [
+        "module_declaration",
+        "interface_declaration",
+        "class_declaration",
+        "package_declaration",
+    ],
     # GDScript: inner classes use ``class Name:`` (class_definition); the
     # file-level ``class_name Name`` gives the script itself an identity.
     "gdscript": ["class_definition", "class_name_statement"],
@@ -668,8 +673,12 @@ _CALL_TYPES: dict[str, list[str]] = {
         "macrocall_expression",
     ],
     "verilog": [
-        "module_instantiation", "function_subroutine_call", "subroutine_call", "system_tf_call"
-        ],
+        "module_instantiation",
+        "interface_instantiation",
+        "function_subroutine_call",
+        "subroutine_call",
+        "system_tf_call",
+    ],
     # GDScript: bare calls produce ``call``; ``obj.method()`` is an
     # ``attribute`` node whose right-hand side is an ``attribute_call``.
     "gdscript": ["call", "attribute_call"],
@@ -4818,6 +4827,18 @@ class CodeParser:
                 child, node_type, source, language, file_path,
                 nodes, edges, enclosing_class, enclosing_func,
                 import_map, defined_names, _depth,
+            ):
+                continue
+
+            # --- Verilog/SystemVerilog structural declarations ---
+            if language == "verilog" and self._extract_verilog_constructs(
+                child,
+                node_type,
+                file_path,
+                nodes,
+                edges,
+                enclosing_class,
+                enclosing_func,
             ):
                 continue
 
@@ -9306,6 +9327,347 @@ class CodeParser:
 
         return False
 
+    def _extract_verilog_constructs(
+        self,
+        child,
+        node_type: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> bool:
+        """Index module-level RTL declarations without inventing local globals.
+
+        Signal-like declarations use Function nodes for backward-compatible
+        storage, but carry ``extra["verilog_kind"]`` so function-oriented
+        analyses can exclude them. Function/task-local declarations are
+        intentionally consumed without emission because the graph has no
+        variable-scope identity model.
+        """
+
+        def decode(node) -> str:
+            return node.text.decode("utf-8", errors="replace")
+
+        def find_simple_identifier(node) -> Optional[str]:
+            if node.type == "simple_identifier":
+                return decode(node)
+            for sub in node.children:
+                found = find_simple_identifier(sub)
+                if found:
+                    return found
+            return None
+
+        def emit(
+            name: Optional[str],
+            source_node,
+            kind: str,
+            modifiers: Optional[str] = None,
+            return_type: Optional[str] = None,
+            default: Optional[str] = None,
+        ) -> None:
+            if not name:
+                return
+            if any(
+                node.name == name
+                and node.parent_name == enclosing_class
+                and node.extra.get("verilog_kind") == kind
+                for node in nodes
+            ):
+                return
+            extra: dict = {"verilog_kind": kind}
+            if default is not None:
+                extra["default"] = default
+            qualified = self._qualify(name, file_path, enclosing_class)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=name,
+                file_path=file_path,
+                line_start=source_node.start_point[0] + 1,
+                line_end=source_node.end_point[0] + 1,
+                language="verilog",
+                parent_name=enclosing_class,
+                return_type=return_type,
+                modifiers=modifiers,
+                extra=extra,
+            ))
+            container = (
+                self._qualify(enclosing_class, file_path, None)
+                if enclosing_class
+                else file_path
+            )
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=container,
+                target=qualified,
+                file_path=file_path,
+                line=source_node.start_point[0] + 1,
+            ))
+
+        local_declarations = {
+            "data_declaration",
+            "input_declaration",
+            "output_declaration",
+            "inout_declaration",
+            "net_declaration",
+            "parameter_declaration",
+            "local_parameter_declaration",
+            "type_declaration",
+        }
+        if enclosing_func is not None and node_type in local_declarations:
+            return True
+
+        if node_type == "list_of_port_declarations":
+            last_direction: Optional[str] = None
+            last_type: Optional[str] = None
+            for port in child.children:
+                if port.type != "ansi_port_declaration":
+                    continue
+                direction = last_direction
+                data_type = last_type
+                name = None
+                for sub in port.children:
+                    if sub.type in (
+                        "variable_port_header",
+                        "net_port_header",
+                        "net_port_header1",
+                        "interface_port_header",
+                    ):
+                        for header_part in sub.children:
+                            if header_part.type == "port_direction":
+                                direction = decode(header_part).strip() or direction
+                            elif header_part.type in (
+                                "data_type",
+                                "net_port_type1",
+                                "variable_port_type",
+                                "data_type_or_implicit1",
+                            ):
+                                data_type = decode(header_part)
+                    elif sub.type == "port_identifier":
+                        name = find_simple_identifier(sub)
+                if name:
+                    last_direction = direction
+                    last_type = data_type
+                    emit(name, port, "port", direction, data_type)
+            return True
+
+        if node_type in (
+            "input_declaration", "output_declaration", "inout_declaration",
+        ):
+            direction = node_type.split("_", 1)[0]
+            data_type = None
+            for sub in child.children:
+                if sub.type in ("data_type", "data_type_or_implicit1"):
+                    data_type = decode(sub)
+            for sub in child.children:
+                if sub.type not in (
+                    "list_of_port_identifiers",
+                    "list_of_variable_identifiers",
+                    "list_of_variable_port_identifiers",
+                ):
+                    continue
+                for identifier in sub.children:
+                    if identifier.type == "port_identifier":
+                        emit(
+                            find_simple_identifier(identifier),
+                            identifier,
+                            "port",
+                            direction,
+                            data_type,
+                        )
+                    elif identifier.type == "simple_identifier":
+                        emit(
+                            decode(identifier),
+                            identifier,
+                            "port",
+                            direction,
+                            data_type,
+                        )
+            return True
+
+        if node_type in (
+            "parameter_declaration", "local_parameter_declaration",
+        ):
+            kind = (
+                "localparam"
+                if node_type == "local_parameter_declaration"
+                else "parameter"
+            )
+            data_type = None
+            for sub in child.children:
+                if sub.type in ("data_type_or_implicit1", "data_type"):
+                    data_type = decode(sub)
+                elif sub.type == "list_of_param_assignments":
+                    for assignment in sub.children:
+                        if assignment.type != "param_assignment":
+                            continue
+                        name = None
+                        default = None
+                        for part in assignment.children:
+                            if part.type in (
+                                "parameter_identifier", "simple_identifier",
+                            ):
+                                name = find_simple_identifier(part)
+                            elif part.type == "constant_param_expression":
+                                default = decode(part)
+                        emit(
+                            name,
+                            assignment,
+                            kind,
+                            return_type=data_type,
+                            default=default,
+                        )
+            return True
+
+        if node_type == "net_declaration":
+            keyword = None
+            for sub in child.children:
+                if sub.type == "net_type":
+                    keyword = decode(sub).strip()
+            for sub in child.children:
+                if sub.type != "list_of_net_decl_assignments":
+                    continue
+                for assignment in sub.children:
+                    if assignment.type == "net_decl_assignment":
+                        emit(
+                            find_simple_identifier(assignment),
+                            assignment,
+                            "net",
+                            keyword,
+                            keyword,
+                        )
+            return True
+
+        if node_type == "data_declaration":
+            if any(
+                sub.type in ("package_import_declaration", "type_declaration")
+                for sub in child.children
+            ):
+                return False
+            data_type = None
+            for sub in child.children:
+                if sub.type == "data_type_or_implicit1":
+                    data_type = decode(sub)
+            keyword = data_type.split()[0] if data_type else None
+            for sub in child.children:
+                if sub.type != "list_of_variable_decl_assignments":
+                    continue
+                for assignment in sub.children:
+                    if assignment.type == "variable_decl_assignment":
+                        emit(
+                            find_simple_identifier(assignment),
+                            assignment,
+                            "net",
+                            keyword,
+                            data_type,
+                        )
+            return True
+
+        if node_type == "type_declaration":
+            name = None
+            data_type = None
+            for sub in child.children:
+                if sub.type == "simple_identifier":
+                    name = decode(sub)
+                elif sub.type == "data_type":
+                    data_type = decode(sub)
+            emit(name, child, "typedef", return_type=data_type)
+            return True
+
+        if node_type == "modport_declaration":
+            for item in child.children:
+                if item.type != "modport_item":
+                    continue
+                name = next(
+                    (
+                        find_simple_identifier(sub)
+                        for sub in item.children
+                        if sub.type == "modport_identifier"
+                    ),
+                    None,
+                )
+                emit(name, item, "modport")
+            return True
+
+        if node_type == "named_port_connection":
+            expression = next(
+                (sub for sub in child.children if sub.type == "expression"),
+                None,
+            )
+            if expression is None:
+                return True
+            roots: set[str] = set()
+
+            def collect_roots(node) -> None:
+                if node.type == "simple_identifier":
+                    roots.add(decode(node))
+                    return
+                for sub in node.children:
+                    if sub.type in (
+                        "select1",
+                        "select",
+                        "bit_select",
+                        "constant_range",
+                        "constant_expression",
+                    ):
+                        continue
+                    collect_roots(sub)
+
+            collect_roots(expression)
+            known_signals = {
+                node.name
+                for node in nodes
+                if node.parent_name == enclosing_class
+                and node.extra.get("verilog_kind") in {
+                    "port", "net", "parameter", "localparam",
+                }
+            }
+            source_name = (
+                self._qualify(enclosing_class, file_path, None)
+                if enclosing_class
+                else file_path
+            )
+            for signal in sorted(roots & known_signals):
+                edges.append(EdgeInfo(
+                    kind="REFERENCES",
+                    source=source_name,
+                    target=self._qualify(signal, file_path, enclosing_class),
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                ))
+            return True
+
+        if node_type in ("covergroup_declaration", "property_declaration"):
+            identifier_type = (
+                "covergroup_identifier"
+                if node_type == "covergroup_declaration"
+                else "property_identifier"
+            )
+            name = next(
+                (
+                    find_simple_identifier(sub)
+                    for sub in child.children
+                    if sub.type == identifier_type
+                ),
+                None,
+            )
+            emit(name, child, node_type.split("_", 1)[0])
+            return True
+
+        if node_type == "sequence_declaration":
+            name = next(
+                (
+                    decode(sub)
+                    for sub in child.children
+                    if sub.type == "simple_identifier"
+                ),
+                None,
+            )
+            emit(name, child, "sequence")
+            return True
+
+        return False
+
     def _collect_file_scope(
         self, root, language: str, source: bytes,
     ) -> tuple[dict[str, str], set[str]]:
@@ -10410,6 +10772,12 @@ class CodeParser:
                             return sub.text.decode("utf-8", errors="replace")
         # Verilog/SystemVerilog: names are nested differently per construct type.
         if language == "verilog":
+            if node.type == "package_declaration":
+                for child in node.children:
+                    if child.type == "package_identifier":
+                        for sub in child.children:
+                            if sub.type == "simple_identifier":
+                                return sub.text.decode("utf-8", errors="replace")
             # module_declaration: name is in module_header > simple_identifier
             if node.type == "module_declaration":
                 for child in node.children:
@@ -11146,8 +11514,10 @@ class CodeParser:
                     return txt or None
             return None
 
-        # Verilog/SystemVerilog: module_instantiation's first child is the module name
-        if language == "verilog" and node.type == "module_instantiation":
+        # Verilog/SystemVerilog: the first child is the instantiated type.
+        if language == "verilog" and node.type in (
+            "module_instantiation", "interface_instantiation",
+        ):
             if first.type == "simple_identifier":
                 return first.text.decode("utf-8", errors="replace")
             return None

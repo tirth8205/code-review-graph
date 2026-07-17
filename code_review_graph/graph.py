@@ -898,6 +898,7 @@ class GraphStore:
             "JOIN nodes n ON n.qualified_name = b.node_qn "
             "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
             "WHERE s.qn IS NULL "
+            "AND n.extra NOT LIKE '%\"verilog_kind\"%' "
             "ORDER BY b.score DESC, b.node_qn "
             "LIMIT ?",
             (max_nodes + 1,),
@@ -909,7 +910,8 @@ class GraphStore:
                 "FROM _impact_best b "
                 "JOIN nodes n ON n.qualified_name = b.node_qn "
                 "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
-                "WHERE s.qn IS NULL"
+                "WHERE s.qn IS NULL "
+                "AND n.extra NOT LIKE '%\"verilog_kind\"%'"
             ).fetchone()[0]
         else:
             total_impacted = len(rows)
@@ -998,6 +1000,10 @@ class GraphStore:
         changed_nodes = self._batch_get_nodes(seeds)
         impacted_qns = set(best) - seeds
         impacted_nodes = self._batch_get_nodes(impacted_qns)
+        impacted_nodes = [
+            node for node in impacted_nodes
+            if not node.extra.get("verilog_kind")
+        ]
         impacted_nodes.sort(
             key=lambda node: (
                 -best.get(node.qualified_name, 0.0),
@@ -1055,8 +1061,13 @@ class GraphStore:
         total_edges = self._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
 
         nodes_by_kind: dict[str, int] = {}
-        for row in self._conn.execute("SELECT kind, COUNT(*) as cnt FROM nodes GROUP BY kind"):
-            nodes_by_kind[row["kind"]] = row["cnt"]
+        for row in self._conn.execute(
+            "SELECT CASE WHEN extra LIKE '%\"verilog_kind\"%' THEN 'Signal' "
+            "ELSE kind END AS display_kind, COUNT(*) AS cnt FROM nodes "
+            "GROUP BY CASE WHEN extra LIKE '%\"verilog_kind\"%' "
+            "THEN 'Signal' ELSE kind END"
+        ):
+            nodes_by_kind[row["display_kind"]] = row["cnt"]
 
         edges_by_kind: dict[str, int] = {}
         for row in self._conn.execute("SELECT kind, COUNT(*) as cnt FROM edges GROUP BY kind"):
@@ -1108,6 +1119,7 @@ class GraphStore:
             "line_start IS NOT NULL",
             "line_end IS NOT NULL",
             "(line_end - line_start + 1) >= ?",
+            "extra NOT LIKE '%\"verilog_kind\"%'",
         ]
         params: list = [min_lines]
 

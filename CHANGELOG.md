@@ -16,6 +16,10 @@
   multiline members, properties, calls, inheritance, and interfaces. Same-file
   targets resolve case-insensitively only when scope evidence is unique, and
   overloads share one stable graph symbol (replacing PR #517).
+- Expanded SystemVerilog structure with ports, nets, parameters, packages,
+  typedefs, modports, port references, and verification declarations. Function
+  locals are excluded rather than promoted to module globals, and signal nodes
+  no longer pollute function risk, flow, dead-code, or size analyses (PR #522).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).

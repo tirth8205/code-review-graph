@@ -187,6 +187,8 @@ def detect_entry_points(
     for node in candidate_nodes:
         if not include_tests and (node.is_test or _is_test_file(node.file_path)):
             continue
+        if node.extra.get("verilog_kind"):
+            continue
 
         is_entry = False
 

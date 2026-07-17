@@ -372,6 +372,9 @@ def find_dead_code(
             if _MOCK_NAME_RE.search(node.name):
                 continue
 
+        if node.extra.get("verilog_kind"):
+            continue
+
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
             continue
@@ -643,7 +646,10 @@ def suggest_refactorings(store: GraphStore) -> list[dict[str, Any]]:
         }
 
         # Check functions called only by members of a different community.
-        all_funcs = store.get_nodes_by_kind(["Function"])
+        all_funcs = [
+            node for node in store.get_nodes_by_kind(["Function"])
+            if not node.extra.get("verilog_kind")
+        ]
 
         for fnode in all_funcs:
             f_community = node_community.get(fnode.qualified_name)
