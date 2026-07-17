@@ -10,12 +10,9 @@ Run: python3 scripts/diagnose_pypi_connectivity.py
 """
 from __future__ import annotations
 
-import json
-import os
 import socket
 import ssl
 import sys
-import time
 import urllib.error
 import urllib.request
 
@@ -29,13 +26,17 @@ def main() -> int:
     print("PyPI check: FAILED (pip/pipx may be unable to download build deps like hatchling).")
     print("Workaround: from the repo root, with https://github.com/astral-sh/uv installed:")
     print('  uv tool install . --force')
-    print("Or run pipx from macOS Terminal.app (outside the IDE) if the failure is terminal-specific.")
+    print(
+        "Or run pipx from macOS Terminal.app (outside the IDE) "
+        "if the failure is terminal-specific."
+    )
     return 1
 
 
 def _try_tls_pypi() -> bool:
     try:
         ctx = ssl.create_default_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         with socket.create_connection(("pypi.org", 443), timeout=15) as sock:
             with ctx.wrap_socket(sock, server_hostname="pypi.org") as tsock:
                 return bool(tsock.version())
