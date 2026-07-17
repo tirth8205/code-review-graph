@@ -142,6 +142,24 @@ class TestGenerateSkills:
             closing_idx = content.index("---", 4)
             assert closing_idx > 0
 
+    def test_skill_frontmatter_names_match_lowercase_directories(self, tmp_path):
+        """Generated and bundled skills use the discovery-safe name format."""
+        generated = generate_skills(tmp_path)
+        bundled = Path(__file__).parents[1] / "skills"
+
+        for skill_name in (
+            "debug-issue",
+            "explore-codebase",
+            "refactor-safely",
+            "review-changes",
+        ):
+            for skill_file in (
+                generated / skill_name / "SKILL.md",
+                bundled / skill_name / "SKILL.md",
+            ):
+                content = skill_file.read_text(encoding="utf-8")
+                assert f"\nname: {skill_name}\n" in content
+
     def test_custom_skills_dir(self, tmp_path):
         custom = tmp_path / "my-skills"
         result = generate_skills(tmp_path, skills_dir=custom)

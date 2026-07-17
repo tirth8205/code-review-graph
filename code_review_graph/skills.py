@@ -535,7 +535,7 @@ def install_platform_configs(
 
 _SKILLS: dict[str, dict[str, str]] = {
     "explore-codebase.md": {
-        "name": "Explore Codebase",
+        "name": "explore-codebase",
         "description": "Navigate and understand codebase structure using the knowledge graph",
         "body": (
             "## Explore Codebase\n\n"
@@ -563,7 +563,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "review-changes.md": {
-        "name": "Review Changes",
+        "name": "review-changes",
         "description": "Perform a structured code review using change detection and impact",
         "body": (
             "## Review Changes\n\n"
@@ -591,7 +591,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "debug-issue.md": {
-        "name": "Debug Issue",
+        "name": "debug-issue",
         "description": "Systematically debug issues using graph-powered code navigation",
         "body": (
             "## Debug Issue\n\n"
@@ -617,7 +617,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "refactor-safely.md": {
-        "name": "Refactor Safely",
+        "name": "refactor-safely",
         "description": "Plan and execute safe refactoring using dependency analysis",
         "body": (
             "## Refactor Safely\n\n"
