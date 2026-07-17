@@ -80,8 +80,15 @@ def get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results
         )
 
+        impact_scores = result.get("impact_scores", {})
         changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
-        impacted_dicts = [node_to_dict(n) for n in result["impacted_nodes"]]
+        impacted_dicts = []
+        for node in result["impacted_nodes"]:
+            node_dict = node_to_dict(node)
+            score = impact_scores.get(node.qualified_name)
+            if score is not None:
+                node_dict["impact_score"] = score
+            impacted_dicts.append(node_dict)
         edge_dicts = [edge_to_dict(e) for e in result["edges"]]
         truncated = result["truncated"]
         total_impacted = result["total_impacted"]

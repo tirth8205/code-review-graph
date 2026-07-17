@@ -11,6 +11,7 @@ import pytest
 import code_review_graph.tools._common as common_module
 import code_review_graph.tools.analysis_tools as analysis_module
 import code_review_graph.tools.docs as docs_module
+import code_review_graph.tools.query as query_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
@@ -1945,3 +1946,48 @@ class TestGraphProvenance:
         assert result == expected
         assert envelope["updated_at"] == "2000-01-02T03:04:05"
         assert envelope["built_on_branch"] == "main"
+
+
+def test_impact_radius_tool_exposes_best_first_scores(monkeypatch, tmp_path):
+    """The public tool adds scores without changing the stored node schema."""
+    store = GraphStore(tmp_path / "impact.db")
+    seed = "/seed.py::seed"
+    called = "/called.py::called"
+    imported = "/imported.py::imported"
+    for name, path in (
+        ("seed", "/seed.py"),
+        ("called", "/called.py"),
+        ("imported", "/imported.py"),
+    ):
+        store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=3, language="python",
+        ))
+    store.upsert_edge(EdgeInfo(
+        kind="CALLS", source=seed, target=called,
+        file_path="/seed.py", line=1,
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="IMPORTS_FROM", source=seed, target=imported,
+        file_path="/seed.py", line=2,
+    ))
+    store.commit()
+
+    monkeypatch.setattr(
+        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
+    )
+    monkeypatch.setattr(
+        query_module,
+        "_resolve_graph_file_paths",
+        lambda _store, _root, _files: ["/seed.py"],
+    )
+
+    result = query_module.get_impact_radius(
+        changed_files=["seed.py"], repo_root=str(tmp_path),
+    )
+
+    assert [node["name"] for node in result["impacted_nodes"]] == [
+        "called", "imported",
+    ]
+    scores = [node["impact_score"] for node in result["impacted_nodes"]]
+    assert scores == sorted(scores, reverse=True)

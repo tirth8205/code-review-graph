@@ -19,7 +19,15 @@ from typing import Any, Optional
 
 import networkx as nx
 
-from .constants import BFS_ENGINE, MAX_IMPACT_DEPTH, MAX_IMPACT_NODES
+from .constants import (
+    BFS_ENGINE,
+    IMPACT_DEFAULT_EDGE_WEIGHT,
+    IMPACT_DEPTH_DECAY,
+    IMPACT_EDGE_WEIGHTS,
+    IMPACT_SCORE_FLOOR,
+    MAX_IMPACT_DEPTH,
+    MAX_IMPACT_NODES,
+)
 from .migrations import get_schema_version, run_migrations
 from .parser import EdgeInfo, NodeInfo
 
@@ -626,9 +634,10 @@ class GraphStore:
 
         Returns dict with:
           - changed_nodes: nodes in changed files
-          - impacted_nodes: nodes reachable via edges
+          - impacted_nodes: reachable nodes ordered by best-path impact score
           - impacted_files: unique set of affected files
           - edges: connecting edges
+          - impact_scores: qualified name to best-path score
         """
         if BFS_ENGINE == "networkx":
             return self._get_impact_radius_networkx(
@@ -638,7 +647,7 @@ class GraphStore:
             changed_files, max_depth=max_depth, max_nodes=max_nodes,
         )
 
-    # -- SQLite recursive CTE version (default) ---------------------------
+    # -- Bounded SQLite relaxation version (default) ----------------------
 
     def get_impact_radius_sql(
         self,
@@ -646,11 +655,13 @@ class GraphStore:
         max_depth: int = MAX_IMPACT_DEPTH,
         max_nodes: int = MAX_IMPACT_NODES,
     ) -> dict[str, Any]:
-        """Impact radius via SQLite recursive CTE.
+        """Impact radius via bounded best-score relaxation in SQLite.
 
         Faster than NetworkX for large graphs because it avoids
         materialising the full graph in Python.
         """
+        max_depth = max(0, int(max_depth))
+        max_nodes = max(0, int(max_nodes))
         if not changed_files:
             return {
                 "changed_nodes": [],
@@ -659,6 +670,7 @@ class GraphStore:
                 "edges": [],
                 "truncated": False,
                 "total_impacted": 0,
+                "impact_scores": {},
             }
 
         # Seed qualified names
@@ -676,10 +688,11 @@ class GraphStore:
                 "edges": [],
                 "truncated": False,
                 "total_impacted": 0,
+                "impact_scores": {},
             }
 
-        # Build recursive CTE — use a temp table for the seed set to
-        # keep the query plan efficient and stay under variable limits.
+        # Use a temp table for the seed set to keep the query plan efficient
+        # and stay under SQLite variable limits.
         self._conn.execute(
             "CREATE TEMP TABLE IF NOT EXISTS _impact_seeds "
             "(qn TEXT PRIMARY KEY)"
@@ -695,44 +708,120 @@ class GraphStore:
                 batch,
             )
 
-        cte_sql = """
-        WITH RECURSIVE impacted(node_qn, depth) AS (
-            SELECT qn, 0 FROM _impact_seeds
-            UNION
-            SELECT e.target_qualified, i.depth + 1
-            FROM impacted i
-            JOIN edges e ON e.source_qualified = i.node_qn
-            WHERE i.depth < ?
-            UNION
-            SELECT e.source_qualified, i.depth + 1
-            FROM impacted i
-            JOIN edges e ON e.target_qualified = i.node_qn
-            WHERE i.depth < ?
+        # Keep one best score per endpoint rather than enumerating every path
+        # in a recursive CTE. Dense cyclic graphs can contain exponentially
+        # many paths; these three bounded temp tables contain at most one row
+        # per qualified name and each iteration scans the edge table once.
+        self._conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _impact_weights "
+            "(kind TEXT PRIMARY KEY, weight REAL NOT NULL)"
         )
-        SELECT DISTINCT node_qn, MIN(depth) AS min_depth
-        FROM impacted
+        self._conn.execute("DELETE FROM _impact_weights")
+        self._conn.executemany(
+            "INSERT INTO _impact_weights (kind, weight) VALUES (?, ?)",
+            list(IMPACT_EDGE_WEIGHTS.items()),
+        )
+        for table in ("_impact_best", "_impact_frontier", "_impact_next"):
+            self._conn.execute(
+                f"CREATE TEMP TABLE IF NOT EXISTS {table} "  # nosec B608
+                "(node_qn TEXT PRIMARY KEY, score REAL NOT NULL)"
+            )
+            self._conn.execute(f"DELETE FROM {table}")  # nosec B608
+
+        self._conn.execute(
+            "INSERT INTO _impact_best (node_qn, score) "
+            "SELECT qn, 1.0 FROM _impact_seeds"
+        )
+        self._conn.execute(
+            "INSERT INTO _impact_frontier (node_qn, score) "
+            "SELECT qn, 1.0 FROM _impact_seeds"
+        )
+
+        candidate_sql = """
+        INSERT INTO _impact_next (node_qn, score)
+        SELECT node_qn, MAX(score)
+        FROM (
+            SELECT e.target_qualified AS node_qn,
+                   f.score * COALESCE(w.weight, ?) * ? AS score
+            FROM _impact_frontier f
+            JOIN edges e ON e.source_qualified = f.node_qn
+            LEFT JOIN _impact_weights w ON w.kind = e.kind
+            UNION ALL
+            SELECT e.source_qualified AS node_qn,
+                   f.score * COALESCE(w.weight, ?) * ? AS score
+            FROM _impact_frontier f
+            JOIN edges e ON e.target_qualified = f.node_qn
+            LEFT JOIN _impact_weights w ON w.kind = e.kind
+        ) candidates
+        WHERE score > ?
         GROUP BY node_qn
-        LIMIT ?
         """
+        candidate_params = (
+            IMPACT_DEFAULT_EDGE_WEIGHT,
+            IMPACT_DEPTH_DECAY,
+            IMPACT_DEFAULT_EDGE_WEIGHT,
+            IMPACT_DEPTH_DECAY,
+            IMPACT_SCORE_FLOOR,
+        )
+        for _ in range(max_depth):
+            self._conn.execute("DELETE FROM _impact_next")
+            self._conn.execute(candidate_sql, candidate_params)
+            self._conn.execute(
+                "DELETE FROM _impact_next "
+                "WHERE score <= COALESCE(("
+                "SELECT score FROM _impact_best b "
+                "WHERE b.node_qn = _impact_next.node_qn"
+                "), 0.0)"
+            )
+            if self._conn.execute(
+                "SELECT 1 FROM _impact_next LIMIT 1"
+            ).fetchone() is None:
+                break
+            self._conn.execute(
+                "INSERT OR REPLACE INTO _impact_best (node_qn, score) "
+                "SELECT node_qn, score FROM _impact_next"
+            )
+            self._conn.execute("DELETE FROM _impact_frontier")
+            self._conn.execute(
+                "INSERT INTO _impact_frontier (node_qn, score) "
+                "SELECT node_qn, score FROM _impact_next"
+            )
+
+        # Fetch one sentinel beyond the public cap. Ghost endpoints remain in
+        # the frontier as bridges but cannot consume a result slot because the
+        # final selection joins the canonical nodes table.
         rows = self._conn.execute(
-            cte_sql, (max_depth, max_depth, max_nodes + len(seeds)),
+            "SELECT b.node_qn, b.score "
+            "FROM _impact_best b "
+            "JOIN nodes n ON n.qualified_name = b.node_qn "
+            "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
+            "WHERE s.qn IS NULL "
+            "ORDER BY b.score DESC, b.node_qn "
+            "LIMIT ?",
+            (max_nodes + 1,),
         ).fetchall()
-
-        # Split into seeds vs impacted
-        impacted_qns: set[str] = set()
-        for r in rows:
-            qn = r[0]
-            if qn not in seeds:
-                impacted_qns.add(qn)
-
-        # Batch-fetch nodes
-        changed_nodes = self._batch_get_nodes(seeds)
-        impacted_nodes = self._batch_get_nodes(impacted_qns)
-
-        total_impacted = len(impacted_nodes)
-        truncated = total_impacted > max_nodes
+        truncated = len(rows) > max_nodes
         if truncated:
-            impacted_nodes = impacted_nodes[:max_nodes]
+            total_impacted = self._conn.execute(
+                "SELECT COUNT(*) "
+                "FROM _impact_best b "
+                "JOIN nodes n ON n.qualified_name = b.node_qn "
+                "LEFT JOIN _impact_seeds s ON s.qn = b.node_qn "
+                "WHERE s.qn IS NULL"
+            ).fetchone()[0]
+        else:
+            total_impacted = len(rows)
+        kept_rows = rows[:max_nodes]
+        score_by_qn = {row[0]: float(row[1]) for row in kept_rows}
+
+        changed_nodes = self._batch_get_nodes(seeds)
+        impacted_nodes = self._batch_get_nodes(set(score_by_qn))
+        impacted_nodes.sort(
+            key=lambda node: (
+                -score_by_qn.get(node.qualified_name, 0.0),
+                node.qualified_name,
+            )
+        )
 
         impacted_files = list({n.file_path for n in impacted_nodes})
 
@@ -748,6 +837,12 @@ class GraphStore:
             "edges": relevant_edges,
             "truncated": truncated,
             "total_impacted": total_impacted,
+            "impact_scores": {
+                node.qualified_name: round(
+                    score_by_qn.get(node.qualified_name, 0.0), 4,
+                )
+                for node in impacted_nodes
+            },
         }
 
     # -- NetworkX BFS version (legacy) ------------------------------------
@@ -759,6 +854,8 @@ class GraphStore:
         max_nodes: int = MAX_IMPACT_NODES,
     ) -> dict[str, Any]:
         """BFS via NetworkX (legacy). Used when CRG_BFS_ENGINE=networkx."""
+        max_depth = max(0, int(max_depth))
+        max_nodes = max(0, int(max_nodes))
         nxg = self._build_networkx_graph()
 
         seeds: set[str] = set()
@@ -767,34 +864,44 @@ class GraphStore:
             for n in nodes:
                 seeds.add(n.qualified_name)
 
-        visited: set[str] = set()
-        frontier = seeds.copy()
-        depth = 0
-        impacted: set[str] = set()
+        best: dict[str, float] = dict.fromkeys(seeds, 1.0)
+        frontier = dict(best)
 
-        while frontier and depth < max_depth:
-            visited.update(frontier)
-            next_frontier: set[str] = set()
-            for qn in frontier:
-                if qn in nxg:
-                    for neighbor in nxg.neighbors(qn):
-                        if neighbor not in visited:
-                            next_frontier.add(neighbor)
-                            impacted.add(neighbor)
-                if qn in nxg:
-                    for pred in nxg.predecessors(qn):
-                        if pred not in visited:
-                            next_frontier.add(pred)
-                            impacted.add(pred)
-            next_frontier -= visited
-            if len(visited) + len(next_frontier) > max_nodes:
+        for _ in range(max_depth):
+            if not frontier:
                 break
+            next_frontier: dict[str, float] = {}
+            for qn, score in frontier.items():
+                if qn not in nxg:
+                    continue
+                neighbors = [
+                    (target, data)
+                    for _, target, data in nxg.out_edges(qn, data=True)
+                ] + [
+                    (source, data)
+                    for source, _, data in nxg.in_edges(qn, data=True)
+                ]
+                for other_qn, data in neighbors:
+                    weight = IMPACT_EDGE_WEIGHTS.get(
+                        data.get("kind", ""), IMPACT_DEFAULT_EDGE_WEIGHT,
+                    )
+                    new_score = score * weight * IMPACT_DEPTH_DECAY
+                    if new_score <= IMPACT_SCORE_FLOOR:
+                        continue
+                    if new_score > best.get(other_qn, 0.0):
+                        best[other_qn] = new_score
+                        next_frontier[other_qn] = new_score
             frontier = next_frontier
-            depth += 1
 
         changed_nodes = self._batch_get_nodes(seeds)
-        impacted_qns = impacted - seeds
+        impacted_qns = set(best) - seeds
         impacted_nodes = self._batch_get_nodes(impacted_qns)
+        impacted_nodes.sort(
+            key=lambda node: (
+                -best.get(node.qualified_name, 0.0),
+                node.qualified_name,
+            )
+        )
 
         total_impacted = len(impacted_nodes)
         truncated = total_impacted > max_nodes
@@ -815,6 +922,12 @@ class GraphStore:
             "edges": relevant_edges,
             "truncated": truncated,
             "total_impacted": total_impacted,
+            "impact_scores": {
+                node.qualified_name: round(
+                    best.get(node.qualified_name, 0.0), 4,
+                )
+                for node in impacted_nodes
+            },
         }
 
     def get_subgraph(self, qualified_names: list[str]) -> dict[str, Any]:
@@ -1285,14 +1398,27 @@ class GraphStore:
     # --- Internal helpers ---
 
     def _build_networkx_graph(self) -> nx.DiGraph:
-        """Build (or return cached) in-memory NetworkX directed graph from all edges."""
+        """Build a directed graph, retaining the strongest parallel edge."""
         with self._cache_lock:
             if self._nxg_cache is not None:
                 return self._nxg_cache
             g: nx.DiGraph = nx.DiGraph()
             rows = self._conn.execute("SELECT * FROM edges").fetchall()
             for r in rows:
-                g.add_edge(r["source_qualified"], r["target_qualified"], kind=r["kind"])
+                source = r["source_qualified"]
+                target = r["target_qualified"]
+                kind = r["kind"]
+                if g.has_edge(source, target):
+                    existing = g[source][target].get("kind", "")
+                    existing_weight = IMPACT_EDGE_WEIGHTS.get(
+                        existing, IMPACT_DEFAULT_EDGE_WEIGHT,
+                    )
+                    candidate_weight = IMPACT_EDGE_WEIGHTS.get(
+                        kind, IMPACT_DEFAULT_EDGE_WEIGHT,
+                    )
+                    if candidate_weight <= existing_weight:
+                        continue
+                g.add_edge(source, target, kind=kind)
             self._nxg_cache = g
             return g
 

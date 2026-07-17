@@ -3,8 +3,12 @@
 import logging
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
+import pytest
+
+import code_review_graph.constants as constants_module
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -455,6 +459,209 @@ class TestImpactRadiusSql:
         assert result["changed_nodes"] == []
         assert result["impacted_nodes"] == []
         assert result["total_impacted"] == 0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("0.75", 0.75),
+        ("", 0.6),
+        ("not-a-number", 0.6),
+        ("nan", 0.6),
+        ("inf", 0.6),
+        ("-0.1", 0.6),
+        ("0", 0.6),
+        ("1", 0.6),
+        ("1.2", 0.6),
+    ],
+)
+def test_impact_float_configuration_is_finite_and_bounded(
+    monkeypatch, raw, expected,
+):
+    monkeypatch.setenv("CRG_TEST_IMPACT_FLOAT", raw)
+    assert constants_module._bounded_float_env(
+        "CRG_TEST_IMPACT_FLOAT", 0.6, lower=0.0, upper=1.0,
+    ) == pytest.approx(expected)
+
+
+class TestWeightedImpactScoring:
+    """Best-path scoring stays ranked, bounded, and engine-independent."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name: str, path: str) -> str:
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=1, line_end=10, language="python",
+        ))
+        return f"{path}::{name}"
+
+    def _add_edge(
+        self, kind: str, source: str, target: str, line: int = 1,
+    ) -> None:
+        self.store.upsert_edge(EdgeInfo(
+            kind=kind, source=source, target=target,
+            file_path="/seed.py", line=line,
+        ))
+
+    @staticmethod
+    def _ordered_qns(result) -> list[str]:
+        return [node.qualified_name for node in result["impacted_nodes"]]
+
+    def test_edge_weights_rank_best_path_and_engines_match(self):
+        seed = self._add_func("seed", "/seed.py")
+        called = self._add_func("called", "/called.py")
+        imported = self._add_func("imported", "/imported.py")
+        indirect = self._add_func("indirect", "/indirect.py")
+        self._add_edge("CALLS", seed, called)
+        self._add_edge("IMPORTS_FROM", seed, imported)
+        self._add_edge("CALLS", called, indirect)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/seed.py"], max_depth=2)
+        nx_result = self.store._get_impact_radius_networkx(
+            ["/seed.py"], max_depth=2,
+        )
+
+        assert sql["impact_scores"][called] == pytest.approx(0.6)
+        assert sql["impact_scores"][indirect] == pytest.approx(0.36)
+        assert sql["impact_scores"][imported] == pytest.approx(0.3)
+        assert self._ordered_qns(sql) == [called, indirect, imported]
+        assert sql["impact_scores"] == nx_result["impact_scores"]
+        assert self._ordered_qns(sql) == self._ordered_qns(nx_result)
+
+    def test_deeper_strong_path_beats_shallow_weak_path(self):
+        seed = self._add_func("seed", "/seed.py")
+        middle = self._add_func("middle", "/middle.py")
+        target = self._add_func("target", "/target.py")
+        self._add_edge("CONTAINS", seed, target)
+        self._add_edge("CALLS", seed, middle, line=2)
+        self._add_edge("CALLS", middle, target, line=3)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/seed.py"], max_depth=2)
+        nx_result = self.store._get_impact_radius_networkx(
+            ["/seed.py"], max_depth=2,
+        )
+
+        assert sql["impact_scores"][target] == pytest.approx(0.36)
+        assert sql["impact_scores"] == nx_result["impact_scores"]
+
+    def test_score_floor_stops_expansion_in_both_engines(self):
+        qns = [
+            self._add_func(f"node_{index}", f"/node_{index}.py")
+            for index in range(8)
+        ]
+        for index, (source, target) in enumerate(zip(qns, qns[1:])):
+            self._add_edge("CALLS", source, target, line=index + 1)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(
+            ["/node_0.py"], max_depth=8,
+        )
+        nx_result = self.store._get_impact_radius_networkx(
+            ["/node_0.py"], max_depth=8,
+        )
+
+        assert qns[5] in sql["impact_scores"]
+        assert qns[6] not in sql["impact_scores"]
+        assert sql["impact_scores"] == nx_result["impact_scores"]
+
+    def test_unknown_edge_kind_uses_default_weight(self):
+        seed = self._add_func("seed", "/seed.py")
+        target = self._add_func("target", "/target.py")
+        self._add_edge("UNKNOWN_KIND", seed, target)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/seed.py"], max_depth=1)
+        nx_result = self.store._get_impact_radius_networkx(
+            ["/seed.py"], max_depth=1,
+        )
+
+        assert sql["impact_scores"][target] == pytest.approx(0.3)
+        assert sql["impact_scores"] == nx_result["impact_scores"]
+
+    def test_truncation_is_exact_at_boundary_and_uses_sentinel(self):
+        seed = self._add_func("seed", "/seed.py")
+        targets = [
+            self._add_func(f"target_{index}", f"/target_{index}.py")
+            for index in range(3)
+        ]
+        for index, target in enumerate(targets):
+            self._add_edge("CALLS", seed, target, line=index + 1)
+        self.store.commit()
+
+        exact = self.store.get_impact_radius_sql(
+            ["/seed.py"], max_depth=1, max_nodes=3,
+        )
+        capped = self.store.get_impact_radius_sql(
+            ["/seed.py"], max_depth=1, max_nodes=2,
+        )
+
+        assert exact["truncated"] is False
+        assert exact["total_impacted"] == 3
+        assert capped["truncated"] is True
+        assert capped["total_impacted"] == 3
+        assert len(capped["impacted_nodes"]) == 2
+
+    def test_ghost_endpoint_bridges_without_consuming_limit(self):
+        seed = self._add_func("seed", "/seed.py")
+        target = self._add_func("target", "/target.py")
+        ghost = "external.package::ghost"
+        self._add_edge("CALLS", seed, ghost)
+        self._add_edge("CALLS", ghost, target, line=2)
+        self.store.commit()
+
+        result = self.store.get_impact_radius_sql(
+            ["/seed.py"], max_depth=2, max_nodes=1,
+        )
+
+        assert self._ordered_qns(result) == [target]
+        assert ghost not in result["impact_scores"]
+        assert result["truncated"] is False
+
+    def test_parallel_edges_use_strongest_weight_in_both_engines(self):
+        seed = self._add_func("seed", "/seed.py")
+        target = self._add_func("target", "/target.py")
+        self._add_edge("CALLS", seed, target, line=1)
+        self._add_edge("CONTAINS", seed, target, line=2)
+        self.store.commit()
+
+        sql = self.store.get_impact_radius_sql(["/seed.py"], max_depth=1)
+        nx_result = self.store._get_impact_radius_networkx(
+            ["/seed.py"], max_depth=1,
+        )
+        assert sql["impact_scores"][target] == pytest.approx(0.6)
+        assert sql["impact_scores"] == nx_result["impact_scores"]
+
+    def test_dense_mixed_cycle_is_bounded(self):
+        qns = [self._add_func(f"node_{i}", f"/node_{i}.py") for i in range(12)]
+        line = 1
+        for source_index, source in enumerate(qns):
+            for target_index, target in enumerate(qns):
+                if source_index == target_index:
+                    continue
+                kind = "CALLS" if (source_index + target_index) % 2 else "IMPORTS_FROM"
+                self._add_edge(kind, source, target, line=line)
+                line += 1
+        self.store.commit()
+
+        started = time.monotonic()
+        result = self.store.get_impact_radius_sql(
+            ["/node_0.py"], max_depth=25, max_nodes=20,
+        )
+        elapsed = time.monotonic() - started
+
+        assert len(result["impacted_nodes"]) == 11
+        assert result["truncated"] is False
+        assert elapsed < 5.0
 
 
 class TestGetTransitiveTestsFrontierCap:
