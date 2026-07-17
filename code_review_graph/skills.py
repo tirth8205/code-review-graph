@@ -1379,6 +1379,9 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
 # --- Cursor hooks ---
 
 
+_CURSOR_HOOK_STEMS = ("crg-update", "crg-session-start", "crg-pre-commit")
+
+
 def _is_windows() -> bool:
     """Return whether hook installation is running on Windows."""
     return platform.system() == "Windows"
@@ -1389,15 +1392,47 @@ def _cursor_hooks_dir() -> Path:
     return Path.home() / ".cursor" / "hooks"
 
 
+def _cursor_windows_hook_command(script_path: Path) -> str:
+    """Return Cursor's native Windows command for a PowerShell hook."""
+    resolved = script_path.resolve()
+    return (
+        "powershell.exe -NoLogo -NoProfile -NonInteractive "
+        f'-ExecutionPolicy Bypass -File "{resolved}"'
+    )
+
+
 def _cursor_hook_command(script_path: Path) -> str:
     """Return the platform-native command used by Cursor to run a hook."""
     if _is_windows():
-        resolved = script_path.resolve()
-        return (
-            "powershell.exe -NoLogo -NoProfile -NonInteractive "
-            f'-ExecutionPolicy Bypass -File "{resolved}"'
-        )
+        return _cursor_windows_hook_command(script_path)
     return str(script_path)
+
+
+def _cursor_owned_hook_commands(script_stem: str) -> set[str]:
+    """Return both platform commands owned for one user-level Cursor hook."""
+    hooks_dir = _cursor_hooks_dir()
+    return {
+        str(hooks_dir / f"{script_stem}.sh"),
+        _cursor_windows_hook_command(hooks_dir / f"{script_stem}.ps1"),
+    }
+
+
+def _all_cursor_owned_hook_commands() -> set[str]:
+    """Return every Unix and Windows Cursor command owned by CRG."""
+    return {
+        command
+        for script_stem in _CURSOR_HOOK_STEMS
+        for command in _cursor_owned_hook_commands(script_stem)
+    }
+
+
+def _all_cursor_owned_hook_filenames() -> set[str]:
+    """Return every platform-specific Cursor hook filename owned by CRG."""
+    return {
+        f"{script_stem}{suffix}"
+        for script_stem in _CURSOR_HOOK_STEMS
+        for suffix in (".sh", ".ps1")
+    }
 
 
 def generate_cursor_hooks_config() -> dict[str, Any]:
@@ -1609,11 +1644,11 @@ def _is_crg_cursor_hook(command: Any, script_stem: str) -> bool:
     """Return whether a command targets CRG's exact user-level hook path."""
     if not isinstance(command, str):
         return False
-    normalized = command.strip().removesuffix('"').replace("\\", "/")
-    return any(
-        normalized.endswith(f"/.cursor/hooks/{script_stem}{suffix}")
-        for suffix in (".sh", ".ps1")
-    )
+    normalized = command.strip().replace("\\", "/")
+    return normalized in {
+        owned.replace("\\", "/")
+        for owned in _cursor_owned_hook_commands(script_stem)
+    }
 
 
 def install_cursor_hooks() -> Path:

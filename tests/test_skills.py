@@ -1560,6 +1560,43 @@ class TestInstallCursorHooks:
             assert (hooks_dir / f"{name}.ps1").exists()
             assert (hooks_dir / f"{name}.sh").read_text() == "user-preserved-old-script"
 
+    def test_windows_install_preserves_foreign_same_named_cursor_hook(self, tmp_path):
+        home = tmp_path / "User"
+        cursor_dir = home / ".cursor"
+        cursor_dir.mkdir(parents=True)
+        foreign_command = str(
+            tmp_path / "workspace" / ".cursor" / "hooks" / "crg-update.sh"
+        )
+        (cursor_dir / "hooks.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "afterFileEdit": [
+                            {"command": foreign_command, "timeout": 17}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            install_cursor_hooks()
+            expected_owned = generate_cursor_hooks_config()["hooks"]["afterFileEdit"][0]
+
+        entries = json.loads((cursor_dir / "hooks.json").read_text())["hooks"][
+            "afterFileEdit"
+        ]
+        assert {entry["command"] for entry in entries} == {
+            foreign_command,
+            expected_owned["command"],
+        }
+        assert {entry["timeout"] for entry in entries} == {5, 17}
+
     @staticmethod
     def _run_windows_hook(command, *, cwd, payload, env):
         # Cursor hands this command string to the Windows shell. Passing it as
