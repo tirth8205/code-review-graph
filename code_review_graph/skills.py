@@ -1007,20 +1007,34 @@ def install_codex_hooks(repo_root: Path) -> Path:
     for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
         if isinstance(merged_hooks.get(hook_name), list):
             merged_list = list(merged_hooks[hook_name])
-            existing_commands = {
-                hook.get("command", "")
-                for entry in merged_list
-                if isinstance(entry, dict)
-                for hook in entry.get("hooks", [])
-                if isinstance(hook, dict)
-            }
             for entry in hook_entries:
-                entry_commands = [
-                    hook.get("command", "")
+                matched_existing_command = False
+                generated_hooks = [
+                    hook
                     for hook in entry.get("hooks", [])
                     if isinstance(hook, dict)
                 ]
-                if not any(command in existing_commands for command in entry_commands):
+                for generated_hook in generated_hooks:
+                    command = generated_hook.get("command")
+                    if not command:
+                        continue
+                    for existing_entry in merged_list:
+                        if not isinstance(existing_entry, dict):
+                            continue
+                        for existing_hook in existing_entry.get("hooks", []):
+                            if not isinstance(existing_hook, dict):
+                                continue
+                            if existing_hook.get("command") != command:
+                                continue
+                            matched_existing_command = True
+                            if "commandWindows" in generated_hook:
+                                existing_hook.setdefault(
+                                    "commandWindows", generated_hook["commandWindows"]
+                                )
+                            break
+                        if matched_existing_command:
+                            break
+                if not matched_existing_command:
                     merged_list.append(entry)
             merged_hooks[hook_name] = merged_list
         else:
