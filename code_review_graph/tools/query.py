@@ -33,6 +33,8 @@ _QUERY_PATTERNS = {
     "triggered_by": "Find schedulers or other triggers that invoke a method",
     "publishers_of": "Find methods that publish an event",
     "listeners_of": "Find methods that listen for an event",
+    "handlers_of": "Find methods that handle an endpoint",
+    "endpoints_for": "Find endpoints handled by a method",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -495,6 +497,24 @@ def query_graph(
                 if source:
                     results.append(node_to_dict(source))
                 edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "handlers_of":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != "HANDLES":
+                    continue
+                handler = store.get_node(edge.source_qualified)
+                if handler:
+                    results.append(node_to_dict(handler))
+                edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "endpoints_for":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != "HANDLES":
+                    continue
+                endpoint = store.get_node(edge.target_qualified)
+                if endpoint and endpoint.kind == "Endpoint":
+                    results.append(node_to_dict(endpoint))
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])

@@ -1068,6 +1068,18 @@ _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
+_SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
+_SPRING_REQUEST_MAPPINGS = {
+    "DeleteMapping": ("DELETE",),
+    "GetMapping": ("GET",),
+    "PatchMapping": ("PATCH",),
+    "PostMapping": ("POST",),
+    "PutMapping": ("PUT",),
+    "RequestMapping": (),
+}
+_HTTP_REQUEST_METHODS = frozenset({
+    "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -7721,6 +7733,145 @@ class CodeParser:
         return attributes
 
     @staticmethod
+    def _java_string_literal_values(node) -> list[str]:
+        """Return string values nested below one Java annotation argument."""
+        values: list[str] = []
+        if node.type == "string_literal":
+            value = node.text.decode("utf-8", errors="replace")
+            if len(value) >= 2:
+                values.append(value[1:-1])
+            return values
+        for child in node.children:
+            values.extend(CodeParser._java_string_literal_values(child))
+        return values
+
+    def _spring_mapping_paths(self, annotation_node) -> list[str]:
+        """Extract only ``value``/``path`` route arguments from a mapping."""
+        paths: list[str] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) < 2:
+                        continue
+                    key = named[0].text.decode("utf-8", errors="replace")
+                    if key not in ("path", "value"):
+                        continue
+                    paths.extend(self._java_string_literal_values(named[-1]))
+                elif argument.is_named:
+                    paths.extend(self._java_string_literal_values(argument))
+        return paths or [""]
+
+    def _spring_mapping_methods(self, annotation_node, name: str) -> list[str]:
+        """Extract HTTP verbs from composed mappings or RequestMethod values."""
+        composed = _SPRING_REQUEST_MAPPINGS[name]
+        if composed:
+            return list(composed)
+
+        methods: list[str] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type != "element_value_pair":
+                    continue
+                named = [part for part in argument.children if part.is_named]
+                if len(named) < 2:
+                    continue
+                key = named[0].text.decode("utf-8", errors="replace")
+                if key != "method":
+                    continue
+                value_node = named[-1]
+                for value in self._descendants_of_type(value_node, "identifier"):
+                    method = value.text.decode("utf-8", errors="replace")
+                    if method in _HTTP_REQUEST_METHODS and method not in methods:
+                        methods.append(method)
+        return methods or ["ANY"]
+
+    @staticmethod
+    def _join_spring_route(prefix: str, path: str) -> str:
+        """Join class and method mappings into one normalized route."""
+        parts = [part.strip("/") for part in (prefix, path) if part.strip("/")]
+        return "/" + "/".join(parts) if parts else "/"
+
+    def _emit_spring_endpoint_nodes(
+        self,
+        method_node,
+        method_name: str,
+        class_name: Optional[str],
+        file_path: str,
+        import_map: dict[str, str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> int:
+        """Emit addressable endpoints and HANDLES edges for Spring mappings."""
+        annotations = self._java_annotations_named(
+            method_node,
+            frozenset(_SPRING_REQUEST_MAPPINGS),
+        )
+        if not annotations:
+            return 0
+
+        prefixes = [""]
+        encoded_prefixes = import_map.get(
+            f"{_SPRING_REQUEST_PREFIX_KEY}{class_name or ''}",
+        )
+        if encoded_prefixes:
+            try:
+                parsed_prefixes = json.loads(encoded_prefixes)
+            except (TypeError, ValueError):
+                parsed_prefixes = None
+            if isinstance(parsed_prefixes, list) and all(
+                isinstance(prefix, str) for prefix in parsed_prefixes
+            ):
+                prefixes = parsed_prefixes or [""]
+
+        source = self._qualify(method_name, file_path, class_name)
+        emitted = 0
+        for annotation_index, annotation in enumerate(annotations):
+            annotation_name = self._java_annotation_name(annotation)
+            if annotation_name is None:
+                continue
+            paths = self._spring_mapping_paths(annotation)
+            methods = self._spring_mapping_methods(annotation, annotation_name)
+            for prefix in prefixes:
+                for path in paths:
+                    route = self._join_spring_route(prefix, path)
+                    for method in methods:
+                        endpoint_name = (
+                            f"{method_name}@{annotation_name}"
+                            f"[{annotation_index}:{emitted}] {method} {route}"
+                        )
+                        metadata = {
+                            "annotation": annotation_name,
+                            "handler": method_name,
+                            "http_method": method,
+                            "route": route,
+                        }
+                        nodes.append(NodeInfo(
+                            kind="Endpoint",
+                            name=endpoint_name,
+                            file_path=file_path,
+                            line_start=annotation.start_point[0] + 1,
+                            line_end=annotation.end_point[0] + 1,
+                            language="java",
+                            parent_name=class_name,
+                            extra=metadata,
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="HANDLES",
+                            source=source,
+                            target=self._qualify(endpoint_name, file_path, class_name),
+                            file_path=file_path,
+                            line=annotation.start_point[0] + 1,
+                            extra=metadata,
+                        ))
+                        emitted += 1
+        return emitted
+
+    @staticmethod
     def _spring_schedule_kind(attributes: dict[str, str]) -> str:
         """Classify one Spring schedule by the trigger attribute it uses."""
         for key, kind in (
@@ -8348,6 +8499,17 @@ class CodeParser:
                 is_wf = "WorkflowInterface" in temporal_roles
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
+            if import_map is not None:
+                request_prefixes: list[str] = []
+                for annotation in self._java_annotations_named(
+                    child,
+                    frozenset({"RequestMapping"}),
+                ):
+                    request_prefixes.extend(self._spring_mapping_paths(annotation))
+                if request_prefixes:
+                    import_map[f"{_SPRING_REQUEST_PREFIX_KEY}{name}"] = json.dumps(
+                        request_prefixes,
+                    )
 
         # Class-level annotation persistence for all annotation-bearing
         # languages.  Kotlin (@HiltViewModel, @AndroidEntryPoint) and C#
@@ -8533,6 +8695,18 @@ class CodeParser:
         if julia_qualifier:
             method_extra["julia_module_qualifier"] = julia_qualifier
         if language == "java" and deco_list:
+            endpoint_count = self._emit_spring_endpoint_nodes(
+                child,
+                name,
+                enclosing_class,
+                file_path,
+                import_map or {},
+                nodes,
+                edges,
+            )
+            if endpoint_count:
+                method_extra["spring_endpoint"] = True
+                method_extra["spring_endpoint_count"] = endpoint_count
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
             ]

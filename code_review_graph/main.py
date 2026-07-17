@@ -266,6 +266,8 @@ def query_graph_tool(
     - triggered_by: Find schedulers or other triggers that invoke the target
     - publishers_of: Find methods that publish an event
     - listeners_of: Find methods that listen for an event
+    - handlers_of: Find methods that handle an endpoint
+    - endpoints_for: Find endpoints handled by a method
     - file_summary: Get all nodes in a file
 
     Args:
