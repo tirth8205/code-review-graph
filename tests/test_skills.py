@@ -496,7 +496,7 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "update" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
-        assert inner["commandWindows"].startswith("cmd.exe ")
+        assert inner["commandWindows"].startswith("more >nul & ")
         assert "code-review-graph update --skip-flows" in inner["commandWindows"]
         assert inner["statusMessage"] == "Updating code-review-graph"
 
@@ -509,7 +509,7 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "status" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
-        assert inner["commandWindows"].startswith("cmd.exe ")
+        assert inner["commandWindows"].startswith("more >nul & ")
         assert "code-review-graph status" in inner["commandWindows"]
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
@@ -652,6 +652,7 @@ class TestInstallCodexHooks:
 
     def test_upgrades_existing_hooks_with_windows_commands(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         repo_root = tmp_path / "repo"
         old_config = generate_codex_hooks_config(repo_root)
         expected_windows_commands = {}
