@@ -76,6 +76,10 @@
 - Hardened generated skills/configuration: uppercase `SKILL.md` (PR #563),
   string-safe JSONC plus top-level and nested-container data-preservation guards
   (#553, PR #354), and portable PATH-aware hooks (PR #565).
+- Codex hook installation now emits native Windows commands that drain the
+  hook event from stdin, fail open outside Git repositories, and upgrade
+  existing Unix-only hook entries without duplicating or replacing user hooks
+  (#620, PR #621).
 - Packaged documentation remains reachable through the MCP wrapper (#613),
   Action comments render repository-relative paths, and both visualization
   templates select the graph SVG specifically (PR #564).
