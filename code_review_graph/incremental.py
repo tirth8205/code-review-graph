@@ -416,25 +416,27 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             sha = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     return branch, sha
 
@@ -508,7 +510,8 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
@@ -517,15 +520,15 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
                 capture_output=True,
-                text=True, encoding='utf-8',                cwd=str(repo_root),
+                text=True, encoding='utf-8', errors='replace',
+                cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
             )
         files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
     """Return changed files in an SVN working copy.
@@ -570,9 +573,8 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                     path = line[8:].strip() if len(line) > 8 else line[1:].strip()
                     files.append(path)
             return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def get_staged_and_unstaged(repo_root: Path) -> list[str]:
     """Get all modified files (staged + unstaged + untracked)."""
@@ -582,7 +584,8 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
@@ -595,9 +598,8 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
                     entry = entry.split(" -> ", 1)[1]
                 files.append(entry)
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def get_all_tracked_files(
     repo_root: Path,
@@ -627,14 +629,14 @@ def get_all_tracked_files(
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.
