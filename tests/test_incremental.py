@@ -3,6 +3,7 @@
 import subprocess
 from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
 
+import code_review_graph.incremental as incremental_module
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _is_binary,
@@ -22,6 +23,36 @@ from code_review_graph.incremental import (
     incremental_update,
     start_watch_thread,
 )
+
+
+class TestParseExecutorSelection:
+    def test_stdio_mcp_uses_threads_on_unix(self, monkeypatch):
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", True, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "linux")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: False)
+
+        assert incremental_module._select_executor_kind() == "thread"
+
+    def test_non_mcp_unix_automation_keeps_process_default(self, monkeypatch):
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "linux")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: False)
+
+        assert incremental_module._select_executor_kind() == "process"
+
+    def test_explicit_process_override_wins_in_stdio_mcp(self, monkeypatch):
+        monkeypatch.setenv("CRG_PARSE_EXECUTOR", "process")
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", True, raising=False,
+        )
+
+        assert incremental_module._select_executor_kind() == "process"
 
 
 class TestFindRepoRoot:

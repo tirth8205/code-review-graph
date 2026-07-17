@@ -17,6 +17,7 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
+from . import incremental as _incremental
 from .graph import GraphStore
 from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
@@ -1077,26 +1078,29 @@ def main(
     _default_repo_root = str(root)
     _apply_tool_filter(tools)
 
+    previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
+    _incremental._MCP_STDIO_ACTIVE = transport == "stdio"
     watch_store: GraphStore | None = None
-    if auto_watch:
-        watch_store = GraphStore(get_db_path(root))
-        thread = start_watch_thread(root, watch_store, daemon=True)
-        if thread is None:
-            logger.warning("Auto-watch was requested but could not be started")
-
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        # Pre-warm sentence-transformers on the main thread before fastmcp's
-        # event loop starts. Lazy-loading ``torch`` + tokenizers inside an
-        # executor worker thread deadlocks ``semantic_search_nodes_tool`` on
-        # Windows stdio MCP (DLL init / OpenMP thread-pool registration grabs
-        # locks the loop needs). #385 added ``asyncio.to_thread`` to peer
-        # tools but cannot fix this case — the dangerous initialization has
-        # to happen on the main thread before any worker thread is spawned.
-        from .embeddings import prewarm_local_embeddings
-        prewarm_local_embeddings()
-
     try:
+        if auto_watch:
+            watch_store = GraphStore(get_db_path(root))
+            thread = start_watch_thread(root, watch_store, daemon=True)
+            if thread is None:
+                logger.warning("Auto-watch was requested but could not be started")
+
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            # Pre-warm sentence-transformers on the main thread before fastmcp's
+            # event loop starts. Lazy-loading ``torch`` + tokenizers inside an
+            # executor worker thread deadlocks ``semantic_search_nodes_tool`` on
+            # Windows stdio MCP (DLL init / OpenMP thread-pool registration grabs
+            # locks the loop needs). #385 added ``asyncio.to_thread`` to peer
+            # tools but cannot fix this case — the dangerous initialization has
+            # to happen on the main thread before any worker thread is spawned.
+            from .embeddings import prewarm_local_embeddings
+
+            prewarm_local_embeddings()
+
         if transport == "stdio":
             # Stdio MCP must keep stdout strictly JSON-RPC. FastMCP's banner/update
             # notices corrupt the handshake stream on clients like Codex CLI.
@@ -1110,6 +1114,7 @@ def main(
     finally:
         if watch_store is not None:
             watch_store.close()
+        _incremental._MCP_STDIO_ACTIVE = previous_stdio_state
 
 
 if __name__ == "__main__":

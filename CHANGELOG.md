@@ -20,6 +20,10 @@
 - Incremental Git change discovery now reads NUL-delimited byte output, so
   Unicode, whitespace, newline, and literal arrow paths are preserved while
   rename/copy records keep destination-only semantics (PR #618).
+- MCP stdio servers now use thread-based parallel parsing on every platform,
+  preventing inherited transport descriptors from keeping Unix servers and
+  workers alive after host disconnects, while normal non-interactive CLI/CI
+  builds retain the faster process-pool default (PR #615).
 - Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
   consumers, with a parser-to-store-to-query regression (#527/#559/#598 class).
 - C# receiver calls now capture bare, chained, member, and null-conditional

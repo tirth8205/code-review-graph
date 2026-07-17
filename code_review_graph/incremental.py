@@ -24,15 +24,22 @@ from .parser import CodeParser
 
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
 
+# Set only while the in-process FastMCP server is using stdio transport.
+# This is deliberately separate from ``sys.stdin.isatty()``: CI, cron, and
+# redirected CLI builds also have non-TTY stdin, but do not share the MCP
+# transport's file-descriptor lifetime problem.
+_MCP_STDIO_ACTIVE = False
+
 
 def _select_executor_kind() -> str:
     """Return 'process' or 'thread' for parallel parsing.
 
     Defaults to ``process`` (the original behavior, fastest on Linux/macOS).
-    Auto-switches to ``thread`` when running on Windows with stdin not
-    attached to a TTY — that combination indicates an MCP/stdio host, where
-    ``ProcessPoolExecutor`` workers inherit the parent's pipe handles and
-    leak as zombies after the pool closes (issues #46, #136).
+    Auto-switches to ``thread`` for an active MCP stdio server on every
+    platform, where ``ProcessPoolExecutor`` workers can inherit the transport
+    pipe/socket and prevent EOF shutdown. The older Windows non-TTY fallback
+    remains for direct integrations that predate the explicit transport flag
+    (issues #46, #136, PR #615).
 
     Override explicitly with ``CRG_PARSE_EXECUTOR={process,thread}``.
 
@@ -44,6 +51,8 @@ def _select_executor_kind() -> str:
     explicit = os.environ.get("CRG_PARSE_EXECUTOR", "").strip().lower()
     if explicit in ("process", "thread"):
         return explicit
+    if _MCP_STDIO_ACTIVE:
+        return "thread"
     if sys.platform == "win32" and not sys.stdin.isatty():
         return "thread"
     return "process"
@@ -915,9 +924,10 @@ def full_build(
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
         # Parallel parsing — store calls remain serial (SQLite single-writer).
-        # Executor kind auto-selected: process on Linux/macOS/Windows-TTY,
-        # thread on Windows-MCP-stdio to avoid pipe-handle inheritance
-        # deadlock (issues #46, #136). Override via CRG_PARSE_EXECUTOR env.
+        # Executor kind auto-selected: process for normal CLI/automation;
+        # thread for MCP stdio to avoid pipe-handle inheritance deadlocks and
+        # orphan workers (issues #46, #136, PR #615). Override via
+        # CRG_PARSE_EXECUTOR env.
         args_list = [(rel_path, str(repo_root)) for rel_path in files]
         with _make_executor(_MAX_PARSE_WORKERS) as executor:
             for i, (rel_path, nodes, edges, error, fhash) in enumerate(
