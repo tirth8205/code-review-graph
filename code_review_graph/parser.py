@@ -1234,6 +1234,14 @@ class CodeParser:
                 tree.root_node, file_path_str, import_map,
             )
 
+        typed_call_targets = self._collect_typed_call_targets(
+            tree.root_node,
+            language,
+            file_path_str,
+            import_map,
+            defined_names,
+        )
+
         # Walk the tree
         self._extract_from_tree(
             tree.root_node, source, language, file_path_str, nodes, edges,
@@ -1246,6 +1254,8 @@ class CodeParser:
                 file_path_str,
                 edges,
             )
+
+        edges = self._apply_typed_call_targets(edges, typed_call_targets)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -2472,7 +2482,12 @@ class CodeParser:
             ):
                 resolved.append(edge)
                 continue
-            if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
+            has_receiver = bool(edge.extra.get("receiver"))
+            if (
+                edge.kind in ("CALLS", "REFERENCES")
+                and "::" not in edge.target
+                and not has_receiver
+            ):
                 if edge.target in symbols:
                     edge = EdgeInfo(
                         kind=edge.kind,
@@ -2590,6 +2605,388 @@ class CodeParser:
                     file_path=edge.file_path,
                     line=edge.line,
                     extra=edge.extra,
+                )
+            resolved.append(edge)
+        return resolved
+
+    _TYPED_CALL_LANGUAGES = frozenset({
+        "python", "kotlin", "java", "javascript", "typescript", "tsx",
+    })
+    _TRANSPARENT_TYPE_WRAPPERS = frozenset({"Annotated", "Optional", "Type"})
+    _NON_RECEIVER_TYPE_NAMES = frozenset({
+        "Array", "Collection", "Dict", "Iterable", "List", "Map", "Mapping",
+        "MutableList", "MutableMap", "MutableMapping", "ReadonlyArray",
+        "Sequence", "Set", "Tuple", "Union", "dict", "frozenset", "list",
+        "set", "tuple",
+    })
+
+    def _collect_typed_call_targets(
+        self,
+        root,
+        language: str,
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> dict[tuple[int, str, str], tuple[str, str, str]]:
+        """Collect evidence-backed targets for calls on typed receivers.
+
+        The result is keyed by source line, receiver, and method so the normal
+        call extractor remains the single producer of CALLS edges. Only
+        repository-local imported types and same-file classes are qualified;
+        unknown or ambiguous types keep their existing bare targets.
+        """
+        if language not in self._TYPED_CALL_LANGUAGES:
+            return {}
+
+        class_types = set(self._class_types.get(language, []))
+        function_types = set(self._function_types.get(language, []))
+        call_types = set(self._call_types.get(language, []))
+        block_types = {
+            "java": {"block"},
+            "kotlin": {"statements"},
+            "javascript": {"statement_block"},
+            "typescript": {"statement_block"},
+            "tsx": {"statement_block"},
+        }.get(language, set())
+        targets: dict[tuple[int, str, str], tuple[str, str, str]] = {}
+
+        def walk(
+            node,
+            bindings: dict[str, str],
+            class_fields: dict[str, str],
+            depth: int = 0,
+        ) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type in class_types:
+                fields = self._collect_class_typed_fields(
+                    node, language, function_types, class_types,
+                )
+                class_bindings = dict(bindings)
+                class_bindings.update(fields)
+                for child in node.children:
+                    walk(child, class_bindings, fields, depth + 1)
+                return
+
+            if node.type in function_types:
+                scoped = dict(bindings)
+                scoped.update(class_fields)
+                scoped.update(self._collect_function_typed_parameters(node, language))
+                for child in node.children:
+                    walk(child, scoped, class_fields, depth + 1)
+                return
+
+            if node.type in block_types:
+                scoped = dict(bindings)
+                for child in node.children:
+                    walk(child, scoped, class_fields, depth + 1)
+                return
+
+            new_bindings = self._typed_bindings_from_node(node, language)
+            if new_bindings:
+                # Initializers are evaluated before their declaration becomes
+                # visible, so visit children with the previous environment.
+                for child in node.children:
+                    walk(child, bindings, class_fields, depth + 1)
+                bindings.update(new_bindings)
+                return
+
+            if node.type in call_types:
+                receiver, method = self._get_member_call_receiver_method(
+                    node, language,
+                )
+                if receiver and method:
+                    type_name = bindings.get(receiver)
+                    evidence = "typed_receiver"
+                    if type_name is None and receiver[:1].isupper():
+                        if receiver in import_map or receiver in defined_names:
+                            type_name = receiver
+                            evidence = "class_receiver"
+                    if type_name:
+                        target = self._resolve_typed_method_target(
+                            type_name,
+                            method,
+                            file_path,
+                            language,
+                            import_map,
+                            defined_names,
+                        )
+                        if target:
+                            key = (node.start_point[0] + 1, receiver, method)
+                            targets[key] = (target, type_name, evidence)
+
+            for child in node.children:
+                walk(child, bindings, class_fields, depth + 1)
+
+        walk(root, {}, {})
+        return targets
+
+    def _collect_class_typed_fields(
+        self,
+        class_node,
+        language: str,
+        function_types: set[str],
+        class_types: set[str],
+    ) -> dict[str, str]:
+        """Return declared instance-field types for one class."""
+        fields: dict[str, str] = {}
+
+        def visit(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node is not class_node and node.type in class_types:
+                return
+            if node is not class_node and node.type in function_types:
+                if language in ("javascript", "typescript", "tsx"):
+                    name = node.child_by_field_name("name")
+                    if name is not None and name.text == b"constructor":
+                        fields.update(self._collect_ts_parameter_properties(node))
+                return
+            fields.update(self._typed_bindings_from_node(node, language))
+            for child in node.children:
+                visit(child, depth + 1)
+
+        visit(class_node)
+        return fields
+
+    def _collect_function_typed_parameters(
+        self,
+        function_node,
+        language: str,
+    ) -> dict[str, str]:
+        """Return typed parameters declared directly by one function."""
+        bindings: dict[str, str] = {}
+        parameter_types = {
+            "python": {"typed_parameter", "typed_default_parameter"},
+            "kotlin": {"parameter"},
+            "java": {"formal_parameter", "spread_parameter"},
+            "javascript": {"required_parameter", "optional_parameter"},
+            "typescript": {"required_parameter", "optional_parameter"},
+            "tsx": {"required_parameter", "optional_parameter"},
+        }.get(language, set())
+
+        def visit(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node is not function_node and node.type in self._function_types.get(
+                language, []
+            ):
+                return
+            if node.type in parameter_types:
+                bindings.update(self._typed_bindings_from_node(node, language))
+                return
+            # Function bodies cannot contain parameters of this function.
+            if node.type in ("block", "statement_block", "function_body"):
+                return
+            for child in node.children:
+                visit(child, depth + 1)
+
+        visit(function_node)
+        return bindings
+
+    def _collect_ts_parameter_properties(self, constructor_node) -> dict[str, str]:
+        """Return TypeScript constructor parameters that declare fields."""
+        bindings: dict[str, str] = {}
+
+        def visit(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH:
+                return
+            if node.type in ("required_parameter", "optional_parameter"):
+                has_field_modifier = any(
+                    child.type in (
+                        "accessibility_modifier", "override_modifier", "readonly",
+                    )
+                    for child in node.children
+                )
+                if has_field_modifier:
+                    bindings.update(
+                        self._typed_bindings_from_node(node, "typescript"),
+                    )
+                return
+            if node.type == "statement_block":
+                return
+            for child in node.children:
+                visit(child, depth + 1)
+
+        visit(constructor_node)
+        return bindings
+
+    def _typed_bindings_from_node(
+        self,
+        node,
+        language: str,
+    ) -> dict[str, str]:
+        """Extract typed variable declarations from one AST node."""
+        result: dict[str, str] = {}
+
+        if language == "python" and node.type in (
+            "assignment", "typed_parameter", "typed_default_parameter",
+        ):
+            name_node = node.child_by_field_name("left")
+            if name_node is None:
+                name_node = next(
+                    (child for child in node.children if child.type == "identifier"),
+                    None,
+                )
+            type_node = node.child_by_field_name("type")
+            self._store_typed_binding(result, name_node, type_node)
+
+        elif language == "kotlin" and node.type in (
+            "class_parameter", "parameter", "variable_declaration",
+        ):
+            name_node = next(
+                (
+                    child
+                    for child in node.children
+                    if child.type == "simple_identifier"
+                ),
+                None,
+            )
+            type_node = next(
+                (
+                    child
+                    for child in node.children
+                    if child.type in ("user_type", "nullable_type")
+                ),
+                None,
+            )
+            self._store_typed_binding(result, name_node, type_node)
+
+        elif language == "java" and node.type in (
+            "formal_parameter", "spread_parameter",
+        ):
+            self._store_typed_binding(
+                result,
+                node.child_by_field_name("name"),
+                node.child_by_field_name("type"),
+            )
+
+        elif language == "java" and node.type in (
+            "field_declaration", "local_variable_declaration",
+        ):
+            type_node = node.child_by_field_name("type")
+            for child in node.children:
+                if child.type == "variable_declarator":
+                    self._store_typed_binding(
+                        result,
+                        child.child_by_field_name("name"),
+                        type_node,
+                    )
+
+        elif language in ("javascript", "typescript", "tsx") and node.type in (
+            "required_parameter", "optional_parameter", "variable_declarator",
+            "public_field_definition",
+        ):
+            name_node = (
+                node.child_by_field_name("name")
+                or node.child_by_field_name("pattern")
+            )
+            if name_node is None:
+                name_node = next(
+                    (child for child in node.children if child.type == "identifier"),
+                    None,
+                )
+            self._store_typed_binding(
+                result,
+                name_node,
+                node.child_by_field_name("type"),
+            )
+
+        return result
+
+    @classmethod
+    def _store_typed_binding(cls, result: dict[str, str], name_node, type_node) -> None:
+        if name_node is None or type_node is None:
+            return
+        name = name_node.text.decode("utf-8", errors="replace")
+        type_name = cls._base_type_name(
+            type_node.text.decode("utf-8", errors="replace"),
+        )
+        if name and type_name:
+            result[name] = type_name
+
+    @classmethod
+    def _base_type_name(cls, annotation: str) -> Optional[str]:
+        """Return the receiver class from a generic/nullable annotation."""
+        current = annotation.strip()
+        for _ in range(4):
+            match = re.search(r"[\"']?([A-Za-z_][A-Za-z0-9_.]*)", current)
+            if match is None:
+                return None
+            outer = match.group(1).rsplit(".", 1)[-1]
+            remainder = current[match.end():].lstrip()
+            if remainder.startswith("[]"):
+                return None
+            if outer in cls._TRANSPARENT_TYPE_WRAPPERS:
+                openings = [
+                    index for index in (current.find("["), current.find("<"))
+                    if index >= 0
+                ]
+                if not openings:
+                    return None
+                current = current[min(openings) + 1:].lstrip()
+                continue
+            if outer in cls._NON_RECEIVER_TYPE_NAMES:
+                return None
+            if outer in (
+                "None", "bool", "boolean", "float", "int", "number", "str",
+                "string", "unknown", "void",
+            ):
+                return None
+            return outer
+        return None
+
+    def _resolve_typed_method_target(
+        self,
+        type_name: str,
+        method: str,
+        file_path: str,
+        language: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        base_type = self._base_type_name(type_name)
+        if not base_type:
+            return None
+        if base_type in import_map:
+            resolved = self._resolve_imported_symbol(
+                base_type,
+                import_map[base_type],
+                file_path,
+                language,
+            )
+            if resolved:
+                return f"{resolved}.{method}"
+        if base_type in defined_names:
+            return f"{file_path}::{base_type}.{method}"
+        return None
+
+    @staticmethod
+    def _apply_typed_call_targets(
+        edges: list[EdgeInfo],
+        targets: dict[tuple[int, str, str], tuple[str, str, str]],
+    ) -> list[EdgeInfo]:
+        if not targets:
+            return edges
+        resolved: list[EdgeInfo] = []
+        for edge in edges:
+            receiver = edge.extra.get("receiver")
+            method = edge.target.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+            evidence = targets.get((edge.line, receiver, method)) if receiver else None
+            if edge.kind == "CALLS" and evidence:
+                target, type_name, evidence_kind = evidence
+                extra = dict(edge.extra)
+                extra.update({
+                    "receiver_type": type_name,
+                    "receiver_resolution": evidence_kind,
+                })
+                edge = EdgeInfo(
+                    kind=edge.kind,
+                    source=edge.source,
+                    target=target,
+                    file_path=edge.file_path,
+                    line=edge.line,
+                    extra=extra,
                 )
             resolved.append(edge)
         return resolved
@@ -5734,11 +6131,14 @@ class CodeParser:
             else:
                 caller = file_path
 
-            # Java method_invocation: extract actual method name and receiver
-            # separately so the Spring DI resolver can rewrite the target.
+            # Preserve simple member-call receivers. Typed-receiver resolution
+            # uses this evidence during parsing, and the Spring DI resolver
+            # consumes the same metadata for Java injected fields.
             call_extra: dict = {}
-            if language == "java" and child.type == "method_invocation":
-                method_name, receiver = self._get_java_method_and_receiver(child)
+            if language in self._TYPED_CALL_LANGUAGES:
+                receiver, method_name = self._get_member_call_receiver_method(
+                    child, language,
+                )
                 if method_name:
                     call_name = method_name
                 if receiver:
@@ -5777,7 +6177,10 @@ class CodeParser:
             # When a receiver is present, skip scope-based resolution: the method
             # lives on the receiver's type, not in the current file's scope.
             # The spring_resolver post-pass will do the correct cross-type lookup.
-            if call_extra.get("receiver"):
+            receiver_name = call_extra.get("receiver")
+            if receiver_name in ("self", "cls", "this") and enclosing_class:
+                target = self._qualify(call_name, file_path, enclosing_class)
+            elif receiver_name:
                 target = call_name
             else:
                 target = self._resolve_call_target(
@@ -5794,6 +6197,86 @@ class CodeParser:
             ))
 
         return False
+
+    def _get_member_call_receiver_method(
+        self,
+        node,
+        language: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return a simple receiver name and method for a member call.
+
+        ``self.field.save()`` and ``this.field.save()`` use ``field`` as the
+        receiver so class-field annotations can resolve them. More complex
+        receiver expressions are deliberately left unresolved.
+        """
+        if language == "java" and node.type == "method_invocation":
+            method, receiver = self._get_java_method_and_receiver(node)
+            return receiver, method
+
+        callee = node.child_by_field_name("function")
+        if callee is None and node.children:
+            callee = node.children[0]
+        if callee is None:
+            return None, None
+
+        if language == "kotlin" and callee.type == "navigation_expression":
+            receiver = next(
+                (
+                    child.text.decode("utf-8", errors="replace")
+                    for child in callee.children
+                    if child.type == "simple_identifier"
+                ),
+                None,
+            )
+            method = None
+            for child in callee.children:
+                if child.type != "navigation_suffix":
+                    continue
+                method = next(
+                    (
+                        part.text.decode("utf-8", errors="replace")
+                        for part in child.children
+                        if part.type == "simple_identifier"
+                    ),
+                    None,
+                )
+            return receiver, method
+
+        if callee.type not in ("attribute", "member_expression"):
+            return None, None
+        object_node = callee.child_by_field_name("object")
+        property_node = (
+            callee.child_by_field_name("attribute")
+            or callee.child_by_field_name("property")
+        )
+        if object_node is None or property_node is None:
+            return None, None
+
+        method = property_node.text.decode("utf-8", errors="replace")
+        if object_node.type in ("identifier", "simple_identifier", "self", "this"):
+            return (
+                object_node.text.decode("utf-8", errors="replace"),
+                method,
+            )
+
+        if object_node.type in ("attribute", "member_expression"):
+            root = object_node.child_by_field_name("object")
+            field_node = (
+                object_node.child_by_field_name("attribute")
+                or object_node.child_by_field_name("property")
+            )
+            if (
+                root is not None
+                and field_node is not None
+                and root.type in ("identifier", "self", "this")
+                and root.text in (b"self", b"this")
+            ):
+                return (
+                    field_node.text.decode("utf-8", errors="replace"),
+                    method,
+                )
+
+        return None, method
 
     # ------------------------------------------------------------------
     # PHP / Laravel semantic constructs
@@ -6841,6 +7324,16 @@ class CodeParser:
         for child in root.children:
             node_type = child.type
 
+            # Kotlin groups top-level imports under an ``import_list`` node,
+            # while the generic import table contains ``import_header``.
+            if language == "kotlin" and node_type == "import_list":
+                for import_node in child.children:
+                    if import_node.type == "import_header":
+                        self._collect_import_names(
+                            import_node, language, source, import_map,
+                        )
+                continue
+
             # Unwrap decorator wrappers to reach the inner definition
             target = child
             if node_type in decorator_wrappers:
@@ -7234,6 +7727,18 @@ class CodeParser:
                         if module_name and real_name and alias:
                             import_map[alias] = f"{module_name}.{real_name}"
 
+        elif language in ("java", "kotlin"):
+            text = node.text.decode("utf-8", errors="replace").strip()
+            if not text.startswith("import "):
+                return
+            imported = text[len("import "):].rstrip(";").strip()
+            if imported.startswith("static ") or imported.endswith(".*"):
+                return
+            original, separator, alias = imported.partition(" as ")
+            local_name = alias.strip() if separator else original.rsplit(".", 1)[-1]
+            if local_name:
+                import_map[local_name] = original.strip()
+
     def _collect_js_import_names(
         self, clause_node, module: str, import_map: dict[str, str],
     ) -> None:
@@ -7422,6 +7927,20 @@ class CodeParser:
                     if current == current.parent:
                         break
                     current = current.parent
+
+        elif language == "kotlin":
+            if module.endswith(".*"):
+                return None
+            relative = module.replace(".", "/")
+            current = caller_dir
+            while True:
+                for suffix in (".kt", ".kts"):
+                    target = current / f"{relative}{suffix}"
+                    if target.is_file():
+                        return str(target.resolve())
+                if current == current.parent:
+                    break
+                current = current.parent
 
         elif language == "php":
             composer_resolved = self._resolve_php_composer_module(
