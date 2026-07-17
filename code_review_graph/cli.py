@@ -41,9 +41,11 @@ import argparse
 import json
 import logging
 import os
+from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ _PLATFORM_CHOICES = [
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
     "copilot", "copilot-cli", "codebuddy", "all",
 ]
+
+
+class _EmbeddingRefreshKwargs(TypedDict, total=False):
+    embedding_provider: str
+    embedding_model: str
 
 
 def _get_version() -> str:
@@ -362,6 +369,43 @@ def _handle_data_dir_option(args, repo_root: Path) -> None:
             sys.exit(1)
 
 
+def _add_embedding_refresh_args(command) -> None:
+    """Add explicit, provider-scoped refresh options to a CLI command."""
+    command.add_argument(
+        "--embedding-provider",
+        choices=["local", "openai", "google", "minimax"],
+        default=None,
+        help=(
+            "Explicitly refresh an existing embedding index with this provider; "
+            "requires --embedding-model (default: disabled)"
+        ),
+    )
+    command.add_argument(
+        "--embedding-model",
+        default=None,
+        help=(
+            "Exact model for --embedding-provider. Cloud providers may transmit "
+            "source-derived text and incur API cost"
+        ),
+    )
+
+
+def _embedding_refresh_kwargs(args, parser) -> _EmbeddingRefreshKwargs:
+    """Validate the all-or-nothing provider/model opt-in."""
+    provider = getattr(args, "embedding_provider", None)
+    model = getattr(args, "embedding_model", None)
+    if bool(provider) != bool(model):
+        parser.error(
+            "--embedding-provider and --embedding-model must be supplied together",
+        )
+    if not provider:
+        return {}
+    return {
+        "embedding_provider": provider,
+        "embedding_model": model,
+    }
+
+
 def main() -> None:
     """Main CLI entry point."""
     ap = argparse.ArgumentParser(
@@ -505,6 +549,7 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    _add_embedding_refresh_args(build_cmd)
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -543,6 +588,7 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    _add_embedding_refresh_args(update_cmd)
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -558,6 +604,7 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    _add_embedding_refresh_args(pp_cmd)
 
     # embed
     embed_cmd = sub.add_parser(
@@ -591,6 +638,7 @@ def main() -> None:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    _add_embedding_refresh_args(watch_cmd)
 
     # status
     status_cmd = sub.add_parser("status", help="Show graph statistics")
@@ -833,6 +881,8 @@ def main() -> None:
         _print_banner()
         return
 
+    embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
+
     if args.command in ("serve", "mcp"):
         from .main import main as serve_main
 
@@ -1033,6 +1083,7 @@ def main() -> None:
                 communities=not getattr(args, "no_communities", False),
                 fts=not getattr(args, "no_fts", False),
                 repo_root=str(repo_root),
+                **embedding_refresh_kwargs,
             )
             parts = []
             if result.get("flows_detected"):
@@ -1096,6 +1147,7 @@ def main() -> None:
                 full_rebuild=True,
                 repo_root=str(repo_root),
                 postprocess=pp,
+                **embedding_refresh_kwargs,
             )
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
@@ -1117,6 +1169,7 @@ def main() -> None:
                 repo_root=str(repo_root),
                 base=args.base,
                 postprocess=pp,
+                **embedding_refresh_kwargs,
             )
             updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
@@ -1217,7 +1270,12 @@ def main() -> None:
             from .postprocessing import run_post_processing
 
             try:
-                watch(repo_root, store, on_files_updated=run_post_processing)
+                callback = (
+                    partial(run_post_processing, **embedding_refresh_kwargs)
+                    if embedding_refresh_kwargs
+                    else run_post_processing
+                )
+                watch(repo_root, store, on_files_updated=callback)
             except RuntimeError as exc:
                 print(f"Error: {exc}", file=sys.stderr)
                 sys.exit(1)

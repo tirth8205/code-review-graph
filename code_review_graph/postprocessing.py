@@ -8,6 +8,10 @@ post-processing steps must run to populate derived tables:
 3. Trace execution flows
 4. Detect code communities
 
+An embedding refresh can be added as an explicit fifth step by supplying an
+exact provider and model.  It is default-off because cloud providers transmit
+source-derived text and may incur API cost.
+
 This module extracts that pipeline so every entry point — MCP tool, CLI
 commands, and watch mode — produces identical results.
 """
@@ -23,7 +27,12 @@ from .graph import GraphStore
 logger = logging.getLogger(__name__)
 
 
-def run_post_processing(store: GraphStore) -> dict[str, Any]:
+def run_post_processing(
+    store: GraphStore,
+    *,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
+) -> dict[str, Any]:
     """Run all post-build steps on a populated graph.
 
     Each step is non-fatal: failures are logged and collected as warnings
@@ -43,6 +52,13 @@ def run_post_processing(store: GraphStore) -> dict[str, Any]:
     _rebuild_fts_index(store, result, warnings)
     _trace_flows(store, result, warnings)
     _detect_communities(store, result, warnings)
+    _refresh_embeddings(
+        store,
+        result,
+        warnings,
+        provider=embedding_provider,
+        model=embedding_model,
+    )
 
     if warnings:
         result["warnings"] = warnings
@@ -132,3 +148,34 @@ def _detect_communities(
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+
+
+def _refresh_embeddings(
+    store: GraphStore,
+    result: dict[str, Any],
+    warnings: list[str],
+    *,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    """Run an explicitly requested embedding refresh without failing a build."""
+    if provider is None and model is None:
+        return
+    if not provider or not model:
+        warning = "Embedding refresh requires both an explicit provider and model."
+        logger.warning(warning)
+        warnings.append(warning)
+        return
+
+    try:
+        from .embeddings import refresh_embeddings
+
+        refreshed = refresh_embeddings(store, provider=provider, model=model)
+        if refreshed is not None:
+            result["embeddings_refreshed"] = refreshed["embedded"]
+            result["embeddings_purged"] = refreshed["purged"]
+    except Exception as exc:
+        logger.warning("Embedding refresh failed: %s", exc)
+        warnings.append(
+            f"Embedding refresh failed: {type(exc).__name__}: {exc}",
+        )

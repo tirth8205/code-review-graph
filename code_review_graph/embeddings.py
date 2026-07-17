@@ -794,6 +794,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 _IDENTIFIER_SPLIT_RE = re.compile(r"([a-z])([A-Z])|[_./\-]+")
+_MAX_EMBEDDED_DOCSTRING_CHARS = 400
 
 
 def _split_identifier(name: str) -> str:
@@ -854,14 +855,23 @@ def _node_to_text(node: GraphNode) -> str:
     if node.return_type:
         parts.append(f"returns {node.return_type}")
 
-    # 7. Module / directory context from the file path — gives queries a
+    # 7. Documentation summary.  Existing databases may contain arbitrary
+    # values in ``extra`` so accept strings only, normalize whitespace, and
+    # re-apply the parser's bound before the text enters a provider request.
+    raw_docstring = node.extra.get("docstring") if node.extra else None
+    if isinstance(raw_docstring, str):
+        docstring = " ".join(raw_docstring.split())[:_MAX_EMBEDDED_DOCSTRING_CHARS]
+        if docstring:
+            parts.append(docstring)
+
+    # 8. Module / directory context from the file path — gives queries a
     # term like "routing" or "client" to anchor against.
     if node.file_path:
         parent_dir = Path(node.file_path).parent.name
         if parent_dir and parent_dir not in (".", "src", "lib"):
             parts.append(parent_dir)
 
-    # 8. Language
+    # 9. Language
     if node.language:
         parts.append(node.language)
 
@@ -984,12 +994,36 @@ class EmbeddingStore:
         )
         self._conn.commit()
 
+    def purge_orphans(self) -> int:
+        """Delete vectors whose graph node no longer exists.
+
+        Embeddings and graph nodes normally share a SQLite file.  Standalone
+        embedding databases remain supported, so a missing ``nodes`` table is
+        an intentional no-op rather than an error.
+        """
+        has_nodes = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'nodes'",
+        ).fetchone()
+        if has_nodes is None:
+            return 0
+        cursor = self._conn.execute(
+            "DELETE FROM embeddings "
+            "WHERE NOT EXISTS ("
+            "SELECT 1 FROM nodes "
+            "WHERE nodes.qualified_name = embeddings.qualified_name"
+            ")",
+        )
+        self._conn.commit()
+        return max(cursor.rowcount, 0)
+
     def count(self) -> int:
         return self._conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
 
 
 def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) -> int:
-    """Embed all non-file nodes in the graph."""
+    """Purge deleted nodes, then embed all current non-file nodes."""
+    embedding_store.purge_orphans()
     if not embedding_store.available:
         return 0
 
@@ -999,6 +1033,88 @@ def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) ->
         all_nodes.extend(graph_store.get_nodes_by_file(f))
 
     return embedding_store.embed_nodes(all_nodes)
+
+
+def refresh_embeddings(
+    graph_store: GraphStore,
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, int] | None:
+    """Refresh a previously embedded graph under one exact provider identity.
+
+    This function is deliberately not called by default build paths.  Callers
+    must supply both provider and model explicitly.  A graph with no existing
+    vectors returns before provider resolution, so routine builds cannot load
+    a local model, contact a cloud service, or incur API cost.
+
+    Existing vectors must all use the identity resolved from the requested
+    provider/model (including the endpoint for OpenAI-compatible providers).
+    Refresh never silently migrates an index to another model or endpoint.
+    """
+    provider = provider.strip().lower()
+    model = model.strip()
+    if not provider or not model:
+        raise ValueError(
+            "Embedding refresh requires an explicit provider and model.",
+        )
+
+    has_table = graph_store._conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'embeddings'",
+    ).fetchone()
+    if has_table is None:
+        return None
+    has_rows = graph_store._conn.execute(
+        "SELECT 1 FROM embeddings LIMIT 1",
+    ).fetchone()
+    if has_rows is None:
+        return None
+    try:
+        rows = graph_store._conn.execute(
+            "SELECT DISTINCT provider FROM embeddings ORDER BY provider",
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such column" in str(exc).lower() and "provider" in str(exc).lower():
+            raise ValueError(
+                "Embedding refresh refused: existing rows have no provider identity; "
+                "run an explicit embed to migrate and rebuild the index.",
+            ) from exc
+        raise
+    identities = {str(row["provider"]) for row in rows}
+
+    embedding_store = EmbeddingStore(
+        graph_store.db_path,
+        provider=provider,
+        model=model,
+    )
+    try:
+        if not embedding_store.available or embedding_store.provider is None:
+            raise RuntimeError(
+                f"Embedding provider '{provider}' is unavailable in this environment.",
+            )
+        resolved_identity = embedding_store.provider.name
+        if provider == "minimax":
+            resolved_model = resolved_identity.partition(":")[2]
+            if model != resolved_model:
+                raise ValueError(
+                    f"MiniMax refresh model must be '{resolved_model}', got '{model}'.",
+                )
+        if identities != {resolved_identity}:
+            existing = ", ".join(sorted(identities))
+            raise ValueError(
+                "Embedding refresh refused: existing embeddings use "
+                f"{existing}; requested provider resolves to {resolved_identity}.",
+            )
+
+        purged = embedding_store.purge_orphans()
+        all_nodes: list[GraphNode] = []
+        for file_path in graph_store.get_all_files():
+            all_nodes.extend(graph_store.get_nodes_by_file(file_path))
+        embedded = embedding_store.embed_nodes(all_nodes)
+        return {"embedded": embedded, "purged": purged}
+    finally:
+        embedding_store.close()
 
 
 def semantic_search(

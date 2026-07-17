@@ -565,12 +565,14 @@ The cloud-egress warning is auto-skipped when the base URL points to localhost
 > `gemini-embedding-001` (via the native Gemini provider, which requires
 > `GOOGLE_API_KEY` instead of the OpenAI-compatible path).
 >
-> Also note: `code-review-graph` currently embeds **function signatures only**
-> (~10 tokens per node, e.g. `"parse_file function (path: str) returns Tree"`).
-> Models whose headline quality comes from long-context body understanding
-> (such as Gemini 2 or Qwen3-8B at their MTEB-code SOTA scores) will see a
-> much narrower quality gap against smaller models at this input length.
-> Body/docstring embedding is tracked as a follow-up enhancement.
+> `code-review-graph` embeds identifiers, signatures, structural context, and a
+> bounded first-paragraph docstring/doc-comment summary. It does not transmit
+> function bodies. Graphs created before documentation extraction was added
+> need one full `code-review-graph build` before re-embedding so every file is
+> reparsed. Routine builds never refresh embeddings by default. To refresh an
+> existing index after a build, explicitly pass both `--embedding-provider`
+> and `--embedding-model`; cloud choices may transmit this source-derived text
+> and incur API cost.
 
 #### Tool Filtering
 

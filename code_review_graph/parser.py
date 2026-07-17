@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import html
 import json
 import logging
 import re
@@ -879,6 +880,85 @@ def _is_test_function(
     if decorators and any(d in _TEST_ANNOTATIONS for d in decorators):
         return True
     return False
+
+
+# Documentation summaries are stored in ``NodeInfo.extra`` so the graph
+# schema remains backward compatible.  A hard cap keeps parser metadata and
+# semantic-search input bounded even when a source file contains a very long
+# API reference as its docstring.
+_MAX_DOCSTRING_CHARS = 400
+_DOC_COMMENT_NODE_TYPES = frozenset({
+    "comment",
+    "block_comment",
+    "line_comment",
+    "doc_comment",
+})
+_DOC_COMMENT_SKIP_TYPES = frozenset({"attribute_item", "decorator"})
+_DOC_COMMENT_WRAPPER_TYPES = frozenset({
+    "export_statement",
+    "template_declaration",
+})
+_CSHARP_SUMMARY_RE = re.compile(
+    r"<summary(?:\s[^>]*)?>(.*?)</summary\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_XML_TAG_RE = re.compile(r"<[^>]+>")
+_DOC_PARAGRAPH_TAG_RE = re.compile(
+    r"</?(?:p|para)(?:\s[^>]*)?>",
+    re.IGNORECASE,
+)
+_DOC_INLINE_TAG_RE = re.compile(
+    r"\{@(?:code|literal|link)\s+([^}]+)\}",
+    re.IGNORECASE,
+)
+_DOC_BRIEF_RE = re.compile(r"^\s*[@\\]brief\s+", re.IGNORECASE)
+
+
+def _clean_docstring_summary(raw: str, language: str) -> str:
+    """Return a whitespace-stable, first-paragraph documentation summary."""
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if language == "csharp":
+        summary = _CSHARP_SUMMARY_RE.search(text)
+        if summary:
+            text = summary.group(1)
+    if language != "python":
+        text = _DOC_PARAGRAPH_TAG_RE.sub("\n\n", text)
+        text = _DOC_INLINE_TAG_RE.sub(r"\1", text)
+        text = _XML_TAG_RE.sub(" ", text)
+        text = html.unescape(text)
+        text = _DOC_BRIEF_RE.sub("", text)
+
+    lines = [line.strip() for line in text.splitlines()]
+    while lines and not lines[0]:
+        lines.pop(0)
+    paragraph: list[str] = []
+    for line in lines:
+        if not line:
+            break
+        if paragraph and line.startswith(("@param", "@return", "\\param", "\\return")):
+            break
+        paragraph.append(line)
+    return " ".join(" ".join(paragraph).split())[:_MAX_DOCSTRING_CHARS]
+
+
+def _strip_block_doc_comment(text: str) -> str:
+    """Remove a Doxygen/Javadoc-style wrapper and per-line ``*`` prefix."""
+    if text.startswith(("/**", "/*!")):
+        text = text[3:]
+    elif text.startswith("/*"):
+        text = text[2:]
+    if text.endswith("*/"):
+        text = text[:-2]
+
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("*"):
+            stripped = stripped[1:]
+            if stripped.startswith(" "):
+                stripped = stripped[1:]
+        lines.append(stripped)
+    return "\n".join(lines)
 
 
 def _modifier_annotation_names(node) -> list[str]:
@@ -5670,6 +5750,124 @@ class CodeParser:
                         extra={"kafka_type": ann_name},
                     ))
 
+    def _get_docstring_summary(self, node, language: str) -> Optional[str]:
+        """Extract a bounded documentation summary for a definition node."""
+        if language == "python":
+            raw = self._python_docstring_value(node)
+        else:
+            raw = self._preceding_doc_comment(node, language)
+        if not raw:
+            return None
+        return _clean_docstring_summary(raw, language) or None
+
+    @staticmethod
+    def _python_docstring_value(node) -> Optional[str]:
+        """Return Python's actual string value for the first body statement.
+
+        ``ast.literal_eval`` gives us CPython-compatible escape handling and
+        implicit literal concatenation while naturally rejecting f-strings.
+        A bytes literal evaluates successfully but is rejected by the final
+        type check, matching ``__doc__`` semantics.
+        """
+        body = node.child_by_field_name("body")
+        if body is None:
+            return None
+        statement = next(
+            (child for child in body.named_children if child.type != "comment"),
+            None,
+        )
+        if statement is None:
+            return None
+        expression = statement
+        if expression.type == "expression_statement":
+            named = expression.named_children
+            if len(named) != 1:
+                return None
+            expression = named[0]
+        if expression.type not in (
+            "string",
+            "concatenated_string",
+            "parenthesized_expression",
+        ):
+            return None
+        try:
+            value = ast.literal_eval(
+                expression.text.decode("utf-8", errors="strict"),
+            )
+        except (SyntaxError, ValueError, UnicodeDecodeError):
+            return None
+        return value if isinstance(value, str) else None
+
+    @staticmethod
+    def _line_doc_payload(text: str, language: str) -> Optional[str]:
+        """Return one documentation-line payload, or ``None`` if not docs."""
+        stripped = text.strip()
+        if language == "go":
+            if not stripped.startswith("//"):
+                return None
+            return stripped[2:].lstrip()
+        if language == "rust":
+            # Rust ``//!`` is inner module/crate documentation; ``////`` is
+            # an ordinary comment, not an outer item doc comment.
+            if not stripped.startswith("///") or stripped.startswith("////"):
+                return None
+            return stripped[3:].lstrip()
+        if stripped.startswith(("///", "//!")):
+            return stripped[3:].lstrip()
+        return None
+
+    def _preceding_doc_comment(self, node, language: str) -> Optional[str]:
+        """Return documentation directly attached above a definition."""
+        anchor = node
+        while (
+            anchor.parent is not None
+            and anchor.parent.type in _DOC_COMMENT_WRAPPER_TYPES
+        ):
+            anchor = anchor.parent
+
+        siblings: list = []
+        current_line = anchor.start_point[0]
+        sibling = anchor.prev_sibling
+        while sibling is not None:
+            if sibling.end_point[0] < current_line - 1:
+                break
+            if sibling.type in _DOC_COMMENT_SKIP_TYPES:
+                current_line = sibling.start_point[0]
+                sibling = sibling.prev_sibling
+                continue
+            if sibling.type not in _DOC_COMMENT_NODE_TYPES:
+                break
+            siblings.append(sibling)
+            current_line = sibling.start_point[0]
+            sibling = sibling.prev_sibling
+
+        if not siblings:
+            return None
+
+        nearest = siblings[0].text.decode("utf-8", errors="replace").strip()
+        if nearest.startswith("/*"):
+            allowed = ("/**",) if language == "rust" else ("/**", "/*!")
+            if not nearest.startswith(allowed):
+                return None
+            return _strip_block_doc_comment(nearest)
+
+        # Work from the definition upward and stop at the first adjacent
+        # ordinary comment.  This attaches only the nearest documentation
+        # block and avoids hoovering unrelated implementation notes into it.
+        payloads: list[str] = []
+        for comment in siblings:
+            text = comment.text.decode("utf-8", errors="replace")
+            payload = self._line_doc_payload(text, language)
+            if payload is None:
+                break
+            if language == "go" and payload.startswith(("go:", "line ")):
+                continue
+            payloads.append(payload)
+        if not payloads:
+            return None
+        payloads.reverse()
+        return "\n".join(payloads)
+
     def _extract_classes(
         self,
         child,
@@ -5744,6 +5942,10 @@ class CodeParser:
         )
         if class_decorators and "decorators" not in extra:
             extra["decorators"] = class_decorators
+
+        docstring = self._get_docstring_summary(child, language)
+        if docstring:
+            extra["docstring"] = docstring
 
         node = NodeInfo(
             kind="Class",
@@ -5925,6 +6127,10 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
+
+        docstring = self._get_docstring_summary(child, language)
+        if docstring:
+            method_extra["docstring"] = docstring
 
         node = NodeInfo(
             kind=kind,

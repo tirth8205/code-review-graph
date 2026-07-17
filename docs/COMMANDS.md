@@ -312,6 +312,8 @@ code-review-graph update --brief               # Update graph + show risk panel
 code-review-graph update --brief --verify      # ...and cross-check vs tiktoken
 code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph embed --provider local       # Compute vector embeddings for semantic search
+code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
+                                                # Explicitly refresh an existing index (default: off)
 
 # Monitor and inspect
 code-review-graph status                       # Graph statistics

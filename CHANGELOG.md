@@ -7,6 +7,16 @@
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).
+- Functions and classes now retain a bounded, first-paragraph documentation
+  summary in backward-compatible node metadata across Python, JSDoc/Javadoc,
+  C# XML docs, Doxygen, Rust, and Go. Semantic embedding text includes the
+  normalized summary, so behavior-oriented queries no longer depend only on
+  identifier overlap (replacing PR #602, with Stefan Hudici attribution).
+- Explicit provider-and-model-scoped embedding refresh is available on build,
+  update, postprocess, and watch paths. It is default-off, refuses silent
+  provider/model/endpoint migration, remains fail-soft, and purges vectors for
+  deleted or renamed nodes; manual `embed` also purges orphans (replacing PR
+  #599, with Stefan Hudici attribution).
 - Added `code-review-graph uninstall` as a safe, symmetric counterpart to
   `install` (#482, replacing PR #491). It derives MCP cleanup from the live
   platform specifications, preserves unrelated shared configuration and JSONC

@@ -13,12 +13,44 @@ from ._common import _get_store
 logger = logging.getLogger(__name__)
 
 
+def _run_embedding_refresh(
+    store: Any,
+    result: dict[str, Any],
+    warnings: list[str],
+    *,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    """Run a provider-scoped embedding refresh only when explicitly requested."""
+    if provider is None and model is None:
+        return
+    if not provider or not model:
+        warning = "Embedding refresh requires both an explicit provider and model."
+        logger.warning(warning)
+        warnings.append(warning)
+        return
+    try:
+        from code_review_graph.embeddings import refresh_embeddings
+
+        refreshed = refresh_embeddings(store, provider=provider, model=model)
+        if refreshed is not None:
+            result["embeddings_refreshed"] = refreshed["embedded"]
+            result["embeddings_purged"] = refreshed["purged"]
+    except Exception as exc:
+        logger.warning("Embedding refresh failed: %s", exc)
+        warnings.append(
+            f"Embedding refresh failed: {type(exc).__name__}: {exc}",
+        )
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
     postprocess: str,
     full_rebuild: bool = False,
     changed_files: list[str] | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
 
@@ -36,6 +68,13 @@ def _run_postprocess(
     build_result["postprocess_level"] = postprocess
 
     if postprocess == "none":
+        _run_embedding_refresh(
+            store,
+            build_result,
+            warnings,
+            provider=embedding_provider,
+            model=embedding_model,
+        )
         return warnings
 
     # -- Signatures + FTS (fast, always run unless "none") --
@@ -86,6 +125,13 @@ def _run_postprocess(
     )
 
     if postprocess == "minimal":
+        _run_embedding_refresh(
+            store,
+            build_result,
+            warnings,
+            provider=embedding_provider,
+            model=embedding_model,
+        )
         build_result["postprocess_timing"] = timing
         return warnings
 
@@ -151,6 +197,13 @@ def _run_postprocess(
     timing["summaries_s"] = max(
         0.0,
         round(time.perf_counter() - stage_started, 6),
+    )
+    _run_embedding_refresh(
+        store,
+        build_result,
+        warnings,
+        provider=embedding_provider,
+        model=embedding_model,
     )
     build_result["postprocess_timing"] = timing
 
@@ -397,6 +450,8 @@ def build_or_update_graph(
     base: str = "HEAD~1",
     postprocess: str = "full",
     recurse_submodules: bool | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -413,6 +468,12 @@ def build_or_update_graph(
             via ``git ls-files --recurse-submodules``. When None
             (default), falls back to the CRG_RECURSE_SUBMODULES
             environment variable. Default: disabled.
+        embedding_provider: Exact provider to use for an explicitly requested
+            post-build refresh. Must be supplied together with
+            ``embedding_model``; omitted by default so builds never transmit
+            source-derived text or load an embedding model unexpectedly.
+        embedding_model: Exact model for an explicitly requested post-build
+            embedding refresh. Must be supplied with ``embedding_provider``.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
@@ -462,6 +523,8 @@ def build_or_update_graph(
             postprocess,
             full_rebuild=full_rebuild,
             changed_files=changed,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
         )
         if warnings:
             build_result["warnings"] = warnings
@@ -475,6 +538,8 @@ def run_postprocess(
     communities: bool = True,
     fts: bool = True,
     repo_root: str | None = None,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict[str, Any]:
     """Run post-processing steps on an existing graph.
 
@@ -487,6 +552,10 @@ def run_postprocess(
         communities: Run community detection. Default: True.
         fts: Rebuild FTS index. Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
+        embedding_provider: Exact provider for an explicit refresh. Must be
+            supplied with ``embedding_model``. Default: disabled.
+        embedding_model: Exact model for an explicit refresh. Must be supplied
+            with ``embedding_provider``. Default: disabled.
 
     Returns:
         Summary of what was computed.
@@ -561,6 +630,14 @@ def run_postprocess(
                 store.rollback()
                 logger.warning("Community detection failed: %s", e)
                 warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
+
+        _run_embedding_refresh(
+            store,
+            result,
+            warnings,
+            provider=embedding_provider,
+            model=embedding_model,
+        )
 
         store.set_metadata(
             "last_postprocessed_at",

@@ -101,6 +101,8 @@ async def build_or_update_graph_tool(
     base: str = "HEAD~1",
     postprocess: str = "full",
     recurse_submodules: Optional[bool] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_model: Optional[str] = None,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -123,6 +125,10 @@ async def build_or_update_graph_tool(
                      or "none" (skip all post-processing). Use "minimal" for faster builds.
         recurse_submodules: If True, include files from git submodules.
             When None (default), falls back to CRG_RECURSE_SUBMODULES env var.
+        embedding_provider: Exact provider for an explicit post-build embedding
+            refresh. Must be supplied with embedding_model. Default: disabled.
+        embedding_model: Exact model for an explicit post-build embedding
+            refresh. Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
 
@@ -130,6 +136,8 @@ async def build_or_update_graph_tool(
         return with_provenance(build_or_update_graph(
             full_rebuild=full_rebuild, repo_root=root, base=base,
             postprocess=postprocess, recurse_submodules=recurse_submodules,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
         ), root)
 
     return await asyncio.to_thread(_run)
@@ -141,6 +149,8 @@ async def run_postprocess_tool(
     communities: bool = True,
     fts: bool = True,
     repo_root: Optional[str] = None,
+    embedding_provider: Optional[str] = None,
+    embedding_model: Optional[str] = None,
 ) -> dict:
     """Run post-processing on existing graph (flows, communities, FTS index).
 
@@ -156,12 +166,18 @@ async def run_postprocess_tool(
         communities: Run community detection. Default: True.
         fts: Rebuild FTS index. Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
+        embedding_provider: Exact provider for an explicit embedding refresh.
+            Must be supplied with embedding_model. Default: disabled.
+        embedding_model: Exact model for an explicit embedding refresh.
+            Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
 
     def _run() -> dict:
         return with_provenance(run_postprocess(
             flows=flows, communities=communities, fts=fts, repo_root=root,
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
         ), root)
 
     return await asyncio.to_thread(_run)

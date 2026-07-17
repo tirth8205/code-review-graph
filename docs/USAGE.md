@@ -89,6 +89,22 @@ Then use `embed_graph_tool` to compute vectors. `semantic_search_nodes_tool` aut
 
 Embedding providers are local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, and MiniMax. Local embeddings use `CRG_EMBEDDING_MODEL`; OpenAI-compatible providers use `CRG_OPENAI_BASE_URL`, `CRG_OPENAI_API_KEY`, and `CRG_OPENAI_MODEL`. Cloud providers are opt-in and print an egress warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set.
 
+Function/class documentation summaries are included in embedding text. For a
+graph created by an older release, run a full build once before re-embedding so
+all files gain that metadata. Embedding refresh after build/update/watch is
+always default-off; opt in with an exact provider and model, for example:
+
+```bash
+code-review-graph build \
+  --embedding-provider local \
+  --embedding-model all-MiniLM-L6-v2
+```
+
+The same two options work with `update`, `postprocess`, and `watch`. They must be
+provided together. A refresh only updates a previously embedded graph, refuses
+to migrate vectors to a different provider/model/endpoint, purges deleted-node
+vectors, and degrades provider or transport failures to graph-build warnings.
+
 ### 7. Detect changes with risk scoring (v2)
 ```
 Ask your MCP client: "Review my recent changes with risk scoring"
