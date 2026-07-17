@@ -2,9 +2,11 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1465,6 +1467,224 @@ class TestInstallCursorHooks:
         assert result.exists()
         data = json.loads(result.read_text())
         assert data["version"] == 1
+
+    def test_windows_commands_quote_paths_with_spaces(self, tmp_path):
+        home = tmp_path / "User With Spaces"
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            config = generate_cursor_hooks_config()
+
+        for entries in config["hooks"].values():
+            for entry in entries:
+                command = entry["command"]
+                assert command.startswith(
+                    'powershell.exe -NoLogo -NoProfile -NonInteractive '
+                    '-ExecutionPolicy Bypass -File "'
+                )
+                assert command.endswith('.ps1"')
+                assert "User With Spaces" in command
+
+    def test_windows_scripts_are_native_and_protocol_safe(self):
+        with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+            scripts = _cursor_hook_scripts()
+
+        assert set(scripts) == {
+            "crg-update.ps1",
+            "crg-session-start.ps1",
+            "crg-pre-commit.ps1",
+        }
+        for name, content in scripts.items():
+            assert "[Console]::In.ReadToEnd()" in content, name
+            assert "ConvertTo-Json -Compress" in content, name
+            assert "exit 0" in content, name
+            assert "python" not in content.lower(), name
+
+    def test_windows_install_migrates_unix_entries_without_data_loss(self, tmp_path):
+        home = tmp_path / "User With Spaces"
+        cursor_dir = home / ".cursor"
+        hooks_dir = cursor_dir / "hooks"
+        hooks_dir.mkdir(parents=True)
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Linux"),
+        ):
+            old_config = generate_cursor_hooks_config()
+
+        custom_edit_hook = {"command": "custom-tool audit", "timeout": 17}
+        old_config["customSetting"] = {"preserve": True}
+        old_config["hooks"]["afterFileEdit"].append(custom_edit_hook)
+        old_config["hooks"]["stop"] = [{"command": "custom-tool stop"}]
+        (cursor_dir / "hooks.json").write_text(json.dumps(old_config), encoding="utf-8")
+        for name in ("crg-update.sh", "crg-session-start.sh", "crg-pre-commit.sh"):
+            (hooks_dir / name).write_text("user-preserved-old-script", encoding="utf-8")
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            install_cursor_hooks()
+            install_cursor_hooks()
+
+        data = json.loads((cursor_dir / "hooks.json").read_text(encoding="utf-8"))
+        assert data["customSetting"] == {"preserve": True}
+        assert custom_edit_hook in data["hooks"]["afterFileEdit"]
+        assert data["hooks"]["stop"] == [{"command": "custom-tool stop"}]
+        for event in ("afterFileEdit", "sessionStart", "beforeShellExecution"):
+            crg_entries = [
+                entry
+                for entry in data["hooks"][event]
+                if "crg-" in entry.get("command", "")
+            ]
+            assert len(crg_entries) == 1, event
+            assert crg_entries[0]["command"].endswith('.ps1"')
+            assert ".sh" not in crg_entries[0]["command"]
+
+        for name in ("crg-update", "crg-session-start", "crg-pre-commit"):
+            assert (hooks_dir / f"{name}.ps1").exists()
+            assert (hooks_dir / f"{name}.sh").read_text() == "user-preserved-old-script"
+
+    @staticmethod
+    def _run_windows_hook(command, *, cwd, payload, env):
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        proc = subprocess.Popen(
+            [comspec, "/d", "/s", "/c", command],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdin is not None
+        write_result = {}
+
+        def write_payload():
+            try:
+                write_result["bytes"] = proc.stdin.write(payload)
+                proc.stdin.close()
+            except OSError as exc:  # pragma: no cover - Windows regression guard
+                write_result["error"] = exc
+
+        writer = threading.Thread(target=write_payload, daemon=True)
+        writer.start()
+        writer.join(timeout=30)
+        if writer.is_alive():
+            proc.kill()
+            writer.join(timeout=5)
+            proc.wait(timeout=5)
+            pytest.fail("Cursor hook did not drain stdin within 30 seconds")
+        if "error" in write_result:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"Cursor hook closed stdin early: {write_result['error']}")
+        assert write_result["bytes"] == len(payload)
+
+        proc.stdin = None
+        stdout, stderr = proc.communicate(timeout=30)
+        return proc.returncode, stdout, stderr
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="requires PowerShell")
+    @pytest.mark.parametrize(
+        ("event", "expected_args"),
+        [
+            ("afterFileEdit", "update --skip-flows"),
+            ("sessionStart", "status"),
+            ("beforeShellExecution", "detect-changes --brief"),
+        ],
+    )
+    def test_windows_commands_execute_and_drain_large_stdin(
+        self, tmp_path, monkeypatch, event, expected_args
+    ):
+        home = tmp_path / "User With Spaces"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        marker = tmp_path / "cursor-hook-invocations.txt"
+        (bin_dir / "code-review-graph.cmd").write_text(
+            '@echo off\r\n>>"%CRG_HOOK_MARKER%" echo %*\r\n'
+            'echo output with "quotes"\r\nexit /b %CRG_HOOK_EXIT%\r\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CRG_HOOK_MARKER", str(marker))
+        monkeypatch.setenv("CRG_HOOK_EXIT", "0")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            install_cursor_hooks()
+            config = generate_cursor_hooks_config()
+
+        command = config["hooks"][event][0]["command"]
+        payload = json.dumps({"payload": "x" * (2 * 1024 * 1024)}).encode()
+        returncode, stdout, stderr = self._run_windows_hook(
+            command,
+            cwd=tmp_path,
+            payload=payload,
+            env=os.environ.copy(),
+        )
+
+        assert returncode == 0, stderr.decode(errors="replace")
+        json.loads(stdout.decode(encoding="utf-8-sig"))
+        assert expected_args in marker.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="requires PowerShell")
+    @pytest.mark.parametrize("exit_code", [1, 23])
+    def test_windows_commands_fail_open_on_tool_errors(
+        self, tmp_path, monkeypatch, exit_code
+    ):
+        home = tmp_path / "User With Spaces"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "code-review-graph.cmd").write_text(
+            "@echo off\r\necho simulated failure 1>&2\r\n"
+            "exit /b %CRG_HOOK_EXIT%\r\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CRG_HOOK_EXIT", str(exit_code))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            install_cursor_hooks()
+            config = generate_cursor_hooks_config()
+
+        for entries in config["hooks"].values():
+            command = entries[0]["command"]
+            returncode, stdout, stderr = self._run_windows_hook(
+                command,
+                cwd=tmp_path,
+                payload=b'{"event":"tool-error"}',
+                env=os.environ.copy(),
+            )
+            assert returncode == 0, stderr.decode(errors="replace")
+            json.loads(stdout.decode(encoding="utf-8-sig"))
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="requires PowerShell")
+    def test_windows_commands_fail_open_when_tool_is_missing(self, tmp_path):
+        home = tmp_path / "User With Spaces"
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=home),
+            patch("code_review_graph.skills.platform.system", return_value="Windows"),
+        ):
+            install_cursor_hooks()
+            config = generate_cursor_hooks_config()
+
+        powershell = shutil.which("powershell.exe")
+        assert powershell is not None
+        env = os.environ.copy()
+        env["PATH"] = str(Path(powershell).parent)
+        for entries in config["hooks"].values():
+            command = entries[0]["command"]
+            returncode, stdout, stderr = self._run_windows_hook(
+                command,
+                cwd=tmp_path,
+                payload=b'{"event":"missing-tool"}',
+                env=env,
+            )
+            assert returncode == 0, stderr.decode(errors="replace")
+            json.loads(stdout.decode(encoding="utf-8-sig"))
 
 
 class TestKiroPlatform:
