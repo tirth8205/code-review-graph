@@ -12,6 +12,10 @@
 - Added Ansible playbook, role, task, handler, notification, include, and role
   dependency extraction with qualified graph relationships, duplicate-task
   disambiguation, and ordinary-YAML false-positive guards (PR #415).
+- Added bounded VB.NET structural parsing for namespaces, types, generics,
+  multiline members, properties, calls, inheritance, and interfaces. Same-file
+  targets resolve case-insensitively only when scope evidence is unique, and
+  overloads share one stable graph symbol (replacing PR #517).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).

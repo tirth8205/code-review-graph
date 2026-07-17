@@ -332,6 +332,9 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".svh": "verilog",
     ".v": "verilog",
     ".vh": "verilog",
+    # tree-sitter-language-pack does not currently bundle Visual Basic.
+    # Keep the fallback deliberately structural and repository-local.
+    ".vb": "vbnet",
     ".sql": "sql",
     ".tf": "hcl",
     ".hcl": "hcl",
@@ -784,6 +787,253 @@ _KAFKA_PRODUCER_TYPES = frozenset({
     "ReactiveKafkaProducerTemplate",
     "KafkaSender",
 })
+
+
+# ---------------------------------------------------------------------------
+# VB.NET regex patterns and helpers (no tree-sitter grammar bundled)
+# ---------------------------------------------------------------------------
+
+_VBNET_IDENT = r"(?:[A-Za-z_][A-Za-z0-9_]*|\[[^\]\r\n]+\])"
+_VBNET_DOTTED_IDENT = rf"{_VBNET_IDENT}(?:\.{_VBNET_IDENT})*"
+_VBNET_MODIFIER_WORDS = (
+    "Public",
+    "Private",
+    "Protected",
+    "Friend",
+    "Partial",
+    "Shared",
+    "Static",
+    "MustInherit",
+    "NotInheritable",
+    "Overridable",
+    "Overrides",
+    "MustOverride",
+    "Overloads",
+    "Default",
+    "ReadOnly",
+    "WriteOnly",
+    "Shadows",
+    "Async",
+    "Iterator",
+    "Declare",
+    "Narrowing",
+    "Widening",
+)
+_VBNET_MODIFIER_RE = rf"(?:(?:{'|'.join(_VBNET_MODIFIER_WORDS)})\s+)*"
+
+_VBNET_IMPORT_RE = re.compile(r"^\s*Imports\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_NAMESPACE_RE = re.compile(
+    rf"^\s*Namespace\s+(?P<name>{_VBNET_DOTTED_IDENT})\s*$",
+    re.IGNORECASE,
+)
+_VBNET_END_NAMESPACE_RE = re.compile(
+    r"^\s*End\s+Namespace\b", re.IGNORECASE,
+)
+_VBNET_TYPE_RE = re.compile(
+    rf"^\s*{_VBNET_MODIFIER_RE}"
+    rf"(?P<kind>Class|Interface|Structure|Module|Enum)\s+"
+    rf"(?P<name>{_VBNET_IDENT})\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_END_TYPE_RE = re.compile(
+    r"^\s*End\s+(?P<kind>Class|Interface|Structure|Module|Enum)\b",
+    re.IGNORECASE,
+)
+_VBNET_MEMBER_RE = re.compile(
+    rf"^\s*(?P<mods>{_VBNET_MODIFIER_RE})"
+    rf"(?P<kind>Function|Sub|Property)\s+"
+    rf"(?P<name>{_VBNET_IDENT})\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_OPERATOR_RE = re.compile(
+    rf"^\s*(?P<mods>{_VBNET_MODIFIER_RE})"
+    r"(?P<kind>Operator)\s+(?P<name>\S+)\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_END_MEMBER_RE = re.compile(
+    r"^\s*End\s+(Function|Sub|Property|Operator)\b", re.IGNORECASE,
+)
+_VBNET_INHERITS_RE = re.compile(r"\bInherits\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_IMPLEMENTS_RE = re.compile(r"\bImplements\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_NEW_RE = re.compile(
+    rf"\bNew\s+(?P<target>{_VBNET_DOTTED_IDENT})\s*(?:\(Of\b[^)]*\))?\s*\(",
+    re.IGNORECASE,
+)
+_VBNET_CALL_RE = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?P<target>{_VBNET_DOTTED_IDENT})\s*\(",
+    re.IGNORECASE,
+)
+
+_VBNET_CALL_KEYWORDS = frozenset({
+    "addhandler", "and", "andalso", "as", "call", "case", "catch",
+    "class", "cobj", "continue", "ctype", "directcast", "do", "each",
+    "else", "elseif", "end", "enum", "erase", "error", "event", "exit",
+    "finally", "for", "function", "get", "gettype", "getxmlnamespace",
+    "global", "gosub", "goto", "if", "implements", "imports", "inherits",
+    "interface", "loop", "module", "mustinherit", "new", "next", "not",
+    "nothing", "operator", "option", "or", "orelse", "property",
+    "raiseevent", "redim", "rem", "removehandler", "resume", "return",
+    "select", "set", "step", "stop", "structure", "sub", "synclock",
+    "then", "throw", "to", "try", "typeof", "until", "using", "when",
+    "while", "with", "withevents", "xor",
+})
+
+
+def _vbnet_normalize_name(value: str) -> str:
+    """Remove VB escaping while preserving dotted identity."""
+    return ".".join(
+        part[1:-1] if part.startswith("[") and part.endswith("]") else part
+        for part in value.strip().split(".")
+    )
+
+
+def _strip_vbnet_noise(text: str) -> str:
+    """Blank VB comments and string contents while preserving line numbers."""
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line):]
+        if re.match(r"^\s*Rem\b", line, re.IGNORECASE):
+            cleaned_lines.append(" " * len(line) + ending)
+            continue
+
+        out: list[str] = []
+        in_string = False
+        i = 0
+        while i < len(line):
+            char = line[i]
+            if char == '"':
+                out.append(char)
+                if in_string and i + 1 < len(line) and line[i + 1] == '"':
+                    out.append(" ")
+                    i += 2
+                    continue
+                in_string = not in_string
+                i += 1
+                continue
+            if not in_string and char == "'":
+                out.append(" " * (len(line) - i))
+                break
+            out.append(" " if in_string else char)
+            i += 1
+        cleaned_lines.append("".join(out) + ending)
+    return "".join(cleaned_lines)
+
+
+def _vbnet_logical_lines(cleaned: str) -> list[tuple[int, int, str]]:
+    """Join explicit and parenthesized VB continuations with source ranges."""
+    logical: list[tuple[int, int, str]] = []
+    parts: list[str] = []
+    start_line = 1
+    depth = 0
+    for line_no, raw_line in enumerate(cleaned.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not stripped and not parts:
+            continue
+        if not parts:
+            start_line = line_no
+        explicit = stripped.endswith("_")
+        if explicit:
+            stripped = stripped[:-1].rstrip()
+        parts.append(stripped)
+        depth += stripped.count("(") - stripped.count(")")
+        if explicit or depth > 0:
+            continue
+        logical.append((start_line, line_no, " ".join(parts)))
+        parts = []
+        depth = 0
+    if parts:
+        logical.append((start_line, len(cleaned.splitlines()) or 1, " ".join(parts)))
+    return logical
+
+
+def _vbnet_parenthesized(text: str, start: int) -> tuple[str, int] | None:
+    """Return one balanced parenthesized group and its exclusive end."""
+    if start >= len(text) or text[start] != "(":
+        return None
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+    return None
+
+
+def _vbnet_split_top_level(value: str) -> list[str]:
+    """Split a comma list without splitting generic/array groups."""
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    for index, char in enumerate(value):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        elif char == "," and depth == 0:
+            parts.append(value[start:index])
+            start = index + 1
+    parts.append(value[start:])
+    return parts
+
+
+def _vbnet_type_parameters(rest: str) -> tuple[list[str], str]:
+    tail = rest.lstrip()
+    if not tail.lower().startswith("(of "):
+        return [], rest
+    group = _vbnet_parenthesized(tail, 0)
+    if group is None:
+        return [], rest
+    content, end = group
+    params = [
+        part.strip().split()[0]
+        for part in _vbnet_split_top_level(content[3:])
+        if part.strip()
+    ]
+    return params, tail[end:]
+
+
+def _vbnet_signature_parts(
+    rest: str,
+) -> tuple[Optional[str], Optional[str], list[str]]:
+    """Extract parameters, return type, and method type parameters."""
+    type_params, tail = _vbnet_type_parameters(rest)
+    tail = tail.lstrip()
+    params: Optional[str] = None
+    if tail.startswith("("):
+        group = _vbnet_parenthesized(tail, 0)
+        if group is not None:
+            raw_params, end = group
+            params = re.sub(r"\s+", " ", raw_params).strip()
+            tail = tail[end:]
+
+    return_type = None
+    return_match = re.search(
+        r"\bAs\s+(.+?)(?=\s+(?:Implements|Handles)\b|$)",
+        tail,
+        re.IGNORECASE,
+    )
+    if return_match:
+        return_type = re.sub(r"\s+", " ", return_match.group(1)).strip()
+    return params, return_type, type_params
+
+
+def _vbnet_relationship_targets(value: str) -> list[str]:
+    targets: list[str] = []
+    for raw_part in _vbnet_split_top_level(value):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            part = part.split("=", 1)[1].strip()
+        if part.lower().startswith("global."):
+            part = part[7:]
+        part = re.sub(r"\s*\(Of\b.*\)\s*$", "", part, flags=re.IGNORECASE)
+        if re.fullmatch(_VBNET_DOTTED_IDENT, part):
+            targets.append(_vbnet_normalize_name(part))
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -1713,6 +1963,11 @@ class CodeParser:
             if first_line == b"# Databricks notebook source":
                 return self._parse_databricks_py_notebook(path, source)
 
+        # VB.NET and ReScript use bounded structural fallbacks because the
+        # bundled language pack has no grammar for either language.
+        if language == "vbnet":
+            return self._parse_vbnet(path, source)
+
         # ReScript: regex-based parser (no tree-sitter grammar bundled).
         if language == "rescript":
             return self._parse_rescript(path, source)
@@ -2426,6 +2681,427 @@ class CodeParser:
                 break
 
         return nodes, edges
+
+    # ------------------------------------------------------------------
+    # VB.NET: bounded structural fallback (no bundled tree-sitter grammar)
+    # ------------------------------------------------------------------
+
+    def _parse_vbnet(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse stable VB structure without pretending to be a full compiler.
+
+        VB is case-insensitive. Symbols are therefore resolved only when an
+        exact case-folded, scope-aware match exists in this file; ambiguous or
+        external targets remain unresolved instead of gaining a false edge.
+        """
+        text = source.decode("utf-8", errors="replace")
+        cleaned = _strip_vbnet_noise(text)
+        statements = _vbnet_logical_lines(cleaned)
+        file_path = str(path)
+        line_count = text.count("\n") + 1
+        test_file = _is_test_file(file_path)
+
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=line_count,
+            language="vbnet",
+            is_test=test_file,
+        )]
+        edges: list[EdgeInfo] = []
+        namespace_stack: list[dict] = []
+        type_stack: list[dict] = []
+        member_stack: list[dict] = []
+        member_nodes: dict[tuple[str, str], int] = {}
+
+        def namespace_scope() -> Optional[str]:
+            return namespace_stack[-1]["full"] if namespace_stack else None
+
+        def current_type() -> Optional[dict]:
+            return type_stack[-1] if type_stack else None
+
+        def parent_scope() -> Optional[str]:
+            current = current_type()
+            return current["full"] if current else namespace_scope()
+
+        def container_qn(scope: Optional[str]) -> str:
+            return self._qualify(scope, file_path, None) if scope else file_path
+
+        def close_member(line_no: int) -> None:
+            if not member_stack:
+                return
+            entry = member_stack.pop()
+            node = nodes[entry["node_index"]]
+            node.line_end = max(node.line_end, line_no)
+
+        def close_type(line_no: int, kind: Optional[str] = None) -> None:
+            while member_stack:
+                close_member(line_no)
+            if not type_stack:
+                return
+            if kind is None:
+                entry = type_stack.pop()
+            else:
+                wanted = kind.casefold()
+                index = next(
+                    (
+                        pos for pos in range(len(type_stack) - 1, -1, -1)
+                        if type_stack[pos]["kind"] == wanted
+                    ),
+                    len(type_stack) - 1,
+                )
+                entry = type_stack.pop(index)
+            nodes[entry["node_index"]].line_end = line_no
+
+        def emit_relationships(
+            statement: str, source_qn: str, line_no: int,
+        ) -> None:
+            for pattern, edge_kind in (
+                (_VBNET_INHERITS_RE, "INHERITS"),
+                (_VBNET_IMPLEMENTS_RE, "IMPLEMENTS"),
+            ):
+                match = pattern.search(statement)
+                if match is None:
+                    continue
+                for target in _vbnet_relationship_targets(match.group(1)):
+                    edges.append(EdgeInfo(
+                        kind=edge_kind,
+                        source=source_qn,
+                        target=target,
+                        file_path=file_path,
+                        line=line_no,
+                        extra={"vbnet_unresolved": True},
+                    ))
+
+        def emit_calls(statement: str, source_qn: str, line_no: int) -> None:
+            new_spans: list[tuple[int, int]] = []
+            for match in _VBNET_NEW_RE.finditer(statement):
+                target = _vbnet_normalize_name(match.group("target"))
+                new_spans.append(match.span())
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=source_qn,
+                    target=target,
+                    file_path=file_path,
+                    line=line_no,
+                    extra={"vbnet_unresolved": True, "constructor": True},
+                ))
+
+            for match in _VBNET_CALL_RE.finditer(statement):
+                if any(start <= match.start() < end for start, end in new_spans):
+                    continue
+                target = _vbnet_normalize_name(match.group("target"))
+                first = target.split(".", 1)[0].casefold()
+                if first in _VBNET_CALL_KEYWORDS:
+                    continue
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=source_qn,
+                    target=target,
+                    file_path=file_path,
+                    line=line_no,
+                    extra={"vbnet_unresolved": True},
+                ))
+
+        for line_start, line_end, statement in statements:
+            if not statement:
+                continue
+
+            import_match = _VBNET_IMPORT_RE.match(statement)
+            if import_match:
+                for target in _vbnet_relationship_targets(import_match.group(1)):
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=target,
+                        file_path=file_path,
+                        line=line_start,
+                    ))
+                continue
+
+            if _VBNET_END_NAMESPACE_RE.match(statement):
+                while type_stack:
+                    close_type(line_end)
+                if namespace_stack:
+                    entry = namespace_stack.pop()
+                    nodes[entry["node_index"]].line_end = line_end
+                continue
+
+            namespace_match = _VBNET_NAMESPACE_RE.match(statement)
+            if namespace_match:
+                raw_name = _vbnet_normalize_name(namespace_match.group("name"))
+                outer = namespace_scope()
+                full_name = ".".join(filter(None, (outer, raw_name)))
+                node_index = len(nodes)
+                nodes.append(NodeInfo(
+                    kind="Class",
+                    name=raw_name,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    language="vbnet",
+                    parent_name=outer,
+                    extra={"vbnet_kind": "namespace"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=container_qn(outer),
+                    target=self._qualify(raw_name, file_path, outer),
+                    file_path=file_path,
+                    line=line_start,
+                ))
+                namespace_stack.append({
+                    "full": full_name,
+                    "node_index": node_index,
+                })
+                continue
+
+            end_member = _VBNET_END_MEMBER_RE.match(statement)
+            if end_member:
+                close_member(line_end)
+                continue
+
+            end_type = _VBNET_END_TYPE_RE.match(statement)
+            if end_type:
+                close_type(line_end, end_type.group("kind"))
+                continue
+
+            type_match = _VBNET_TYPE_RE.match(statement)
+            if type_match:
+                while member_stack:
+                    close_member(line_start)
+                name = _vbnet_normalize_name(type_match.group("name"))
+                kind = type_match.group("kind").casefold()
+                scope = parent_scope()
+                full_scope = ".".join(filter(None, (scope, name)))
+                type_params, _ = _vbnet_type_parameters(type_match.group("rest"))
+                extra: dict = {"vbnet_kind": kind}
+                if type_params:
+                    extra["vbnet_type_parameters"] = type_params
+                node_index = len(nodes)
+                nodes.append(NodeInfo(
+                    kind="Class",
+                    name=name,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=line_end,
+                    language="vbnet",
+                    parent_name=scope,
+                    extra=extra,
+                ))
+                type_qn = self._qualify(name, file_path, scope)
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=container_qn(scope),
+                    target=type_qn,
+                    file_path=file_path,
+                    line=line_start,
+                ))
+                type_stack.append({
+                    "full": full_scope,
+                    "kind": kind,
+                    "node_index": node_index,
+                })
+                emit_relationships(type_match.group("rest"), type_qn, line_start)
+                continue
+
+            type_entry = current_type()
+            if type_entry and re.match(
+                r"^\s*(?:Inherits|Implements)\b", statement, re.IGNORECASE,
+            ):
+                emit_relationships(
+                    statement,
+                    self._qualify(type_entry["full"], file_path, None),
+                    line_start,
+                )
+                continue
+
+            member_match = (
+                _VBNET_MEMBER_RE.match(statement)
+                or _VBNET_OPERATOR_RE.match(statement)
+            )
+            if member_match:
+                while member_stack:
+                    close_member(line_start)
+                member_kind = member_match.group("kind").casefold()
+                name = _vbnet_normalize_name(member_match.group("name"))
+                if member_kind == "operator":
+                    name = f"operator_{name}"
+                modifiers = re.sub(
+                    r"\s+", " ", member_match.group("mods").strip(),
+                ) or None
+                params, return_type, type_params = _vbnet_signature_parts(
+                    member_match.group("rest"),
+                )
+                scope = parent_scope()
+                qn = self._qualify(name, file_path, scope)
+                key = ((scope or "").casefold(), name.casefold())
+                node_index = member_nodes.get(key)
+                if node_index is None:
+                    is_test = _is_test_function(name, file_path)
+                    extra = {"vbnet_kind": member_kind}
+                    if type_params:
+                        extra["vbnet_type_parameters"] = type_params
+                    node_index = len(nodes)
+                    nodes.append(NodeInfo(
+                        kind="Test" if is_test else "Function",
+                        name=name,
+                        file_path=file_path,
+                        line_start=line_start,
+                        line_end=line_end,
+                        language="vbnet",
+                        parent_name=scope,
+                        params=params,
+                        return_type=return_type,
+                        modifiers=modifiers,
+                        is_test=is_test,
+                        extra=extra,
+                    ))
+                    member_nodes[key] = node_index
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS",
+                        source=container_qn(scope),
+                        target=qn,
+                        file_path=file_path,
+                        line=line_start,
+                    ))
+                else:
+                    existing = nodes[node_index]
+                    overloads = existing.extra.setdefault(
+                        "vbnet_overloads", [existing.params or ""],
+                    )
+                    overloads.append(params or "")
+                    existing.line_end = max(existing.line_end, line_end)
+
+                implements = _VBNET_IMPLEMENTS_RE.search(
+                    member_match.group("rest"),
+                )
+                if implements:
+                    for target in _vbnet_relationship_targets(implements.group(1)):
+                        edges.append(EdgeInfo(
+                            kind="IMPLEMENTS",
+                            source=qn,
+                            target=target,
+                            file_path=file_path,
+                            line=line_start,
+                            extra={"vbnet_unresolved": True},
+                        ))
+
+                modifier_words = {
+                    word.casefold() for word in (modifiers or "").split()
+                }
+                has_body = (
+                    not type_entry or type_entry["kind"] != "interface"
+                ) and not modifier_words.intersection({"mustoverride", "declare"})
+                if has_body:
+                    member_stack.append({
+                        "node_index": node_index,
+                        "qn": qn,
+                    })
+                continue
+
+            if member_stack:
+                emit_calls(statement, member_stack[-1]["qn"], line_start)
+
+        while member_stack:
+            close_member(line_count)
+        while type_stack:
+            close_type(line_count)
+        while namespace_stack:
+            entry = namespace_stack.pop()
+            nodes[entry["node_index"]].line_end = line_count
+
+        edges = self._resolve_vbnet_edges(nodes, edges, file_path)
+        if test_file:
+            test_qnames = {
+                self._qualify(node.name, file_path, node.parent_name)
+                for node in nodes
+                if node.is_test
+            }
+            for edge in list(edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+        return nodes, edges
+
+    def _resolve_vbnet_edges(
+        self,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        file_path: str,
+    ) -> list[EdgeInfo]:
+        """Resolve only unique case-insensitive same-file VB targets."""
+        prefix = f"{file_path}::"
+        symbols: dict[str, list[str]] = {}
+        bare_symbols: dict[str, list[str]] = {}
+        for node in nodes:
+            if node.kind not in ("Class", "Function", "Test", "Type"):
+                continue
+            qn = self._qualify(node.name, file_path, node.parent_name)
+            tail = qn.removeprefix(prefix)
+            symbols.setdefault(tail.casefold(), []).append(qn)
+            bare_symbols.setdefault(node.name.casefold(), []).append(qn)
+
+        def unique(candidate: str) -> Optional[str]:
+            matches = symbols.get(candidate.casefold(), [])
+            return matches[0] if len(matches) == 1 else None
+
+        def resolve(edge: EdgeInfo) -> Optional[str]:
+            raw = edge.target
+            if "::" in raw:
+                return raw
+            target = _vbnet_normalize_name(raw)
+            source_tail = edge.source.removeprefix(prefix)
+            source_parts = source_tail.split(".") if source_tail else []
+            scope_parts = source_parts[:-1]
+
+            lowered = target.casefold()
+            if lowered.startswith("global."):
+                target = target[7:]
+            elif lowered.startswith("me."):
+                target = target[3:]
+            elif lowered.startswith("myclass."):
+                target = target[8:]
+
+            for size in range(len(scope_parts), -1, -1):
+                candidate = ".".join((*scope_parts[:size], target))
+                found = unique(candidate)
+                if found is not None:
+                    return found
+            found = unique(target)
+            if found is not None:
+                return found
+            bare = bare_symbols.get(target.casefold(), [])
+            return bare[0] if len(bare) == 1 else None
+
+        resolved: list[EdgeInfo] = []
+        for edge in edges:
+            if edge.kind not in ("CALLS", "INHERITS", "IMPLEMENTS"):
+                resolved.append(edge)
+                continue
+            target = resolve(edge)
+            if target is None:
+                resolved.append(edge)
+                continue
+            extra = dict(edge.extra)
+            extra.pop("vbnet_unresolved", None)
+            resolved.append(EdgeInfo(
+                kind=edge.kind,
+                source=edge.source,
+                target=target,
+                file_path=edge.file_path,
+                line=edge.line,
+                extra=extra,
+            ))
+        return resolved
 
     # ------------------------------------------------------------------
     # ReScript: regex-based structural parser (no tree-sitter grammar
