@@ -12,6 +12,10 @@
   typedefs, modports, port references, and verification declarations. Function
   locals are excluded rather than promoted to module globals, and signal nodes
   no longer pollute function risk, flow, dead-code, or size analyses (PR #522).
+- Corrected Rust trait and `impl` identity, preserving one concrete type across
+  repeated implementation blocks. Nested/aliased `use` trees, `Self` and
+  turbofish calls, and bounded cached Cargo path/workspace dependency resolution
+  now retain their original graph targets (replacing PR #526).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).

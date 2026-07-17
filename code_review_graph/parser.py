@@ -15,7 +15,12 @@ import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import tree_sitter_language_pack as tslp
 
@@ -39,6 +44,29 @@ _SQL_TABLE_RE = re.compile(
 _PYTHON_STAR_CACHE_MAX = 15_000
 _PYTHON_STAR_EXPORT_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
 _PYTHON_STAR_EXPORT_CACHE_LOCK = threading.RLock()
+
+
+@lru_cache(maxsize=512)
+def _read_cargo_manifest(
+    manifest_path: str, _mtime_ns: int, _size: int,
+) -> dict[str, Any]:
+    """Read one Cargo manifest, keyed by immutable file identity metadata."""
+    try:
+        parsed = tomllib.loads(
+            Path(manifest_path).read_text(encoding="utf-8", errors="replace"),
+        )
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _load_cargo_manifest(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return {}
+    return _read_cargo_manifest(str(resolved), stat.st_mtime_ns, stat.st_size)
 
 # SQL keywords that can appear after FROM/JOIN but are NOT table names.
 _SQL_KEYWORDS: frozenset[str] = frozenset({
@@ -271,7 +299,9 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "typescript": ["class_declaration", "class"],
     "tsx": ["class_declaration", "class"],
     "go": ["type_declaration"],
-    "rust": ["struct_item", "enum_item", "impl_item"],
+    # impl_item is a scope for methods, not a second type definition. It is
+    # dispatched separately so repeated impl blocks cannot overwrite structs.
+    "rust": ["struct_item", "enum_item", "trait_item"],
     "java": ["class_declaration", "interface_declaration", "enum_declaration"],
     "c": ["struct_specifier", "type_definition"],
     "cpp": ["class_specifier", "struct_specifier"],
@@ -339,7 +369,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "typescript": ["function_declaration", "method_definition", "arrow_function"],
     "tsx": ["function_declaration", "method_definition", "arrow_function"],
     "go": ["function_declaration", "method_declaration"],
-    "rust": ["function_item"],
+    "rust": ["function_item", "function_signature_item"],
     "java": ["method_declaration", "constructor_declaration"],
     "c": ["function_definition"],
     "cpp": ["function_definition"],
@@ -1267,6 +1297,10 @@ class CodeParser:
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
+        # Cargo discovery is shared by every Rust import/call in a source file.
+        self._rust_project_cache: dict[
+            str, tuple[Path, Path, Path, dict[str, Path], Path]
+        ] = {}
         # Config-driven custom languages (.code-review-graph/languages.toml).
         # The built-in tables stay shared module-level constants; only when a
         # repo defines custom languages does this parser switch to merged
@@ -3809,6 +3843,19 @@ class CodeParser:
                 enclosing_class,
                 enclosing_func,
             ):
+                continue
+
+            if language == "rust" and node_type == "impl_item":
+                self._extract_rust_impl(
+                    child,
+                    source,
+                    file_path,
+                    nodes,
+                    edges,
+                    import_map or {},
+                    defined_names or set(),
+                    _depth,
+                )
                 continue
 
             # --- Dart call detection (see #87) ---
@@ -6832,7 +6879,7 @@ class CodeParser:
             # uses this evidence during parsing, and the Spring DI resolver
             # consumes the same metadata for Java injected fields.
             call_extra: dict = {}
-            if language in self._TYPED_CALL_LANGUAGES:
+            if language in self._TYPED_CALL_LANGUAGES or language == "rust":
                 receiver, method_name = self._get_member_call_receiver_method(
                     child, language,
                 )
@@ -6877,6 +6924,14 @@ class CodeParser:
             receiver_name = call_extra.get("receiver")
             if receiver_name in ("self", "cls", "this") and enclosing_class:
                 target = self._qualify(call_name, file_path, enclosing_class)
+            elif (
+                language == "rust"
+                and call_name.startswith("Self::")
+                and enclosing_class
+            ):
+                target = self._qualify(
+                    call_name.rsplit("::", 1)[-1], file_path, enclosing_class,
+                )
             elif receiver_name:
                 target = call_name
             else:
@@ -6906,6 +6961,21 @@ class CodeParser:
         receiver so class-field annotations can resolve them. More complex
         receiver expressions are deliberately left unresolved.
         """
+        if language == "rust" and node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            while callee is not None and callee.type == "generic_function":
+                callee = callee.child_by_field_name("function")
+            if callee is None or callee.type != "field_expression":
+                return None, None
+            receiver = callee.child_by_field_name("value")
+            method = callee.child_by_field_name("field")
+            if receiver is None or method is None:
+                return None, None
+            return (
+                receiver.text.decode("utf-8", errors="replace"),
+                method.text.decode("utf-8", errors="replace"),
+            )
+
         if language == "java" and node.type == "method_invocation":
             method, receiver = self._get_java_method_and_receiver(node)
             return receiver, method
@@ -7998,6 +8068,161 @@ class CodeParser:
 
         return False
 
+    def _rust_path_segments(self, node) -> list[str]:
+        """Return semantic Rust path segments while discarding type arguments."""
+        if node is None:
+            return []
+        if node.type in (
+            "identifier", "type_identifier", "crate", "self", "super",
+        ):
+            return [node.text.decode("utf-8", errors="replace")]
+        if node.type in (
+            "scoped_identifier", "scoped_type_identifier",
+        ):
+            path = node.child_by_field_name("path")
+            name = node.child_by_field_name("name")
+            return self._rust_path_segments(path) + self._rust_path_segments(name)
+        if node.type == "generic_type":
+            return self._rust_path_segments(node.child_by_field_name("type"))
+        if node.type == "generic_function":
+            return self._rust_path_segments(node.child_by_field_name("function"))
+        return []
+
+    def _parse_rust_use_node(
+        self, node, prefix: tuple[str, ...] = (),
+    ) -> list[tuple[str, str]]:
+        """Flatten nested Rust use trees into local-name/original-path pairs."""
+        if node.type == "use_declaration":
+            argument = node.child_by_field_name("argument")
+            return self._parse_rust_use_node(argument, prefix) if argument else []
+
+        if node.type in ("identifier", "type_identifier"):
+            name = node.text.decode("utf-8", errors="replace")
+            full = (*prefix, name)
+            return [(name, "::".join(full))]
+
+        if node.type == "self":
+            if not prefix:
+                return []
+            return [(prefix[-1], "::".join(prefix))]
+
+        if node.type in ("scoped_identifier", "scoped_type_identifier"):
+            segments = tuple(self._rust_path_segments(node))
+            if not segments:
+                return []
+            full = (*prefix, *segments)
+            return [(segments[-1], "::".join(full))]
+
+        if node.type == "use_as_clause":
+            path = node.child_by_field_name("path")
+            alias = node.child_by_field_name("alias")
+            segments = tuple(self._rust_path_segments(path))
+            if not segments or alias is None:
+                return []
+            local_name = alias.text.decode("utf-8", errors="replace")
+            return [(local_name, "::".join((*prefix, *segments)))]
+
+        if node.type == "scoped_use_list":
+            path = node.child_by_field_name("path")
+            use_list = node.child_by_field_name("list")
+            path_segments = tuple(self._rust_path_segments(path))
+            if use_list is None:
+                return []
+            return self._parse_rust_use_node(
+                use_list, (*prefix, *path_segments),
+            )
+
+        if node.type == "use_list":
+            results: list[tuple[str, str]] = []
+            for child in node.children:
+                if child.is_named:
+                    results.extend(self._parse_rust_use_node(child, prefix))
+            return results
+
+        if node.type == "use_wildcard":
+            path = node.child_by_field_name("path")
+            segments = tuple(self._rust_path_segments(path))
+            full = (*prefix, *segments)
+            return [("*", "::".join(full))] if full else []
+
+        return []
+
+    def _resolve_rust_type_target(
+        self,
+        segments: list[str],
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> str:
+        """Resolve a Rust type path only when file evidence is available."""
+        if not segments:
+            return ""
+        local_name = segments[-1]
+        if len(segments) == 1 and local_name in defined_names:
+            return self._qualify(local_name, file_path, None)
+
+        first = segments[0]
+        if first in import_map:
+            imported = import_map[first].split("::") + segments[1:]
+            original_name = imported[-1]
+            resolved = self._resolve_module_to_file(
+                "::".join(imported), file_path, "rust",
+            )
+            if resolved:
+                return self._qualify(original_name, resolved, None)
+
+        resolved = self._resolve_module_to_file(
+            "::".join(segments), file_path, "rust",
+        )
+        if resolved:
+            return self._qualify(local_name, resolved, None)
+        return "::".join(segments)
+
+    def _extract_rust_impl(
+        self,
+        impl_node,
+        source: bytes,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        import_map: dict[str, str],
+        defined_names: set[str],
+        depth: int,
+    ) -> None:
+        """Use impl blocks as method scopes without emitting duplicate types."""
+        type_node = impl_node.child_by_field_name("type")
+        target_segments = self._rust_path_segments(type_node)
+        if not target_segments:
+            return
+        target_name = target_segments[-1]
+        trait_node = impl_node.child_by_field_name("trait")
+        if trait_node is not None:
+            trait_segments = self._rust_path_segments(trait_node)
+            trait_target = self._resolve_rust_type_target(
+                trait_segments, file_path, import_map, defined_names,
+            )
+            if trait_target:
+                edges.append(EdgeInfo(
+                    kind="IMPLEMENTS",
+                    source=self._qualify(target_name, file_path, None),
+                    target=trait_target,
+                    file_path=file_path,
+                    line=impl_node.start_point[0] + 1,
+                ))
+
+        self._extract_from_tree(
+            impl_node,
+            source,
+            "rust",
+            file_path,
+            nodes,
+            edges,
+            enclosing_class=target_name,
+            import_map=import_map,
+            defined_names=defined_names,
+            _depth=depth + 1,
+        )
+
     def _extract_verilog_constructs(
         self,
         child,
@@ -8713,6 +8938,11 @@ class CodeParser:
                     if child.type == "import_clause":
                         self._collect_js_import_names(child, module, import_map)
 
+        elif language == "rust":
+            for local_name, original_path in self._parse_rust_use_node(node):
+                if local_name != "*":
+                    import_map[local_name] = original_path
+
         elif language == "julia":
             def _alias_parts(alias_node) -> tuple[Optional[str], Optional[str]]:
                 names: list[str] = []
@@ -8934,6 +9164,9 @@ class CodeParser:
             # ``dart:core`` / ``dart:async`` etc. are SDK libraries we do
             # not track; fall through to return None.
 
+        elif language == "rust":
+            return self._resolve_rust_module_file(module, file_path)
+
         elif language == "java":
             # ``import com.example.pkg.ClassName;`` — convert dot-notation
             # to a relative path and walk up from the caller's directory to
@@ -9019,6 +9252,248 @@ class CodeParser:
                 current = current.parent
 
         return None
+
+    @staticmethod
+    def _rust_dependency_specs(manifest: dict[str, Any]) -> dict[str, Any]:
+        """Collect Cargo dependency tables, including target-specific ones."""
+        specs: dict[str, Any] = {}
+        for section in ("dependencies", "dev-dependencies", "build-dependencies"):
+            table = manifest.get(section)
+            if isinstance(table, dict):
+                specs.update(table)
+        target_tables = manifest.get("target")
+        if isinstance(target_tables, dict):
+            for target in target_tables.values():
+                if not isinstance(target, dict):
+                    continue
+                for section in (
+                    "dependencies", "dev-dependencies", "build-dependencies",
+                ):
+                    table = target.get(section)
+                    if isinstance(table, dict):
+                        specs.update(table)
+        return specs
+
+    @staticmethod
+    def _rust_crate_layout(crate_root: Path) -> Optional[tuple[Path, Path]]:
+        """Return ``(source root, crate root module)`` for a local crate."""
+        manifest = _load_cargo_manifest(crate_root / "Cargo.toml")
+        if not isinstance(manifest.get("package"), dict):
+            return None
+        lib = manifest.get("lib")
+        explicit_lib = lib.get("path") if isinstance(lib, dict) else None
+        if isinstance(explicit_lib, str):
+            root_file = crate_root / explicit_lib
+            if root_file.is_file():
+                return root_file.parent, root_file
+
+        source_root = crate_root / "src"
+        for name in ("lib.rs", "main.rs"):
+            candidate = source_root / name
+            if candidate.is_file():
+                return source_root, candidate
+        return None
+
+    def _rust_project_context(
+        self, file_path: str,
+    ) -> Optional[tuple[Path, Path, Path, dict[str, Path], Path]]:
+        """Discover a bounded Cargo crate/workspace once per source directory."""
+        try:
+            caller_dir = Path(file_path).resolve().parent
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if self._repo_root is not None and not _path_is_within(
+            caller_dir, self._repo_root,
+        ):
+            return None
+        key = str(caller_dir)
+        if key in self._rust_project_cache:
+            return self._rust_project_cache[key]
+
+        manifests: list[tuple[Path, dict[str, Any]]] = []
+        current = caller_dir
+        for _ in range(64):
+            manifest_path = current / "Cargo.toml"
+            if manifest_path.is_file():
+                manifests.append((manifest_path, _load_cargo_manifest(manifest_path)))
+            if self._repo_root is not None and current == self._repo_root:
+                break
+            if current == current.parent:
+                break
+            current = current.parent
+
+        crate_entry = next(
+            (
+                entry for entry in manifests
+                if isinstance(entry[1].get("package"), dict)
+            ),
+            None,
+        )
+        if crate_entry is None:
+            return None
+        crate_manifest, crate_data = crate_entry
+        crate_root = crate_manifest.parent
+        workspace_entry = next(
+            (
+                entry for entry in manifests
+                if isinstance(entry[1].get("workspace"), dict)
+            ),
+            None,
+        )
+        workspace_root = (
+            workspace_entry[0].parent if workspace_entry else crate_root
+        )
+        boundary = self._repo_root or workspace_root
+        try:
+            boundary = boundary.resolve()
+            crate_root = crate_root.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not _path_is_within(crate_root, boundary):
+            return None
+
+        layout = self._rust_crate_layout(crate_root)
+        if layout is None:
+            return None
+        source_root, root_file = layout
+
+        workspace_specs: dict[str, Any] = {}
+        workspace_base = workspace_root
+        if workspace_entry:
+            workspace_table = workspace_entry[1].get("workspace")
+            if isinstance(workspace_table, dict):
+                raw_specs = workspace_table.get("dependencies")
+                if isinstance(raw_specs, dict):
+                    workspace_specs = raw_specs
+
+        dependencies: dict[str, Path] = {}
+        for alias, raw_spec in self._rust_dependency_specs(crate_data).items():
+            if not isinstance(alias, str) or not isinstance(raw_spec, dict):
+                continue
+            spec = raw_spec
+            base = crate_root
+            if raw_spec.get("workspace") is True:
+                inherited = workspace_specs.get(alias)
+                if not isinstance(inherited, dict):
+                    continue
+                spec = inherited
+                base = workspace_base
+            raw_path = spec.get("path")
+            if not isinstance(raw_path, str):
+                continue
+            try:
+                dependency_root = (base / raw_path).resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if not _path_is_within(dependency_root, boundary):
+                continue
+            if self._rust_crate_layout(dependency_root) is None:
+                continue
+            dependencies[alias] = dependency_root
+            dependencies[alias.replace("-", "_")] = dependency_root
+
+        context = (crate_root, source_root, root_file, dependencies, boundary)
+        self._rust_project_cache[key] = context
+        return context
+
+    @staticmethod
+    def _rust_current_module_parts(file_path: Path, source_root: Path) -> list[str]:
+        try:
+            relative = file_path.resolve().relative_to(source_root.resolve())
+        except (OSError, RuntimeError, ValueError):
+            return []
+        parts = list(relative.parts)
+        if not parts:
+            return []
+        filename = parts.pop()
+        if filename not in ("lib.rs", "main.rs", "mod.rs"):
+            parts.append(Path(filename).stem)
+        return parts
+
+    @staticmethod
+    def _rust_module_file_for_parts(
+        source_root: Path, root_file: Path, parts: list[str],
+    ) -> Optional[Path]:
+        if not parts:
+            return root_file
+        relative = Path(*parts)
+        flat = source_root / relative.with_suffix(".rs")
+        nested = source_root / relative / "mod.rs"
+        if flat.is_file():
+            return flat
+        if nested.is_file():
+            return nested
+        return None
+
+    def _resolve_rust_module_file(
+        self, module: str, file_path: str,
+    ) -> Optional[str]:
+        """Resolve crate/self/super and local path dependencies to source files."""
+        context = self._rust_project_context(file_path)
+        if context is None:
+            return None
+        _, source_root, root_file, dependencies, boundary = context
+        segments = [segment for segment in module.split("::") if segment]
+        if not segments:
+            return None
+
+        current_parts: list[str] = []
+        current_file = root_file
+        remaining = list(segments)
+        first = remaining[0]
+        if first == "crate":
+            remaining.pop(0)
+        elif first == "self":
+            remaining.pop(0)
+            current_parts = self._rust_current_module_parts(
+                Path(file_path), source_root,
+            )
+            current_file = Path(file_path)
+        elif first == "super":
+            current_parts = self._rust_current_module_parts(
+                Path(file_path), source_root,
+            )
+            while remaining and remaining[0] == "super":
+                remaining.pop(0)
+                if current_parts:
+                    current_parts.pop()
+            parent_file = self._rust_module_file_for_parts(
+                source_root, root_file, current_parts,
+            )
+            if parent_file is None:
+                return None
+            current_file = parent_file
+        elif first in dependencies:
+            dependency_root = dependencies[first]
+            remaining.pop(0)
+            layout = self._rust_crate_layout(dependency_root)
+            if layout is None:
+                return None
+            source_root, current_file = layout
+            current_parts = []
+
+        for index, segment in enumerate(remaining):
+            candidate_parts = [*current_parts, segment]
+            candidate = self._rust_module_file_for_parts(
+                source_root, current_file if not current_parts else root_file,
+                candidate_parts,
+            )
+            if candidate is not None:
+                current_parts = candidate_parts
+                current_file = candidate
+                continue
+            # The final segment can be an item exported by the current module.
+            if index != len(remaining) - 1:
+                return None
+            break
+
+        try:
+            resolved = current_file.resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not _path_is_within(resolved, boundary):
+            return None
+        return str(resolved)
 
     def _resolve_php_composer_module(
         self,
@@ -9137,6 +9612,43 @@ class CodeParser:
         self._dart_pubspec_cache[cache_key] = None
         return None
 
+    def _resolve_rust_scoped_call(
+        self,
+        call_name: str,
+        file_path: str,
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        """Resolve associated/module Rust calls with alias provenance."""
+        parts = [part for part in call_name.split("::") if part]
+        if len(parts) < 2:
+            return None
+        method = parts[-1]
+        prefix = parts[:-1]
+        if prefix == ["Self"]:
+            return None
+        if len(prefix) == 1 and prefix[0] in defined_names:
+            return f"{self._qualify(prefix[0], file_path, None)}.{method}"
+
+        if prefix[0] in import_map:
+            prefix = import_map[prefix[0]].split("::") + prefix[1:]
+
+        resolved = self._resolve_module_to_file(
+            "::".join(prefix), file_path, "rust",
+        )
+        if resolved is None:
+            return None
+        parent_resolved = None
+        if len(prefix) > 1:
+            parent_resolved = self._resolve_module_to_file(
+                "::".join(prefix[:-1]), file_path, "rust",
+            )
+        if parent_resolved == resolved and prefix[-1] not in {
+            "crate", "self", "super",
+        }:
+            return f"{self._qualify(prefix[-1], resolved, None)}.{method}"
+        return self._qualify(method, resolved, None)
+
     def _resolve_call_target(
         self,
         call_name: str,
@@ -9146,6 +9658,12 @@ class CodeParser:
         defined_names: set[str],
     ) -> str:
         """Resolve a bare call name to a qualified target, with fallback."""
+        if language == "rust" and "::" in call_name:
+            resolved_rust = self._resolve_rust_scoped_call(
+                call_name, file_path, import_map, defined_names,
+            )
+            if resolved_rust:
+                return resolved_rust
         if call_name in defined_names:
             return self._qualify(call_name, file_path, None)
         if call_name in import_map:
@@ -9857,8 +10375,10 @@ class CodeParser:
                             val = s.text.decode("utf-8", errors="replace")
                             imports.append(val.strip('"'))
         elif language == "rust":
-            # use crate::module::item
-            imports.append(text.replace("use ", "").rstrip(";").strip())
+            imports.extend(
+                original_path
+                for _, original_path in self._parse_rust_use_node(node)
+            )
         elif language in ("c", "cpp"):
             # #include <header> or #include "header"
             for child in node.children:
@@ -10094,6 +10614,18 @@ class CodeParser:
             return None
 
         first = node.children[0]
+
+        if language == "rust" and node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            segments = self._rust_path_segments(callee)
+            if segments:
+                return "::".join(segments)
+            while callee is not None and callee.type == "generic_function":
+                callee = callee.child_by_field_name("function")
+            if callee is not None and callee.type == "field_expression":
+                field = callee.child_by_field_name("field")
+                if field is not None:
+                    return field.text.decode("utf-8", errors="replace")
 
         # Julia macrocall: ``@test expr`` — name is inside
         # ``macro_identifier > identifier``. Prefix with ``@`` to distinguish

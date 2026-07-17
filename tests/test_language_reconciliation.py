@@ -290,3 +290,252 @@ endmodule
             for node in impact["impacted_nodes"]
         )
         store.close()
+
+
+class TestRustReconciliation:
+    def test_traits_and_multiple_impl_blocks_keep_one_concrete_type(self, tmp_path):
+        path = tmp_path / "lib.rs"
+        nodes, edges = _parse(
+            path,
+            """
+pub trait Repository {
+    fn save(&self);
+}
+
+pub struct MemoryRepository;
+
+impl MemoryRepository {
+    pub fn new() -> Self { Self }
+    pub fn duplicate() -> Self { Self::new() }
+}
+
+impl Repository for MemoryRepository {
+    fn save(&self) {}
+}
+
+impl MemoryRepository {
+    pub fn clear(&mut self) {}
+}
+""".lstrip(),
+        )
+
+        concrete = [
+            node for node in nodes
+            if node.kind == "Class" and node.name == "MemoryRepository"
+        ]
+        assert len(concrete) == 1
+        assert concrete[0].line_start == 5
+        assert any(node.kind == "Class" and node.name == "Repository" for node in nodes)
+        methods = {
+            (node.name, node.parent_name)
+            for node in nodes
+            if node.kind == "Function"
+        }
+        assert ("new", "MemoryRepository") in methods
+        assert ("duplicate", "MemoryRepository") in methods
+        assert ("save", "MemoryRepository") in methods
+        assert ("clear", "MemoryRepository") in methods
+
+        duplicate_qn = f"{path}::MemoryRepository.duplicate"
+        new_qn = f"{path}::MemoryRepository.new"
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source == duplicate_qn
+            and edge.target == new_qn
+            for edge in edges
+        )
+
+        store = GraphStore(":memory:")
+        store.store_file_nodes_edges(str(path), nodes, edges)
+        concrete_qn = f"{path}::MemoryRepository"
+        trait_qn = f"{path}::Repository"
+        assert store.get_node(concrete_qn).line_start == 5
+        assert any(
+            edge.kind == "IMPLEMENTS" and edge.target_qualified == trait_qn
+            for edge in store.get_edges_by_source(concrete_qn)
+        )
+        store.close()
+
+    def test_alias_and_turbofish_calls_resolve_to_the_original_type(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "demo"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        src = tmp_path / "src"
+        src.mkdir()
+        db = src / "db.rs"
+        db.write_text(
+            "pub struct Repository;\n"
+            "impl Repository { pub fn new<T>() -> Self { Self } }\n",
+            encoding="utf-8",
+        )
+        lib = src / "lib.rs"
+        lib.write_text(
+            "mod db;\n"
+            "use crate::db::{Repository as Repo};\n"
+            "pub fn build() {\n"
+            "    Repo::new::<u8>();\n"
+            "    crate::db::Repository::<u16>::new();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        parser = CodeParser(repo_root=tmp_path)
+        db_nodes, db_edges = parser.parse_file(db)
+        lib_nodes, lib_edges = parser.parse_file(lib)
+        target = f"{db.resolve()}::Repository.new"
+        calls = [edge for edge in lib_edges if edge.kind == "CALLS"]
+        assert [edge.target for edge in calls].count(target) == 2
+        assert all("::Repo.new" not in edge.target for edge in calls)
+
+        store = GraphStore(":memory:")
+        store.store_file_nodes_edges(str(db), db_nodes, db_edges)
+        store.store_file_nodes_edges(str(lib), lib_nodes, lib_edges)
+        assert store.get_node(target) is not None
+        store.close()
+
+    def test_self_super_and_crate_imports_resolve_to_module_files(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "demo"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        src = tmp_path / "src"
+        nested = src / "db" / "nested.rs"
+        nested.parent.mkdir(parents=True)
+        root = src / "lib.rs"
+        parent = src / "db" / "mod.rs"
+        root.write_text("pub fn root_function() {}\npub mod db;\n", encoding="utf-8")
+        parent.write_text(
+            "pub struct Repository;\npub mod nested;\n",
+            encoding="utf-8",
+        )
+        nested.write_text(
+            "use self::local_function;\n"
+            "use super::Repository;\n"
+            "use crate::root_function;\n"
+            "pub fn local_function() {}\n",
+            encoding="utf-8",
+        )
+
+        parser = CodeParser(repo_root=tmp_path)
+        _, edges = parser.parse_file(nested)
+        targets = {
+            edge.target for edge in edges if edge.kind == "IMPORTS_FROM"
+        }
+        assert targets == {
+            str(nested.resolve()),
+            str(parent.resolve()),
+            str(root.resolve()),
+        }
+
+    def test_workspace_dependency_alias_resolves_from_workspace_manifest(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            "[workspace]\n"
+            'members = ["crates/app", "crates/dep"]\n'
+            'resolver = "2"\n'
+            "[workspace.dependencies]\n"
+            'renamed = { package = "dep-crate", path = "crates/dep" }\n',
+            encoding="utf-8",
+        )
+        app = tmp_path / "crates" / "app"
+        dep = tmp_path / "crates" / "dep"
+        (app / "src").mkdir(parents=True)
+        (dep / "src").mkdir(parents=True)
+        (app / "Cargo.toml").write_text(
+            "[package]\n"
+            'name = "app"\nversion = "0.1.0"\n'
+            "[dependencies]\nrenamed = { workspace = true }\n",
+            encoding="utf-8",
+        )
+        (dep / "Cargo.toml").write_text(
+            '[package]\nname = "dep-crate"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        dep_lib = dep / "src" / "lib.rs"
+        dep_lib.write_text("pub struct Helper;\n", encoding="utf-8")
+        app_main = app / "src" / "main.rs"
+        app_main.write_text("use renamed::Helper;\n", encoding="utf-8")
+
+        _, edges = CodeParser(repo_root=tmp_path).parse_file(app_main)
+        imports = [edge for edge in edges if edge.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str(dep_lib.resolve())
+
+    def test_path_dependency_without_cargo_manifest_stays_unresolved(self, tmp_path):
+        (tmp_path / "Cargo.toml").write_text(
+            "[package]\n"
+            'name = "demo"\nversion = "0.1.0"\n'
+            "[dependencies]\n"
+            'fake = { path = "fake" }\n',
+            encoding="utf-8",
+        )
+        src = tmp_path / "src"
+        src.mkdir()
+        lib = src / "lib.rs"
+        lib.write_text("use fake::Helper;\n", encoding="utf-8")
+        fake_src = tmp_path / "fake" / "src"
+        fake_src.mkdir(parents=True)
+        (fake_src / "lib.rs").write_text("pub struct Helper;\n", encoding="utf-8")
+
+        _, edges = CodeParser(repo_root=tmp_path).parse_file(lib)
+        imports = [edge for edge in edges if edge.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == "fake::Helper"
+
+    def test_full_and_incremental_builds_keep_resolved_rust_calls(
+        self, tmp_path, monkeypatch,
+    ):
+        from code_review_graph.incremental import full_build, incremental_update
+
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "Cargo.toml").write_text(
+            '[package]\nname = "demo"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        src = tmp_path / "src"
+        src.mkdir()
+        db = src / "db.rs"
+        db.write_text(
+            "pub struct Repository;\n"
+            "impl Repository { pub fn new() -> Self { Self } }\n",
+            encoding="utf-8",
+        )
+        lib = src / "lib.rs"
+        lib.write_text(
+            "mod db;\n"
+            "use crate::db::Repository;\n"
+            "pub fn build() { Repository::new(); }\n",
+            encoding="utf-8",
+        )
+        target = f"{db.resolve()}::Repository.new"
+        caller = f"{lib.resolve()}::build"
+
+        store = GraphStore(":memory:")
+        try:
+            built = full_build(tmp_path, store)
+            assert built["errors"] == []
+            assert any(
+                edge.kind == "CALLS" and edge.target_qualified == target
+                for edge in store.get_edges_by_source(caller)
+            )
+
+            lib.write_text(
+                "mod db;\n"
+                "use crate::db::Repository;\n"
+                "pub fn build() { Repository::new(); }\n"
+                "pub fn build_again() { Repository::new(); }\n",
+                encoding="utf-8",
+            )
+            updated = incremental_update(
+                tmp_path, store, changed_files=["src/lib.rs"],
+            )
+            assert updated["errors"] == []
+            assert any(
+                edge.kind == "CALLS" and edge.target_qualified == target
+                for edge in store.get_edges_by_source(
+                    f"{lib.resolve()}::build_again",
+                )
+            )
+        finally:
+            store.close()
