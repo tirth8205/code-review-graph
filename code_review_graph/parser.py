@@ -449,7 +449,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "tsx": ["call_expression", "new_expression"],
     "go": ["call_expression"],
     "rust": ["call_expression", "macro_invocation"],
-    "java": ["method_invocation", "object_creation_expression"],
+    "java": ["method_invocation", "object_creation_expression", "method_reference"],
     "c": ["call_expression"],
     "cpp": ["call_expression"],
     "csharp": ["invocation_expression", "object_creation_expression"],
@@ -6496,6 +6496,8 @@ class CodeParser:
                     call_name = method_name
                 if receiver:
                     call_extra["receiver"] = receiver
+                if language == "java" and child.type == "method_reference":
+                    call_extra["call_syntax"] = "method_reference"
 
             # Keep Julia module qualification in the canonical target. The
             # same-file resolver can then distinguish ``run`` from ``A.B.run``.
@@ -6564,6 +6566,18 @@ class CodeParser:
         """
         if language == "java" and node.type == "method_invocation":
             method, receiver = self._get_java_method_and_receiver(node)
+            return receiver, method
+
+        if language == "java" and node.type == "method_reference":
+            named = [child for child in node.children if child.is_named]
+            if len(named) < 2:
+                return None, None
+            receiver_node = named[0]
+            method_node = named[-1]
+            if method_node.type not in ("identifier", "type_identifier"):
+                return None, None
+            receiver = receiver_node.text.decode("utf-8", errors="replace")
+            method = method_node.text.decode("utf-8", errors="replace")
             return receiver, method
 
         callee = node.child_by_field_name("function")
@@ -7153,6 +7167,15 @@ class CodeParser:
         Returns (None, None) for unrecognised shapes.
         """
         children = node.children
+        if (
+            len(children) == 2
+            and children[0].type == "identifier"
+            and children[-1].type == "argument_list"
+        ):
+            return (
+                children[0].text.decode("utf-8", errors="replace"),
+                None,
+            )
         if len(children) < 3:
             return None, None
 
@@ -9410,6 +9433,16 @@ class CodeParser:
             return None
 
         first = node.children[0]
+
+        if language == "java":
+            if node.type == "method_invocation":
+                method, _ = self._get_java_method_and_receiver(node)
+                return method
+            if node.type == "method_reference":
+                _, method = self._get_member_call_receiver_method(node, language)
+                return method
+            if node.type == "object_creation_expression":
+                return self._java_type_name(node)
 
         # Julia macrocall: ``@test expr`` — name is inside
         # ``macro_identifier > identifier``. Prefix with ``@`` to distinguish
