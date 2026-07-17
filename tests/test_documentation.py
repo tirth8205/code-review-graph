@@ -9,6 +9,7 @@ README_FILES = (
     "README.hi-IN.md",
     "README.ja-JP.md",
     "README.ko-KR.md",
+    "README.ur-PK.md",
     "README.zh-CN.md",
 )
 OPTIONAL_GROUPS = (
@@ -44,11 +45,33 @@ def test_current_user_docs_have_no_unquoted_pip_extras():
         assert pattern.search(content) is None, f"unquoted pip extras in {doc_name}"
 
 
+def test_readme_language_navigation_is_reciprocal():
+    """Every translated README must link to every available translation."""
+    for readme_name in README_FILES:
+        content = (ROOT / readme_name).read_text(encoding="utf-8")
+        for target_name in README_FILES:
+            assert f'href="{target_name}"' in content, (
+                f"{readme_name} is missing the language link to {target_name}"
+            )
+
+
+def test_current_urdu_readme_preserves_canonical_code_blocks():
+    """Commands and configuration examples must stay verbatim across translation."""
+    pattern = re.compile(r"(?ms)^( {0,3})```[^\n]*\n(.*?)^\1```[ \t]*$")
+    english = (ROOT / "README.md").read_text(encoding="utf-8")
+    urdu = (ROOT / "README.ur-PK.md").read_text(encoding="utf-8")
+
+    english_blocks = [body for _indent, body in pattern.findall(english)]
+    urdu_blocks = [body for _indent, body in pattern.findall(urdu)]
+    assert urdu_blocks == english_blocks
+
+
 def test_github_action_references_use_current_supported_majors():
     """Keep active workflows and copy-paste examples on supported majors."""
     files = [
         ROOT / "action.yml",
         ROOT / "README.md",
+        ROOT / "README.ur-PK.md",
         ROOT / "docs/GITHUB_ACTION.md",
         *(ROOT / ".github/workflows").glob("*.yml"),
     ]
