@@ -428,10 +428,12 @@ def analyze_changes(
         for fp in changed_files:
             changed_nodes.extend(store.get_nodes_by_file(fp))
 
-    # Filter to functions/tests for risk scoring (skip File nodes).
+    # RTL declarations are stored as Function nodes for compatibility but
+    # are not callable/testable functions.
     changed_funcs = [
         n for n in changed_nodes
         if n.kind in ("Function", "Test", "Class")
+        and not n.extra.get("verilog_kind")
     ]
 
     # Cap to prevent O(N*M) query explosion on large PRs.
