@@ -265,13 +265,13 @@ node_modules/**
 वैकल्पिक डिपेंडेंसी ग्रुप:
 
 ```bash
-pip install code-review-graph[embeddings]          # लोकल वेक्टर एम्बेडिंग (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini एम्बेडिंग
-pip install code-review-graph[communities]         # कम्युनिटी डिटेक्शन (igraph)
-pip install code-review-graph[enrichment]          # Python call-resolution enrichment (Jedi)
-pip install code-review-graph[eval]                # मूल्यांकन बेंचमार्क (matplotlib)
-pip install code-review-graph[wiki]                # LLM सारांश के साथ विकी जनरेशन (ollama)
-pip install code-review-graph[all]                 # सभी वैकल्पिक डिपेंडेंसीज़
+pip install "code-review-graph[embeddings]"          # लोकल वेक्टर एम्बेडिंग (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini एम्बेडिंग
+pip install "code-review-graph[communities]"         # कम्युनिटी डिटेक्शन (igraph)
+pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
+pip install "code-review-graph[eval]"                # मूल्यांकन बेंचमार्क (matplotlib)
+pip install "code-review-graph[wiki]"                # LLM सारांश के साथ विकी जनरेशन (ollama)
+pip install "code-review-graph[all]"                 # सभी वैकल्पिक डिपेंडेंसीज़
 ```
 
 OpenAI-compatible एम्बेडिंग्स (असली OpenAI, Azure, या सेल्फ-होस्टेड गेटवे जैसे new-api / LiteLLM / vLLM / LocalAI / Ollama openai मोड) के लिए कोई अतिरिक्त इंस्टॉल की ज़रूरत नहीं — बस एनवायरनमेंट वेरिएबल्स सेट करें और `embed_graph` को `provider="openai"` पास करें:

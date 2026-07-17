@@ -107,7 +107,7 @@ repo_root: str | None
 model: str | None    # Embedding model name
 provider: str | None # local, openai, google, minimax
 ```
-Local embeddings require: `pip install code-review-graph[embeddings]`. Cloud providers use stdlib HTTP clients and require their provider environment variables.
+Local embeddings require: `pip install "code-review-graph[embeddings]"`. Cloud providers use stdlib HTTP clients and require their provider environment variables.
 
 #### `list_graph_stats_tool`
 ```
@@ -311,6 +311,7 @@ code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph + show risk panel
 code-review-graph update --brief --verify      # ...and cross-check vs tiktoken
 code-review-graph postprocess                  # Re-run flows, communities, FTS
+code-review-graph embed --provider local       # Compute vector embeddings for semantic search
 
 # Monitor and inspect
 code-review-graph status                       # Graph statistics
@@ -347,7 +348,7 @@ code-review-graph daemon start [--foreground]       # Start the watch daemon
 code-review-graph daemon stop                       # Stop the daemon
 code-review-graph daemon restart [--foreground]     # Restart the daemon
 code-review-graph daemon status                     # Show daemon status and repos
-code-review-graph daemon logs [--repo ALIAS] [-f]   # View daemon or per-repo logs
+code-review-graph daemon logs [--repo ALIAS] [--follow]  # View daemon or per-repo logs
 code-review-graph daemon add <path> [--alias NAME]  # Add a repo to daemon config
 code-review-graph daemon remove <path_or_alias>     # Remove a repo from daemon config
 

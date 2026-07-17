@@ -352,7 +352,10 @@ def analyze_changes(
     for node in changed_funcs:
         if node.is_test:
             continue
-        tested = store.get_edges_by_target(node.qualified_name)
+        # TESTED_BY edges are stored as source=production, target=test by the
+        # parser, so a changed production function finds its tests by source.
+        # See: #515
+        tested = store.get_edges_by_source(node.qualified_name)
         if not any(e.kind == "TESTED_BY" for e in tested):
             test_gaps.append({
                 "name": _sanitize_name(node.name),

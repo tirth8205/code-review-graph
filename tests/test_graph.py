@@ -248,6 +248,119 @@ class TestGraphStore:
         assert self.store.get_metadata("test_key") == "test_value"
         assert self.store.get_metadata("nonexistent") is None
 
+    def test_get_transitive_tests_follows_direct_tested_by_edge(self):
+        """Regression test for #515: get_transitive_tests must follow
+        TESTED_BY edges by source_qualified (production) since the parser
+        stores source=production, target=test. The test function uses an
+        unconventional name so the bare-name fallback cannot mask the bug.
+        """
+        self.store.upsert_node(self._make_file_node("/src/calc.py"))
+        self.store.upsert_node(self._make_func_node("add", "/src/calc.py"))
+        self.store.upsert_node(self._make_file_node("/tests/check.py"))
+        self.store.upsert_node(self._make_func_node(
+            "verify_addition", "/tests/check.py", is_test=True,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/src/calc.py::add",
+            target="/tests/check.py::verify_addition",
+            file_path="/tests/check.py", line=1,
+        ))
+        self.store.commit()
+
+        results = self.store.get_transitive_tests("/src/calc.py::add")
+        qns = {r["qualified_name"] for r in results}
+        assert "/tests/check.py::verify_addition" in qns
+        assert all(not r["indirect"] for r in results)
+
+    def test_get_transitive_tests_follows_calls_then_tested_by(self):
+        """Transitive coverage: caller -> CALLS -> callee -> TESTED_BY -> test.
+        Uses an unconventional test name so the bare-name fallback cannot
+        match. See: #515.
+        """
+        self.store.upsert_node(self._make_file_node("/src/svc.py"))
+        self.store.upsert_node(self._make_func_node("orchestrate", "/src/svc.py"))
+        self.store.upsert_node(self._make_func_node("compute", "/src/svc.py"))
+        self.store.upsert_node(self._make_file_node("/tests/check.py"))
+        self.store.upsert_node(self._make_func_node(
+            "verify_compute", "/tests/check.py", is_test=True,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/src/svc.py::orchestrate",
+            target="/src/svc.py::compute", file_path="/src/svc.py", line=2,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/src/svc.py::compute",
+            target="/tests/check.py::verify_compute",
+            file_path="/tests/check.py", line=1,
+        ))
+        self.store.commit()
+
+        results = self.store.get_transitive_tests(
+            "/src/svc.py::orchestrate", max_depth=2,
+        )
+        qns = {r["qualified_name"] for r in results}
+        assert "/tests/check.py::verify_compute" in qns
+        match = next(
+            r for r in results
+            if r["qualified_name"] == "/tests/check.py::verify_compute"
+        )
+        assert match["indirect"] is True
+
+    def test_parse_store_get_transitive_tests_end_to_end(self):
+        """End-to-end producer->store->consumer guard for #515.
+
+        Parse a real fixture pair (production + test) through the parser,
+        persist the emitted nodes/edges, and confirm get_transitive_tests
+        surfaces the test as covering the production code. This couples the
+        parser's canonical TESTED_BY direction (source=production,
+        target=test) to the consumer query, so a future parser flip would
+        break this test even if every hand-seeded fixture test still passed.
+        """
+        from code_review_graph.parser import CodeParser
+
+        fixtures = Path(__file__).parent / "fixtures"
+        parser = CodeParser()
+        all_nodes: list[NodeInfo] = []
+        all_edges: list[EdgeInfo] = []
+        for fixture in ("sample_python.py", "test_sample.py"):
+            nodes, edges = parser.parse_file(fixtures / fixture)
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+
+        for n in all_nodes:
+            self.store.upsert_node(n)
+        for e in all_edges:
+            self.store.upsert_edge(e)
+        self.store.commit()
+
+        tested_by = [e for e in all_edges if e.kind == "TESTED_BY"]
+        assert tested_by, "fixture pair should yield at least one TESTED_BY edge"
+
+        # Producer direction guard: every TESTED_BY target must be a stored
+        # Test node, and querying the consumer (get_transitive_tests) by the
+        # edge's *source* (production) must surface that test target. If a
+        # future parser flip swapped the direction, the target would point at
+        # production code and this end-to-end assertion would fail.
+        checked = 0
+        for edge in tested_by:
+            target = self.store.get_node(edge.target)
+            assert target is not None, f"missing test node {edge.target}"
+            assert target.is_test, (
+                f"TESTED_BY target {edge.target!r} should be a test node; "
+                f"a flipped parser would put production code here"
+            )
+
+            results = self.store.get_transitive_tests(edge.source)
+            qns = {r["qualified_name"] for r in results}
+            assert edge.target in qns, (
+                f"get_transitive_tests({edge.source!r}) should surface test "
+                f"{edge.target!r}; got {sorted(qns)}"
+            )
+            checked += 1
+        assert checked >= 1
+
     def test_get_all_community_ids_logs_when_column_missing(self, caplog):
         conn = sqlite3.connect(":memory:")
         conn.row_factory = sqlite3.Row
@@ -401,7 +514,7 @@ class TestGetTransitiveTestsFrontierCap:
             # Only callee_2 has a test
             if i == 2:
                 self.store.upsert_edge(EdgeInfo(
-                    kind="TESTED_BY", source=test_qn, target=callee_qn,
+                    kind="TESTED_BY", source=callee_qn, target=test_qn,
                     file_path="/t/test_hub.py", line=1,
                 ))
         self.store.commit()

@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import platform
-import re
 import shutil
 import stat
 import subprocess
@@ -31,6 +30,15 @@ def _zed_settings_path() -> Path:
     if platform.system() == "Darwin":
         return Path.home() / "Library" / "Application Support" / "Zed" / "settings.json"
     return Path.home() / ".config" / "zed" / "settings.json"
+
+
+def _opencode_config_path(repo_root: Path) -> Path:
+    """Return OpenCode's existing project config, preferring JSONC."""
+    for name in ("opencode.jsonc", "opencode.json"):
+        path = repo_root / name
+        if path.exists():
+            return path
+    return repo_root / "opencode.jsonc"
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
@@ -84,11 +92,11 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        "config_path": lambda root: root / ".opencode.json",
-        "key": "mcpServers",
+        "config_path": _opencode_config_path,
+        "key": "mcp",
         "detect": lambda: True,
         "format": "object",
-        "needs_type": True,
+        "needs_type": False,
     },
     "antigravity": {
         "name": "Antigravity",
@@ -235,15 +243,41 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
+    if key == "opencode":
+        opencode_command = [command, *args]
+        if repo_root is not None:
+            opencode_command.extend(("--repo", str(repo_root)))
+        return {"type": "local", "command": opencode_command}
+
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
-    if key == "opencode":
-        entry["env"] = []
     return entry
+
+
+def _warn_legacy_opencode_config(repo_root: Path) -> None:
+    """Warn without modifying the obsolete Cursor-shaped OpenCode config."""
+    legacy = repo_root / ".opencode.json"
+    if not legacy.exists():
+        return
+    try:
+        parsed = json.loads(
+            _strip_jsonc(legacy.read_text(encoding="utf-8", errors="replace"))
+        )
+    except (json.JSONDecodeError, OSError):
+        return
+    if not isinstance(parsed, dict):
+        return
+    servers = parsed.get("mcpServers")
+    if isinstance(servers, dict) and "code-review-graph" in servers:
+        print(
+            f"  OpenCode: legacy config found at {legacy}; leaving it unchanged. "
+            "OpenCode now reads opencode.json or opencode.jsonc with a top-level "
+            "'mcp' setting."
+        )
 
 
 def _format_toml_value(value: Any) -> str:
@@ -290,6 +324,83 @@ def _merge_toml_mcp_server(
     return True
 
 
+def _strip_jsonc(text: str) -> str:
+    """Strip JSONC comments and trailing commas without corrupting string values.
+
+    Editors like Zed accept non-standard JSON (``//`` and ``/* */`` comments,
+    trailing commas). To merge such a config we must reduce it to strict JSON
+    first. A naive regex pass cannot tell structure from data: it would delete a
+    comma inside ``"foo, bar"`` or truncate a ``"https://..."`` URL at the
+    ``//``. This walks the text character by character, tracking whether we are
+    inside a double-quoted string (respecting ``\\`` escapes), and only removes
+    comments and trailing commas that appear in structural position. Content
+    inside string values is preserved verbatim. (GH #553)
+    """
+
+    def _skip_comment(s: str, idx: int) -> int | None:
+        """If a comment starts at ``idx``, return the index just past it."""
+        if s[idx] != "/" or idx + 1 >= len(s):
+            return None
+        nxt = s[idx + 1]
+        if nxt == "/":
+            idx += 2
+            while idx < len(s) and s[idx] != "\n":
+                idx += 1
+            return idx
+        if nxt == "*":
+            idx += 2
+            while idx + 1 < len(s) and not (s[idx] == "*" and s[idx + 1] == "/"):
+                idx += 1
+            return idx + 2  # consume the closing */ (or run off the end if unterminated)
+        return None
+
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])  # escaped char is data, never a delimiter
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        # Outside a string.
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        past = _skip_comment(text, i)
+        if past is not None:
+            i = past
+            continue
+        if ch == ",":
+            # Trailing comma if the next significant char (skipping whitespace
+            # and comments) closes an object or array.
+            j = i + 1
+            while j < n:
+                if text[j] in " \t\r\n":
+                    j += 1
+                    continue
+                past = _skip_comment(text, j)
+                if past is not None:
+                    j = past
+                    continue
+                break
+            if j < n and text[j] in "}]":
+                i += 1  # drop the trailing comma
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def install_platform_configs(
     repo_root: Path,
     target: str = "all",
@@ -319,6 +430,8 @@ def install_platform_configs(
     configured: list[str] = []
 
     for key, plat in platforms_to_install.items():
+        if key == "opencode":
+            _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
@@ -345,22 +458,50 @@ def install_platform_configs(
         existing: dict[str, Any] = {}
         if config_path.exists():
             raw = config_path.read_text(encoding="utf-8", errors="replace")
-            # Strip single-line comments and trailing commas (JSONC compat
-            # for editors like Zed that allow non-standard JSON).
-            stripped = re.sub(r'//.*?$', '', raw, flags=re.MULTILINE)
-            stripped = re.sub(r',(\s*[}\]])', r'\1', stripped)
-            try:
-                existing = json.loads(stripped)
-            except (json.JSONDecodeError, OSError):
-                print(f"  {plat['name']}: {config_path} contains "
-                      f"unparseable JSON — skipping to avoid data loss. "
-                      f"Please add the MCP config manually.")
-                continue
+            # Strip comments and trailing commas (JSONC compat for editors like
+            # Zed that allow non-standard JSON) without corrupting string values.
+            stripped = _strip_jsonc(raw)
+            if not stripped.strip():
+                # An empty (or comment-only) file is a valid empty config,
+                # not a parse failure — proceed and write a fresh one rather
+                # than mis-flagging it "unparseable" and skipping. See #344.
+                existing = {}
+            else:
+                try:
+                    parsed = json.loads(stripped)
+                except (json.JSONDecodeError, OSError):
+                    print(f"  {plat['name']}: {config_path} contains "
+                          f"unparseable JSON — skipping to avoid data loss. "
+                          f"Please add the MCP config manually.")
+                    continue
+                if not isinstance(parsed, dict):
+                    # Valid JSON, but the top level is a list/scalar rather
+                    # than an object. Writing our server object would clobber
+                    # the user's data, and the ``.get()`` calls below would
+                    # raise AttributeError. Refuse and skip. See #344.
+                    print(f"  {plat['name']}: {config_path} is valid JSON but "
+                          f"not a top-level object "
+                          f"({type(parsed).__name__}) — skipping to avoid "
+                          f"data loss. Please add the MCP config manually.")
+                    continue
+                existing = parsed
+
+        expected_container = list if plat["format"] == "array" else dict
+        if server_key in existing and not isinstance(
+            existing[server_key], expected_container
+        ):
+            expected_name = "array" if expected_container is list else "object"
+            actual_name = type(existing[server_key]).__name__
+            print(
+                f"  {plat['name']}: {config_path} setting {server_key!r} "
+                f"is {actual_name}; expected a JSON {expected_name} — "
+                f"skipping to avoid data loss. Please repair that setting "
+                f"or add the MCP config manually."
+            )
+            continue
 
         if plat["format"] == "array":
             arr = existing.get(server_key, [])
-            if not isinstance(arr, list):
-                arr = []
             # Check if already present
             if any(isinstance(s, dict) and s.get("name") == "code-review-graph" for s in arr):
                 print(f"  {plat['name']}: already configured in {config_path}")
@@ -371,8 +512,6 @@ def install_platform_configs(
             existing[server_key] = arr
         else:
             servers = existing.get(server_key, {})
-            if not isinstance(servers, dict):
-                servers = {}
             if "code-review-graph" in servers:
                 print(f"  {plat['name']}: already configured in {config_path}")
                 configured.append(plat["name"])
@@ -396,18 +535,18 @@ def install_platform_configs(
 
 _SKILLS: dict[str, dict[str, str]] = {
     "explore-codebase.md": {
-        "name": "Explore Codebase",
+        "name": "explore-codebase",
         "description": "Navigate and understand codebase structure using the knowledge graph",
         "body": (
             "## Explore Codebase\n\n"
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
             "1. Run `list_graph_stats` to see overall codebase metrics.\n"
-            "2. Run `get_architecture_overview` for high-level community structure.\n"
-            "3. Use `list_communities` to find major modules, then `get_community` "
+            "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
+            "3. Use `list_communities_tool` to find major modules, then `get_community` "
             "for details.\n"
-            "4. Use `semantic_search_nodes` to find specific functions or classes.\n"
-            "5. Use `query_graph` with patterns like `callers_of`, `callees_of`, "
+            "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
+            "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
             "`imports_of` to trace relationships.\n"
             "6. Use `list_flows` and `get_flow` to understand execution paths.\n\n"
             "### Tips\n\n"
@@ -424,17 +563,17 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "review-changes.md": {
-        "name": "Review Changes",
+        "name": "review-changes",
         "description": "Perform a structured code review using change detection and impact",
         "body": (
             "## Review Changes\n\n"
             "Perform a thorough, risk-aware code review using the knowledge graph.\n\n"
             "### Steps\n\n"
-            "1. Run `detect_changes` to get risk-scored change analysis.\n"
-            "2. Run `get_affected_flows` to find impacted execution paths.\n"
-            "3. For each high-risk function, run `query_graph` with "
+            "1. Run `detect_changes_tool` to get risk-scored change analysis.\n"
+            "2. Run `get_affected_flows_tool` to find impacted execution paths.\n"
+            "3. For each high-risk function, run `query_graph_tool` with "
             'pattern="tests_for" to check test coverage.\n'
-            "4. Run `get_impact_radius` to understand the blast radius.\n"
+            "4. Run `get_impact_radius_tool` to understand the blast radius.\n"
             "5. For any untested changes, suggest specific test cases.\n\n"
             "### Output Format\n\n"
             "Provide findings grouped by risk level (high/medium/low) with:\n"
@@ -452,18 +591,18 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "debug-issue.md": {
-        "name": "Debug Issue",
+        "name": "debug-issue",
         "description": "Systematically debug issues using graph-powered code navigation",
         "body": (
             "## Debug Issue\n\n"
             "Use the knowledge graph to systematically trace and debug issues.\n\n"
             "### Steps\n\n"
-            "1. Use `semantic_search_nodes` to find code related to the issue.\n"
-            "2. Use `query_graph` with `callers_of` and `callees_of` to trace "
+            "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
+            "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
             "3. Use `get_flow` to see full execution paths through suspected areas.\n"
-            "4. Run `detect_changes` to check if recent changes caused the issue.\n"
-            "5. Use `get_impact_radius` on suspected files to see what else is affected.\n\n"
+            "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
+            "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
             "### Tips\n\n"
             "- Check both callers and callees to understand the full context.\n"
             "- Look at affected flows to find the entry point that triggers the bug.\n"
@@ -478,7 +617,7 @@ _SKILLS: dict[str, dict[str, str]] = {
         ),
     },
     "refactor-safely.md": {
-        "name": "Refactor Safely",
+        "name": "refactor-safely",
         "description": "Plan and execute safe refactoring using dependency analysis",
         "body": (
             "## Refactor Safely\n\n"
@@ -490,11 +629,11 @@ _SKILLS: dict[str, dict[str, str]] = {
             '3. For renames, use `refactor_tool` with mode="rename" to preview all '
             "affected locations.\n"
             "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
-            "5. After changes, run `detect_changes` to verify the refactoring impact.\n\n"
+            "5. After changes, run `detect_changes_tool` to verify the refactoring impact.\n\n"
             "### Safety Checks\n\n"
             "- Always preview before applying (rename mode gives you an edit list).\n"
-            "- Check `get_impact_radius` before major refactors.\n"
-            "- Use `get_affected_flows` to ensure no critical paths are broken.\n"
+            "- Check `get_impact_radius_tool` before major refactors.\n"
+            "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
             '- ALWAYS start with `get_minimal_context(task="<your task>")` '
@@ -526,11 +665,11 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     skills_dir.mkdir(parents=True, exist_ok=True)
 
     for filename, skill in _SKILLS.items():
-        # Claude Code expects skills at .claude/skills/<name>/skill.md
+        # Claude Code expects skills at .claude/skills/<name>/SKILL.md
         skill_name = filename.removesuffix(".md")
         skill_subdir = skills_dir / skill_name
         skill_subdir.mkdir(parents=True, exist_ok=True)
-        path = skill_subdir / "skill.md"
+        path = skill_subdir / "SKILL.md"
         content = (
             "---\n"
             f"name: {skill['name']}\n"
@@ -550,21 +689,28 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     Hooks use the v1.x+ schema: each entry needs a ``matcher`` and a nested
     ``hooks`` array. Timeouts are in seconds. ``PreCommit`` is not a valid
     Claude Code event — pre-commit checks are handled by ``install_git_hook``.
+
+    The ``repo_root`` parameter is retained for backward compatibility but is
+    not embedded in hook commands. Instead, the repo root is resolved at
+    runtime via ``git rev-parse --show-toplevel`` so that ``settings.json``
+    is shareable across collaborators with different checkout paths.
+    A PATH guard ensures the hook exits silently when the binary is not on
+    ``$PATH`` (e.g. installed in a project venv).
     """
-    repo_arg = json.dumps(repo_root.resolve().as_posix())
     return {
         "hooks": {
             "PostToolUse": [
                 {
-                    "matcher": "Edit|Write|Bash",
+                    "matcher": "Edit|Write",
                     "hooks": [
                         {
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
+                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph update --skip-flows"
-                                f" --repo {repo_arg}"
+                                " && code-review-graph update --skip-flows"
+                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
                                 " || true"
                             ),
                             "timeout": 30,
@@ -580,8 +726,10 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
                             "type": "command",
                             "command": (
                                 "cat >/dev/null || true; "
+                                "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
                                 "git rev-parse --git-dir >/dev/null 2>&1"
-                                f" && code-review-graph status --repo {repo_arg}"
+                                " && code-review-graph status"
+                                " --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\""
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "timeout": 10,
@@ -827,11 +975,11 @@ scanning cannot.
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
 Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
@@ -839,21 +987,21 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 
 | Tool | Use when |
 | ------ | ---------- |
-| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
-| `get_review_context` | Need source snippets for review — token-efficient |
-| `get_impact_radius` | Understanding blast radius of a change |
-| `get_affected_flows` | Finding which execution paths are impacted |
-| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes` | Finding functions/classes by name or keyword |
-| `get_architecture_overview` | Understanding high-level codebase structure |
+| `detect_changes_tool` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context_tool` | Need source snippets for review — token-efficient |
+| `get_impact_radius_tool` | Understanding blast radius of a change |
+| `get_affected_flows_tool` | Finding which execution paths are impacted |
+| `query_graph_tool` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes_tool` | Finding functions/classes by name or keyword |
+| `get_architecture_overview_tool` | Understanding high-level codebase structure |
 | `refactor_tool` | Planning renames, finding dead code |
 
 ### Workflow
 
 1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
 """
 
 # Copilot-specific instruction file content: uses VS Code tool references and
@@ -876,11 +1024,11 @@ test coverage) that file scanning cannot.
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph`
-- **Understanding impact**: `get_impact_radius`
-- **Code review**: `detect_changes` + `get_review_context`
-- **Finding relationships**: `query_graph` callers_of/callees_of
-- **Architecture questions**: `get_architecture_overview`
+- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool`
+- **Understanding impact**: `get_impact_radius_tool`
+- **Code review**: `detect_changes_tool` + `get_review_context_tool`
+- **Finding relationships**: `query_graph_tool` callers_of/callees_of
+- **Architecture questions**: `get_architecture_overview_tool`
 
 Fall back to file/search tools **only** when the graph doesn't
 cover what you need.
@@ -889,21 +1037,21 @@ cover what you need.
 
 | Tool | Use when |
 | ------ | ---------- |
-| `detect_changes` | Risk-scored change analysis |
-| `get_review_context` | Token-efficient source snippets |
-| `get_impact_radius` | Blast radius of a change |
-| `get_affected_flows` | Impacted execution paths |
-| `query_graph` | Trace callers, callees, imports, tests |
-| `semantic_search_nodes` | Find functions/classes by keyword |
-| `get_architecture_overview` | High-level structure |
+| `detect_changes_tool` | Risk-scored change analysis |
+| `get_review_context_tool` | Token-efficient source snippets |
+| `get_impact_radius_tool` | Blast radius of a change |
+| `get_affected_flows_tool` | Impacted execution paths |
+| `query_graph_tool` | Trace callers, callees, imports, tests |
+| `semantic_search_nodes_tool` | Find functions/classes by keyword |
+| `get_architecture_overview_tool` | High-level structure |
 | `refactor_tool` | Rename planning, dead code |
 
 ### Workflow
 
 1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern=\"tests_for\" to check coverage.
+2. Use `detect_changes_tool` for code review.
+3. Use `get_affected_flows_tool` to understand impact.
+4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
 """
 
 # Maps instruction file path → (marker, section) for files that need content

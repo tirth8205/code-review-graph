@@ -188,16 +188,17 @@ class TestEnsureRepoGitignoreExcludesCrg:
 class TestIgnorePatterns:
     def test_default_patterns_loaded(self, tmp_path):
         patterns = _load_ignore_patterns(tmp_path)
-        assert "node_modules/**" in patterns
-        assert ".git/**" in patterns
-        assert "__pycache__/**" in patterns
+        assert "**/node_modules/**" in patterns
+        assert "**/.git/**" in patterns
+        assert "**/__pycache__/**" in patterns
+        assert "/build/**" in patterns
 
     def test_custom_ignore_file(self, tmp_path):
         ignore = tmp_path / ".code-review-graphignore"
-        ignore.write_text("custom/**\n# comment\n\nvendor/**\n")
+        ignore.write_text("custom/\n# comment\n\nvendor/**\n")
         patterns = _load_ignore_patterns(tmp_path)
-        assert "custom/**" in patterns
-        assert "vendor/**" in patterns
+        assert "**/custom/**" in patterns
+        assert "**/vendor/**" in patterns
         # Comments and blanks should be skipped
         assert "# comment" not in patterns
         assert "" not in patterns
@@ -208,6 +209,19 @@ class TestIgnorePatterns:
         assert _should_ignore("test.pyc", patterns)
         assert _should_ignore(".git/HEAD", patterns)
         assert not _should_ignore("src/main.py", patterns)
+
+    def test_should_ignore_directory_trailing_slash_pattern(self, tmp_path):
+        ignore = tmp_path / ".code-review-graphignore"
+        ignore.write_text("vendor/\n/generated/\n")
+
+        patterns = _load_ignore_patterns(tmp_path)
+        assert "**/vendor/**" in patterns
+        assert "/generated/**" in patterns
+        assert _should_ignore("vendor/autoload.php", patterns)
+        assert _should_ignore("services/api/vendor/autoload.php", patterns)
+        assert _should_ignore("generated/code.js", patterns)
+        assert not _should_ignore("packages/app/generated/code.js", patterns)
+        assert not _should_ignore("src/vendorized/file.php", patterns)
 
     def test_should_ignore_nested_dependency_dirs(self):
         """Nested node_modules / vendor / .gradle should be ignored (#91)."""
@@ -241,6 +255,27 @@ class TestIgnorePatterns:
         # Coverage/cache
         assert _should_ignore("coverage/lcov.info", patterns)
         assert _should_ignore(".cache/webpack/index.pack", patterns)
+
+    def test_root_output_defaults_do_not_hide_nested_source_directories(self):
+        """Reviewed #92 semantics keep ambiguous output names root-relative."""
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        for directory in ("build", "dist", "bin", "obj", "target"):
+            assert _should_ignore(f"{directory}/generated/output.js", patterns)
+            assert not _should_ignore(
+                f"packages/app/{directory}/source.py",
+                patterns,
+            )
+
+    def test_safe_dependency_defaults_still_match_at_any_depth(self):
+        """The monorepo dependency case from #91 remains fixed."""
+        from code_review_graph.incremental import DEFAULT_IGNORE_PATTERNS
+
+        patterns = DEFAULT_IGNORE_PATTERNS
+        assert _should_ignore("packages/app/node_modules/pkg/index.js", patterns)
+        assert _should_ignore("services/api/vendor/pkg/file.php", patterns)
+        assert _should_ignore("src/lib/__pycache__/module.pyc", patterns)
 
 
 class TestDataDir:
@@ -385,7 +420,6 @@ class TestDataDirRegistry:
     def test_registry_fallback_to_env_var(self, tmp_path, monkeypatch):
         """Fall back to CRG_DATA_DIR when registry has no entry."""
         from code_review_graph.incremental import get_data_dir
-        from code_review_graph.registry import Registry
 
         repo = tmp_path / "project"
         repo.mkdir()
@@ -401,7 +435,6 @@ class TestDataDirRegistry:
     def test_registry_fallback_to_default(self, tmp_path, monkeypatch):
         """Fall back to default when neither registry nor env var is set."""
         from code_review_graph.incremental import get_data_dir
-        from code_review_graph.registry import Registry
 
         repo = tmp_path / "project"
         repo.mkdir()

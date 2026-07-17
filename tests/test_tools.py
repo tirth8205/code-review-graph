@@ -146,6 +146,26 @@ class TestTools:
         names = {r.name for r in results}
         assert "login" in names or "AuthService" in names
 
+    def test_search_mode_fts(self, monkeypatch, tmp_path):
+        """semantic_search_nodes reports search_mode='fts' when only FTS contributes."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        tmp_db = tmp_path / "test.db"
+        store = GraphStore(tmp_db)
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path="/repo/auth.py",
+            line_start=1, line_end=10, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+
+        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None: (store, tmp_path))
+        result = semantic_search_nodes("login")
+        assert result["status"] == "ok"
+        assert result["search_mode"] == "fts"
+
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""
         # Add an edge with bare target name
@@ -367,6 +387,71 @@ class TestRepoRootValidation:
     def test_validate_repo_root_error_mentions_svn_marker(self, tmp_path):
         with pytest.raises(ValueError, match=r"\.git, \.svn, or \.code-review-graph"):
             _validate_repo_root(tmp_path)
+
+
+class TestQueryGraphTestsFor:
+    """Regression tests for #515: query_graph(pattern='tests_for')
+    must follow direct TESTED_BY edges (source=production, target=test)
+    rather than relying on the naming-convention fallback.
+    """
+
+    def setup_method(self):
+        import tempfile as _tempfile
+        self._tmpdir = _tempfile.TemporaryDirectory()
+        self.repo_root = Path(self._tmpdir.name)
+        # _validate_repo_root requires .git or .code-review-graph.
+        (self.repo_root / ".code-review-graph").mkdir()
+        # find_project_root / get_db_path look here for the DB.
+        from code_review_graph.incremental import get_db_path
+        self.db_path = get_db_path(self.repo_root)
+        self.store = GraphStore(str(self.db_path))
+        self._seed_graph()
+
+    def teardown_method(self):
+        self.store.close()
+        self._tmpdir.cleanup()
+
+    def _seed_graph(self):
+        # Production function with an unconventional name so the
+        # naming-convention fallback (test_<name> / Test<name>) cannot match.
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/src/calc.py", file_path="/src/calc.py",
+            line_start=1, line_end=20, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="combine", file_path="/src/calc.py",
+            line_start=1, line_end=5, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/tests/spec.py", file_path="/tests/spec.py",
+            line_start=1, line_end=20, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Test", name="verify_combine_behaviour",
+            file_path="/tests/spec.py",
+            line_start=1, line_end=5, language="python", is_test=True,
+        ))
+        # Parser-canonical direction: source=production, target=test.
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/src/calc.py::combine",
+            target="/tests/spec.py::verify_combine_behaviour",
+            file_path="/tests/spec.py", line=1,
+        ))
+        self.store.commit()
+        # Release the writer connection so query_graph can open its own.
+        self.store.close()
+
+    def test_query_graph_tests_for_finds_direct_edge(self):
+        from code_review_graph.tools import query_graph
+        result = query_graph(
+            pattern="tests_for",
+            target="/src/calc.py::combine",
+            repo_root=str(self.repo_root),
+        )
+        assert result["status"] == "ok"
+        qns = {r["qualified_name"] for r in result["results"]}
+        assert "/tests/spec.py::verify_combine_behaviour" in qns
 
 
 class TestGetDocsSection:

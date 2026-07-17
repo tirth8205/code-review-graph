@@ -19,7 +19,7 @@ Usage:
     code-review-graph daemon stop
     code-review-graph daemon restart [--foreground]
     code-review-graph daemon status
-    code-review-graph daemon logs [--repo ALIAS] [-f] [-n N]
+    code-review-graph daemon logs [--repo ALIAS] [--follow] [--lines N]
     code-review-graph daemon add <path> [--alias NAME]
     code-review-graph daemon remove <path_or_alias>
 """

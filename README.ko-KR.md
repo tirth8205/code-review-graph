@@ -123,7 +123,7 @@ Build the code review graph for this project
   <img src="diagrams/diagram5_benchmark_board.png" alt="실제 저장소 벤치마크: 4.9배에서 27.3배 적은 토큰과 보수적인 영향 분석" width="85%" />
 </p>
 
-모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 원본 데이터는 [`evaluate/reports/summary.md`](evaluate/reports/summary.md)에 있습니다.
+모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 전체 재현 절차와 기준 수치는 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)에 있습니다.
 
 전체 벤치마크 결과는 [영문 README](README.md#benchmarks)를 참조하세요.
 
@@ -267,13 +267,13 @@ node_modules/**
 선택적 의존성 그룹:
 
 ```bash
-pip install code-review-graph[embeddings]          # 로컬 벡터 임베딩 (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini 임베딩
-pip install code-review-graph[communities]         # 커뮤니티 감지 (igraph)
-pip install code-review-graph[enrichment]          # Python 호출 해결 보강 (Jedi)
-pip install code-review-graph[eval]                # 평가 벤치마크 (matplotlib)
-pip install code-review-graph[wiki]                # LLM 요약 위키 생성 (ollama)
-pip install code-review-graph[all]                 # 모든 선택적 의존성
+pip install "code-review-graph[embeddings]"          # 로컬 벡터 임베딩 (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini 임베딩
+pip install "code-review-graph[communities]"         # 커뮤니티 감지 (igraph)
+pip install "code-review-graph[enrichment]"          # Python 호출 해결 보강 (Jedi)
+pip install "code-review-graph[eval]"                # 평가 벤치마크 (matplotlib)
+pip install "code-review-graph[wiki]"                # LLM 요약 위키 생성 (ollama)
+pip install "code-review-graph[all]"                 # 모든 선택적 의존성
 ```
 
 OpenAI 호환 임베딩(실제 OpenAI, Azure, 또는 자체 호스팅 게이트웨이 new-api / LiteLLM / vLLM / LocalAI / Ollama openai 모드)은 추가 설치가 필요하지 않습니다. 환경 변수만 설정하고 `embed_graph`에 `provider="openai"`를 전달하면 됩니다:

@@ -67,6 +67,91 @@ def test_md_escape_caps_length():
 
 
 # ---------------------------------------------------------------------------
+# relativize_path (strip CI-runner absolute prefixes)
+# ---------------------------------------------------------------------------
+
+
+def test_relativize_strips_github_workspace(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+    out = render.relativize_path(
+        "/home/runner/work/repo/repo/code_review_graph/embeddings.py"
+    )
+    assert out == "code_review_graph/embeddings.py"
+
+
+def test_relativize_keeps_symbol_suffix(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+    out = render.relativize_path(
+        "/home/runner/work/repo/repo/code_review_graph/embeddings.py::get_provider"
+    )
+    assert out == "code_review_graph/embeddings.py::get_provider"
+
+
+def test_relativize_handles_workspace_with_trailing_slash(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo/")
+    out = render.relativize_path(
+        "/home/runner/work/repo/repo/pkg/mod.py::fn"
+    )
+    assert out == "pkg/mod.py::fn"
+
+
+def test_relativize_leaves_already_relative_paths(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+    assert render.relativize_path("auth/session.py::rotate_token") == (
+        "auth/session.py::rotate_token"
+    )
+    assert render.relativize_path("auth/session.py") == "auth/session.py"
+
+
+def test_relativize_falls_back_to_repo_segment_without_env(monkeypatch):
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/code-review-graph")
+    out = render.relativize_path(
+        "/home/runner/work/code-review-graph/code-review-graph/"
+        "scripts/render_pr_comment.py::main"
+    )
+    assert out == "scripts/render_pr_comment.py::main"
+
+
+def test_relativize_no_env_no_match_returns_input(monkeypatch):
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    # Nothing to strip against; render the path as-is rather than mangling it.
+    weird = "/opt/build/some/place/file.py::fn"
+    assert render.relativize_path(weird) == weird
+
+
+def test_relativize_handles_none_and_question_mark(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+    assert render.relativize_path("?") == "?"
+
+
+def test_render_markdown_relativizes_absolute_paths(monkeypatch):
+    monkeypatch.setenv("GITHUB_WORKSPACE", "/home/runner/work/repo/repo")
+    ws = "/home/runner/work/repo/repo"
+    abs_report = {
+        "risk_score": 0.72,
+        "review_priorities": [
+            {
+                "qualified_name": f"{ws}/code_review_graph/embeddings.py::get_provider",
+                "file_path": f"{ws}/code_review_graph/embeddings.py",
+                "line_start": 42,
+                "risk_score": 0.72,
+                "is_test": False,
+            }
+        ],
+        "affected_flows": [],
+        "test_gaps": [],
+    }
+    body = render.render_markdown(abs_report)
+    # Absolute CI-runner prefix must not leak into the rendered comment.
+    assert "/home/runner/work" not in body
+    assert render.md_escape("code_review_graph/embeddings.py::get_provider") in body
+    # Location column path is markdown-escaped (underscores) like every cell.
+    assert f"{render.md_escape('code_review_graph/embeddings.py')}:42" in body
+
+
+# ---------------------------------------------------------------------------
 # render_markdown
 # ---------------------------------------------------------------------------
 

@@ -389,6 +389,223 @@ class TestCSharpParsing:
         names = {f.name for f in funcs}
         assert "FindById" in names or "Save" in names
 
+    @pytest.mark.parametrize(
+        ("statement", "expected_targets"),
+        [
+            ("Ping();", {"Ping"}),
+            ("service.Send();", {"Send"}),
+            ("service.GetClient().Fetch();", {"GetClient", "Fetch"}),
+            ("service?.Notify();", {"Notify"}),
+        ],
+        ids=("bare", "member", "chained", "null-conditional"),
+    )
+    def test_finds_calls_and_attributes_them_to_enclosing_method(
+        self, tmp_path, statement, expected_targets,
+    ):
+        source_file = tmp_path / "Calls.cs"
+        source_file.write_text(
+            "class Caller\n"
+            "{\n"
+            "    void Run()\n"
+            "    {\n"
+            f"        {statement}\n"
+            "    }\n"
+            "}\n"
+        )
+
+        _, edges = self.parser.parse_file(source_file)
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        call_targets = {
+            edge.target.split("::")[-1].split(".")[-1]: edge
+            for edge in calls
+        }
+
+        assert expected_targets <= call_targets.keys()
+        assert all(
+            call_targets[target].source.endswith("::Caller.Run")
+            for target in expected_targets
+        )
+
+
+@pytest.mark.skipif(
+    not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
+)
+class TestCSharpAttributes:
+    """Regression tests for #295 (C# half): C# attributes use
+    ``attribute_list`` nodes, not ``modifiers > annotation``, so they need
+    a dedicated capture path. Persisted in ``modifiers`` + ``extra['decorators']``.
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.cs"
+        p.write_text(source, encoding="utf-8")
+        return CodeParser().parse_file(p)
+
+    def test_method_attributes_captured(self, tmp_path):
+        nodes, _ = self._parse(
+            "namespace Api;\npublic class Ctrl {\n"
+            "    [HttpGet(\"/x\")]\n    [Authorize]\n"
+            "    public void Get() {}\n}\n",
+            tmp_path,
+        )
+        get = next(n for n in nodes if n.kind == "Function" and n.name == "Get")
+        assert get.extra.get("decorators") == ["HttpGet", "Authorize"]
+        assert get.modifiers == "HttpGet,Authorize"
+
+    def test_class_attribute_captured(self, tmp_path):
+        nodes, _ = self._parse(
+            "namespace Api;\n[ApiController]\npublic class Ctrl {\n"
+            "    public void Get() {}\n}\n",
+            tmp_path,
+        )
+        ctrl = next(n for n in nodes if n.kind == "Class" and n.name == "Ctrl")
+        assert ctrl.extra.get("decorators") == ["ApiController"]
+        assert ctrl.modifiers == "ApiController"
+
+    def test_unattributed_method_has_none_modifiers(self, tmp_path):
+        nodes, _ = self._parse(
+            "namespace Api;\npublic class C {\n    public void Plain() {}\n}\n",
+            tmp_path,
+        )
+        plain = next(n for n in nodes if n.kind == "Function" and n.name == "Plain")
+        assert plain.modifiers is None
+        assert "decorators" not in plain.extra
+
+
+@pytest.mark.skipif(
+    not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
+)
+class TestCSharpNamespaceResolution:
+    """Regression tests for #310: C# ``using X.Y;`` directives carry a
+    namespace string as their ``IMPORTS_FROM.target`` (not a file path), so
+    ``importers_of`` returned [] for every .cs file. The fix tags File
+    nodes with their declared namespaces and adds a namespace fallback.
+    """
+
+    def _write(self, path: Path, source: str) -> None:
+        path.write_text(source, encoding="utf-8")
+
+    def test_file_scoped_namespace_tagged(self, tmp_path):
+        f = tmp_path / "Core.cs"
+        self._write(f, "namespace ACME.Core;\npublic class TaskBoard {}\n")
+        nodes, _ = CodeParser().parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == ["ACME.Core"]
+
+    def test_block_namespace_tagged(self, tmp_path):
+        f = tmp_path / "Core.cs"
+        self._write(f, "namespace ACME.Core {\n    public class T {}\n}\n")
+        nodes, _ = CodeParser().parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == ["ACME.Core"]
+
+    def test_non_csharp_file_has_no_namespace_tag(self, tmp_path):
+        f = tmp_path / "mod.py"
+        self._write(f, "def foo():\n    pass\n")
+        nodes, _ = CodeParser().parse_file(f)
+        file_node = next(n for n in nodes if n.kind == "File")
+        assert "csharp_namespaces" not in file_node.extra
+
+    def test_importers_of_resolves_namespace_to_file(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        core = tmp_path / "Core.cs"
+        self._write(core, "namespace ACME.Core;\npublic class TaskBoard {}\n")
+        app = tmp_path / "App.cs"
+        self._write(app, "using ACME.Core;\nnamespace ACME.App;\npublic class App {}\n")
+        unrelated = tmp_path / "Unrelated.cs"
+        self._write(
+            unrelated,
+            "using System.Linq;\nnamespace ACME.Other;\npublic class Other {}\n",
+        )
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser()
+        for path in (core, app, unrelated):
+            nodes, edges = parser.parse_file(path)
+            for n in nodes:
+                store.upsert_node(n)
+            for e in edges:
+                store.upsert_edge(e)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {r["file"] for r in result.get("results", [])}
+        assert str(app) in importers
+        assert str(unrelated) not in importers
+
+    def test_importers_of_resolves_nested_block_namespace(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        core = tmp_path / "Core.cs"
+        self._write(
+            core,
+            "namespace Acme {\n"
+            "    namespace Core {\n"
+            "        public class TaskBoard {}\n"
+            "    }\n"
+            "}\n",
+        )
+        app = tmp_path / "App.cs"
+        self._write(
+            app,
+            "using Acme.Core;\n"
+            "namespace Acme.App;\n"
+            "public class App {}\n",
+        )
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser()
+        for path in (core, app):
+            nodes, edges = parser.parse_file(path)
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {r["file"] for r in result.get("results", [])}
+        assert str(app) in importers
+
+    def test_deep_ast_preserves_nested_namespace_metadata(self, tmp_path):
+        """Namespace discovery must not recurse through the whole C# AST."""
+        source_file = tmp_path / "Deep.cs"
+        deep_expression = "(" * 1200 + "1" + ")" * 1200
+        self._write(
+            source_file,
+            "namespace Acme {\n"
+            "    namespace Core {\n"
+            "        public class Calculator {\n"
+            "            public int Value() {\n"
+            f"                return {deep_expression};\n"
+            "            }\n"
+            "        }\n"
+            "    }\n"
+            "}\n",
+        )
+
+        try:
+            nodes, _ = CodeParser().parse_file(source_file)
+        except RecursionError:
+            pytest.fail("C# namespace discovery overflowed on a deep expression AST")
+
+        file_node = next(node for node in nodes if node.kind == "File")
+        assert file_node.extra.get("csharp_namespaces") == [
+            "Acme",
+            "Acme.Core",
+        ]
+
 
 class TestRubyParsing:
     def setup_method(self):
@@ -455,6 +672,94 @@ class TestPHPParsing:
         assert "dirname" in target_names
 
 
+class TestPHPImportResolution:
+    """PHP ``use`` imports resolve to absolute file paths (PSR-4 layout)."""
+
+    def test_resolves_project_import(self, tmp_path):
+        """``use`` of a project class resolves to its .php file."""
+        entity = tmp_path / "src/App/Domain/Entity"
+        entity.mkdir(parents=True)
+        (entity / "Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\nclass Job {}\n"
+        )
+        svc = tmp_path / "src/App/Service"
+        svc.mkdir(parents=True)
+        (svc / "MatchService.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use App\\Domain\\Entity\\Job;\n"
+            "class MatchService {}\n"
+        )
+
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "MatchService.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((entity / "Job.php").resolve())
+
+    def test_vendor_import_stays_unresolved(self, tmp_path):
+        """A class with no local file stays as the bare FQN, not a raw
+        ``use ...;`` statement and not a fake path."""
+        svc = tmp_path / "src/App/Service"
+        svc.mkdir(parents=True)
+        (svc / "Logger.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use Psr\\Log\\LoggerInterface;\n"
+            "class Logger {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(svc / "Logger.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == "Psr\\Log\\LoggerInterface"
+        assert not imports[0].target.endswith(".php")
+
+    def test_aliased_import_records_fqn_not_alias(self, tmp_path):
+        """``use A\\B\\C as D`` records the FQN A\\B\\C, ignoring the alias."""
+        contact = tmp_path / "src/App/Domain/Embedded"
+        contact.mkdir(parents=True)
+        (contact / "Contact.php").write_text(
+            "<?php\nnamespace App\\Domain\\Embedded;\nclass Contact {}\n"
+        )
+        job = tmp_path / "src/App/Domain/Entity"
+        job.mkdir(parents=True)
+        (job / "Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\n"
+            "use App\\Domain\\Embedded\\Contact as ContactEmbedded;\n"
+            "class Job {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(job / "Job.php")
+        imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert len(imports) == 1
+        assert imports[0].target == str((contact / "Contact.php").resolve())
+
+    def test_grouped_use_expands_to_multiple_imports(self, tmp_path):
+        """``use App\\Domain\\{Entity\\Job, Model\\Status}`` -> two imports,
+        each prefixed with the group namespace and resolved independently."""
+        base = tmp_path / "src/App/Domain"
+        (base / "Entity").mkdir(parents=True)
+        (base / "Model").mkdir(parents=True)
+        (base / "Entity/Job.php").write_text(
+            "<?php\nnamespace App\\Domain\\Entity;\nclass Job {}\n"
+        )
+        (base / "Model/Status.php").write_text(
+            "<?php\nnamespace App\\Domain\\Model;\nclass Status {}\n"
+        )
+        consumer = tmp_path / "src/App/Service"
+        consumer.mkdir(parents=True)
+        (consumer / "C.php").write_text(
+            "<?php\nnamespace App\\Service;\n"
+            "use App\\Domain\\{Entity\\Job, Model\\Status};\n"
+            "class C {}\n"
+        )
+        parser = CodeParser()
+        _, edges = parser.parse_file(consumer / "C.php")
+        targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert str((base / "Entity/Job.php").resolve()) in targets
+        assert str((base / "Model/Status.php").resolve()) in targets
+        assert len(targets) == 2
+
+
 class TestKotlinParsing:
     def setup_method(self):
         self.parser = CodeParser()
@@ -480,6 +785,58 @@ class TestKotlinParsing:
         assert "println" in targets
         # Method call: repo.save(user)
         assert any("save" in t for t in targets)
+
+
+class TestKotlinAnnotations:
+    """Regression tests for #295: Kotlin nodes must persist annotation
+    metadata in both ``modifiers`` (comma-joined string) and
+    ``extra['decorators']`` (list) so consumers can filter queries like
+    "show me all @Composable functions" or "find @HiltViewModel classes".
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.kt"
+        p.write_text(source, encoding="utf-8")
+        return CodeParser().parse_file(p)
+
+    def test_hilt_viewmodel_annotation_on_class(self, tmp_path):
+        nodes, _ = self._parse(
+            "package com.example\n@HiltViewModel\nclass MyVM {\n    fun noop() {}\n}\n",
+            tmp_path,
+        )
+        vm = next(n for n in nodes if n.kind == "Class" and n.name == "MyVM")
+        assert vm.modifiers == "HiltViewModel"
+        assert vm.extra.get("decorators") == ["HiltViewModel"]
+
+    def test_composable_annotation_on_function(self, tmp_path):
+        nodes, _ = self._parse(
+            "package com.example\n@Composable\nfun Greeting(n: String) {\n"
+            "    println(n)\n}\n",
+            tmp_path,
+        )
+        fn = next(n for n in nodes if n.kind == "Function" and n.name == "Greeting")
+        assert fn.modifiers == "Composable"
+        assert fn.extra.get("decorators") == ["Composable"]
+
+    def test_unannotated_function_has_none_modifiers(self, tmp_path):
+        """Guard: adding annotation support must not leak an empty string
+        or empty list onto unannotated nodes."""
+        nodes, _ = self._parse(
+            "package com.example\nfun bare() { println(1) }\n", tmp_path,
+        )
+        fn = next(n for n in nodes if n.kind == "Function" and n.name == "bare")
+        assert fn.modifiers is None
+        assert "decorators" not in fn.extra
+
+    def test_test_annotation_still_triggers_test_kind(self, tmp_path):
+        """Guard: annotation persistence must not break the pre-existing
+        @Test -> Test-kind promotion."""
+        nodes, _ = self._parse(
+            "package com.example\nclass T {\n    @Test\n    fun testX() { println(1) }\n}\n",
+            tmp_path,
+        )
+        t = next(n for n in nodes if n.kind == "Test" and n.name == "testX")
+        assert t.extra.get("decorators") == ["Test"]
 
 
 class TestSwiftParsing:
@@ -2548,3 +2905,120 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+class TestZigParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.fixture = FIXTURES / "sample_zig.zig"
+        self.nodes, self.edges = self.parser.parse_file(self.fixture)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("main.zig")) == "zig"
+
+    def test_finds_top_level_functions(self):
+        funcs = {
+            n.name for n in self.nodes
+            if n.kind == "Function" and n.parent_name is None
+        }
+        assert {"main", "helper"} <= funcs
+
+    def test_finds_struct_methods(self):
+        methods = {
+            n.name for n in self.nodes
+            if n.kind == "Function" and n.parent_name == "Point"
+        }
+        assert {"init", "distance"} <= methods
+
+    def test_finds_struct_enum_union_classes(self):
+        classes = {
+            n.name: n.extra.get("zig_kind") for n in self.nodes
+            if n.kind == "Class"
+        }
+        assert classes.get("Point") == "struct"
+        assert classes.get("Color") == "enum"
+        assert classes.get("Shape") == "union"
+
+    def test_finds_imports(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        targets = {e.target for e in imports}
+        # std stays unresolved (no relative .zig path); util resolves to
+        # the absolute fixture path.
+        assert "std" in targets
+        assert any(
+            t.endswith("sample_zig_util.zig") and t != "./sample_zig_util.zig"
+            for t in targets
+        )
+
+    def test_finds_calls(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        # Bare callees (std.debug.print, expect, util.noop) keep their final
+        # identifier as the target; same-file helper resolves to the
+        # qualified name via _resolve_call_targets.
+        bare_targets = {e.target.split("::")[-1] for e in calls}
+        assert "print" in bare_targets
+        assert "expect" in bare_targets
+        assert "helper" in bare_targets
+
+    def test_builtin_calls_emitted(self):
+        # @intCast inside Point.distance should produce a CALLS edge
+        # whose target is the builtin name (with the leading @).
+        targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "@intCast" in targets
+
+    def test_at_import_is_not_a_call(self):
+        # @import is modelled as IMPORTS_FROM only — never as CALLS, so
+        # it doesn't pollute the call graph.
+        targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "@import" not in targets
+
+    def test_test_block_creates_test_node(self):
+        tests = [n for n in self.nodes if n.kind == "Test"]
+        assert len(tests) == 1
+        assert tests[0].name.startswith("test:helper increments@L")
+        assert tests[0].is_test is True
+
+    def test_in_source_test_emits_tested_by_outside_test_path(self):
+        path = Path("src/math.zig")
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"fn increment(x: i32) i32 { return x + 1; }\n"
+            b'test "increment" { try expect(increment(1) == 2); }\n',
+        )
+
+        file_node = next(n for n in nodes if n.kind == "File")
+        test_node = next(n for n in nodes if n.kind == "Test")
+        function_node = next(
+            n for n in nodes if n.kind == "Function" and n.name == "increment"
+        )
+        test_qname = self.parser._qualify(
+            test_node.name, test_node.file_path, test_node.parent_name,
+        )
+        function_qname = self.parser._qualify(
+            function_node.name, function_node.file_path, function_node.parent_name,
+        )
+
+        assert file_node.is_test is False
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source == test_qname
+            and edge.target == function_qname
+            for edge in edges
+        )
+        assert any(
+            edge.kind == "TESTED_BY"
+            and edge.source == function_qname
+            and edge.target == test_qname
+            for edge in edges
+        )
+
+    def test_calls_inside_methods_have_qualified_source(self):
+        # Point.distance calls helper(...) — the source should be the
+        # qualified Point.distance name, not the bare file path.
+        sources = {
+            e.source.split("::")[-1] for e in self.edges
+            if e.kind == "CALLS"
+        }
+        assert "Point.distance" in sources
+
+    def test_nodes_have_zig_language(self):
+        for node in self.nodes:
+            assert node.language == "zig"

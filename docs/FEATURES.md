@@ -1,6 +1,20 @@
 # Features
 
-## v2.3.5 (Current)
+## v2.3.6 (Current)
+- **Custom languages without forking**: drop a `.code-review-graph/languages.toml` into your repo to index any grammar shipped by tree-sitter-language-pack — extension map plus node-type lists, validated and capped, with built-in languages always winning. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
+- **GitHub Action for risk-scored PR reviews**: composite `action.yml` builds/restores the graph from CI cache, runs `detect-changes` against the PR base, and upserts a sticky comment with risk table, affected flows, test gaps, and the Token Savings line. Optional `fail-on-risk` merge gate. Dogfooded on this repo via `.github/workflows/pr-review.yml`. See [GITHUB_ACTION.md](GITHUB_ACTION.md).
+- **`agent_baseline` eval benchmark**: compares graph queries against a realistic grep-and-read-top-k agent baseline instead of the whole-corpus strawman; wired into all six pinned eval configs.
+- **Co-change ground truth for `impact_accuracy`**: predictions are also graded against files actually co-changed in the same commit; the legacy metric is explicitly labelled "graph-derived (circular — upper bound)".
+- **Weekly eval CI**: `.github/workflows/eval.yml` runs a report-only cron of the two smallest pinned configs with CSV artifacts and a job summary.
+- **docs/FAQ.md**: how CRG compares to LSP, RAG, grep/agentic search, and adjacent tools; when NOT to use it; verification steps; monorepo/worktree and registry guidance.
+- **Contribution scaffolding**: GitHub issue forms (bug/feature/platform), a PR template mirroring the CONTRIBUTING checklist, and dependabot config for pip + GitHub Actions.
+- **Windows fixes**: `daemon status` no longer crashes with WinError 87 (#511), and CLI `detect-changes` maps diff paths to absolute native paths so it no longer reports 0 functions (#528).
+- **Provider-name validation**: unknown embedding provider names raise a clear error listing valid providers instead of silently falling back to the local model.
+- **Store-leak fixes**: the five analysis MCP tools and the wiki-page tool no longer leak SQLite connections (try/finally `store.close()`).
+- **`fastmcp<4` cap**: the next fastmcp major can no longer silently break the server.
+- **Worktree-safe git hooks**: `install` resolves the real hooks directory via `git rev-parse --git-path hooks`, so linked worktrees and `core.hooksPath` (husky) setups get a working pre-commit hook.
+
+## v2.3.5
 - **Token Savings panel on every brief CLI call**: `code-review-graph detect-changes --brief` and the new `code-review-graph update --brief` print a boxed `Token Savings` panel — full-context baseline, graph response, saved tokens, percent, and per-category breakdown (Functions / Tests / Risk / Other) that sums exactly to the graph response size.
 - **`--verify` flag**: cross-checks the displayed numbers against OpenAI's `cl100k_base` tokenizer (the GPT-4 family). Adds a second `Verified (tiktoken)` row showing real token counts. Calibration across 222 mixed-language files shows the estimate is within ~1% of real tokens in aggregate.
 - **`update --brief`**: incremental update + the same risk panel in one command. Distinct from `detect-changes --brief` (which is read-only against the existing graph) — use update when the graph might be stale (post-rebase, large change set).

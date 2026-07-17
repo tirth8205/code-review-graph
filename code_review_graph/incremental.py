@@ -95,37 +95,44 @@ def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
 
 # Default ignore patterns (in addition to .gitignore).
 #
-# `<dir>/**` patterns are matched at any depth by _should_ignore, so
-# `node_modules/**` also excludes `packages/app/node_modules/react/index.js`
-# inside monorepos. See: #91
+# ``**/<dir>/**`` patterns are safe-anywhere directory exclusions.  A leading
+# slash anchors a pattern to the repository root, which prevents ambiguous
+# output names such as ``build`` and ``dist`` from hiding nested source
+# directories.  See: #91 and PR #92.
 DEFAULT_IGNORE_PATTERNS = [
-    ".code-review-graph/**",
-    "node_modules/**",
-    ".git/**",
-    ".svn/**",
-    "__pycache__/**",
+    "**/.code-review-graph/**",
+    "**/node_modules/**",
+    "**/.git/**",
+    "**/.svn/**",
+    "**/__pycache__/**",
     "*.pyc",
-    ".venv/**",
-    "venv/**",
-    "dist/**",
-    "build/**",
-    ".next/**",
-    "target/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "/dist/**",
+    "/build/**",
+    "/.next/**",
+    "/.nuxt/**",
+    "/target/**",
+    "/bin/**",
+    "/obj/**",
     # PHP / Laravel / Composer
-    "vendor/**",
-    "bootstrap/cache/**",
-    "public/build/**",
+    "**/vendor/**",
+    "/storage/**",
+    "/bootstrap/cache/**",
+    "/public/build/**",
     # Ruby / Bundler
-    ".bundle/**",
+    "**/.bundle/**",
     # Java / Kotlin / Gradle
-    ".gradle/**",
+    "**/.gradle/**",
     "*.jar",
     # Dart / Flutter
-    ".dart_tool/**",
-    ".pub-cache/**",
+    "**/.dart_tool/**",
+    "**/.pub-cache/**",
     # General
-    "coverage/**",
-    ".cache/**",
+    "/coverage/**",
+    "**/.cache/**",
+    "/.tmp/**",
+    "/tmp/**",  # nosec B108 -- repo-relative ignore glob, not a temp-file path
     "*.min.js",
     "*.min.css",
     "*.map",
@@ -359,34 +366,55 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
         for line in ignore_file.read_text(encoding="utf-8", errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
-                patterns.append(line)
+                # Directory names without a slash match at any depth, as in
+                # .gitignore. A leading slash remains an explicit root anchor.
+                if line.endswith("/"):
+                    prefix = line[:-1]
+                    if prefix.startswith("/") or "/" in prefix:
+                        line = f"{prefix}/**"
+                    else:
+                        line = f"**/{prefix}/**"
+                elif line.endswith("/**") and not line.startswith(("/", "**/")):
+                    prefix = line[:-3]
+                    if "/" in prefix:
+                        line = f"/{line}"
+                    else:
+                        line = f"**/{line}"
+                if line:
+                    patterns.append(line)
     return patterns
 
 
 def _should_ignore(path: str, patterns: list[str]) -> bool:
     """Check if a path matches any ignore pattern.
 
-    Handles nested occurrences of ``<dir>/**`` patterns: for example,
-    ``node_modules/**`` also matches ``packages/app/node_modules/foo.js``
-    inside monorepos. ``fnmatch`` alone treats ``*`` as not crossing ``/``
-    and only matches the prefix, so we additionally test each path segment
-    against the bare prefix of ``<dir>/**`` patterns. See: #91
+    ``**/<dir>/**`` and unanchored single-directory patterns match at any
+    depth. A leading slash anchors a pattern to the repository root.
     """
-    # Direct fnmatch first (cheap)
-    if any(fnmatch.fnmatch(path, p) for p in patterns):
-        return True
-    # Then: treat simple single-segment "dir/**" patterns as
-    # "this directory at any depth".
-    parts = PurePosixPath(path).parts
-    for p in patterns:
-        if not p.endswith("/**"):
+    normalized = path.replace("\\", "/").lstrip("/")
+    parts = PurePosixPath(normalized).parts
+    for pattern in patterns:
+        anchored = pattern.startswith("/")
+        candidate = pattern[1:] if anchored else pattern
+
+        if candidate.startswith("**/") and candidate.endswith("/**"):
+            segment = candidate[3:-3]
+            if segment and segment in parts:
+                return True
             continue
-        prefix = p[:-3]
-        # Only single-segment dir patterns (no "/" inside the prefix)
-        # qualify for nested matching.
-        if "/" in prefix or not prefix:
+
+        if candidate.endswith("/**"):
+            prefix = tuple(part for part in candidate[:-3].split("/") if part)
+            if not prefix:
+                continue
+            if anchored or len(prefix) > 1:
+                if parts[: len(prefix)] == prefix:
+                    return True
+            elif prefix[0] in parts:
+                return True
             continue
-        if prefix in parts:
+
+        if fnmatch.fnmatch(normalized, candidate):
             return True
     return False
 
@@ -416,25 +444,27 @@ def _git_branch_info(repo_root: Path) -> tuple[str, str]:
         result = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             sha = result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, UnicodeDecodeError):
         pass
     return branch, sha
 
@@ -508,7 +538,8 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         result = subprocess.run(
             ["git", "diff", "--name-only", base, "--"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
@@ -517,15 +548,15 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             result = subprocess.run(
                 ["git", "diff", "--name-only", "--cached"],
                 capture_output=True,
-                text=True, encoding='utf-8',                cwd=str(repo_root),
+                text=True, encoding='utf-8', errors='replace',
+                cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
             )
         files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
     """Return changed files in an SVN working copy.
@@ -570,9 +601,8 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                     path = line[8:].strip() if len(line) > 8 else line[1:].strip()
                     files.append(path)
             return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def get_staged_and_unstaged(repo_root: Path) -> list[str]:
     """Get all modified files (staged + unstaged + untracked)."""
@@ -582,7 +612,8 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
@@ -595,9 +626,8 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
                     entry = entry.split(" -> ", 1)[1]
                 files.append(entry)
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def get_all_tracked_files(
     repo_root: Path,
@@ -627,14 +657,14 @@ def get_all_tracked_files(
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True, encoding='utf-8',            cwd=str(repo_root),
+            text=True, encoding='utf-8', errors='replace',
+            cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
         return [f.strip() for f in result.stdout.splitlines() if f.strip()]
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
-
 
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.

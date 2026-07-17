@@ -307,6 +307,42 @@ def test_generate_html_includes_loading_and_empty_state(store_with_data, tmp_pat
     assert "No nodes to display" in content
 
 
+def test_generate_html_uses_id_selector_for_svg(store_with_data, tmp_path):
+    """Regression test for #523: d3.select("svg") selects the legend icon, not the canvas.
+
+    The legend <nav> contains inline <svg> icons that appear before #graph-svg
+    in document order. d3.select("svg") returns the first match — a 16px legend
+    icon — causing the entire force graph to render inside it. The fix targets
+    #graph-svg by id.
+    """
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store_with_data, output_path)
+    content = output_path.read_text()
+    assert 'd3.select("#graph-svg")' in content, (
+        "HTML should use d3.select('#graph-svg') to target the main canvas, "
+        "not d3.select('svg') which selects the first inline legend icon"
+    )
+    assert 'd3.select("svg")' not in content, (
+        "No bare d3.select('svg') should remain — it selects legend icons"
+    )
+
+
+def test_community_mode_uses_id_selector_for_svg(large_store, tmp_path):
+    """Regression test for #523: community/aggregated template must also use #graph-svg."""
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "community.html"
+    generate_html(large_store, output_path, mode="community")
+    content = output_path.read_text()
+    assert 'd3.select("#graph-svg")' in content
+    assert 'd3.select("svg")' not in content
+    assert 'id="graph-svg"' in content, (
+        "Aggregated template's <svg> must have id='graph-svg' for the selector to work"
+    )
+
+
 def test_generate_html_includes_focus_visible(store_with_data, tmp_path):
     """Generated HTML should include :focus-visible styles."""
     from code_review_graph.visualization import generate_html

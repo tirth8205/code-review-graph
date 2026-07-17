@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,6 +55,57 @@ def risk_level(score: float) -> str:
     return "low"
 
 
+def relativize_path(value: Any) -> str:
+    """Strip CI-runner absolute prefixes so paths render repo-relative.
+
+    detect-changes emits paths exactly as the graph stored them; in CI the
+    repo is checked out under an absolute prefix
+    (``/home/runner/work/<repo>/<repo>/...``), which is ugly in a PR comment
+    and leaks the runner layout. We strip that prefix so the reader sees
+    ``code_review_graph/embeddings.py`` instead.
+
+    Handles both bare paths and ``path::symbol`` qualified names (the
+    ``::symbol`` suffix is preserved). Already-relative paths and non-path
+    tokens (``?``) are returned unchanged.
+
+    Strategy, in order:
+      1. ``GITHUB_WORKSPACE`` prefix (set by Actions ``checkout``).
+      2. The ``<repo>/<repo>/`` doubled-segment that Actions uses under
+         ``/work/`` (derived from ``GITHUB_REPOSITORY`` when present).
+      3. Otherwise return the input untouched — never guess-mangle a path.
+    """
+    text = str(value)
+    path_part, sep, symbol = text.partition("::")
+    # Only touch absolute, POSIX-style runner paths; leave everything else.
+    if not path_part.startswith("/"):
+        return text
+
+    rel = _strip_workspace_prefix(path_part)
+    if rel is None:
+        return text
+    return f"{rel}{sep}{symbol}" if sep else rel
+
+
+def _strip_workspace_prefix(path_part: str) -> str | None:
+    """Return ``path_part`` made repo-relative, or None when nothing matches."""
+    workspace = os.environ.get("GITHUB_WORKSPACE", "").strip()
+    if workspace:
+        prefix = workspace.rstrip("/") + "/"
+        if path_part.startswith(prefix):
+            return path_part[len(prefix):]
+
+    # Fallback: Actions checks repos out at /work/<name>/<name>/<files...>.
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    name = repo.split("/")[-1] if "/" in repo else ""
+    if name:
+        marker = f"/{name}/{name}/"
+        idx = path_part.find(marker)
+        if idx != -1:
+            return path_part[idx + len(marker):]
+
+    return None
+
+
 def md_escape(value: Any, limit: int = _MAX_CELL) -> str:
     """Escape a value for safe inclusion in markdown tables and lists.
 
@@ -74,8 +126,11 @@ def md_escape(value: Any, limit: int = _MAX_CELL) -> str:
 
 
 def _location(entry: dict[str, Any]) -> str:
-    """Format ``file:line`` for a node-ish dict (file_path/file + line_start)."""
-    file_path = entry.get("file_path") or entry.get("file") or "?"
+    """Format ``file:line`` for a node-ish dict (file_path/file + line_start).
+
+    Paths are relativized first so CI-runner absolute prefixes don't leak.
+    """
+    file_path = relativize_path(entry.get("file_path") or entry.get("file") or "?")
     line_start = entry.get("line_start")
     if line_start:
         return f"{md_escape(file_path)}:{line_start}"
@@ -103,7 +158,7 @@ def _functions_table(
         else:
             tested = "yes"
         lines.append(
-            f"| {score:.2f} | {risk_level(score)} | {md_escape(name)} "
+            f"| {score:.2f} | {risk_level(score)} | {md_escape(relativize_path(name))} "
             f"| {_location(entry)} | {tested} |"
         )
     if len(priorities) > max_functions:
@@ -146,7 +201,7 @@ def _gaps_section(gaps: list[dict[str, Any]], max_gaps: int = 5) -> list[str]:
             break
     for gap in shown:
         name = gap.get("qualified_name") or gap.get("name") or "?"
-        lines.append(f"- {md_escape(name)} ({_location(gap)})")
+        lines.append(f"- {md_escape(relativize_path(name))} ({_location(gap)})")
     remaining = len(gaps) - len(shown)
     if remaining > 0:
         lines.append(f"- ...and {remaining} more without direct tests")

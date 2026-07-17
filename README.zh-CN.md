@@ -265,13 +265,13 @@ node_modules/**
 可选依赖组：
 
 ```bash
-pip install code-review-graph[embeddings]          # 本地向量嵌入 (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini 嵌入
-pip install code-review-graph[communities]         # 社区检测 (igraph)
-pip install code-review-graph[enrichment]          # Python 调用解析增强 (Jedi)
-pip install code-review-graph[eval]                # 评估基准测试 (matplotlib)
-pip install code-review-graph[wiki]                # 使用 LLM 摘要生成 Wiki (ollama)
-pip install code-review-graph[all]                 # 所有可选依赖
+pip install "code-review-graph[embeddings]"          # 本地向量嵌入 (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini 嵌入
+pip install "code-review-graph[communities]"         # 社区检测 (igraph)
+pip install "code-review-graph[enrichment]"          # Python 调用解析增强 (Jedi)
+pip install "code-review-graph[eval]"                # 评估基准测试 (matplotlib)
+pip install "code-review-graph[wiki]"                # 使用 LLM 摘要生成 Wiki (ollama)
+pip install "code-review-graph[all]"                 # 所有可选依赖
 ```
 
 OpenAI 兼容嵌入（真实 OpenAI、Azure，或自建网关如 new-api / LiteLLM / vLLM / LocalAI / Ollama openai 模式）无需额外安装 —— 只需设置环境变量并在 `embed_graph` 中传入 `provider="openai"`：

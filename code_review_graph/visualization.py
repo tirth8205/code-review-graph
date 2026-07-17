@@ -856,7 +856,7 @@ function moveTooltip(ev) {
 }
 function hideTooltip() { tooltip.classList.remove("visible"); }
 var W = innerWidth, H = innerHeight;
-var svg = d3.select("svg").attr("viewBox", [0, 0, W, H]);
+var svg = d3.select("#graph-svg").attr("viewBox", [0, 0, W, H]);
 var gRoot = svg.append("g");
 var currentTransform = d3.zoomIdentity;
 var zoomBehavior = d3.zoom()
@@ -1605,7 +1605,7 @@ _AGGREGATED_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
 <div id="tooltip"></div>
 <button id="btn-back" aria-label="Back to overview">&larr; Back to Overview</button>
-<svg role="img" aria-label="Interactive code knowledge graph visualization (aggregated view)."></svg>
+<svg id="graph-svg" role="img" aria-label="Interactive code knowledge graph visualization (aggregated view)."></svg>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
@@ -1756,7 +1756,7 @@ function hideTooltip() { tooltip.classList.remove("visible"); }
 
 /* --- SVG setup --- */
 var W = innerWidth, H = innerHeight;
-var svg = d3.select("svg").attr("viewBox", [0, 0, W, H]);
+var svg = d3.select("#graph-svg").attr("viewBox", [0, 0, W, H]);
 var gRoot = svg.append("g");
 var currentTransform = d3.zoomIdentity;
 var zoomBehavior = d3.zoom()

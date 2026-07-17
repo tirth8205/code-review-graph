@@ -225,7 +225,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # Nix: attrset bindings aren't "classes"; dispatched via
     # _extract_nix_constructs.
     "nix": [],
-    "zig": ["container_declaration"],
+    # Zig has no single class node; struct/union/enum/opaque are VarDecl
+    # whose RHS is a SuffixExpr > ContainerDecl. Dispatched via
+    # _extract_zig_constructs.
+    "zig": [],
     "powershell": ["class_statement"],
     "julia": [
         "struct_definition", "abstract_definition", "module_definition",
@@ -283,7 +286,10 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # Nix: `attrpath = expr;` bindings become Function nodes —
     # handled in _extract_nix_constructs.
     "nix": [],
-    "zig": ["fn_proto", "fn_decl"],
+    # Zig: FnProto+Block pairs sit inside a Decl node; the standard generic
+    # walker can't bridge the FnProto signature to its sibling Block body,
+    # so the whole thing is dispatched via _extract_zig_constructs.
+    "zig": [],
     "powershell": ["function_statement"],
     # Julia: short-form functions `f(x) = expr` parse as `assignment` nodes
     # (not a dedicated definition node) and are handled in
@@ -335,8 +341,9 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     # `inputs.*.url` strings become IMPORTS_FROM edges —
     # handled in _extract_nix_constructs.
     "nix": [],
-    # Zig: @import("...") is a builtin_call_expr — handled
-    # generically via call types below.
+    # Zig: @import("path") is a SuffixExpr containing a BUILTINIDENTIFIER
+    # "@import" + FnCallArguments holding a STRINGLITERALSINGLE. Handled in
+    # _extract_zig_constructs as part of VarDecl processing.
     "zig": [],
     "powershell": [],
     # Julia: import/using are import_statement nodes.
@@ -392,7 +399,11 @@ _CALL_TYPES: dict[str, list[str]] = {
     # Nix: function application is ubiquitous; only import/callPackage
     # produce edges, in _extract_nix_constructs.
     "nix": [],
-    "zig": ["call_expression", "builtin_call_expr"],
+    # Zig calls are SuffixExpr/FieldOrFnCall nodes containing FnCallArguments.
+    # Mapping SuffixExpr here would over-match (every expression is a
+    # SuffixExpr); calls are walked explicitly in
+    # _extract_zig_calls_in_subtree from inside function bodies.
+    "zig": [],
     "powershell": ["command_expression"],
     "julia": [
         "call_expression",
@@ -785,6 +796,80 @@ def _is_test_function(
     return False
 
 
+def _modifier_annotation_names(node) -> list[str]:
+    """Return annotation names from a ``modifiers`` child of *node*.
+
+    Covers Java/Kotlin/C# where annotations live inside a ``modifiers``
+    node as ``annotation`` / ``marker_annotation`` children. The leading
+    ``@`` is stripped. See: #295
+    """
+    names: list[str] = []
+    for sub in node.children:
+        if sub.type == "modifiers":
+            for mod in sub.children:
+                if mod.type in ("annotation", "marker_annotation"):
+                    text = mod.text.decode("utf-8", errors="replace")
+                    names.append(text.lstrip("@").strip())
+    return names
+
+
+def _csharp_attribute_names(node) -> list[str]:
+    """Return C# attribute names from ``attribute_list`` children of *node*.
+
+    C# attributes (``[HttpGet]``, ``[Authorize]``, ``[ApiController]``) are
+    ``attribute_list`` nodes, each wrapping one or more ``attribute`` nodes
+    whose first ``identifier`` is the attribute name. The bracket wrapper
+    and any argument list are dropped. See: #295
+    """
+    names: list[str] = []
+    for sub in node.children:
+        if sub.type != "attribute_list":
+            continue
+        for attr in sub.children:
+            if attr.type != "attribute":
+                continue
+            for ident in attr.children:
+                if ident.type in ("identifier", "qualified_name"):
+                    names.append(ident.text.decode("utf-8", errors="replace").strip())
+                    break
+    return names
+
+
+def _csharp_namespaces(root_node) -> list[str]:
+    """Return all namespaces declared in a C# compilation unit.
+
+    Handles both the block form (``namespace_declaration``) and the C# 10+
+    file-scoped form (``file_scoped_namespace_declaration``). A single file
+    may declare multiple namespaces; all are returned in source order.
+    See: #310
+    """
+    namespaces: list[str] = []
+    stack = [(root_node, None)]
+
+    while stack:
+        node, parent_namespace = stack.pop()
+        current_namespace = parent_namespace
+        if node.type in (
+            "namespace_declaration", "file_scoped_namespace_declaration",
+        ):
+            for c in node.children:
+                if c.type in ("qualified_name", "identifier"):
+                    text = c.text.decode("utf-8", errors="replace").strip()
+                    if text:
+                        current_namespace = (
+                            f"{parent_namespace}.{text}"
+                            if parent_namespace
+                            else text
+                        )
+                        namespaces.append(current_namespace)
+                    break
+        stack.extend(
+            (child, current_namespace)
+            for child in reversed(node.children)
+        )
+    return namespaces
+
+
 def file_hash(path: Path) -> str:
     """SHA-256 hash of file contents."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1000,6 +1085,14 @@ class CodeParser:
 
         # File node
         test_file = _is_test_file(file_path_str)
+        file_extra: dict = {}
+        # C#: record the namespace(s) this file declares so query-time
+        # fallbacks can resolve namespace-form IMPORTS_FROM targets (from
+        # `using X.Y;` directives) back to the declaring file. See: #310
+        if language == "csharp":
+            ns_list = _csharp_namespaces(tree.root_node)
+            if ns_list:
+                file_extra["csharp_namespaces"] = ns_list
         nodes.append(NodeInfo(
             kind="File",
             name=file_path_str,
@@ -1008,6 +1101,7 @@ class CodeParser:
             line_end=source.count(b"\n") + 1,
             language=language,
             is_test=test_file,
+            extra=file_extra,
         ))
 
         # Pre-scan for import mappings and defined names
@@ -1026,12 +1120,12 @@ class CodeParser:
 
         # Generate TESTED_BY edges: when a test function calls a production
         # function, create an edge from the production function back to the test.
-        if test_file:
-            test_qnames = set()
-            for n in nodes:
-                if n.is_test:
-                    qn = self._qualify(n.name, n.file_path, n.parent_name)
-                    test_qnames.add(qn)
+        test_qnames = set()
+        for n in nodes:
+            if n.is_test:
+                qn = self._qualify(n.name, n.file_path, n.parent_name)
+                test_qnames.add(qn)
+        if test_qnames:
             for edge in list(edges):
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     edges.append(EdgeInfo(
@@ -2251,6 +2345,19 @@ class CodeParser:
 
             # --- Lua/Luau-specific constructs ---
             if language in ("lua", "luau") and self._extract_lua_constructs(
+                child, node_type, source, language, file_path,
+                nodes, edges, enclosing_class, enclosing_func,
+                import_map, defined_names, _depth,
+            ):
+                continue
+
+            # --- Zig-specific constructs ---
+            # Zig's grammar emits PascalCase Decl/VarDecl/FnProto/SuffixExpr
+            # nodes that don't fit the generic class/function/import/call
+            # dispatch. _extract_zig_constructs handles top-level Decl and
+            # TestDecl nodes (functions, structs/unions/enums, @import,
+            # test blocks) and walks call sites itself.
+            if language == "zig" and self._extract_zig_constructs(
                 child, node_type, source, language, file_path,
                 nodes, edges, enclosing_class, enclosing_func,
                 import_map, defined_names, _depth,
@@ -3701,6 +3808,379 @@ class CodeParser:
         return None
 
     # ------------------------------------------------------------------
+    # Zig-specific helpers
+    # ------------------------------------------------------------------
+
+    _ZIG_CONTAINER_KINDS = frozenset({"struct", "union", "enum", "opaque"})
+
+    def _extract_zig_constructs(
+        self,
+        child,
+        node_type: str,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle Zig's PascalCase AST shapes.
+
+        Top-level forms recognised:
+          - ``Decl > FnProto + Block``         -> Function/Test node
+          - ``Decl > VarDecl`` with ``@import`` -> IMPORTS_FROM edge
+          - ``Decl > VarDecl`` with ``ContainerDecl`` (struct/union/enum/
+            opaque) -> Class node, recurse for nested methods
+          - ``TestDecl``                        -> Test node
+
+        Returns True if the construct was fully handled and the main loop
+        should skip generic recursion. Returns False to let generic
+        recursion continue (e.g. unknown / line_comment children).
+        """
+        if node_type == "TestDecl":
+            return self._handle_zig_test_decl(
+                child, source, language, file_path, nodes, edges,
+                enclosing_class, enclosing_func,
+                import_map, defined_names, _depth,
+            )
+
+        if node_type != "Decl":
+            return False
+
+        fn_proto = None
+        body_block = None
+        var_decl = None
+        for sub in child.children:
+            t = sub.type
+            if t == "FnProto" and fn_proto is None:
+                fn_proto = sub
+            elif t == "Block" and fn_proto is not None and body_block is None:
+                body_block = sub
+            elif t == "VarDecl" and var_decl is None:
+                var_decl = sub
+
+        if fn_proto is not None:
+            return self._handle_zig_fn_decl(
+                child, fn_proto, body_block, source, language, file_path,
+                nodes, edges, enclosing_class, enclosing_func,
+                import_map, defined_names, _depth,
+            )
+
+        if var_decl is not None:
+            return self._handle_zig_var_decl(
+                child, var_decl, source, language, file_path,
+                nodes, edges, enclosing_class, enclosing_func,
+                import_map, defined_names, _depth,
+            )
+
+        return False
+
+    def _handle_zig_fn_decl(
+        self,
+        decl,
+        fn_proto,
+        body_block,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Emit a Function/Test node for ``fn name(...) ReturnType { body }``."""
+        name: Optional[str] = None
+        for sub in fn_proto.children:
+            if sub.type == "IDENTIFIER":
+                name = sub.text.decode("utf-8", errors="replace")
+                break
+        if not name:
+            return False
+
+        is_test = _is_test_function(name, file_path)
+        kind = "Test" if is_test else "Function"
+        qualified = self._qualify(name, file_path, enclosing_class)
+
+        nodes.append(NodeInfo(
+            kind=kind,
+            name=name,
+            file_path=file_path,
+            line_start=decl.start_point[0] + 1,
+            line_end=decl.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            is_test=is_test,
+        ))
+        container = (
+            self._qualify(enclosing_class, file_path, None)
+            if enclosing_class
+            else file_path
+        )
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=container,
+            target=qualified,
+            file_path=file_path,
+            line=decl.start_point[0] + 1,
+        ))
+
+        if body_block is not None:
+            self._extract_zig_calls_in_subtree(
+                body_block, file_path, edges, enclosing_class, name,
+            )
+        return True
+
+    def _handle_zig_var_decl(
+        self,
+        decl,
+        var_decl,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle ``const Name = <expr>;`` decls.
+
+        Recognises @import (-> IMPORTS_FROM) and struct/union/enum/opaque
+        ContainerDecl (-> Class node + recurse). For other expressions,
+        scans the RHS for nested call sites so call edges aren't lost.
+        """
+        var_name: Optional[str] = None
+        rhs_suffix = None
+        for sub in var_decl.children:
+            t = sub.type
+            if t == "IDENTIFIER" and var_name is None:
+                var_name = sub.text.decode("utf-8", errors="replace")
+            elif t == "ErrorUnionExpr" and rhs_suffix is None:
+                for inner in sub.children:
+                    if inner.type == "SuffixExpr":
+                        rhs_suffix = inner
+                        break
+
+        if not var_name or rhs_suffix is None:
+            return False
+
+        suffix_children = list(rhs_suffix.children)
+
+        # @import("path") -> IMPORTS_FROM edge
+        if (
+            len(suffix_children) >= 2
+            and suffix_children[0].type == "BUILTINIDENTIFIER"
+            and suffix_children[0].text == b"@import"
+            and suffix_children[1].type == "FnCallArguments"
+        ):
+            target = self._zig_extract_import_target(suffix_children[1])
+            if target is not None:
+                resolved = self._resolve_module_to_file(
+                    target, file_path, language,
+                )
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source=file_path,
+                    target=resolved if resolved else target,
+                    file_path=file_path,
+                    line=decl.start_point[0] + 1,
+                ))
+                return True
+
+        # struct / union / enum / opaque -> Class node
+        container_decl = None
+        for inner in suffix_children:
+            if inner.type == "ContainerDecl":
+                container_decl = inner
+                break
+
+        if container_decl is not None:
+            kind_label = "struct"
+            for cd in container_decl.children:
+                if cd.type == "ContainerDeclType":
+                    for kw in cd.children:
+                        txt = kw.text.decode("utf-8", errors="replace")
+                        if txt in self._ZIG_CONTAINER_KINDS:
+                            kind_label = txt
+                            break
+                    break
+
+            nodes.append(NodeInfo(
+                kind="Class",
+                name=var_name,
+                file_path=file_path,
+                line_start=decl.start_point[0] + 1,
+                line_end=decl.end_point[0] + 1,
+                language=language,
+                parent_name=enclosing_class,
+                extra={"zig_kind": kind_label},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=(
+                    self._qualify(enclosing_class, file_path, None)
+                    if enclosing_class
+                    else file_path
+                ),
+                target=self._qualify(var_name, file_path, enclosing_class),
+                file_path=file_path,
+                line=decl.start_point[0] + 1,
+            ))
+            self._extract_from_tree(
+                container_decl, source, language, file_path, nodes, edges,
+                enclosing_class=var_name,
+                enclosing_func=enclosing_func,
+                import_map=import_map,
+                defined_names=defined_names,
+                _depth=_depth + 1,
+            )
+            return True
+
+        # Plain ``const x = expr;`` — still scan RHS for call sites so
+        # call edges aren't lost when calls appear at module scope.
+        self._extract_zig_calls_in_subtree(
+            rhs_suffix, file_path, edges,
+            enclosing_class, enclosing_func,
+        )
+        return True
+
+    def _handle_zig_test_decl(
+        self,
+        child,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle ``test "label" { ... }`` blocks."""
+        label: Optional[str] = None
+        body_block = None
+        for sub in child.children:
+            if sub.type == "STRINGLITERALSINGLE":
+                raw = sub.text.decode("utf-8", errors="replace")
+                stripped = raw.strip().strip('"').strip("'")
+                if stripped:
+                    label = stripped
+            elif sub.type == "Block":
+                body_block = sub
+
+        line_no = child.start_point[0] + 1
+        base = f"test:{label}" if label else "test"
+        synthetic = f"{base}@L{line_no}"
+        qualified = self._qualify(synthetic, file_path, enclosing_class)
+
+        nodes.append(NodeInfo(
+            kind="Test",
+            name=synthetic,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            is_test=True,
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=(
+                self._qualify(enclosing_class, file_path, None)
+                if enclosing_class
+                else file_path
+            ),
+            target=qualified,
+            file_path=file_path,
+            line=line_no,
+        ))
+
+        if body_block is not None:
+            self._extract_zig_calls_in_subtree(
+                body_block, file_path, edges, enclosing_class, synthetic,
+            )
+        return True
+
+    @staticmethod
+    def _zig_extract_import_target(args_node) -> Optional[str]:
+        """Pull the string argument out of ``@import("path")``.
+
+        Walks FnCallArguments > ErrorUnionExpr > SuffixExpr >
+        STRINGLITERALSINGLE. Returns the unquoted contents or None.
+        """
+        for arg in args_node.children:
+            if arg.type != "ErrorUnionExpr":
+                continue
+            for sub in arg.children:
+                if sub.type != "SuffixExpr":
+                    continue
+                for s in sub.children:
+                    if s.type == "STRINGLITERALSINGLE":
+                        raw = s.text.decode("utf-8", errors="replace")
+                        return raw.strip().strip('"').strip("'")
+        return None
+
+    def _extract_zig_calls_in_subtree(
+        self,
+        root,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> None:
+        """Walk a subtree and emit a CALLS edge for each call site.
+
+        A call site is a ``SuffixExpr`` or ``FieldOrFnCall`` node whose
+        direct children include a ``FnCallArguments``; the callee is the
+        IDENTIFIER (or BUILTINIDENTIFIER) immediately preceding it. The
+        builtin ``@import`` is skipped here because it's already modelled
+        as IMPORTS_FROM by _handle_zig_var_decl.
+        """
+        src_qn = (
+            self._qualify(enclosing_func, file_path, enclosing_class)
+            if enclosing_func
+            else file_path
+        )
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            if node.type in ("SuffixExpr", "FieldOrFnCall"):
+                children = node.children
+                for i, ch in enumerate(children):
+                    if ch.type != "FnCallArguments" or i == 0:
+                        continue
+                    prev = children[i - 1]
+                    callee: Optional[str] = None
+                    if prev.type == "IDENTIFIER":
+                        callee = prev.text.decode("utf-8", errors="replace")
+                    elif prev.type == "BUILTINIDENTIFIER":
+                        txt = prev.text.decode("utf-8", errors="replace")
+                        if txt != "@import":
+                            callee = txt
+                    if callee:
+                        edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=src_qn,
+                            target=callee,
+                            file_path=file_path,
+                            line=node.start_point[0] + 1,
+                        ))
+                    break
+            for ch in node.children:
+                stack.append(ch)
+
+    # ------------------------------------------------------------------
     # JS/TS: variable-assigned functions  (const foo = () => {})
     # ------------------------------------------------------------------
 
@@ -4296,6 +4776,23 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
 
+        # Class-level annotation persistence for all annotation-bearing
+        # languages.  Kotlin (@HiltViewModel, @AndroidEntryPoint) and C#
+        # ([ApiController], [Route]) lost this metadata entirely; Java reuses
+        # the list already gathered above.  Stored in ``modifiers`` (string)
+        # and ``extra["decorators"]`` (list).  See: #295
+        if language == "java":
+            class_decorators = list(class_annotations)
+        else:
+            class_decorators = _modifier_annotation_names(child)
+            if language == "csharp":
+                class_decorators.extend(_csharp_attribute_names(child))
+        class_modifiers: Optional[str] = (
+            ",".join(class_decorators) if class_decorators else None
+        )
+        if class_decorators and "decorators" not in extra:
+            extra["decorators"] = class_decorators
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -4304,6 +4801,7 @@ class CodeParser:
             line_end=child.end_point[0] + 1,
             language=language,
             parent_name=enclosing_class,
+            modifiers=class_modifiers,
             extra=extra,
         )
         nodes.append(node)
@@ -4412,6 +4910,12 @@ class CodeParser:
                     inner = inner[:-1]
                 deco_list.append(inner.strip())
                 sib = sib.prev_sibling
+        # C#: attributes use `attribute_list` child nodes ([HttpGet],
+        # [Authorize]) rather than `modifiers > annotation`. Capture the
+        # attribute name from each `attribute_list > attribute > identifier`.
+        # See: #295
+        if language == "csharp":
+            deco_list.extend(_csharp_attribute_names(child))
         if deco_list:
             decorators = tuple(deco_list)
 
@@ -4445,6 +4949,15 @@ class CodeParser:
                     child, name, enclosing_class, file_path, edges,
                 )
 
+        # Persist annotations/decorators so consumers can filter on them
+        # (e.g. "show me all @Composable functions").  Stored in BOTH
+        # ``modifiers`` (comma-joined string) and ``extra["decorators"]``
+        # (list) — merged into the existing method_extra dict rather than a
+        # separate one.  See: #295
+        modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
+        if deco_list:
+            method_extra["decorators"] = list(deco_list)
+
         node = NodeInfo(
             kind=kind,
             name=name,
@@ -4455,6 +4968,7 @@ class CodeParser:
             parent_name=parent_name,
             params=params,
             return_type=ret_type,
+            modifiers=modifiers_str,
             is_test=is_test,
             extra=method_extra,
         )
@@ -5429,6 +5943,20 @@ class CodeParser:
                 pass
             return None
 
+        if language == "zig":
+            # Zig: only relative ``@import("./foo.zig")`` paths are
+            # resolvable here. ``@import("std")`` and other package-style
+            # imports stay unresolved (the caller falls back to the raw
+            # module string as the edge target).
+            if module.endswith(".zig"):
+                try:
+                    target = (caller_dir / module).resolve()
+                    if target.is_file():
+                        return str(target)
+                except (OSError, ValueError):
+                    pass
+            return None
+
         if language == "python":
             rel_path = module.replace(".", "/")
             candidates = [rel_path + ".py", rel_path + "/__init__.py"]
@@ -5530,6 +6058,24 @@ class CodeParser:
                     if current == current.parent:
                         break
                     current = current.parent
+
+        elif language == "php":
+            # ``use App\Domain\Entity\Job;`` — convert namespace separators to
+            # a relative path and walk up from the caller's directory to find
+            # the file, mirroring the Java resolver. PSR-4 layouts where a
+            # namespace segment maps to a real directory (e.g. ``App\Foo`` ->
+            # ``.../App/Foo``) resolve; vendor/global classes (``\Exception``)
+            # and ``use function`` / ``use const`` targets with no matching
+            # file stay unresolved and keep the bare FQN, like JDK imports.
+            rel_path = module.replace("\\", "/").lstrip("/") + ".php"
+            current = caller_dir
+            while True:
+                target = current / rel_path
+                if target.is_file():
+                    return str(target.resolve())
+                if current == current.parent:
+                    break
+                current = current.parent
 
         return None
 
@@ -6394,6 +6940,47 @@ class CodeParser:
                     txt = child.text.decode("utf-8", errors="replace")
                     if txt and txt != "extends":
                         imports.append(txt)
+        elif language == "php":
+            # ``namespace_use_declaration`` covers several shapes:
+            #   use A\B\C;            use A\B\C as D;
+            #   use function A\b;     use const A\B;
+            #   use A\B, C\D;         (comma-separated clauses)
+            #   use A\B\{C, D as E};  (grouped — clause names are relative to A\B)
+            # Record the fully-qualified name of each imported symbol, ignoring
+            # any ``as`` alias and stripping a leading ``\``, so IMPORTS_FROM
+            # targets are clean FQNs that _do_resolve_module can map to files.
+            # Without this branch PHP falls through to the raw-text fallback and
+            # stores the entire ``use ...;`` statement as the edge target.
+            def _php_clause_fqn(clause) -> Optional[str]:
+                for sub in clause.children:
+                    if sub.type in ("qualified_name", "name"):
+                        return sub.text.decode(
+                            "utf-8", errors="replace",
+                        ).lstrip("\\")
+                return None
+
+            group_node = None
+            prefix = ""
+            for child in node.children:
+                if child.type == "namespace_name":
+                    prefix = child.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip("\\")
+                elif child.type == "namespace_use_group":
+                    group_node = child
+
+            if group_node is not None:
+                for clause in group_node.children:
+                    if clause.type == "namespace_use_clause":
+                        rel = _php_clause_fqn(clause)
+                        if rel:
+                            imports.append(f"{prefix}\\{rel}" if prefix else rel)
+            else:
+                for clause in node.children:
+                    if clause.type == "namespace_use_clause":
+                        fqn = _php_clause_fqn(clause)
+                        if fqn:
+                            imports.append(fqn)
         elif language in self._custom_languages:
             # Custom languages (languages.toml): prefer the grammar's
             # module-ish field over the raw statement text (e.g. Erlang
@@ -6546,7 +7133,8 @@ class CodeParser:
         member_types = (
             "attribute", "member_expression",
             "field_expression", "selector_expression",
-            "navigation_expression",
+            "navigation_expression", "member_access_expression",
+            "conditional_access_expression",
         )
         if first.type in member_types:
             # Get the rightmost identifier (the method name)
@@ -6560,6 +7148,10 @@ class CodeParser:
                 if child.type == "navigation_suffix":
                     for sub in child.children:
                         if sub.type == "simple_identifier":
+                            return sub.text.decode("utf-8", errors="replace")
+                if child.type == "member_binding_expression":
+                    for sub in child.children:
+                        if sub.type == "identifier":
                             return sub.text.decode("utf-8", errors="replace")
             return first.text.decode("utf-8", errors="replace")
 

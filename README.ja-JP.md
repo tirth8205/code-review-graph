@@ -123,7 +123,7 @@ Build the code review graph for this project
   <img src="diagrams/diagram5_benchmark_board.png" alt="実リポジトリでのベンチマーク：トークン4.9倍から27.3倍削減、保守的な影響分析" width="85%" />
 </p>
 
-すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。生データは [`evaluate/reports/summary.md`](evaluate/reports/summary.md) をご覧ください。
+すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。完全な再現手順と正規の数値は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) をご覧ください。
 
 > 詳細なベンチマーク結果（トークン効率、影響精度、ビルド性能、既知の制限事項）については [英語版README](README.md) を参照してください。
 
@@ -267,13 +267,13 @@ node_modules/**
 オプションの依存グループ：
 
 ```bash
-pip install code-review-graph[embeddings]          # ローカルベクトル埋め込み (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini埋め込み
-pip install code-review-graph[communities]         # コミュニティ検出 (igraph)
-pip install code-review-graph[enrichment]          # Python呼び出し解決の補強 (Jedi)
-pip install code-review-graph[eval]                # 評価ベンチマーク (matplotlib)
-pip install code-review-graph[wiki]                # LLMサマリー付きWiki生成 (ollama)
-pip install code-review-graph[all]                 # 全オプション依存
+pip install "code-review-graph[embeddings]"          # ローカルベクトル埋め込み (sentence-transformers)
+pip install "code-review-graph[google-embeddings]"   # Google Gemini埋め込み
+pip install "code-review-graph[communities]"         # コミュニティ検出 (igraph)
+pip install "code-review-graph[enrichment]"          # Python呼び出し解決の補強 (Jedi)
+pip install "code-review-graph[eval]"                # 評価ベンチマーク (matplotlib)
+pip install "code-review-graph[wiki]"                # LLMサマリー付きWiki生成 (ollama)
+pip install "code-review-graph[all]"                 # 全オプション依存
 ```
 
 OpenAI互換の埋め込み（本家OpenAI、Azure、または自前のゲートウェイ: new-api / LiteLLM / vLLM / LocalAI / Ollama openaiモード）は追加インストール不要です。環境変数を設定し、`embed_graph` に `provider="openai"` を渡すだけで動作します：

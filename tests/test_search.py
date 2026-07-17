@@ -249,6 +249,76 @@ class TestHybridSearch:
             # Just assert no exception was raised
             assert isinstance(results, list)
 
+    # --- _out_mode tracking ---
+
+    def test_out_mode_fts_only(self):
+        """_out_mode is 'fts' when only FTS contributes (no embeddings)."""
+        rebuild_fts_index(self.store)
+        out: list[str] = []
+        results = hybrid_search(self.store, "authenticate", _out_mode=out)
+        assert out == ["fts"]
+        assert len(results) > 0
+
+    def test_out_mode_keyword(self):
+        """_out_mode is 'keyword' when FTS table is absent and no embeddings."""
+        self.store._conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        self.store._conn.commit()
+        out: list[str] = []
+        results = hybrid_search(self.store, "authenticate", _out_mode=out)
+        assert out == ["keyword"]
+        assert len(results) > 0
+
+    def test_out_mode_keyword_no_results(self):
+        """_out_mode is 'none' when keyword fallback also returns 0 results."""
+        self.store._conn.execute("DROP TABLE IF EXISTS nodes_fts")
+        self.store._conn.commit()
+        out: list[str] = []
+        results = hybrid_search(self.store, "xyzzy_nonexistent_abc123", _out_mode=out)
+        assert results == []
+        assert out == ["none"]
+
+    def test_out_mode_semantic(self, monkeypatch):
+        """_out_mode is 'semantic' when only embeddings contribute."""
+        import code_review_graph.search as search_mod
+
+        node_id = self.store._conn.execute(
+            "SELECT id FROM nodes WHERE name = 'authenticate'"
+        ).fetchone()[0]
+
+        def fake_emb(store, query, limit=50, model=None, provider=None):
+            return [(node_id, 0.9)]
+
+        monkeypatch.setattr(search_mod, "_embedding_search", fake_emb)
+        out: list[str] = []
+        results = hybrid_search(self.store, "authenticate", _out_mode=out)
+        assert out == ["semantic"]
+        assert len(results) > 0
+
+    def test_out_mode_hybrid(self, monkeypatch):
+        """_out_mode is 'hybrid' when both FTS and embeddings contribute."""
+        import code_review_graph.search as search_mod
+
+        rebuild_fts_index(self.store)
+        node_id = self.store._conn.execute(
+            "SELECT id FROM nodes WHERE name = 'authenticate'"
+        ).fetchone()[0]
+
+        def fake_emb(store, query, limit=50, model=None, provider=None):
+            return [(node_id, 0.9)]
+
+        monkeypatch.setattr(search_mod, "_embedding_search", fake_emb)
+        out: list[str] = []
+        results = hybrid_search(self.store, "authenticate", _out_mode=out)
+        assert out == ["hybrid"]
+        assert len(results) > 0
+
+    def test_out_mode_empty_query(self):
+        """_out_mode is 'none' for empty queries (no search ran)."""
+        out: list[str] = []
+        results = hybrid_search(self.store, "", _out_mode=out)
+        assert results == []
+        assert out == ["none"]
+
     def test_fts_rebuild_is_atomic(self):
         """Regression test for #259: rebuild_fts_index must wrap the DROP +
         CREATE + INSERT sequence in a single transaction so a crash between

@@ -13,6 +13,7 @@ import inspect
 
 import pytest
 
+import code_review_graph.tools.docs as docs_module
 from code_review_graph import main as crg_main
 
 
@@ -57,6 +58,33 @@ class TestResolveRepoRoot:
     def test_client_arg_used_when_no_flag(self):
         crg_main._default_repo_root = None
         assert crg_main._resolve_repo_root("/explicit") == "/explicit"
+
+
+def test_docs_wrapper_falls_back_to_packaged_docs_with_resolved_repo(
+    tmp_path, monkeypatch,
+):
+    """The server's resolved repo must not hide wheel-packaged docs."""
+    package_dir = tmp_path / "site-packages" / "code_review_graph"
+    tools_dir = package_dir / "tools"
+    docs_dir = package_dir / "docs"
+    tools_dir.mkdir(parents=True)
+    docs_dir.mkdir()
+    (docs_dir / "LLM-OPTIMIZED-REFERENCE.md").write_text(
+        '<section name="usage">packaged docs</section>\n',
+        encoding="utf-8",
+    )
+
+    repo_root = tmp_path / "repo"
+    (repo_root / ".code-review-graph").mkdir(parents=True)
+    monkeypatch.setattr(docs_module, "__file__", str(tools_dir / "docs.py"))
+    monkeypatch.setattr(crg_main, "_default_repo_root", str(repo_root))
+    tool = getattr(crg_main.get_docs_section_tool, "fn", None)
+    get_docs = tool or crg_main.get_docs_section_tool
+
+    result = get_docs(section_name="usage")
+
+    assert result["status"] == "ok"
+    assert result["content"] == "packaged docs"
 
 
 class TestServeMainTransport:

@@ -797,6 +797,75 @@ class TestFindDeadCodeWithReferences:
         assert "handleCreate" not in dead_names
 
 
+class TestFindDeadCodeWithTestedBy:
+    """Regression for #515: dead-code detection must read TESTED_BY edges
+    in the canonical direction (source=production, target=test).
+
+    A production function whose only reference is its test must NOT be
+    flagged as dead. Before the fix, find_dead_code looked for TESTED_BY
+    edges where the production node was the *target*, but the parser writes
+    the production node as the *source*, so tested-but-uncalled functions
+    were wrongly reported as dead.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+        self._seed()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed(self):
+        # Production file with a function that is tested but never called.
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/repo/calc.py", file_path="/repo/calc.py",
+            line_start=1, line_end=100, language="python",
+        ))
+        # Unconventional name so no naming-convention heuristic rescues it.
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="combine", file_path="/repo/calc.py",
+            line_start=10, line_end=20, language="python",
+        ))
+        # A truly dead function (no edges at all).
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="orphan", file_path="/repo/calc.py",
+            line_start=30, line_end=40, language="python",
+        ))
+        # Test file + test.
+        self.store.upsert_node(NodeInfo(
+            kind="File", name="/repo/spec.py", file_path="/repo/spec.py",
+            line_start=1, line_end=50, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Test", name="verify_combine_behaviour",
+            file_path="/repo/spec.py", line_start=5, line_end=10,
+            language="python", is_test=True,
+        ))
+        # Canonical TESTED_BY: source=production, target=test.
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY",
+            source="/repo/calc.py::combine",
+            target="/repo/spec.py::verify_combine_behaviour",
+            file_path="/repo/spec.py", line=6,
+        ))
+        self.store.commit()
+
+    def test_tested_function_not_dead(self):
+        """A function whose only reference is a canonical TESTED_BY edge
+        (source=production) must not be flagged as dead."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "combine" not in dead_names
+
+    def test_orphan_function_still_dead(self):
+        """A function with no edges at all is still reported as dead."""
+        dead = find_dead_code(self.store)
+        dead_names = {d["name"] for d in dead}
+        assert "orphan" in dead_names
+
+
 class TestTransitiveImportResolution:
     """Tests for 2-hop transitive import resolution in plausible caller."""
 
