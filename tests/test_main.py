@@ -14,6 +14,7 @@ import threading
 
 import pytest
 
+import code_review_graph.incremental as incremental_module
 import code_review_graph.tools.docs as docs_module
 from code_review_graph import main as crg_main
 
@@ -95,18 +96,29 @@ class TestServeMainTransport:
         calls: list[dict] = []
 
         def fake_run(**kwargs):
+            assert incremental_module._MCP_STDIO_ACTIVE is True
+            assert incremental_module._select_executor_kind() == "thread"
             calls.append(kwargs)
 
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
         crg_main.main(repo_root=None)
         assert calls == [{"transport": "stdio", "show_banner": False}]
+        assert incremental_module._MCP_STDIO_ACTIVE is False
 
     def test_http_calls_mcp_run_with_host_port(self, monkeypatch):
         calls: list[dict] = []
 
         def fake_run(**kwargs):
+            assert incremental_module._MCP_STDIO_ACTIVE is False
             calls.append(kwargs)
 
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
         monkeypatch.setattr(crg_main.mcp, "run", fake_run)
         crg_main.main(
             repo_root="/tmp/r",
