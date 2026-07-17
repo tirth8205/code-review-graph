@@ -687,6 +687,7 @@ _SPRING_REQUEST_MAPPINGS = {
     "PutMapping": ("PUT",),
     "RequestMapping": (),
 }
+_SPRING_WEBFLUX_HTTP_VERBS = frozenset({"DELETE", "GET", "PATCH", "POST", "PUT"})
 _HTTP_REQUEST_METHODS = frozenset({
     "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
 })
@@ -6665,6 +6666,187 @@ class CodeParser:
                         emitted += 1
         return emitted
 
+    def _java_invocation_chain_has_route(self, invocation) -> bool:
+        """Return whether a fluent Java invocation is rooted at ``route()``."""
+        current = invocation
+        for _ in range(32):
+            if current.type != "method_invocation":
+                return False
+            method, _ = self._get_java_method_and_receiver(current)
+            if method == "route":
+                return True
+            current = next(
+                (
+                    child for child in current.children
+                    if child.type == "method_invocation"
+                ),
+                None,
+            )
+            if current is None:
+                return False
+        return False
+
+    @staticmethod
+    def _webflux_route_arguments(invocation) -> tuple[Optional[str], Optional[object]]:
+        """Return a literal route and method-reference handler from one call."""
+        arguments = next(
+            (
+                child for child in invocation.children
+                if child.type == "argument_list"
+            ),
+            None,
+        )
+        if arguments is None:
+            return None, None
+        named = [child for child in arguments.children if child.is_named]
+        if len(named) < 2 or named[0].type != "string_literal":
+            return None, None
+        route_literal = named[0].text.decode("utf-8", errors="replace")
+        if len(route_literal) < 2:
+            return None, None
+        route = route_literal[1:-1]
+        if not route.startswith("/"):
+            return None, None
+        handler = next(
+            (child for child in named[1:] if child.type == "method_reference"),
+            None,
+        )
+        return route, handler
+
+    def _resolve_java_method_reference_target(
+        self,
+        reference,
+        file_path: str,
+        enclosing_class: Optional[str],
+        import_map: dict[str, str],
+        defined_names: set[str],
+    ) -> Optional[str]:
+        """Resolve a WebFlux handler reference from lexical Java type evidence."""
+        receiver, method = self._get_member_call_receiver_method(reference, "java")
+        if not receiver or not method:
+            return None
+        if receiver == "this" and enclosing_class:
+            return self._qualify(method, file_path, enclosing_class)
+
+        function_types = set(self._function_types.get("java", []))
+        class_types = set(self._class_types.get("java", []))
+        bindings: dict[str, str] = {}
+        function_node = None
+        class_node = None
+        ancestor = reference.parent
+        while ancestor is not None:
+            if function_node is None and ancestor.type in function_types:
+                function_node = ancestor
+            if ancestor.type in class_types:
+                class_node = ancestor
+                break
+            ancestor = ancestor.parent
+        if function_node is not None:
+            bindings.update(
+                self._collect_function_typed_parameters(function_node, "java"),
+            )
+        if class_node is not None:
+            bindings.update(
+                self._collect_class_typed_fields(
+                    class_node,
+                    "java",
+                    function_types,
+                    class_types,
+                ),
+            )
+
+        type_name = bindings.get(receiver)
+        if type_name is None and receiver[:1].isupper():
+            if receiver in import_map or receiver in defined_names:
+                type_name = receiver
+        if type_name is None:
+            return None
+        return self._resolve_typed_method_target(
+            type_name,
+            method,
+            file_path,
+            "java",
+            import_map,
+            defined_names,
+        )
+
+    def _emit_spring_webflux_endpoint(
+        self,
+        invocation,
+        source: bytes,
+        method: str,
+        file_path: str,
+        enclosing_class: Optional[str],
+        import_map: dict[str, str],
+        defined_names: set[str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> bool:
+        """Link a direct functional WebFlux route to its actual handler."""
+        if (
+            method not in _SPRING_WEBFLUX_HTTP_VERBS
+            or b"org.springframework.web.reactive.function.server" not in source
+            or not self._java_invocation_chain_has_route(invocation)
+        ):
+            return False
+
+        ancestor = invocation.parent
+        while ancestor is not None and ancestor.type not in self._function_types.get(
+            "java", []
+        ):
+            if ancestor.type == "lambda_expression":
+                return False
+            ancestor = ancestor.parent
+
+        route, handler_reference = self._webflux_route_arguments(invocation)
+        if route is None or handler_reference is None:
+            return False
+        handler_target = self._resolve_java_method_reference_target(
+            handler_reference,
+            file_path,
+            enclosing_class,
+            import_map,
+            defined_names,
+        )
+        if handler_target is None:
+            return False
+        _, handler_method = self._get_member_call_receiver_method(
+            handler_reference,
+            "java",
+        )
+        if handler_method is None:
+            return False
+
+        line = invocation.start_point[0] + 1
+        endpoint_name = f"{handler_method}@WebFlux[{line}] {method} {route}"
+        endpoint_target = self._qualify(endpoint_name, file_path, enclosing_class)
+        metadata = {
+            "handler": handler_method,
+            "handler_qualified": handler_target,
+            "http_method": method,
+            "mapping_style": "webflux_functional",
+            "route": route,
+        }
+        nodes.append(NodeInfo(
+            kind="Endpoint",
+            name=endpoint_name,
+            file_path=file_path,
+            line_start=line,
+            line_end=invocation.end_point[0] + 1,
+            language="java",
+            parent_name=enclosing_class,
+            extra=metadata,
+        ))
+        edges.append(EdgeInfo(
+            kind="HANDLES",
+            source=handler_target,
+            target=endpoint_target,
+            file_path=file_path,
+            line=line,
+            extra=metadata,
+        ))
+        return True
+
     @staticmethod
     def _spring_schedule_kind(attributes: dict[str, str]) -> str:
         """Classify one Spring schedule by the trigger attribute it uses."""
@@ -7671,6 +7853,19 @@ class CodeParser:
                     call_extra["receiver"] = receiver
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
+
+            if language == "java" and child.type == "method_invocation":
+                self._emit_spring_webflux_endpoint(
+                    child,
+                    source,
+                    call_name,
+                    file_path,
+                    enclosing_class,
+                    import_map or {},
+                    defined_names or set(),
+                    nodes,
+                    edges,
+                )
 
             # Keep Julia module qualification in the canonical target. The
             # same-file resolver can then distinguish ``run`` from ``A.B.run``.
