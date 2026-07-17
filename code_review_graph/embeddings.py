@@ -17,6 +17,7 @@ import re
 import sqlite3
 import struct
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -66,7 +67,10 @@ class EmbeddingProvider(ABC):
 LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 
 
-# Process-wide cache of loaded sentence-transformer models, keyed by model name.
+# Process-wide cache and initialization lock for sentence-transformer models.
+# The dependency import itself touches process-global Torch state, so one lock
+# must cover availability checks, imports, and model construction across every
+# model name. A per-model lock would still allow two first imports to race.
 # Populated by ``prewarm_local_embeddings()`` at server startup (see ``main.main``)
 # and by ``LocalEmbeddingProvider._get_model`` on first lazy load. Sharing the
 # loaded model across ``LocalEmbeddingProvider`` instances avoids re-importing
@@ -75,6 +79,7 @@ LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 # tools via ``asyncio.to_thread``; this cache fixes the remaining case where
 # torch DLL / OpenMP init runs inside an executor thread).
 _MODEL_CACHE: dict[str, Any] = {}
+_MODEL_INIT_LOCK = threading.RLock()
 
 
 def prewarm_local_embeddings(model_name: str | None = None) -> None:
@@ -93,19 +98,13 @@ def prewarm_local_embeddings(model_name: str | None = None) -> None:
         model_name: Optional override; falls back to the ``CRG_EMBEDDING_MODEL``
             environment variable and then to ``LOCAL_DEFAULT_MODEL``.
     """
-    try:
-        from sentence_transformers import SentenceTransformer  # noqa: F401
-    except ImportError:
-        return  # cloud-only setup: nothing to pre-warm
-
     resolved = model_name or os.environ.get(
         "CRG_EMBEDDING_MODEL", LOCAL_DEFAULT_MODEL
     )
-    if resolved in _MODEL_CACHE:
-        return
-
     try:
-        _MODEL_CACHE[resolved] = LocalEmbeddingProvider(resolved)._get_model()
+        LocalEmbeddingProvider(resolved)._get_model()
+    except ImportError:
+        return  # cloud-only setup: nothing to pre-warm
     except Exception as exc:  # pragma: no cover — best-effort startup hook
         logger.warning("prewarm_local_embeddings(%s) skipped: %s", resolved, exc)
 
@@ -118,29 +117,45 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         self._model = None  # Lazy-loaded
 
     def _get_model(self):
-        if self._model is None:
-            # Check the process-wide cache first — populated either by a prior
-            # provider instance or by ``prewarm_local_embeddings`` at startup.
+        if self._model is not None:
+            return self._model
+
+        # Fast path for a model fully published by another provider instance.
+        cached = _MODEL_CACHE.get(self._model_name)
+        if cached is not None:
+            self._model = cached
+            return self._model
+
+        with _MODEL_INIT_LOCK:
+            # A competing caller may have initialized this provider or cache
+            # entry while we waited. Recheck both under the process-wide lock.
+            if self._model is not None:
+                return self._model
             cached = _MODEL_CACHE.get(self._model_name)
             if cached is not None:
                 self._model = cached
                 return self._model
+
             try:
                 from sentence_transformers import SentenceTransformer
                 # Check environment variable, default to False to prevent RCE
                 _rce_val = os.environ.get("CRG_ALLOW_REMOTE_CODE", "0")
                 allow_remote_code = _rce_val.lower() in ("1", "true", "yes")
 
-                self._model = SentenceTransformer(
+                model = SentenceTransformer(
                     self._model_name,
                     trust_remote_code=allow_remote_code,
                 )
-                _MODEL_CACHE[self._model_name] = self._model
             except ImportError:
                 raise ImportError(
                     "sentence-transformers not installed. "
                     "Run: pip install code-review-graph[embeddings]"
                 )
+
+            # Publish only a fully constructed model. Failed attempts leave
+            # both the provider and shared cache empty so a waiter can retry.
+            _MODEL_CACHE[self._model_name] = model
+            self._model = model
         return self._model
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -733,11 +748,12 @@ def get_provider(
 
 def _check_available() -> bool:
     """Check whether local embedding support is available."""
-    try:
-        import sentence_transformers  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    with _MODEL_INIT_LOCK:
+        try:
+            import sentence_transformers  # noqa: F401
+            return True
+        except ImportError:
+            return False
 
 
 # ---------------------------------------------------------------------------
