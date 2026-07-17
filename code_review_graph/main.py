@@ -242,6 +242,7 @@ def query_graph_tool(
     - listeners_of: Find methods that listen for an event
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
+    - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
 
     Args:

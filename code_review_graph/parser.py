@@ -19,6 +19,7 @@ from typing import NamedTuple, Optional
 
 import tree_sitter_language_pack as tslp
 
+from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .custom_languages import CustomLanguage, load_custom_languages
 
 try:
@@ -233,6 +234,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".v": "verilog",
     ".vh": "verilog",
     ".sql": "sql",
+    ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
 }
@@ -638,6 +640,7 @@ _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
 _SPRING_INJECT_ANNOTATIONS = frozenset({
     "Autowired", "Inject", "Resource",
 })
+_SPRING_PLACEHOLDER_RE = re.compile(r"\$\{([^{}]+)\}")
 
 # Temporal workflow/activity interface markers
 _TEMPORAL_INTERFACE_ANNOTATIONS = frozenset({
@@ -1252,6 +1255,10 @@ class CodeParser:
         lang = self._extension_map.get(suffix)
         if lang == "yaml" and _is_ansible_path(path):
             return "ansible"
+        if lang in ("properties", "yaml") and is_spring_config_path(path):
+            return "spring_config"
+        if lang == "properties":
+            return None
         if lang is not None:
             return lang
         # Only probe shebang for files without any extension — "README", "LICENSE",
@@ -1393,6 +1400,15 @@ class CodeParser:
             if file_type in ("vars", "meta") or _is_ansible_content(source):
                 return self._parse_ansible(path, source)
             return [], []
+
+        # Spring configuration: only conventional application files reach
+        # this branch. Generic YAML and arbitrary .properties files stay out.
+        if language == "spring_config":
+            if _yaml is None:
+                return [], []
+            if path.suffix.lower() in (".yaml", ".yml") and _is_ansible_content(source):
+                return self._parse_ansible(path, source)
+            return self._parse_spring_config(path, source)
 
         # Generic YAML: no tree-sitter grammar bundled; skip.
         if language == "yaml":
@@ -3210,6 +3226,208 @@ class CodeParser:
                             normalized = normalized[: self._MAX_TEST_DESCRIPTION_LEN]
                         return normalized
         return None
+
+    # -----------------------------------------------------------------------
+    # Spring application configuration parser
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _spring_config_file_node(path: Path, source: bytes, language: str) -> NodeInfo:
+        file_path = str(path)
+        return NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language=language,
+            extra={"config_format": path.suffix.lower().lstrip(".")},
+        )
+
+    def _parse_spring_config(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index Spring property names while deliberately discarding values."""
+        if path.suffix.lower() == ".properties":
+            return self._parse_spring_properties(path, source)
+        return self._parse_spring_yaml(path, source)
+
+    def _parse_spring_yaml(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Flatten Spring YAML keys using PyYAML's syntax tree, never values."""
+        try:
+            documents = list(_yaml.compose_all(source.decode("utf-8", errors="replace")))
+        except _yaml.YAMLError as exc:
+            logger.debug("Spring YAML parse error in %s: %s", path, exc)
+            return [], []
+
+        if self._is_non_spring_yaml(documents):
+            return [], []
+
+        file_path = str(path)
+        nodes = [self._spring_config_file_node(path, source, "yaml")]
+        emitted: set[str] = set()
+
+        def emit(raw_key: str, value_node: object, document_index: int) -> None:
+            key = normalize_spring_config_key(raw_key)
+            if not key or key in emitted:
+                return
+            emitted.add(key)
+            tag = str(getattr(value_node, "tag", ""))
+            value_type = tag.rsplit(":", 1)[-1]
+            if value_type not in {"bool", "float", "int", "null", "str", "timestamp"}:
+                value_type = "scalar"
+            nodes.append(NodeInfo(
+                kind="ConfigProperty",
+                name=key,
+                file_path=file_path,
+                line_start=_yaml_line(value_node),
+                line_end=_yaml_end_line(value_node),
+                language="yaml",
+                extra={
+                    "document_index": document_index,
+                    "raw_key": raw_key,
+                    "source_file": path.name,
+                    "value_type": value_type,
+                },
+            ))
+
+        def visit(
+            node: object,
+            prefix: str,
+            document_index: int,
+            ancestors: frozenset[int],
+        ) -> None:
+            node_id = id(node)
+            if node_id in ancestors:
+                return
+            nested_ancestors = ancestors | {node_id}
+            if isinstance(node, _YamlMapping):
+                for key_node, value_node in node.value:
+                    raw_segment = _yaml_scalar(key_node)
+                    if not raw_segment or raw_segment == "<<":
+                        continue
+                    raw_key = f"{prefix}.{raw_segment}" if prefix else raw_segment
+                    if isinstance(value_node, _YamlScalar):
+                        emit(raw_key, value_node, document_index)
+                    else:
+                        visit(value_node, raw_key, document_index, nested_ancestors)
+            elif isinstance(node, _YamlSequence):
+                for index, item in enumerate(node.value):
+                    raw_key = f"{prefix}[{index}]"
+                    if isinstance(item, _YamlScalar):
+                        emit(raw_key, item, document_index)
+                    else:
+                        visit(item, raw_key, document_index, nested_ancestors)
+
+        for document_index, document in enumerate(documents):
+            if document is not None:
+                visit(document, "", document_index, frozenset())
+        return nodes, []
+
+    @staticmethod
+    def _is_non_spring_yaml(documents: list[object]) -> bool:
+        """Reject clear CI, deployment, and API manifests despite their filename."""
+        signatures = (
+            frozenset({"apiVersion", "kind"}),
+            frozenset({"jobs", "on"}),
+            frozenset({"openapi", "paths"}),
+            frozenset({"paths", "swagger"}),
+            frozenset({"services", "version"}),
+            frozenset({"AWSTemplateFormatVersion", "Resources"}),
+        )
+        for document in documents:
+            if document is None:
+                continue
+            if not isinstance(document, _YamlMapping):
+                return True
+            top_level_keys = {
+                key
+                for key_node, _ in document.value
+                if (key := _yaml_scalar(key_node)) is not None
+            }
+            if any(signature <= top_level_keys for signature in signatures):
+                return True
+        return False
+
+    @staticmethod
+    def _spring_property_logical_lines(text: str) -> list[tuple[int, str]]:
+        """Join Java-properties continuation lines while retaining start lines."""
+        logical: list[tuple[int, str]] = []
+        buffer = ""
+        start_line = 1
+        for line_number, physical in enumerate(text.splitlines(), start=1):
+            if not buffer:
+                start_line = line_number
+            buffer += physical.lstrip() if buffer else physical
+            backslashes = len(buffer) - len(buffer.rstrip("\\"))
+            if backslashes % 2:
+                buffer = buffer[:-1]
+                continue
+            logical.append((start_line, buffer))
+            buffer = ""
+        if buffer:
+            logical.append((start_line, buffer))
+        return logical
+
+    @staticmethod
+    def _spring_property_key(line: str) -> Optional[str]:
+        """Extract the unescaped key portion of one Java-properties entry."""
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith(("#", "!")):
+            return None
+        escaped = False
+        boundary = len(stripped)
+        for index, char in enumerate(stripped):
+            if char == "\\":
+                escaped = not escaped
+                continue
+            if not escaped and (char in "=:" or char.isspace()):
+                boundary = index
+                break
+            escaped = False
+        key = stripped[:boundary]
+        for escaped_char in (" ", ":", "=", "#", "!"):
+            key = key.replace(f"\\{escaped_char}", escaped_char)
+        return key or None
+
+    def _parse_spring_properties(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index Spring .properties keys without retaining their values."""
+        text = source.decode("utf-8", errors="replace")
+        file_path = str(path)
+        nodes = [self._spring_config_file_node(path, source, "properties")]
+        emitted: set[str] = set()
+        for line_number, line in self._spring_property_logical_lines(text):
+            raw_key = self._spring_property_key(line)
+            if raw_key is None:
+                continue
+            key = normalize_spring_config_key(raw_key)
+            if not key or key in emitted:
+                continue
+            emitted.add(key)
+            nodes.append(NodeInfo(
+                kind="ConfigProperty",
+                name=key,
+                file_path=file_path,
+                line_start=line_number,
+                line_end=line_number,
+                language="properties",
+                extra={
+                    "raw_key": raw_key,
+                    "source_file": path.name,
+                    "value_type": "scalar",
+                },
+            ))
+        return nodes, []
 
     # -----------------------------------------------------------------------
     # Ansible YAML parser
@@ -5982,6 +6200,121 @@ class CodeParser:
                             break
         return names
 
+    @staticmethod
+    def _spring_config_annotation_name(annotation_node) -> Optional[str]:
+        """Return the simple name of a Java annotation node."""
+        for child in annotation_node.children:
+            if child.type == "identifier":
+                return child.text.decode("utf-8", errors="replace")
+            if child.type in ("scoped_identifier", "qualified_name"):
+                return child.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
+        return None
+
+    @staticmethod
+    def _spring_config_string_literals(node) -> list[str]:
+        values: list[str] = []
+        if node.type == "string_literal":
+            text = node.text.decode("utf-8", errors="replace")
+            if len(text) >= 2:
+                values.append(text[1:-1])
+            return values
+        for child in node.children:
+            values.extend(CodeParser._spring_config_string_literals(child))
+        return values
+
+    def _spring_config_annotation_values(
+        self,
+        annotation_node,
+        accepted_keys: frozenset[str],
+    ) -> list[str]:
+        """Read selected string arguments from a parsed Java annotation."""
+        values: list[str] = []
+        for child in annotation_node.children:
+            if child.type != "annotation_argument_list":
+                continue
+            for argument in child.children:
+                if argument.type == "element_value_pair":
+                    named = [part for part in argument.children if part.is_named]
+                    if len(named) < 2:
+                        continue
+                    key = named[0].text.decode("utf-8", errors="replace")
+                    if key in accepted_keys:
+                        values.extend(self._spring_config_string_literals(named[-1]))
+                elif argument.is_named and "value" in accepted_keys:
+                    values.extend(self._spring_config_string_literals(argument))
+        return values
+
+    def _emit_spring_config_edges(
+        self,
+        class_node,
+        class_name: str,
+        enclosing_class: Optional[str],
+        file_path: str,
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Emit Spring config dependencies while retaining no literal values."""
+        source = self._qualify(class_name, file_path, enclosing_class)
+
+        for child in class_node.children:
+            if child.type != "modifiers":
+                continue
+            for annotation in child.children:
+                if self._spring_config_annotation_name(annotation) != "ConfigurationProperties":
+                    continue
+                prefixes = self._spring_config_annotation_values(
+                    annotation,
+                    frozenset({"prefix", "value"}),
+                )
+                for prefix in prefixes:
+                    key = normalize_spring_config_key(prefix)
+                    if not key:
+                        continue
+                    edges.append(EdgeInfo(
+                        kind="DEPENDS_ON_CONFIG",
+                        source=source,
+                        target=f"config:{key}.*",
+                        file_path=file_path,
+                        line=annotation.start_point[0] + 1,
+                        extra={
+                            "config_key": key,
+                            "resolution": "configuration_properties",
+                        },
+                    ))
+
+        for child in class_node.children:
+            if child.type != "class_body":
+                continue
+            for member in child.children:
+                if member.type != "field_declaration":
+                    continue
+                for modifiers in member.children:
+                    if modifiers.type != "modifiers":
+                        continue
+                    for annotation in modifiers.children:
+                        if self._spring_config_annotation_name(annotation) != "Value":
+                            continue
+                        expressions = self._spring_config_annotation_values(
+                            annotation,
+                            frozenset({"value"}),
+                        )
+                        for expression in expressions:
+                            for match in _SPRING_PLACEHOLDER_RE.finditer(expression):
+                                raw_key = match.group(1).split(":", 1)[0].strip()
+                                key = normalize_spring_config_key(raw_key)
+                                if not key:
+                                    continue
+                                edges.append(EdgeInfo(
+                                    kind="DEPENDS_ON_CONFIG",
+                                    source=source,
+                                    target=f"config:{key}",
+                                    file_path=file_path,
+                                    line=annotation.start_point[0] + 1,
+                                    extra={
+                                        "config_key": key,
+                                        "resolution": "value_annotation",
+                                    },
+                                ))
+
     def _emit_spring_injections(
         self,
         class_node,
@@ -6917,6 +7250,9 @@ class CodeParser:
         if language == "java":
             self._emit_spring_injections(
                 child, name, class_annotations, language, file_path, edges,
+            )
+            self._emit_spring_config_edges(
+                child, name, enclosing_class, file_path, edges,
             )
             # Temporal: emit TEMPORAL_STUB edges for activity/workflow stub fields
             self._emit_temporal_stub_fields(child, name, file_path, edges)
