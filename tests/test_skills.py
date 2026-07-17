@@ -601,6 +601,7 @@ class TestGenerateCodexHooksConfig:
 
         assert completed.returncode == 0, completed.stderr.decode(errors="replace")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires a Unix shell")
     def test_post_tool_use_command_handles_large_stdin_payload(self, tmp_path):
         config = generate_codex_hooks_config(tmp_path)
         cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
