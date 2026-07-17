@@ -9,7 +9,9 @@ install from a git checkout may still work via uv (different downloader):
 Run: python3 scripts/diagnose_pypi_connectivity.py
 """
 from __future__ import annotations
-
+import json
+import os
+import time
 import socket
 import ssl
 import sys
