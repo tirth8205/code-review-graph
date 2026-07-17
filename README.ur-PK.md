@@ -56,7 +56,7 @@ code-review-graph build            # parse your codebase
 ایک کمانڈ سب کچھ ترتیب دے دیتی ہے۔ `install` خود اس بات کی شناخت کرتی ہے کہ آپ کے پاس کون سے AI کوڈنگ ٹولز موجود ہیں، ہر ایک کے لیے درست MCP ترتیب لکھتی ہے، معاون ہک/اسکلز کو جہاں ممکن ہو وہاں انسٹال کرتی ہے، اور اپنے پلیٹ فارم اصولوں میں گراف سے آگاہ ہدایات داخل کرتی ہے۔ یہ خودکار طور پر معلوم کرتی ہے کہ آپ نے `uvx` یا `pip`/`pipx` کے ذریعے انسٹال کیا ہے اور مناسب ترتیب تیار کرتی ہے۔ انسٹال کے بعد اپنے ایڈیٹر/ٹول کو دوبارہ شروع کریں۔
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="ایک انسٹال، ہر پلیٹ فارم: Codex، Claude Code، CodeBuddy Code، Cursor، Windsurf، Zed، Continue، OpenCode، Antigravity، Gemini CLI، Qwen، Qoder، Kiro، اور GitHub Copilot کی خودکار شناخت اور ترتیب" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="ایک انسٹال، ہر پلیٹ فارم: Codex، Claude Code، CodeBuddy Code، Cursor، Windsurf، Zed، Continue، OpenCode، Antigravity، Gemini CLI، Qwen، Qoder، Kiro، IBM Bob، اور GitHub Copilot کی خودکار شناخت اور ترتیب" width="85%" />
 </p>
 
 کسی خاص پلیٹ فارم کو ہدف بنانے کے لیے:
@@ -69,6 +69,8 @@ code-review-graph install --platform gemini-cli   # configure only Gemini CLI
 code-review-graph install --platform kiro         # configure only Kiro
 code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
+code-review-graph install --platform bob-shell    # configure only IBM Bob Shell
+code-review-graph install --platform bob-ide      # configure only IBM Bob IDE
 code-review-graph install --platform codebuddy    # configure only CodeBuddy Code
 ```
 
@@ -643,5 +645,5 @@ MIT۔ [LICENSE](LICENSE) دیکھیں۔
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Codex، Claude Code، CodeBuddy Code، Cursor، Windsurf، Zed، Continue، OpenCode، Antigravity، Gemini CLI، Qwen، Qoder، Kiro، GitHub Copilot، اور GitHub Copilot CLI کے ساتھ کام کرتا ہے</sub>
+<sub>Codex، Claude Code، CodeBuddy Code، Cursor، Windsurf، Zed، Continue، OpenCode، Antigravity، Gemini CLI، Qwen، Qoder، Kiro، IBM Bob Shell، IBM Bob IDE، GitHub Copilot، اور GitHub Copilot CLI کے ساتھ کام کرتا ہے</sub>
 </p>
