@@ -251,6 +251,78 @@ def test_cursor_shared_hooks_directory_keeps_unrelated_scripts(
     assert data["hooks"]["sessionStart"] == [{"command": "user-session-hook"}]
 
 
+@pytest.mark.parametrize(
+    ("installed_platform", "uninstall_platform"),
+    [("Linux", "Windows"), ("Windows", "Linux")],
+)
+def test_cursor_uninstall_removes_owned_hooks_from_other_platform(
+    installed_platform: str,
+    uninstall_platform: str,
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    cursor_dir = fake_home / ".cursor"
+    with patch(
+        "code_review_graph.skills.platform.system", return_value=installed_platform
+    ):
+        config = skills.generate_cursor_hooks_config()
+        script_filenames = set(skills._cursor_hook_scripts())
+
+    owned_commands = {
+        entry["command"]
+        for entries in config["hooks"].values()
+        for entry in entries
+    }
+    config["hooks"]["sessionStart"].append({"command": "user-session-hook"})
+    _write_json(cursor_dir / "hooks.json", config)
+    for filename in script_filenames:
+        _write(cursor_dir / "hooks" / filename, "owned\n")
+    _write(cursor_dir / "hooks" / "my-company-hook.ps1", "unrelated\n")
+
+    with patch(
+        "code_review_graph.skills.platform.system", return_value=uninstall_platform
+    ):
+        uninstall.run(repo=fake_repo, keep_data=True)
+
+    data = _read_jsonc(cursor_dir / "hooks.json")
+    remaining_commands = {
+        entry.get("command")
+        for entries in data["hooks"].values()
+        for entry in entries
+        if isinstance(entry, dict)
+    }
+    assert owned_commands.isdisjoint(remaining_commands)
+    assert "user-session-hook" in remaining_commands
+    for filename in script_filenames:
+        assert not (cursor_dir / "hooks" / filename).exists()
+    assert (cursor_dir / "hooks" / "my-company-hook.ps1").read_text() == "unrelated\n"
+
+
+def test_cursor_uninstall_removes_stale_scripts_after_platform_migration(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    cursor_dir = fake_home / ".cursor"
+    with patch("code_review_graph.skills.platform.system", return_value="Linux"):
+        skills.install_cursor_hooks()
+    with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+        skills.install_cursor_hooks()
+
+    owned_filenames = {
+        f"crg-{hook}{suffix}"
+        for hook in ("update", "session-start", "pre-commit")
+        for suffix in (".sh", ".ps1")
+    }
+    assert all((cursor_dir / "hooks" / name).exists() for name in owned_filenames)
+    _write(cursor_dir / "hooks" / "keep-me.sh", "unrelated\n")
+
+    with patch("code_review_graph.skills.platform.system", return_value="Windows"):
+        uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert all(not (cursor_dir / "hooks" / name).exists() for name in owned_filenames)
+    assert (cursor_dir / "hooks" / "keep-me.sh").read_text() == "unrelated\n"
+
+
 def test_hook_cleanup_handles_owned_entries_and_mixed_nested_groups(
     fake_repo: Path,
     fake_home: Path,

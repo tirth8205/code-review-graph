@@ -1140,12 +1140,12 @@ def _process_user(
     )
     _remove_hooks(
         home / ".cursor" / "hooks.json",
-        _commands(skills.generate_cursor_hooks_config()),
+        skills._all_cursor_owned_hook_commands(),
         home,
         report,
         dry_run=dry_run,
     )
-    for filename in skills._cursor_hook_scripts():
+    for filename in skills._all_cursor_owned_hook_filenames():
         _remove_file(
             home / ".cursor" / "hooks" / filename,
             home,
