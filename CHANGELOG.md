@@ -4,6 +4,9 @@
 
 ### Added
 
+- Added an explicit local JSON visualization export. The output is written
+  atomically inside the ignored graph data directory and is documented as
+  potentially containing absolute paths and code-structure metadata (PR #449).
 - Added `code-review-graph uninstall` as a safe, symmetric counterpart to
   `install` (#482, replacing PR #491). It derives MCP cleanup from the live
   platform specifications, preserves unrelated shared configuration and JSONC

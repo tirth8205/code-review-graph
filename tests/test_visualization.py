@@ -131,6 +131,45 @@ def test_export_graph_data(store_with_data):
     json.dumps(data)  # must be serializable
 
 
+def test_export_json_writes_utf8_graph_data(store_with_data, tmp_path):
+    from code_review_graph.exports import export_json
+
+    output_path = tmp_path / "nested" / "graph.json"
+    result = export_json(store_with_data, output_path)
+
+    assert result == output_path
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    assert {node["name"] for node in payload["nodes"]} >= {
+        "auth.py",
+        "AuthService",
+        "login",
+    }
+    assert {edge["kind"] for edge in payload["edges"]} == {
+        "CALLS",
+        "CONTAINS",
+    }
+
+
+def test_export_json_failure_preserves_existing_file(
+    store_with_data, tmp_path, monkeypatch
+):
+    from code_review_graph import exports
+
+    output_path = tmp_path / "graph.json"
+    output_path.write_text("existing export\n", encoding="utf-8")
+    monkeypatch.setattr(
+        exports,
+        "export_graph_data",
+        lambda _store: {"not_json": {object()}},
+    )
+
+    with pytest.raises(TypeError):
+        exports.export_json(store_with_data, output_path)
+
+    assert output_path.read_text(encoding="utf-8") == "existing export\n"
+    assert list(tmp_path.glob(".graph.json.*.tmp")) == []
+
+
 def test_generate_html(store_with_data, tmp_path):
     from code_review_graph.visualization import generate_html
 

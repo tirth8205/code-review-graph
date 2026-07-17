@@ -617,7 +617,7 @@ def main() -> None:
     )
     vis_cmd.add_argument(
         "--format",
-        choices=["html", "graphml", "cypher", "obsidian", "svg"],
+        choices=["html", "json", "graphml", "cypher", "obsidian", "svg"],
         default="html",
         help="Export format (default: html)",
     )
@@ -1228,7 +1228,13 @@ def main() -> None:
             data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
-            if fmt == "graphml":
+            if fmt == "json":
+                from .exports import export_json
+
+                out = data_dir / "graph.json"
+                export_json(store, out)
+                print(f"JSON exported: {out}")
+            elif fmt == "graphml":
                 from .exports import export_graphml
 
                 out = data_dir / "graph.graphml"

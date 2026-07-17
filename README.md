@@ -336,6 +336,7 @@ code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Auto-update on file changes
 code-review-graph visualize        # Generate interactive HTML graph
+code-review-graph visualize --format json      # Export local graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
 code-review-graph visualize --format svg       # Export as SVG
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
@@ -353,6 +354,10 @@ code-review-graph daemon status    # Show daemon status and repos
 code-review-graph eval             # Run evaluation benchmarks
 code-review-graph serve            # Start MCP server
 ```
+
+JSON exports stay inside the local graph data directory, which Git ignores by
+default. They can contain absolute paths and code-structure metadata, so inspect
+and sanitize an export before publishing it outside your machine.
 
 </details>
 

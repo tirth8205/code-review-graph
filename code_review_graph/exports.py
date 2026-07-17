@@ -1,16 +1,54 @@
-"""Additional export formats: GraphML, Neo4j Cypher, Obsidian vault, SVG."""
+"""Additional export formats: JSON, GraphML, Neo4j Cypher, Obsidian, SVG."""
 
 from __future__ import annotations
 
 import html
+import json
 import logging
+import os
 import re
+import tempfile
 from pathlib import Path
 
 from .graph import GraphStore, _sanitize_name
 from .visualization import export_graph_data
 
 logger = logging.getLogger(__name__)
+
+
+# -------------------------------------------------------------------
+# JSON export
+# -------------------------------------------------------------------
+
+def export_json(store: GraphStore, output_path: Path) -> Path:
+    """Export the complete local graph payload as UTF-8 JSON atomically.
+
+    The payload can contain absolute local paths and code-structure metadata.
+    Callers are responsible for deciding whether it is safe to publish.
+    """
+    data = export_graph_data(store)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_path.parent,
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    logger.info("JSON exported to %s", output_path)
+    return output_path
 
 
 # -------------------------------------------------------------------

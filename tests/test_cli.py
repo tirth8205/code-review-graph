@@ -102,6 +102,39 @@ class TestWatchInteraction:
                             assert exc.code == 1
 
 
+def test_visualize_json_uses_local_export(tmp_path, capsys):
+    argv = [
+        "code-review-graph",
+        "visualize",
+        "--repo",
+        str(tmp_path),
+        "--format",
+        "json",
+    ]
+    data_dir = tmp_path / ".code-review-graph"
+    store = MagicMock()
+
+    with patch.object(sys, "argv", argv):
+        with patch("code_review_graph.graph.GraphStore", return_value=store):
+            with patch(
+                "code_review_graph.incremental.get_db_path",
+                return_value=data_dir / "graph.db",
+            ):
+                with patch(
+                    "code_review_graph.incremental.get_data_dir",
+                    return_value=data_dir,
+                ):
+                    with patch(
+                        "code_review_graph.exports.export_json",
+                        return_value=data_dir / "graph.json",
+                    ) as export_json:
+                        cli.main()
+
+    export_json.assert_called_once_with(store, data_dir / "graph.json")
+    assert "JSON exported:" in capsys.readouterr().out
+    store.close.assert_called_once()
+
+
 class TestBuildUpdateCommands:
     def test_build_skip_postprocess_does_not_run_extra_cli_postprocess(self):
         argv = [
