@@ -109,6 +109,20 @@ class GraphEdge:
     confidence: float = 1.0
     confidence_tier: str = "EXTRACTED"
 
+    def is_live(self) -> bool:
+        """Return False if this edge sits inside statically-dead code.
+
+        Before the dead-guard fix, the parser emitted CALLS edges inside
+        ``if False:`` / ``if TYPE_CHECKING:`` with
+        ``extra["reachable"] == False``.  After the fix, dead edges are
+        never emitted at all.  This predicate handles both cases so
+        consumers work against old and new graphs.
+        """
+        extra = self.extra or {}
+        if isinstance(extra, str):
+            extra = json.loads(extra)
+        return extra.get("reachable", True)
+
 
 @dataclass
 class FlowAdjacency:
@@ -428,7 +442,8 @@ class GraphStore:
         for qn in input_qns:
             for row in conn.execute(
                 "SELECT target_qualified FROM edges "
-                "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
+                "WHERE source_qualified = ? AND kind = 'TESTED_BY' "
+                "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0",
                 (qn,),
             ).fetchall():
                 tgt = row["target_qualified"]
@@ -442,7 +457,8 @@ class GraphStore:
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         for row in conn.execute(
             "SELECT target_qualified FROM edges "
-            "WHERE source_qualified = ? AND kind = 'TESTED_BY'",
+            "WHERE source_qualified = ? AND kind = 'TESTED_BY' "
+            "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0",
             (bare,),
         ).fetchall():
             tgt = row["target_qualified"]
@@ -459,7 +475,8 @@ class GraphStore:
             for qn in frontier:
                 for row in conn.execute(
                     "SELECT target_qualified FROM edges "
-                    "WHERE source_qualified = ? AND kind = 'CALLS'",
+                    "WHERE source_qualified = ? AND kind = 'CALLS' "
+                    "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0",
                     (qn,),
                 ).fetchall():
                     next_frontier.add(row["target_qualified"])
@@ -703,11 +720,15 @@ class GraphStore:
             FROM impacted i
             JOIN edges e ON e.source_qualified = i.node_qn
             WHERE i.depth < ?
+              AND (e.kind != 'CALLS'
+                   OR COALESCE(json_extract(e.extra, '$.reachable'), 1) != 0)
             UNION
             SELECT e.source_qualified, i.depth + 1
             FROM impacted i
             JOIN edges e ON e.target_qualified = i.node_qn
             WHERE i.depth < ?
+              AND (e.kind != 'CALLS'
+                   OR COALESCE(json_extract(e.extra, '$.reachable'), 1) != 0)
         )
         SELECT DISTINCT node_qn, MIN(depth) AS min_depth
         FROM impacted
@@ -1119,13 +1140,15 @@ class GraphStore:
         if include_file_sources:
             rows = self._conn.execute(
                 "SELECT DISTINCT target_qualified FROM edges "
-                "WHERE kind = 'CALLS'"
+                "WHERE kind = 'CALLS' "
+                "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0"
             ).fetchall()
         else:
             rows = self._conn.execute(
                 "SELECT DISTINCT e.target_qualified FROM edges e "
                 "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
                 "WHERE e.kind = 'CALLS' "
+                "AND COALESCE(json_extract(e.extra, '$.reachable'), 1) != 0 "
                 "AND (n.kind IS NULL OR n.kind != 'File')"
             ).fetchall()
         return {r["target_qualified"] for r in rows}
@@ -1225,7 +1248,10 @@ class GraphStore:
             ).fetchall()
             for r in rows:
                 edge = self._row_to_edge(r)
-                if edge.target_qualified in qualified_names:
+                if (
+                    edge.target_qualified in qualified_names
+                    and edge.is_live()
+                ):
                     results.append(edge)
         return results
 
@@ -1266,10 +1292,15 @@ class GraphStore:
         calls_out: dict[str, list[str]] = {}
         has_tested_by: set[str] = set()
         for row in self._conn.execute(
-            "SELECT kind, source_qualified, target_qualified FROM edges "
+            "SELECT kind, source_qualified, target_qualified, extra FROM edges "
             "WHERE kind IN ('CALLS', 'TESTED_BY')"
         ):
             kind, src, tgt = row["kind"], row["source_qualified"], row["target_qualified"]
+            extra = row["extra"] or {}
+            if isinstance(extra, str):
+                extra = json.loads(extra)
+            if not extra.get("reachable", True):
+                continue
             if kind == "CALLS":
                 calls_out.setdefault(src, []).append(tgt)
             else:  # TESTED_BY: source is the production node being tested. See: #515
@@ -1290,7 +1321,11 @@ class GraphStore:
             if self._nxg_cache is not None:
                 return self._nxg_cache
             g: nx.DiGraph = nx.DiGraph()
-            rows = self._conn.execute("SELECT * FROM edges").fetchall()
+            rows = self._conn.execute(
+                "SELECT * FROM edges "
+                "WHERE kind != 'CALLS' "
+                "OR COALESCE(json_extract(extra, '$.reachable'), 1) != 0"
+            ).fetchall()
             for r in rows:
                 g.add_edge(r["source_qualified"], r["target_qualified"], kind=r["kind"])
             self._nxg_cache = g

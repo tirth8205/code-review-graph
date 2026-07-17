@@ -111,7 +111,7 @@ def rename_preview(
     # --- Call sites (CALLS edges targeting this node) ---
     call_edges = store.get_edges_by_target(node.qualified_name)
     for edge in call_edges:
-        if edge.kind == "CALLS":
+        if edge.kind == "CALLS" and edge.is_live():
             edits.append({
                 "file": edge.file_path,
                 "line": edge.line,
@@ -124,6 +124,8 @@ def rename_preview(
     bare_edges = store.search_edges_by_target_name(old_name, kind="CALLS")
     seen = {(e["file"], e["line"]) for e in edits}
     for edge in bare_edges:
+        if not edge.is_live():
+            continue
         key = (edge.file_path, edge.line)
         if key not in seen:
             edits.append({
@@ -471,13 +473,13 @@ def find_dead_code(
         incoming = store.get_edges_by_target(node.qualified_name)
         # Also check class-qualified edges (e.g. "ClassName::method") which
         # lack the file-path prefix used in node.qualified_name.
-        if not any(e.kind == "CALLS" for e in incoming) and node.parent_name:
+        if not any(e.kind == "CALLS" and e.is_live() for e in incoming) and node.parent_name:
             class_qn = f"{node.parent_name}::{node.name}"
             incoming = incoming + store.get_edges_by_target(class_qn)
         # Also check bare-name and partially-qualified edges.
         # CALLS targets may be bare ("funcName"), class-qualified
         # ("Class::method"), or workspace-qualified ("pkg/dir::funcName").
-        if not any(e.kind == "CALLS" for e in incoming):
+        if not any(e.kind == "CALLS" and e.is_live() for e in incoming):
             bare = store.search_edges_by_target_name(node.name, kind="CALLS")
             # Also search for partially-qualified targets ending with ::name
             suffix_rows = conn.execute(
@@ -497,7 +499,7 @@ def find_dead_code(
         # edge -- look outgoing, not incoming. See: #515
         outgoing_tb = [
             e for e in store.get_edges_by_source(node.qualified_name)
-            if e.kind == "TESTED_BY"
+            if e.kind == "TESTED_BY" and e.is_live()
         ]
         if not outgoing_tb and node.parent_name:
             # Class-qualified source (e.g. "ClassName::method") which lacks the
@@ -505,13 +507,14 @@ def find_dead_code(
             class_qn = f"{node.parent_name}::{node.name}"
             outgoing_tb += [
                 e for e in store.get_edges_by_source(class_qn)
-                if e.kind == "TESTED_BY"
+                if e.kind == "TESTED_BY" and e.is_live()
             ]
         if not outgoing_tb:
             # Bare-name source fallback: unresolved TESTED_BY edges may store the
             # production function by its plain name (e.g. "authenticate").
             bare_rows = conn.execute(
-                "SELECT * FROM edges WHERE kind = 'TESTED_BY' AND source_qualified = ?",
+                "SELECT * FROM edges WHERE kind = 'TESTED_BY' AND source_qualified = ? "
+                "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0",
                 (node.name,),
             ).fetchall()
             outgoing_tb += [
@@ -522,7 +525,7 @@ def find_dead_code(
         if node.kind == "Class" and not any(e.kind == "INHERITS" for e in incoming):
             bare_inh = store.search_edges_by_target_name(node.name, kind="INHERITS")
             incoming = incoming + bare_inh
-        has_callers = any(e.kind == "CALLS" for e in incoming)
+        has_callers = any(e.kind == "CALLS" and e.is_live() for e in incoming)
         has_test_refs = bool(outgoing_tb)
         has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
         has_references = any(e.kind == "REFERENCES" for e in incoming)
@@ -539,7 +542,8 @@ def find_dead_code(
             bare_prefix = node.name + "."
             member_calls = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE kind = 'CALLS'"
-                " AND (target_qualified LIKE ? OR target_qualified LIKE ?)",
+                " AND (target_qualified LIKE ? OR target_qualified LIKE ?)"
+                " AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0",
                 (f"%{member_prefix}%", f"%{bare_prefix}%"),
             ).fetchone()[0]
             if member_calls > 0:
@@ -567,6 +571,7 @@ def find_dead_code(
                             if conn.execute(
                                 "SELECT 1 FROM edges "
                                 "WHERE target_qualified = ? AND kind = 'CALLS' "
+                                "AND COALESCE(json_extract(extra, '$.reachable'), 1) != 0 "
                                 "LIMIT 1",
                                 (base_method_qn,),
                             ).fetchone():
@@ -652,7 +657,7 @@ def suggest_refactorings(store: GraphStore) -> list[dict[str, Any]]:
 
             incoming_calls = [
                 e for e in store.get_edges_by_target(fnode.qualified_name)
-                if e.kind == "CALLS"
+                if e.kind == "CALLS" and e.is_live()
             ]
             if not incoming_calls:
                 continue

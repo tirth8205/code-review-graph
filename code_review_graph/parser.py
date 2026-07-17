@@ -877,6 +877,35 @@ def file_hash(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Parser helpers
+# ---------------------------------------------------------------------------
+
+
+def _node_is_in_child(node, child_node) -> bool:
+    """Return True if *node* is a descendant of *child_node*.
+
+    Used by ``_is_in_static_dead_guard`` to distinguish the consequence
+    (true-branch) of an ``if`` statement from the alternative (else/elif)
+    without walking the full ancestor chain twice.
+
+    Comparison uses byte ranges because the tree-sitter Python bindings
+    create fresh ``Node`` objects on every ``child_by_field_name`` call,
+    so ``is`` identity does not work even when both sides refer to the
+    same tree node.
+    """
+    sb, eb = child_node.start_byte, child_node.end_byte
+    cursor = node
+    while cursor is not None:
+        if (
+            cursor.start_byte == sb
+            and cursor.end_byte == eb
+        ):
+            return True
+        cursor = cursor.parent
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
 
@@ -5090,51 +5119,88 @@ class CodeParser:
             ))
 
     @staticmethod
-    def _is_in_static_dead_guard(node) -> bool:
+    def _is_in_static_dead_guard(
+        node,
+        import_map: Optional[dict[str, str]] = None,
+    ) -> bool:
         """Walk ancestors to detect statically-dead guards.
 
-        Returns True when ``node`` sits inside an ``if_statement`` whose
-        condition is ``False`` (the literal), the integer ``0``, or
-        ``TYPE_CHECKING`` (the ``typing`` sentinel).  This covers the
-        most common Python idioms for compile-time-only code:
+        Returns True when *node* sits inside the **consequence** (true
+        branch) of an ``if_statement`` whose condition is statically
+        ``False`` (the literal), the integer ``0``, or the
+        ``typing.TYPE_CHECKING`` sentinel.  This covers the most common
+        Python idioms for compile-time-only code::
 
-            if False:
+            if False:          # consequence is dead
                 ...
-            if 0:
+            if 0:              # consequence is dead
                 ...
-            if TYPE_CHECKING:
+            if TYPE_CHECKING:  # consequence is dead
                 ...
 
-        The walk stops at function/class/module boundaries so a dead
-        guard in an outer scope does not leak into nested definitions.
+        Branch semantics:
+
+        * A call in the **else/elif** branch of ``if False:`` is **live**
+          (the else branch runs when the condition is false).
+        * A nested function/class defined under ``if False:`` is still
+          importable — the definition node lives at module scope — so
+          calls *inside* that nested function are not marked dead.
+
+        ``TYPE_CHECKING`` is only treated as the typing sentinel when it
+        is imported via ``from typing import TYPE_CHECKING``.  Aliased
+        imports (``as TC``) and attribute access
+        (``typing.TYPE_CHECKING``) are not yet handled — those are
+        follow-up enhancements.  A local variable coincidentally named
+        ``TYPE_CHECKING`` is not a dead guard.
         """
+        typing_names: set[str] = set()
+        if import_map:
+            for local, qualified in import_map.items():
+                if (
+                    qualified == "typing"
+                    and local == "TYPE_CHECKING"
+                ):
+                    typing_names.add(local)
+
         cursor = node.parent
         while cursor is not None:
             ntype = cursor.type
             # Stop at scope boundaries -- a dead guard in an outer
             # function does not make an inner function's calls dead.
             if ntype in (
-                "function_definition", "class_definition", "module",
+                "function_definition", "class_definition",
+                "async_function_definition", "lambda", "module",
             ):
                 break
             if ntype == "if_statement":
                 cond = cursor.child_by_field_name("condition")
-                if cond is not None:
+                consequence = cursor.child_by_field_name("consequence")
+                if cond is not None and consequence is not None:
+                    is_dead_cond = False
                     # ``if False:``
                     if cond.type == "false":
-                        return True
+                        is_dead_cond = True
                     # ``if 0:``
-                    if (
+                    elif (
                         cond.type == "integer"
                         and cond.text == b"0"
                     ):
-                        return True
+                        is_dead_cond = True
                     # ``if TYPE_CHECKING:``
-                    if (
+                    elif (
                         cond.type == "identifier"
-                        and cond.text == b"TYPE_CHECKING"
+                        and cond.text in {
+                            n.encode() for n in typing_names
+                        }
                     ):
-                        return True
+                        is_dead_cond = True
+
+                    if is_dead_cond:
+                        # Only the consequence (true branch) is dead.
+                        # If node is in the alternative (else/elif),
+                        # it is live -- keep walking up.
+                        if _node_is_in_child(node, consequence):
+                            return True
             cursor = cursor.parent
         return False
 
@@ -5270,11 +5336,11 @@ class CodeParser:
                     call_name, file_path, language,
                     import_map or {}, defined_names or set(),
                 )
-            # Tag calls inside statically-dead guards (if False: /
-            # if TYPE_CHECKING:) so downstream consumers can filter
-            # them out.  Live edges omit the key (absent = live).
-            if self._is_in_static_dead_guard(child):
-                call_extra["reachable"] = False
+            # Skip calls inside statically-dead guards entirely.
+            # Dead edges would confuse every downstream consumer
+            # (callers, impact, flows, dead-code detection).
+            if self._is_in_static_dead_guard(child, import_map):
+                return False
 
             edges.append(EdgeInfo(
                 kind="CALLS",

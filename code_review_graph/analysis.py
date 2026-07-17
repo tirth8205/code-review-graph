@@ -22,6 +22,8 @@ def find_hub_nodes(store: GraphStore, top_n: int = 10) -> list[dict]:
     in_degree: dict[str, int] = Counter()
     out_degree: dict[str, int] = Counter()
     for e in edges:
+        if not e.is_live():
+            continue
         out_degree[e.source_qualified] += 1
         in_degree[e.target_qualified] += 1
 
@@ -129,6 +131,8 @@ def find_knowledge_gaps(store: GraphStore) -> dict[str, list[dict]]:
     degree: dict[str, int] = Counter()
     tested_nodes: set[str] = set()
     for e in edges:
+        if not e.is_live():
+            continue
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
         if e.kind == "TESTED_BY":
@@ -228,9 +232,11 @@ def find_surprising_connections(
 
     node_map = {n.qualified_name: n for n in nodes}
 
-    # Build degree map
+    # Build degree map (skip dead edges)
     degree: dict[str, int] = Counter()
     for e in edges:
+        if not e.is_live():
+            continue
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
 
@@ -243,6 +249,8 @@ def find_surprising_connections(
 
     scored_edges = []
     for e in edges:
+        if not e.is_live():
+            continue
         src = node_map.get(e.source_qualified)
         tgt = node_map.get(e.target_qualified)
         if not src or not tgt:
@@ -285,12 +293,12 @@ def find_surprising_connections(
             reasons.append("peripheral-to-hub")
 
         # Cross-file-type: test <-> non-test (+0.15)
-        if src.is_test != tgt.is_test and e.kind == "CALLS":
+        if src.is_test != tgt.is_test and e.kind == "CALLS" and e.is_live():
             score += 0.15
             reasons.append("cross-test-boundary")
 
         # Non-standard edge kind (+0.15)
-        if e.kind == "CALLS" and src.kind == "Type":
+        if e.kind == "CALLS" and e.is_live() and src.kind == "Type":
             score += 0.15
             reasons.append("unusual-edge-kind")
 

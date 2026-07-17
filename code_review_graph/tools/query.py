@@ -227,7 +227,7 @@ def query_graph(
         if pattern == "callers_of":
             seen_sources: set[str] = set()
             for e in store.get_edges_by_target(qn):
-                if e.kind == "CALLS":
+                if e.kind == "CALLS" and e.is_live():
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
@@ -239,6 +239,8 @@ def query_graph(
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
             if node:
                 for e in store.search_edges_by_target_name(node.name):
+                    if not e.is_live():
+                        continue
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
@@ -249,7 +251,7 @@ def query_graph(
         elif pattern == "callees_of":
             seen_targets: set[str] = set()
             for e in store.get_edges_by_source(qn):
-                if e.kind == "CALLS":
+                if e.kind == "CALLS" and e.is_live():
                     if e.target_qualified not in seen_targets:
                         seen_targets.add(e.target_qualified)
                         callee = store.get_node(e.target_qualified)
@@ -693,10 +695,14 @@ def traverse_graph_func(
                 current_qn
             )
             for e in out_edges:
+                if not e.is_live():
+                    continue
                 tgt = e.target_qualified
                 if tgt not in visited:
                     queue.append((tgt, cur_depth + 1))
             for e in in_edges:
+                if not e.is_live():
+                    continue
                 src = e.source_qualified
                 if src not in visited:
                     queue.append((src, cur_depth + 1))

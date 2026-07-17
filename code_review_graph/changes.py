@@ -238,7 +238,7 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
 
     # --- Community crossing (cap 0.15) ---
     callers = store.get_edges_by_target(node.qualified_name)
-    caller_edges = [e for e in callers if e.kind == "CALLS"]
+    caller_edges = [e for e in callers if e.kind == "CALLS" and e.is_live()]
 
     cross_community = 0
     node_cid = store.get_node_community_id(node.id)
@@ -356,7 +356,9 @@ def analyze_changes(
         # parser, so a changed production function finds its tests by source.
         # See: #515
         tested = store.get_edges_by_source(node.qualified_name)
-        if not any(e.kind == "TESTED_BY" for e in tested):
+        if not any(
+            e.kind == "TESTED_BY" and e.is_live() for e in tested
+        ):
             test_gaps.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": _sanitize_name(node.qualified_name),

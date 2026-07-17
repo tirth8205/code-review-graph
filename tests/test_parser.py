@@ -1149,34 +1149,65 @@ class TestCodeParser:
         assert "test_something" in test_names
         assert "helper" not in test_names
 
-    def test_dead_guard_reachable_flag(self):
-        """CALLS edges inside ``if False:`` / ``if 0:`` /
-        ``if TYPE_CHECKING:`` are tagged with
-        ``extra["reachable"] == False``; live calls omit the key
-        entirely.  See: #576."""
+    def test_dead_guard_omits_dead_edges(self):
+        """CALLS edges inside the consequence (true branch) of
+        ``if False:`` / ``if 0:`` / ``if TYPE_CHECKING:`` are never
+        emitted.  Live calls and calls in else/elif branches are kept.
+        See: #576, #580."""
         nodes, edges = self.parser.parse_file(
             FIXTURES / "sample_dead_guard.py",
         )
         calls = [e for e in edges if e.kind == "CALLS"]
 
+        # Live control: emitted normally
         live = [e for e in calls if "live_helper" in e.target]
+        assert len(live) == 1
+
+        # Dead consequence calls are NOT emitted at all
         dead_false = [e for e in calls if "dead_false_call" in e.target]
         dead_zero = [e for e in calls if "dead_zero_call" in e.target]
         dead_tc = [e for e in calls if "dead_tc_call" in e.target]
+        assert dead_false == []
+        assert dead_zero == []
+        assert dead_tc == []
 
-        # Control: live call has no reachable key
+        # Dead consequence inside else_branch function is NOT emitted
+        dead_in_if = [e for e in calls if "dead_in_if" in e.target]
+        assert dead_in_if == []
+
+        # else branch of ``if False:`` is LIVE
+        live_else = [e for e in calls if "live_in_else" in e.target]
+        assert len(live_else) == 1
+
+        # elif branches of ``if False:`` are LIVE
+        live_elif = [e for e in calls if "live_elif_call" in e.target]
+        assert len(live_elif) == 1
+
+        # final else of elif chain is LIVE
+        live_final = [e for e in calls if "live_final_else" in e.target]
+        assert len(live_final) == 1
+
+        # Dead consequence of elif chain is NOT emitted
+        dead_elif_cons = [
+            e for e in calls if "dead_elif_consequence" in e.target
+        ]
+        assert dead_elif_cons == []
+
+        # Total: 5 live edges (live_helper, live_in_else,
+        # some_condition, live_elif_call, live_final_else)
+        assert len(calls) == 5
+
+    def test_type_checking_false_positive(self):
+        """A local variable named ``TYPE_CHECKING`` that is NOT imported
+        from ``typing`` must not mark calls as dead.  See: #576."""
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_type_checking_false_positive.py",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+        # Exactly one CALLS edge should exist (should_be_live)
+        assert len(calls) == 1
+        live = [e for e in calls if "should_be_live" in e.target]
         assert len(live) == 1
-        assert "reachable" not in live[0].extra
-
-        # Dead calls carry the flag
-        assert len(dead_false) == 1
-        assert dead_false[0].extra.get("reachable") is False
-
-        assert len(dead_zero) == 1
-        assert dead_zero[0].extra.get("reachable") is False
-
-        assert len(dead_tc) == 1
-        assert dead_tc[0].extra.get("reachable") is False
 
 
 class TestValueReferences:

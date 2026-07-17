@@ -133,7 +133,7 @@ def _format_node_context(
     callers: list[str] = []
     seen: set[str] = set()
     for e in store.get_edges_by_target(qn):
-        if e.kind == "CALLS" and len(callers) < 5:
+        if e.kind == "CALLS" and e.is_live() and len(callers) < 5:
             c = store.get_node(e.source_qualified)
             if c and c.name not in seen:
                 seen.add(c.name)
@@ -145,7 +145,7 @@ def _format_node_context(
     callees: list[str] = []
     seen.clear()
     for e in store.get_edges_by_source(qn):
-        if e.kind == "CALLS" and len(callees) < 5:
+        if e.kind == "CALLS" and e.is_live() and len(callees) < 5:
             c = store.get_node(e.target_qualified)
             if c and c.name not in seen:
                 seen.add(c.name)
