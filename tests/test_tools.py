@@ -12,6 +12,7 @@ import code_review_graph.tools.docs as docs_module
 from code_review_graph.graph import GraphStore, _sanitize_name, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 from code_review_graph.tools import (
+    _validate_repo_root,
     get_affected_flows_func,
     get_architecture_overview_func,
     get_community_func,
@@ -22,7 +23,6 @@ from code_review_graph.tools import (
     list_communities_func,
     list_flows,
     query_graph,
-    _validate_repo_root,
 )
 
 
@@ -424,20 +424,38 @@ class TestQueryGraphTestsFor:
             line_start=1, line_end=5, language="python",
         ))
         self.store.upsert_node(NodeInfo(
+            kind="Function", name="orchestrate", file_path="/src/calc.py",
+            line_start=7, line_end=12, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
             kind="File", name="/tests/spec.py", file_path="/tests/spec.py",
             line_start=1, line_end=20, language="python",
         ))
         self.store.upsert_node(NodeInfo(
-            kind="Test", name="verify_combine_behaviour",
+            kind="Test", name="verify_\x01combine_behaviour",
             file_path="/tests/spec.py",
             line_start=1, line_end=5, language="python", is_test=True,
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="shared_name", file_path="/src/first.py",
+            line_start=1, line_end=5, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="shared_name", file_path="/src/second.py",
+            line_start=1, line_end=5, language="python",
         ))
         # Parser-canonical direction: source=production, target=test.
         self.store.upsert_edge(EdgeInfo(
             kind="TESTED_BY",
             source="/src/calc.py::combine",
-            target="/tests/spec.py::verify_combine_behaviour",
+            target="/tests/spec.py::verify_\x01combine_behaviour",
             file_path="/tests/spec.py", line=1,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source="/src/calc.py::orchestrate",
+            target="/src/calc.py::combine",
+            file_path="/src/calc.py", line=9,
         ))
         self.store.commit()
         # Release the writer connection so query_graph can open its own.
@@ -451,8 +469,54 @@ class TestQueryGraphTestsFor:
             repo_root=str(self.repo_root),
         )
         assert result["status"] == "ok"
-        qns = {r["qualified_name"] for r in result["results"]}
-        assert "/tests/spec.py::verify_combine_behaviour" in qns
+        match = next(
+            r for r in result["results"]
+            if r["qualified_name"] == "/tests/spec.py::verify_combine_behaviour"
+        )
+        assert match["name"] == "verify_combine_behaviour"
+        assert match["indirect"] is False
+        assert set(match) == {
+            "id", "kind", "name", "qualified_name", "file_path",
+            "line_start", "line_end", "language", "parent_name", "is_test",
+            "indirect",
+        }
+
+    def test_query_graph_tests_for_finds_one_hop_indirect_test(self):
+        from code_review_graph.tools import query_graph
+
+        result = query_graph(
+            pattern="tests_for",
+            target="/src/calc.py::orchestrate",
+            repo_root=str(self.repo_root),
+        )
+
+        assert result["status"] == "ok"
+        match = next(
+            r for r in result["results"]
+            if r["qualified_name"] == "/tests/spec.py::verify_combine_behaviour"
+        )
+        assert match["indirect"] is True
+        assert match["is_test"] is True
+
+        minimal = query_graph(
+            pattern="tests_for",
+            target="/src/calc.py::orchestrate",
+            repo_root=str(self.repo_root),
+            detail_level="minimal",
+        )
+        assert minimal["results"][0]["indirect"] is True
+
+    def test_query_graph_tests_for_keeps_ambiguous_target_explicit(self):
+        from code_review_graph.tools import query_graph
+
+        result = query_graph(
+            pattern="tests_for",
+            target="shared_name",
+            repo_root=str(self.repo_root),
+        )
+
+        assert result["status"] == "ambiguous"
+        assert len(result["candidates"]) == 2
 
 
 class TestGetDocsSection:

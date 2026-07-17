@@ -319,21 +319,29 @@ def query_graph(
                         results.append(node_to_dict(child))
 
         elif pattern == "tests_for":
-            # TESTED_BY edges are stored as source=production, target=test
-            # by the parser, so look them up by source. See: #515
-            for e in store.get_edges_by_source(qn):
-                if e.kind == "TESTED_BY":
-                    test = store.get_node(e.target_qualified)
-                    if test:
-                        results.append(node_to_dict(test))
+            # Keep the normal sanitized node response while adding the
+            # direct/indirect marker returned by the bounded store lookup.
+            seen: set[str] = set()
+            for match in store.get_transitive_tests(qn):
+                test_qn = match.get("qualified_name")
+                if not isinstance(test_qn, str) or test_qn in seen:
+                    continue
+                test = store.get_node(test_qn)
+                if test:
+                    result = node_to_dict(test)
+                    result["indirect"] = bool(match.get("indirect", False))
+                    results.append(result)
+                    seen.add(test_qn)
             # Also search by naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)
             test_nodes += store.search_nodes(f"Test{name}", limit=10)
-            seen = {r.get("qualified_name") for r in results}
             for t in test_nodes:
                 if t.qualified_name not in seen and t.is_test:
-                    results.append(node_to_dict(t))
+                    result = node_to_dict(t)
+                    result["indirect"] = False
+                    results.append(result)
+                    seen.add(t.qualified_name)
 
         elif pattern == "inheritors_of":
             for e in store.get_edges_by_target(qn):
@@ -368,7 +376,7 @@ def query_graph(
             minimal_results = [
                 {
                     k: r[k]
-                    for k in ("name", "kind", "file_path")
+                    for k in ("name", "kind", "file_path", "indirect")
                     if k in r
                 }
                 for r in results[:5]
