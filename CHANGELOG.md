@@ -14,6 +14,9 @@
 
 ### Fixed
 
+- Incremental Git change discovery now reads NUL-delimited byte output, so
+  Unicode, whitespace, newline, and literal arrow paths are preserved while
+  rename/copy records keep destination-only semantics (PR #618).
 - Corrected TESTED_BY edge direction across graph, refactor, and transitive-test
   consumers, with a parser-to-store-to-query regression (#527/#559/#598 class).
 - C# receiver calls now capture bare, chained, member, and null-conditional

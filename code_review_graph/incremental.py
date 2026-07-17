@@ -505,6 +505,11 @@ _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 _SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
 
 
+def _decode_nul_paths(output: bytes) -> list[str]:
+    """Decode Git's NUL-delimited path output without quote mangling."""
+    return [os.fsdecode(path) for path in output.split(b"\0") if path]
+
+
 def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
     """Persist VCS branch/revision info into the graph metadata table."""
     vcs = detect_vcs(repo_root)
@@ -538,9 +543,8 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         return []
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", base, "--"],
+            ["git", "diff", "--name-only", "-z", base, "--"],
             capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
@@ -548,16 +552,17 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         if result.returncode != 0:
             # Fallback: try diff against empty tree (initial commit)
             result = subprocess.run(
-                ["git", "diff", "--name-only", "--cached"],
+                ["git", "diff", "--name-only", "-z", "--cached"],
                 capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
                 cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
                 stdin=subprocess.DEVNULL,
             )
-        files = [f.strip() for f in result.stdout.splitlines() if f.strip()]
-        return files
-    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
+        if result.returncode != 0:
+            logger.warning("git diff failed while discovering changed files")
+            return []
+        return _decode_nul_paths(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
@@ -612,23 +617,30 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
         return _get_svn_changed_files(repo_root)
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "status", "--porcelain=v1", "-z"],
             capture_output=True,
-            text=True, encoding='utf-8', errors='replace',
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
-        files = []
-        for line in result.stdout.splitlines():
-            if len(line) > 3:
-                entry = line[3:].strip()
-                # Handle renamed files: "R  old -> new"
-                if " -> " in entry:
-                    entry = entry.split(" -> ", 1)[1]
-                files.append(entry)
+        if result.returncode != 0:
+            logger.warning("git status failed while discovering working-tree files")
+            return []
+        files: list[str] = []
+        records = result.stdout.split(b"\0")
+        index = 0
+        while index < len(records):
+            record = records[index]
+            if len(record) > 3:
+                status = record[:2]
+                files.append(os.fsdecode(record[3:]))
+                # With porcelain -z, a rename/copy record stores the
+                # destination first and its source in the following record.
+                if b"R" in status or b"C" in status:
+                    index += 1
+            index += 1
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
 def get_all_tracked_files(

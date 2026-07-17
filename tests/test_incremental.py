@@ -496,25 +496,37 @@ class TestGitOperations:
     def test_get_changed_files(self, mock_run, tmp_path):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="src/a.py\nsrc/b.py\n",
+            stdout=b"src/a.py\0src/b.py\0",
         )
         result = get_changed_files(tmp_path)
         assert result == ["src/a.py", "src/b.py"]
         mock_run.assert_called_once()
         call_args = mock_run.call_args
         assert "git" in call_args[0][0]
+        assert "-z" in call_args[0][0]
         assert call_args[1].get("timeout") == 30
+        assert "text" not in call_args[1]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_fallback(self, mock_run, tmp_path):
         # First call fails, second succeeds
         mock_run.side_effect = [
-            MagicMock(returncode=1, stdout=""),
-            MagicMock(returncode=0, stdout="staged.py\n"),
+            MagicMock(returncode=1, stdout=b""),
+            MagicMock(returncode=0, stdout=b"staged.py\0"),
         ]
         result = get_changed_files(tmp_path)
         assert result == ["staged.py"]
         assert mock_run.call_count == 2
+        assert "-z" in mock_run.call_args_list[1].args[0]
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_rejects_failed_fallback(self, mock_run, tmp_path):
+        mock_run.side_effect = [
+            MagicMock(returncode=128, stdout=b""),
+            MagicMock(returncode=128, stdout=b"misleading.py\0"),
+        ]
+
+        assert get_changed_files(tmp_path) == []
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_timeout(self, mock_run, tmp_path):
@@ -526,14 +538,37 @@ class TestGitOperations:
     def test_get_staged_and_unstaged(self, mock_run, tmp_path):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=" M src/a.py\n?? new.py\nR  old.py -> new_name.py\n",
+            stdout=(
+                b" M src/a.py\0"
+                b"?? new.py\0"
+                b"R  new_name.py\0old.py\0"
+                b"C  copied.py\0source.py\0"
+                b" M path -> literal.py\0"
+                b" M  leading and trailing.py \0"
+            ),
         )
         result = get_staged_and_unstaged(tmp_path)
         assert "src/a.py" in result
         assert "new.py" in result
         assert "new_name.py" in result
-        # old.py should NOT be in results (renamed away)
+        assert "copied.py" in result
+        assert "path -> literal.py" in result
+        assert " leading and trailing.py " in result
+        # Rename/copy sources should NOT be in results (destination-only).
         assert "old.py" not in result
+        assert "source.py" not in result
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_staged_and_unstaged_rejects_failed_status(
+        self, mock_run, tmp_path
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=128,
+            stdout=b"?? misleading.py\0",
+            stderr=b"fatal: not a git repository",
+        )
+
+        assert get_staged_and_unstaged(tmp_path) == []
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_all_tracked_files(self, mock_run, tmp_path):

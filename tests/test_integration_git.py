@@ -11,6 +11,7 @@ Tests cover:
 from __future__ import annotations
 
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from code_review_graph.incremental import (
     full_build,
     get_all_tracked_files,
     get_changed_files,
+    get_staged_and_unstaged,
     incremental_update,
 )
 from code_review_graph.wiki import get_wiki_page
@@ -79,6 +81,92 @@ def test_get_changed_files_real_git(git_repo: Path) -> None:
     """get_changed_files should list hello.py as changed between HEAD~1..HEAD."""
     changed = get_changed_files(git_repo, base="HEAD~1")
     assert "hello.py" in changed
+
+
+@pytest.fixture()
+def git_repo_with_unicode_path(tmp_path: Path) -> Path:
+    """Create a real repository with a committed non-ASCII Python path."""
+    repo = tmp_path / "unicode-repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+    assert _git(repo, "config", "user.email", "test@test.com").returncode == 0
+    assert _git(repo, "config", "user.name", "Test").returncode == 0
+    (repo / "café.py").write_text("value = 1\n", encoding="utf-8")
+    assert _git(repo, "add", "--", "café.py").returncode == 0
+    assert _git(repo, "commit", "-m", "add unicode path").returncode == 0
+    return repo
+
+
+def test_get_changed_files_preserves_unicode_path(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Committed Git changes preserve a literal path on every platform."""
+    source = git_repo_with_unicode_path / "café.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+    assert _git(git_repo_with_unicode_path, "add", "--", "café.py").returncode == 0
+    assert (
+        _git(git_repo_with_unicode_path, "commit", "-m", "modify unicode path").returncode
+        == 0
+    )
+
+    assert get_changed_files(git_repo_with_unicode_path, base="HEAD~1") == [
+        "café.py"
+    ]
+
+
+def test_get_staged_and_unstaged_preserves_unicode_path(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Working-tree Git changes preserve a literal path on every platform."""
+    source = git_repo_with_unicode_path / "café.py"
+    source.write_text("value = 2\n", encoding="utf-8")
+
+    assert get_staged_and_unstaged(git_repo_with_unicode_path) == ["café.py"]
+
+
+def test_get_staged_and_unstaged_uses_rename_destination(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """NUL porcelain returns only the destination record for a staged rename."""
+    destination = "renamed café.py"
+    assert (
+        _git(
+            git_repo_with_unicode_path,
+            "mv",
+            "--",
+            "café.py",
+            destination,
+        ).returncode
+        == 0
+    )
+
+    assert get_staged_and_unstaged(git_repo_with_unicode_path) == [destination]
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows filenames cannot contain '>' or newline characters",
+)
+def test_git_discovery_preserves_literal_separator_characters(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """NUL output preserves arrows and newlines as filename characters."""
+    names = ["path -> literal.py", "line\nbreak.py"]
+    for name in names:
+        (git_repo_with_unicode_path / name).write_text("value = 1\n")
+    assert _git(git_repo_with_unicode_path, "add", "--", *names).returncode == 0
+    assert (
+        _git(git_repo_with_unicode_path, "commit", "-m", "add literal paths").returncode
+        == 0
+    )
+
+    assert set(
+        get_changed_files(git_repo_with_unicode_path, base="HEAD~1")
+    ) == set(names)
+
+    for name in names:
+        (git_repo_with_unicode_path / name).write_text("value = 2\n")
+    assert set(get_staged_and_unstaged(git_repo_with_unicode_path)) == set(names)
 
 
 # ------------------------------------------------------------------
