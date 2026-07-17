@@ -154,6 +154,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
     @property
     def dimension(self) -> int:
         model = self._get_model()
+        if hasattr(model, "get_embedding_dimension"):
+            return model.get_embedding_dimension()
         return model.get_sentence_embedding_dimension()
 
     @property

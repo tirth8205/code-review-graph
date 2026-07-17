@@ -149,6 +149,26 @@ class TestEmbeddingStore:
 class TestLocalEmbeddingProviderModelName:
     """Tests for configurable model name on LocalEmbeddingProvider."""
 
+    def test_dimension_uses_current_sentence_transformers_api(self):
+        class CurrentModel:
+            def get_embedding_dimension(self):
+                return 384
+
+        provider = LocalEmbeddingProvider(model_name="offline/current")
+        provider._model = CurrentModel()
+
+        assert provider.dimension == 384
+
+    def test_dimension_supports_sentence_transformers_3(self):
+        class LegacyModel:
+            def get_sentence_embedding_dimension(self):
+                return 768
+
+        provider = LocalEmbeddingProvider(model_name="offline/legacy")
+        provider._model = LegacyModel()
+
+        assert provider.dimension == 768
+
     def test_default_model_name(self):
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("CRG_EMBEDDING_MODEL", None)

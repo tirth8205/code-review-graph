@@ -33,7 +33,7 @@ dependencies = [
     "tree-sitter>=0.23.0,<1",
     "tree-sitter-language-pack>=0.3.0,<1",
     "networkx>=3.2,<4",
-    "watchdog>=4.0.0,<6",
+    "watchdog>=4.0.0,<7",
     "tomli>=2.0.0,<3; python_version < '3.11'",
 ]
 
@@ -50,7 +50,7 @@ crg-daemon = "code_review_graph.daemon_cli:main"
 
 [project.optional-dependencies]
 embeddings = [
-    "sentence-transformers>=3.0.0,<4",
+    "sentence-transformers>=3.0.0,<6",
     "numpy>=1.26,<3",
 ]
 google-embeddings = [
@@ -78,7 +78,7 @@ enrichment = [
 ]
 dev = [
     "pytest>=8.0,<9",
-    "pytest-asyncio>=0.23,<1",
+    "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
     "tomli>=2.0; python_version < '3.11'",
@@ -134,5 +134,5 @@ norecursedirs = ["tests/fixtures"]
 [dependency-groups]
 dev = [
     "pytest>=8.4.2",
-    "pytest-asyncio>=0.23,<1",
+    "pytest-asyncio>=0.23,<2",
 ]
