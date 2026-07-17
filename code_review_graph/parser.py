@@ -580,11 +580,6 @@ _SPRING_INJECT_ANNOTATIONS = frozenset({
     "Autowired", "Inject", "Resource",
 })
 
-# Lombok annotations that trigger constructor injection of final fields
-_LOMBOK_CONSTRUCTOR_ANNOTATIONS = frozenset({
-    "RequiredArgsConstructor", "AllArgsConstructor",
-})
-
 # Temporal workflow/activity interface markers
 _TEMPORAL_INTERFACE_ANNOTATIONS = frozenset({
     "WorkflowInterface", "ActivityInterface",
@@ -5315,17 +5310,17 @@ class CodeParser:
     ) -> None:
         """Emit INJECTS edges for Spring DI injection points in a Java class.
 
-        Handles three patterns:
+        Handles four patterns:
         - @Autowired / @Inject / @Resource field injection
         - @Autowired constructor injection
-        - Lombok @RequiredArgsConstructor / @AllArgsConstructor with final fields
+        - Lombok @RequiredArgsConstructor with uninitialized final / @NonNull fields
+        - Lombok @AllArgsConstructor with every non-static field
         """
         if language != "java":
             return
 
-        has_lombok_constructor = any(
-            a in _LOMBOK_CONSTRUCTOR_ANNOTATIONS for a in class_annotations
-        )
+        has_required_args = "RequiredArgsConstructor" in class_annotations
+        has_all_args = "AllArgsConstructor" in class_annotations
         qualified_source = self._qualify(class_name, file_path, None)
 
         # Find the class body
@@ -5336,7 +5331,7 @@ class CodeParser:
                 if member.type == "field_declaration":
                     self._emit_spring_field_injection(
                         member, qualified_source, file_path,
-                        edges, has_lombok_constructor,
+                        edges, has_required_args, has_all_args,
                     )
                 elif member.type == "constructor_declaration":
                     self._emit_spring_constructor_injection(
@@ -5349,14 +5344,15 @@ class CodeParser:
         qualified_source: str,
         file_path: str,
         edges: list[EdgeInfo],
-        has_lombok_constructor: bool,
+        has_required_args: bool,
+        has_all_args: bool,
     ) -> None:
-        """Emit an INJECTS edge for a single field_declaration if injection applies."""
+        """Emit one INJECTS edge per field selected by Spring/Lombok."""
         field_annotations: list[str] = []
         has_final = False
         has_static = False
         field_type: Optional[str] = None
-        field_name: Optional[str] = None
+        declarators: list[tuple[str, bool]] = []
 
         for child in field_node.children:
             if child.type == "modifiers":
@@ -5388,32 +5384,42 @@ class CodeParser:
                             field_type = sub.text.decode("utf-8", errors="replace")
                             break
             elif child.type == "variable_declarator":
+                field_name: Optional[str] = None
                 for sub in child.children:
                     if sub.type == "identifier":
                         field_name = sub.text.decode("utf-8", errors="replace")
                         break
+                if field_name:
+                    has_initializer = child.child_by_field_name("value") is not None
+                    declarators.append((field_name, has_initializer))
 
-        if not field_type or has_static:
+        if not field_type or has_static or not declarators:
             return
 
         has_inject_annotation = any(a in _SPRING_INJECT_ANNOTATIONS for a in field_annotations)
-        is_lombok_injected = has_lombok_constructor and has_final
+        has_non_null = "NonNull" in field_annotations
 
-        if not has_inject_annotation and not is_lombok_injected:
-            return
+        for field_name, has_initializer in declarators:
+            if has_inject_annotation:
+                injection_type = "field"
+            elif has_all_args:
+                injection_type = "constructor_lombok_all"
+            elif has_required_args and not has_initializer and (has_final or has_non_null):
+                injection_type = "constructor_lombok"
+            else:
+                continue
 
-        injection_type = "field" if has_inject_annotation else "constructor_lombok"
-        extra: dict = {"injection_type": injection_type}
-        if field_name:
-            extra["field_name"] = field_name
-        edges.append(EdgeInfo(
-            kind="INJECTS",
-            source=qualified_source,
-            target=field_type,
-            file_path=file_path,
-            line=field_node.start_point[0] + 1,
-            extra=extra,
-        ))
+            edges.append(EdgeInfo(
+                kind="INJECTS",
+                source=qualified_source,
+                target=field_type,
+                file_path=file_path,
+                line=field_node.start_point[0] + 1,
+                extra={
+                    "injection_type": injection_type,
+                    "field_name": field_name,
+                },
+            ))
 
     def _emit_spring_constructor_injection(
         self,
