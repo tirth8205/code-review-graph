@@ -789,10 +789,10 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 " || true"
                             ),
                             "commandWindows": (
-                                'cmd.exe /d /s /c "more >nul & '
+                                "more >nul & "
                                 "git rev-parse --git-dir >nul 2>&1"
                                 " && code-review-graph update --skip-flows"
-                                ' || exit /b 0"'
+                                " || exit /b 0"
                             ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
@@ -813,10 +813,10 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 " || echo 'Not a git repo, skipping'"
                             ),
                             "commandWindows": (
-                                'cmd.exe /d /s /c "more >nul & '
+                                "more >nul & "
                                 "git rev-parse --git-dir >nul 2>&1"
                                 " && code-review-graph status"
-                                ' || echo Not a git repo, skipping"'
+                                " || echo Not a git repo, skipping"
                             ),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
