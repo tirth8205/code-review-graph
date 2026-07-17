@@ -475,13 +475,13 @@ Note: in git repos, only tracked files are indexed (`git ls-files`), so gitignor
 Optional dependency groups:
 
 ```bash
-pip install code-review-graph[embeddings]          # Local vector embeddings (sentence-transformers)
-pip install code-review-graph[google-embeddings]   # Google Gemini embeddings
-pip install code-review-graph[communities]         # Community detection (igraph)
-pip install code-review-graph[enrichment]          # Python call-resolution enrichment (Jedi)
-pip install code-review-graph[eval]                # Evaluation benchmarks (matplotlib)
-pip install code-review-graph[wiki]                # Wiki generation with LLM summaries (ollama)
-pip install code-review-graph[all]                 # All optional dependencies
+pip install 'code-review-graph[embeddings]'          # Local vector embeddings (sentence-transformers)
+pip install 'code-review-graph[google-embeddings]'   # Google Gemini embeddings
+pip install 'code-review-graph[communities]'         # Community detection (igraph)
+pip install 'code-review-graph[enrichment]'          # Python call-resolution enrichment (Jedi)
+pip install 'code-review-graph[eval]'                # Evaluation benchmarks (matplotlib)
+pip install 'code-review-graph[wiki]'                # Wiki generation with LLM summaries (ollama)
+pip install 'code-review-graph[all]'                 # All optional dependencies
 ```
 
 ### Environment Variables
