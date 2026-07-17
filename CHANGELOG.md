@@ -76,6 +76,9 @@
 - Hardened generated skills/configuration: uppercase `SKILL.md` (PR #563),
   string-safe JSONC plus top-level and nested-container data-preservation guards
   (#553, PR #354), and portable PATH-aware hooks (PR #565).
+- Cursor installation now writes native PowerShell hooks on Windows, quotes
+  user paths containing spaces, and migrates CRG-owned Bash entries without
+  duplicating hooks or removing unrelated user configuration (PR #617).
 - Packaged documentation remains reachable through the MCP wrapper (#613),
   Action comments render repository-relative paths, and both visualization
   templates select the graph SVG specifically (PR #564).
