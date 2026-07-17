@@ -14,4 +14,3 @@ pull requests, discussions, and any other communication channels.
 
 Instances of unacceptable behavior may be reported to the project maintainers.
 All complaints will be reviewed and investigated promptly and fairly.
-´
