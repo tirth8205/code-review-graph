@@ -146,6 +146,26 @@ class TestTools:
         names = {r.name for r in results}
         assert "login" in names or "AuthService" in names
 
+    def test_search_mode_fts(self, monkeypatch, tmp_path):
+        """semantic_search_nodes reports search_mode='fts' when only FTS contributes."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        tmp_db = tmp_path / "test.db"
+        store = GraphStore(tmp_db)
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path="/repo/auth.py",
+            line_start=1, line_end=10, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+
+        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None: (store, tmp_path))
+        result = semantic_search_nodes("login")
+        assert result["status"] == "ok"
+        assert result["search_mode"] == "fts"
+
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""
         # Add an edge with bare target name
