@@ -66,6 +66,9 @@ def _make_executor(max_workers: int):
 
 logger = logging.getLogger(__name__)
 
+CPP_IDENTITY_VERSION = "1"
+_CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+
 
 def _run_rescript_resolver(store: GraphStore) -> Optional[dict]:
     """Run the ReScript cross-module resolver, swallowing any failure so
@@ -926,6 +929,7 @@ def full_build(
     total_nodes = 0
     total_edges = 0
     errors = []
+    cpp_errors: set[str] = set()
     file_count = len(files)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
@@ -943,9 +947,13 @@ def full_build(
                 total_edges += len(edges)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
+                if parser.detect_language(full_path) == "cpp":
+                    cpp_errors.add(str(rel_path))
             except Exception as e:
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
+                if parser.detect_language(full_path) == "cpp":
+                    cpp_errors.add(str(rel_path))
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
@@ -963,6 +971,8 @@ def full_build(
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
+                    if parser.detect_language(repo_root / rel_path) == "cpp":
+                        cpp_errors.add(str(rel_path))
                     continue
                 full_path = repo_root / rel_path
                 store.store_file_nodes_edges(
@@ -978,6 +988,8 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
+    if not cpp_errors:
+        store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
@@ -1009,6 +1021,29 @@ def incremental_update(
     """Incremental update: re-parse changed + dependent files only."""
     parser = CodeParser(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
+
+    if (
+        store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
+        and store.has_nodes_for_language("cpp")
+    ):
+        logger.info(
+            "C++ identity format changed; rebuilding the graph before incremental update",
+        )
+        rebuilt = full_build(repo_root, store)
+        return {
+            "files_updated": rebuilt["files_parsed"],
+            "total_nodes": rebuilt["total_nodes"],
+            "total_edges": rebuilt["total_edges"],
+            "changed_files": list(changed_files or []),
+            "dependent_files": [],
+            "errors": rebuilt["errors"],
+            "identity_rebuild": True,
+            "rescript_resolution": rebuilt["rescript_resolution"],
+            "spring_resolution": rebuilt["spring_resolution"],
+            "event_resolution": rebuilt["event_resolution"],
+            "temporal_resolution": rebuilt["temporal_resolution"],
+            "hcl_resolution": rebuilt["hcl_resolution"],
+        }
 
     # Determine changed files
     if changed_files is None:
@@ -1112,6 +1147,7 @@ def incremental_update(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
+    store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
