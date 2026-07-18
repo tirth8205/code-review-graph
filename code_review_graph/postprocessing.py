@@ -75,7 +75,7 @@ def _resolve_bare_endpoints(
     result: dict[str, Any],
     warnings: list[str],
 ) -> None:
-    """Qualify bare CALLS/TESTED_BY endpoints before derived graph steps."""
+    """Resolve bare and C++ scoped call targets before derived graph steps."""
     try:
         resolved = store.resolve_bare_call_targets()
         resolved += store.resolve_bare_tested_by_sources()
@@ -84,9 +84,9 @@ def _resolve_bare_endpoints(
             store.resolve_cpp_scoped_call_targets()
         )
     except sqlite3.OperationalError as e:
-        logger.warning("Bare-endpoint resolution failed: %s", e)
+        logger.warning("Call-target resolution failed: %s", e)
         warnings.append(
-            f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+            f"Call-target resolution failed: {type(e).__name__}: {e}"
         )
 
 

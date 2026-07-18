@@ -9290,8 +9290,6 @@ class CodeParser:
         # Recurse into class body
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
-        elif language == "cpp":
-            recursive_class = name
         else:
             recursive_class = name
         self._extract_from_tree(

@@ -77,7 +77,7 @@ def _run_postprocess(
         )
         return warnings
 
-    # Resolve only same-file/import-backed targets before derived graph steps.
+    # Resolve bare and C++ scoped call targets before derived graph steps.
     try:
         resolved = store.resolve_bare_call_targets()
         resolved += store.resolve_bare_tested_by_sources()
@@ -86,9 +86,9 @@ def _run_postprocess(
             store.resolve_cpp_scoped_call_targets()
         )
     except sqlite3.OperationalError as e:
-        logger.warning("Bare-endpoint resolution failed: %s", e)
+        logger.warning("Call-target resolution failed: %s", e)
         warnings.append(
-            f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+            f"Call-target resolution failed: {type(e).__name__}: {e}"
         )
 
     # -- Signatures + FTS (fast, always run unless "none") --
@@ -587,9 +587,9 @@ def run_postprocess(
                 store.resolve_cpp_scoped_call_targets()
             )
         except sqlite3.OperationalError as e:
-            logger.warning("Bare-endpoint resolution failed: %s", e)
+            logger.warning("Call-target resolution failed: %s", e)
             warnings.append(
-                f"Bare-endpoint resolution failed: {type(e).__name__}: {e}"
+                f"Call-target resolution failed: {type(e).__name__}: {e}"
             )
 
         try:
