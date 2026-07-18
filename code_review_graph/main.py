@@ -940,8 +940,10 @@ def cross_repo_search_tool(
 ) -> dict:
     """Search for code entities across all registered repositories.
 
-    Runs hybrid search on each registered repo's graph database and merges
-    the results by score. Register repos first with the CLI 'register' command.
+    Runs hybrid search on each registered repo's graph database and interleaves
+    results by repository-local rank. Equal ranks follow registry order, and up
+    to ``limit`` results per searched repo may be returned. Register repos first
+    with the CLI 'register' command.
 
     Args:
         query: Search string to match against node names.

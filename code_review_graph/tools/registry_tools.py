@@ -79,10 +79,10 @@ def cross_repo_search_func(
                 "results": [],
             }
 
-        all_results: list[dict[str, Any]] = []
+        ranked_results: list[tuple[int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
 
-        for repo_entry in repos:
+        for repo_index, repo_entry in enumerate(repos):
             repo_path = Path(repo_entry["path"])
             db_path = get_db_path(repo_path)
             if not db_path.exists():
@@ -95,10 +95,10 @@ def cross_repo_search_func(
                         store, query, kind=kind, limit=limit
                     )
                     alias = repo_entry.get("alias", repo_path.name)
-                    for r in results:
+                    for local_rank, r in enumerate(results):
                         r["repo"] = alias
                         r["repo_path"] = str(repo_path)
-                    all_results.extend(results)
+                        ranked_results.append((local_rank, repo_index, r))
                     searched_repos.append(alias)
                 finally:
                     store.close()
@@ -107,10 +107,10 @@ def cross_repo_search_func(
                     "Search failed for %s: %s", repo_path, exc
                 )
 
-        # Sort all results by score descending
-        all_results.sort(
-            key=lambda r: r.get("score", 0), reverse=True
-        )
+        # Scores from different search paths are not comparable across repos.
+        # Merge by each repo's local rank and use registry order as a stable tie-breaker.
+        ranked_results.sort(key=lambda item: (item[0], item[1]))
+        all_results = [result for _, _, result in ranked_results]
 
         return {
             "status": "ok",
@@ -118,7 +118,7 @@ def cross_repo_search_func(
                 f"Found {len(all_results)} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
             ),
-            "results": all_results[:limit],
+            "results": all_results,
             "repos_searched": searched_repos,
         }
     except Exception as exc:
