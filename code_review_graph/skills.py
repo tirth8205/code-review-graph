@@ -149,7 +149,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "copilot-cli": {
         "name": "GitHub Copilot CLI",
         "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
-        "key": "servers",
+        "key": "mcpServers",
         "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
@@ -1116,6 +1116,7 @@ cover what you need.
 # different from the default _CLAUDE_MD_SECTION.
 _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
     ".github/code-review-graph.instruction.md": (_CLAUDE_MD_SECTION_MARKER, _COPILOT_SECTION),
+    ".github/instructions/code-review-graph.instructions.md": (_CLAUDE_MD_SECTION_MARKER, _COPILOT_SECTION),
 }
 
 
@@ -1162,7 +1163,8 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
-    ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
+    ".github/code-review-graph.instruction.md": ("copilot",),
+    ".github/instructions/code-review-graph.instructions.md": ("copilot-cli",),
     "CODEBUDDY.md": ("codebuddy",),
 }
 

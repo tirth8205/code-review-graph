@@ -677,6 +677,7 @@ class TestInjectPlatformInstructionsFiltering:
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
+            ".github/instructions/code-review-graph.instructions.md",
             "CODEBUDDY.md",
         }
 
@@ -686,6 +687,7 @@ class TestInjectPlatformInstructionsFiltering:
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
             ".github/code-review-graph.instruction.md",
+            ".github/instructions/code-review-graph.instructions.md",
             "CODEBUDDY.md",
         }
 
@@ -1661,12 +1663,12 @@ class TestCopilotCLIPlatform:
         assert "copilot-cli" in PLATFORMS
         copilot_cli = PLATFORMS["copilot-cli"]
         assert copilot_cli["name"] == "GitHub Copilot CLI"
-        assert copilot_cli["key"] == "servers"
+        assert copilot_cli["key"] == "mcpServers"
         assert copilot_cli["format"] == "object"
         assert copilot_cli["needs_type"] is True
 
     def test_install_copilot_cli_config(self, tmp_path):
-        """install_platform_configs creates ~/.copilot/mcp-config.json with 'servers' key."""
+        """install_platform_configs creates ~/.copilot/mcp-config.json with 'mcpServers' key."""
         fake_home = tmp_path / "fakehome"
         (fake_home / ".copilot").mkdir(parents=True)
         config_path = fake_home / ".copilot" / "mcp-config.json"
@@ -1684,18 +1686,18 @@ class TestCopilotCLIPlatform:
         assert "GitHub Copilot CLI" in configured
         assert config_path.exists()
         data = json.loads(config_path.read_text())
-        assert "code-review-graph" in data["servers"]
-        entry = data["servers"]["code-review-graph"]
+        assert "code-review-graph" in data["mcpServers"]
+        entry = data["mcpServers"]["code-review-graph"]
         assert entry["type"] == "stdio"
         assert "serve" in entry["args"]
 
     def test_install_copilot_cli_preserves_existing_servers(self, tmp_path):
-        """Existing server entries are preserved when adding code-review-graph."""
+        """Existing mcpServers entries are preserved when adding code-review-graph."""
         fake_home = tmp_path / "fakehome"
         config_path = fake_home / ".copilot" / "mcp-config.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
-            json.dumps({"servers": {"other-server": {"command": "other"}}}),
+            json.dumps({"mcpServers": {"other-server": {"command": "other"}}}),
             encoding="utf-8",
         )
         with patch.dict(
@@ -1710,14 +1712,14 @@ class TestCopilotCLIPlatform:
         ):
             install_platform_configs(tmp_path, target="copilot-cli")
         data = json.loads(config_path.read_text())
-        assert "other-server" in data["servers"]
-        assert "code-review-graph" in data["servers"]
+        assert "other-server" in data["mcpServers"]
+        assert "code-review-graph" in data["mcpServers"]
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
-        """Copilot CLI injection writes its GitHub instruction file."""
+        """Copilot CLI injection writes to .github/instructions/code-review-graph.instructions.md."""
         updated = inject_platform_instructions(tmp_path, target="copilot-cli")
-        assert ".github/code-review-graph.instruction.md" in updated
-        instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
+        assert ".github/instructions/code-review-graph.instructions.md" in updated
+        instructions = tmp_path / ".github" / "instructions" / "code-review-graph.instructions.md"
         assert instructions.exists()
         content = instructions.read_text()
         assert _CLAUDE_MD_SECTION_MARKER in content
