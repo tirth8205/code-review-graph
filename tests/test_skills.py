@@ -726,6 +726,16 @@ class TestInjectPlatformInstructionsFiltering:
         updated = inject_platform_instructions(tmp_path, target="opencode")
         assert updated == ["AGENTS.md"]
 
+    def test_codex_writes_only_agents(self, tmp_path):
+        updated = inject_platform_instructions(tmp_path, target="codex")
+        assert updated == ["AGENTS.md"]
+        assert not (tmp_path / "GEMINI.md").exists()
+        assert not (tmp_path / ".cursorrules").exists()
+        assert not (tmp_path / ".windsurfrules").exists()
+        assert not (tmp_path / "QODER.md").exists()
+        content = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+        assert _CLAUDE_MD_SECTION_MARKER in content
+
     def test_qoder_writes_only_qoder_md(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="qoder")
         assert updated == ["QODER.md"]
