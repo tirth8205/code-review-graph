@@ -634,3 +634,117 @@ class TestFlows:
             "WHERE f.id IS NULL"
         ).fetchall()
         assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
+
+    def test_incremental_trace_flows_relative_vs_absolute_new_entry(self, tmp_path):
+        """Relative git paths must match absolute graph file_path values (#569)."""
+        abs_a = str((tmp_path / "a.py").resolve())
+        abs_b = str((tmp_path / "b.py").resolve())
+
+        self._add_func("old_entry", path=abs_a)
+        self._add_func("old_callee", path=abs_a)
+        self._add_call(f"{abs_a}::old_entry", f"{abs_a}::old_callee", abs_a)
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        self._add_func("new_entry", path=abs_b)
+        self._add_func("new_callee", path=abs_b)
+        self._add_call(f"{abs_b}::new_entry", f"{abs_b}::new_callee", abs_b)
+
+        # git-style relative input — must still discover the new entry point.
+        count = incremental_trace_flows(
+            self.store, ["b.py"], repo_root=tmp_path,
+        )
+        assert count >= 1
+        after = get_flows(self.store)
+        assert any(f["name"] == "new_entry" for f in after)
+
+    def test_incremental_flow_lifecycle_after_node_replacement(self, tmp_path):
+        """Capture/clear before replace, then rematch via entry-point QNs (#569)."""
+        from code_review_graph.flows import (
+            clear_flows_for_files,
+            expand_changed_file_paths,
+            purge_orphan_flow_data,
+        )
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        abs_routes = str((tmp_path / "routes.py").resolve())
+        abs_services = str((tmp_path / "services.py").resolve())
+
+        handler_id = self._add_func("handler", path=abs_routes)
+        service_id = self._add_func("service", path=abs_services)
+        self._add_call(
+            f"{abs_routes}::handler",
+            f"{abs_services}::service",
+            abs_routes,
+        )
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+        before = get_flows(self.store)
+        assert any(f["name"] == "handler" for f in before)
+        old_flow = next(f for f in before if f["name"] == "handler")
+        old_ep_id = old_flow["entry_point_id"]
+        assert old_ep_id == handler_id
+
+        # Pre-replacement capture (as incremental_update does).
+        expanded = expand_changed_file_paths(
+            self.store, ["routes.py", abs_routes], repo_root=tmp_path,
+        )
+        entry_qns = clear_flows_for_files(self.store, expanded)
+        assert f"{abs_routes}::handler" in entry_qns
+        assert get_flows(self.store) == []
+
+        # Simulate store_file_nodes_edges: delete + reinsert with new IDs.
+        self.store.remove_file_data(abs_routes)
+        self.store.commit()
+        new_handler = NodeInfo(
+            kind="Function",
+            name="handler",
+            file_path=abs_routes,
+            line_start=1,
+            line_end=12,
+            language="python",
+        )
+        new_handler_id = self.store.upsert_node(new_handler, file_hash="new")
+        self.store.upsert_edge(
+            EdgeInfo(
+                kind="CALLS",
+                source=f"{abs_routes}::handler",
+                target=f"{abs_services}::service",
+                file_path=abs_routes,
+                line=5,
+            )
+        )
+        self.store.commit()
+        assert new_handler_id != handler_id
+        # Unchanged callee keeps its ID.
+        assert self.store.get_node(f"{abs_services}::service").id == service_id
+
+        purge_orphan_flow_data(self.store)
+
+        count = incremental_trace_flows(
+            self.store,
+            ["routes.py"],
+            repo_root=tmp_path,
+            entry_point_qns=entry_qns,
+        )
+        assert count >= 1
+
+        after = get_flows(self.store)
+        handler_flows = [f for f in after if f["name"] == "handler"]
+        assert len(handler_flows) == 1
+        assert handler_flows[0]["entry_point_id"] == new_handler_id
+
+        conn = self.store._conn
+        dead_eps = conn.execute(
+            "SELECT id FROM flows WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
+        ).fetchall()
+        assert dead_eps == []
+        orphan_members = conn.execute(
+            "SELECT fm.node_id FROM flow_memberships fm "
+            "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+        ).fetchall()
+        assert orphan_members == []
+        # Exactly one handler flow — no duplicate stale+new pair.
+        assert len(handler_flows) == 1

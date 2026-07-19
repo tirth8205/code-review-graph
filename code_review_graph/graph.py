@@ -1764,11 +1764,20 @@ class GraphStore:
         return result
 
     def get_files_matching(self, pattern: str) -> list[str]:
-        """Return distinct ``file_path`` values matching a LIKE suffix."""
+        """Return distinct ``file_path`` values ending with *pattern*.
+
+        ``%`` and ``_`` in *pattern* are treated as literal characters, not
+        SQL ``LIKE`` wildcards.
+        """
+        escaped = (
+            pattern.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         rows = self._conn.execute(
             "SELECT DISTINCT file_path FROM nodes "
-            "WHERE file_path LIKE ?",
-            (f"%{pattern}",),
+            "WHERE file_path LIKE ? ESCAPE '\\'",
+            (f"%{escaped}",),
         ).fetchall()
         return [r["file_path"] for r in rows]
 
