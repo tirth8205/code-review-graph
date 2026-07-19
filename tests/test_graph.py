@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import code_review_graph.constants as constants_module
-from code_review_graph.graph import GraphStore
+from code_review_graph.graph import GraphStore, GraphEdge, GraphNode, edge_to_dict, node_to_dict
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
 
@@ -883,3 +883,46 @@ class TestResolveBareEndpoints:
         self.store.commit()
 
         assert self.store.get_transitive_tests(hub_qn, max_depth=1) == []
+
+class TestVisualizationMetadataWhitelist:
+    """node_to_dict/edge_to_dict must export a curated subset of ``extra``.
+
+    The visualization used to dump *every* field of a node/edge's ``extra``
+    blob, leaking large internal payloads (serialized signatures, resolver
+    hints) into the exported HTML/JSON graph. Only a whitelisted set of
+    visualization-relevant keys should be emitted.
+    """
+
+    def test_node_whitelists_antelope_metadata(self):
+        node = GraphNode(
+            id=1, kind="Action", name="transfer",
+            qualified_name="x.abi::transfer", file_path="x.abi",
+            line_start=1, line_end=2, language="antelope_abi",
+            parent_name=None, params=None, return_type=None,
+            is_test=False, file_hash=None,
+            extra={"antelope_kind": "action", "secret": "leak", "big": "x" * 50},
+        )
+        d = node_to_dict(node)
+        assert d["antelope_kind"] == "action"
+        assert "secret" not in d and "big" not in d
+
+    def test_node_drops_all_extra_when_not_whitelisted(self):
+        node = GraphNode(
+            id=2, kind="Function", name="fn", qualified_name="f.py::fn",
+            file_path="f.py", line_start=1, line_end=2, language="python",
+            parent_name=None, params=None, return_type=None,
+            is_test=False, file_hash=None,
+            extra={"internal_hint": "do-not-export", "secret": 9},
+        )
+        d = node_to_dict(node)
+        assert "internal_hint" not in d and "secret" not in d
+
+    def test_edge_whitelists_antelope_flag(self):
+        edge = GraphEdge(
+            id=1, kind="CALLS", source_qualified="a", target_qualified="b",
+            file_path="f.cpp", line=1,
+            extra={"antelope": True, "resolver_trace": "drop-me"},
+        )
+        d = edge_to_dict(edge)
+        assert d["antelope"] is True
+        assert "resolver_trace" not in d

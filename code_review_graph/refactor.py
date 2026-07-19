@@ -47,9 +47,15 @@ _MOCK_NAME_RE = re.compile(
 
 @functools.lru_cache(maxsize=2048)
 def _antelope_runtime_symbols(file_path: str) -> tuple[frozenset[str], bool]:
-    """Find ABI actions, notification handlers, and static APIs for a contract."""
-    if "/contracts/" not in file_path.replace("\\", "/"):
-        return frozenset(), False
+    """Find ABI actions, notification handlers, and static APIs for a contract.
+
+    .. deprecated::
+        Kept only as a cheap fallback when a node reaches dead-code detection
+        with no ``antelope_kind`` in its ``extra`` (e.g. a graph built before
+        runtime tagging existed). Prefer the indexed in-DB lookup performed by
+        :func:`_antelope_is_runtime_symbol`, which never reads the filesystem
+        and therefore scales to large repos with arbitrary contract layouts.
+    """
     path = Path(file_path)
     text = ""
     for candidate in (path, path.with_suffix(".hpp"), path.with_suffix(".cpp")):
@@ -58,10 +64,46 @@ def _antelope_runtime_symbols(file_path: str) -> tuple[frozenset[str], bool]:
         except OSError:
             pass
     names = set(re.findall(r"\bACTION\s+(?:[A-Za-z_]\w*::)?([A-Za-z_]\w*)\s*\(", text))
-    names.update(re.findall(r"\[\[\s*eosio::on_notify[^\]]*\]\][^;{()]*?\b([A-Za-z_]\w*)\s*\(", text, re.DOTALL))
+    names.update(re.findall(r"\[\[\s*eosio::on_notify[^\\]]*\]][^;{()]*?\b([A-Za-z_]\w*)\s*\(", text, re.DOTALL))
     names.update(re.findall(r"\bstatic\s+[^;{()]+?\b((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
     names.update(re.findall(r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
     return frozenset(names), ("TABLE " in text or "multi_index<" in text)
+
+
+# Runtime tag values the parser writes into a node's ``extra["antelope_kind"]``.
+# Any of these means the node is a contract surface that should be treated as
+# an entry point (never dead code).
+_ANTELOPE_RUNTIME_KINDS = frozenset(
+    {"action", "notification", "cross_contract_getter", "table_schema"}
+)
+
+
+def _antelope_is_runtime_symbol(store: "GraphStore", node: Any) -> bool:
+    """Indexed, filesystem-free check for Antelope runtime symbols.
+
+    The parser tags contract surfaces (``action``, ``notification``,
+    ``cross_contract_getter``, ``table_schema``) into ``node.extra`` at build
+    time, so we query the already-recorded tag instead of re-scanning source
+    files. This is O(1) per node and works for contracts in any directory
+    layout — no ``/contracts/`` path requirement.
+
+    Falls back to the legacy disk scan only when the node has no in-DB tag
+    (e.g. a graph built before runtime tagging existed).
+    """
+    antelope_kind = node.extra.get("antelope_kind") if node.extra else None
+    if antelope_kind in _ANTELOPE_RUNTIME_KINDS:
+        return True
+    # No tag recorded: fall back to the cheap source scan for legacy graphs.
+    names, has_tables = _antelope_runtime_symbols(node.file_path)
+    if node.name in names:
+        return True
+    if has_tables and node.name in _ANTELOPE_TABLE_STRUCT_NAMES:
+        return True
+    return False
+
+
+# Node names that imply a table struct when a legacy scan reports tables.
+_ANTELOPE_TABLE_STRUCT_NAMES = frozenset({"TABLE", "primary_key"})
 
 # ---------------------------------------------------------------------------
 # Thread-safe pending refactors storage
@@ -201,7 +243,7 @@ def rename_preview(
 # ---------------------------------------------------------------------------
 
 
-def _is_entry_point(node: Any) -> bool:
+def _is_entry_point(node: Any, store: Optional["GraphStore"] = None) -> bool:
     """Check if a node looks like an entry point by name or decorator.
 
     Unlike ``flows.detect_entry_points()`` which treats ALL uncalled functions
@@ -216,6 +258,10 @@ def _is_entry_point(node: Any) -> bool:
     antelope_kind = node.extra.get("antelope_kind") if node.extra else None
     if antelope_kind in {"action", "notification", "cross_contract_getter", "table_schema"}:
         return True
+    # Prefer the indexed in-DB tag lookup (no filesystem scan, any layout).
+    if store is not None:
+        return _antelope_is_runtime_symbol(store, node)
+    # Fall back to the legacy disk scan when no store is available.
     names, has_tables = _antelope_runtime_symbols(node.file_path)
     if node.name in names:
         return True
@@ -403,7 +449,7 @@ def find_dead_code(
             continue
 
         # Skip entry points (by name pattern or decorator, not just "uncalled").
-        if _is_entry_point(node):
+        if _is_entry_point(node, store):
             continue
 
         # Check for callers (CALLS), test refs (TESTED_BY), importers (IMPORTS_FROM),

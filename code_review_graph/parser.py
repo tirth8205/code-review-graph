@@ -609,6 +609,10 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    # Antelope (EOSIO) contract ABI — JSON document describing actions, tables,
+    # and structs. Routed through a dedicated validator that safely skips
+    # foreign or malformed ABI documents instead of parsing them as code.
+    ".abi": "antelope_abi",
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -2287,10 +2291,6 @@ class CodeParser:
             if _yaml is None:
                 return [], []
             file_type = _ansible_file_type(path)
-            # Variable and role-metadata files are identified by Ansible's
-            # directory contract. Task/handler paths are not sufficient on
-            # their own: generic YAML repositories commonly contain those
-            # directory names, so require Ansible content evidence there.
             if file_type in ("vars", "meta") or _is_ansible_content(source):
                 return self._parse_ansible(path, source)
             return [], []
@@ -2307,6 +2307,12 @@ class CodeParser:
         # Generic YAML: no tree-sitter grammar bundled; skip.
         if language == "yaml":
             return [], []
+
+        # Antelope ABI: a JSON document, not source code. Validated and
+        # modeled with a dedicated parser that never assumes an object
+        # shape and skips foreign/malformed ABIs safely.
+        if language == "antelope_abi":
+            return self._parse_antelope_abi(path, source)
 
         parser = self._get_parser(language)
         if not parser:
@@ -2454,10 +2460,13 @@ class CodeParser:
         self, source: bytes, file_path: str, nodes: list[NodeInfo],
         edges: list[EdgeInfo],
     ) -> None:
-        """Model Antelope ABI/runtime surfaces that have no normal C++ caller."""
-        normalized = file_path.replace("\\", "/")
-        if "/contracts/" not in normalized:
-            return
+        """Model Antelope ABI/runtime surfaces that have no normal C++ caller.
+
+        Contracts are detected by positive runtime signals (``ACTION``,
+        ``TABLE``/``multi_index``, ``on_notify``) rather than by a fixed
+        ``/contracts/`` path, so contracts living in any layout
+        (``src/``, ``include/``, a monorepo package, etc.) are modelled.
+        """
         text = source.decode("utf-8", errors="ignore")
         if not any(x in text for x in ("ACTION ", "TABLE ", "multi_index<", "on_notify")):
             return
@@ -2487,8 +2496,14 @@ class CodeParser:
             text + "\n" + header_text,
         ))
         getters.update(re.findall(
-            r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text,
+            r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(",
+            text,
         ))
+        # Table evidence must come from THIS file: a `TABLE` declaration (the
+        # eosio.cdt macro that opens a table struct) or a `multi_index<`
+        # instantiation. Requiring the signal in the same translation unit
+        # avoids turning every ordinary `primary_key`/`by_` method on a
+        # plain C++ object into a phantom table.
         has_tables = "TABLE " in text or "multi_index<" in text
         for node in nodes:
             tags = []
@@ -2498,9 +2513,12 @@ class CodeParser:
                 tags.append("notification")
             if node.name in getters:
                 tags.append("cross_contract_getter")
-            if has_tables and (
-                node.name in ("TABLE", "primary_key") or node.name.startswith("by_")
-            ):
+            # A `TABLE` macro invocation *is* the table struct declaration in
+            # tree-sitter's eyes (the macro hides the struct name), so tag the
+            # `TABLE` node itself — not arbitrary helper methods named
+            # `primary_key`/`by_*`. This keeps table inference anchored to real
+            # Antelope table declarations in this file.
+            if has_tables and node.name == "TABLE":
                 tags.append("table_schema")
             if not tags:
                 continue
@@ -2515,7 +2533,6 @@ class CodeParser:
                     file_path=file_path, line=node.line_start,
                     extra={"antelope": True, "runtime": tags[0]},
                 ))
-
         for match in re.finditer(
             r"eosio::action\s*\([^;]*?[\"']([a-z][a-z0-9_]*)_n[\"']",
             text, re.DOTALL,
@@ -2550,6 +2567,173 @@ class CodeParser:
                 kind="CALLS_ACTION", source=source_qn, target=match.group(1),
                 file_path=file_path, line=line, extra={"antelope": True},
             ))
+
+    # -----------------------------------------------------------------------
+    # Antelope ABI (JSON contract descriptor) parsing
+    # -----------------------------------------------------------------------
+
+    # Antelope (EOSIO) ABI documents carry a ``version`` field (e.g. "eosio::abi/1.0"
+    # or "1.0") and describe the contract surface via ``actions`` and ``tables``
+    # arrays. We only model documents that plausibly describe an Antelope ABI so
+    # that ordinary Ethereum/JSON ABIs and arbitrary JSON files silently pass
+    # through (returning no nodes) instead of crashing the parser.
+    _ANTELOPE_ABI_VERSION_RE = re.compile(r"eosio\s*::\s*abi|antelope", re.IGNORECASE)
+    _ANTELOPE_ABI_OBJECT_KINDS = {
+        "action", "actions", "table", "tables", "struct", "structs",
+        "type", "types", "ricardian_clause", "ricardian_clauses",
+        "error_message", "error_messages", "variant", "variants",
+        "abi_extension", "abi_extensions",
+    }
+
+    def _parse_antelope_abi(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse an Antelope contract ``*.abi`` JSON document.
+
+        The parser is defensive: it validates the ABI object/version shape
+        before touching any field, so a JSON array (e.g. a Solidity/Ethereum
+        ABI) or a non-ABI JSON object reaching ``.get()`` cannot crash
+        parsing.  Documents that do not look like an Antelope ABI — foreign
+        chain ABIs, plain data, malformed JSON — are skipped (empty result)
+        rather than treated as a contract.
+
+        Returns ``(nodes, edges)`` describing the contract's actions and
+        tables as standalone runtime surfaces.
+        """
+        file_path_str = str(path)
+        try:
+            text = source.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            logger.debug("Antelope ABI %s is not valid UTF-8; skipping", file_path_str)
+            return [], []
+        try:
+            data = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            logger.debug("Antelope ABI %s is not valid JSON; skipping", file_path_str)
+            return [], []
+
+        # A real ABI document is always a JSON *object*. JSON arrays (the most
+        # common foreign shape — Ethereum/Solidity ABIs are top-level arrays)
+        # and scalars are explicitly rejected here, before any field access.
+        if not isinstance(data, dict):
+            logger.debug(
+                "Antelope ABI %s is not an object (got %s); skipping",
+                file_path_str, type(data).__name__,
+            )
+            return [], []
+
+        # Validate the version shape. ``version`` may be missing on legacy ABIs,
+        # but when present it must be a string. A non-string version is a
+        # malformed document — skip it rather than guessing.
+        version = data.get("version")
+        if version is not None and not isinstance(version, str):
+            logger.debug(
+                "Antelope ABI %s has non-string version (%r); skipping",
+                file_path_str, version,
+            )
+            return [], []
+
+        # Don't assume the object is an ABi at all. Require at least one ABI
+        # object key (actions/tables/structs/...) or an Antelope version string
+        # before treating this as a contract description. This safely ignores
+        # ordinary JSON objects (config, package manifests, data exports).
+        has_abi_key = any(k in data for k in self._ANTELOPE_ABI_OBJECT_KINDS)
+        version_is_antelope = (
+            isinstance(version, str)
+            and bool(self._ANTELOPE_ABI_VERSION_RE.search(version))
+        )
+        if not has_abi_key and not version_is_antelope:
+            logger.debug(
+                "Antelope ABI %s has no recognizable ABI surface; skipping",
+                file_path_str,
+            )
+            return [], []
+
+        nodes: list[NodeInfo] = []
+        edges: list[EdgeInfo] = []
+
+        # File node for the contract ABI document.
+        nodes.append(NodeInfo(
+            kind="Contract",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=max(text.count("\n"), 1),
+            language="antelope_abi",
+            is_test=False,
+            extra={"antelope_kind": "contract_abi", "antelope_version": version or ""},
+        ))
+
+        actions = data.get("actions")
+        # Accept a list of {"name": ...} dicts, or bare string names.
+        action_names: list[str] = []
+        if isinstance(actions, list):
+            for entry in actions:
+                if isinstance(entry, str):
+                    action_names.append(entry)
+                elif isinstance(entry, dict):
+                    name = entry.get("name")
+                    if isinstance(name, str):
+                        action_names.append(name)
+        for name in action_names:
+            qn = f"{file_path_str}::{name}"
+            nodes.append(NodeInfo(
+                kind="Action",
+                name=name,
+                file_path=file_path_str,
+                line_start=1,
+                line_end=max(text.count("\n"), 1),
+                language="antelope_abi",
+                extra={
+                    "antelope_kind": "action",
+                    "antelope_runtime": ("action",),
+                    "abi_action": True,
+                },
+            ))
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=f"{file_path_str}::antelope::action",
+                target=qn,
+                file_path=file_path_str,
+                line=1,
+                extra={"antelope": True, "runtime": "action"},
+            ))
+
+        tables = data.get("tables")
+        table_names: list[str] = []
+        if isinstance(tables, list):
+            for entry in tables:
+                if isinstance(entry, str):
+                    table_names.append(entry)
+                elif isinstance(entry, dict):
+                    name = entry.get("name")
+                    if isinstance(name, str):
+                        table_names.append(name)
+        for name in table_names:
+            qn = f"{file_path_str}::{name}"
+            nodes.append(NodeInfo(
+                kind="Table",
+                name=name,
+                file_path=file_path_str,
+                line_start=1,
+                line_end=max(text.count("\n"), 1),
+                language="antelope_abi",
+                extra={
+                    "antelope_kind": "table_schema",
+                    "antelope_runtime": ("table_schema",),
+                    "abi_table": True,
+                },
+            ))
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=f"{file_path_str}::antelope::table_schema",
+                target=qn,
+                file_path=file_path_str,
+                line=1,
+                extra={"antelope": True, "runtime": "table_schema"},
+            ))
+
+        return nodes, edges
 
     def _parse_vue(
         self, path: Path, source: bytes,

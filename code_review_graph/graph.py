@@ -1630,7 +1630,7 @@ def _sanitize_name(s: str, max_len: int = 256) -> str:
 
 
 def node_to_dict(n: GraphNode) -> dict:
-    return {
+    d = {
         "id": n.id, "kind": n.kind, "name": _sanitize_name(n.name),
         "qualified_name": _sanitize_name(n.qualified_name), "file_path": n.file_path,
         "line_start": n.line_start, "line_end": n.line_end,
@@ -1638,13 +1638,35 @@ def node_to_dict(n: GraphNode) -> dict:
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
     }
+    # Whitelist a small, visualization-relevant subset of node extra metadata.
+    # We deliberately do NOT dump every extra field: extras can carry large or
+    # internal payloads (serialized signatures, resolver hints) that bloat the
+    # exported graph and leak implementation detail into the visualization.
+    _NODE_EXTRA_WHITELIST = (
+        "antelope_kind", "antelope_runtime", "antelope_version",
+        "abi_action", "abi_table", "notebook_format", "message_type",
+    )
+    extra = n.extra if isinstance(n.extra, dict) else {}
+    for key in _NODE_EXTRA_WHITELIST:
+        if key in extra:
+            d[key] = extra[key]
+    return d
 
 
 def edge_to_dict(e: GraphEdge) -> dict:
-    return {
+    d = {
         "id": e.id, "kind": e.kind,
         "source": _sanitize_name(e.source_qualified),
         "target": _sanitize_name(e.target_qualified),
         "file_path": e.file_path, "line": e.line,
         "confidence": e.confidence, "confidence_tier": e.confidence_tier,
     }
+    # Whitelist a small subset of edge extra metadata for the visualization.
+    # Only the Antelope/action-submission flag is meaningful to render; all
+    # other extra keys are intentionally excluded.
+    _EDGE_EXTRA_WHITELIST = ("antelope", "runtime")
+    extra = e.extra if isinstance(e.extra, dict) else {}
+    for key in _EDGE_EXTRA_WHITELIST:
+        if key in extra:
+            d[key] = extra[key]
+    return d

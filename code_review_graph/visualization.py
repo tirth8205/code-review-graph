@@ -668,10 +668,14 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,5 -6,5" fill="#3fb950"/></svg> Function</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-7 7,0 0,7 -7,0" fill="#d782ff"/></svg> Action</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M0,-7L7,-2L4,7L-4,7L-7,-2Z" fill="#56d4dd"/></svg> Table</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="6" fill="#7ee787"/></svg> Contract</div>
   </div>
   <h3>Edges</h3>
   <div class="legend-section">
     <button class="legend-item legend-edge" data-edge-kind="CALLS" aria-pressed="true"><span class="legend-line l-calls"></span> Calls</button>
+    <button class="legend-item legend-edge" data-edge-kind="CALLS_ACTION" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #d782ff"></span> Action Call</button>
     <button class="legend-item legend-edge" data-edge-kind="IMPORTS_FROM" aria-pressed="true"><span class="legend-line l-imports"></span> Imports</button>
     <button class="legend-item legend-edge" data-edge-kind="INHERITS" aria-pressed="true"><span class="legend-line l-inherits"></span> Inherits</button>
     <button class="legend-item legend-edge" data-edge-kind="CONTAINS" aria-pressed="true"><span class="legend-line l-contains"></span> Contains</button>
@@ -742,11 +746,11 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
-var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
-var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
-var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
+var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e", Action:"#d782ff", Table:"#56d4dd", Contract:"#7ee787" };
+var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5, Action:7, Table:7, Contract:14 };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79, Action:154, Table:154, Contract:615 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross, Action:d3.symbolStar, Table:d3.symbolWye, Contract:d3.symbolCircle };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", CALLS_ACTION:"#d782ff" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -870,7 +874,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-implements",color:"#f9e2af"},{id:"arrow-tested_by",color:"#f38ba8"},{id:"arrow-depends_on",color:"#fab387"},{id:"arrow-calls_action",color:"#d782ff"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
@@ -897,6 +901,7 @@ var EDGE_CFG = {
   IMPLEMENTS:   { dash:"4,3", width:1.5, opacity:0.65, marker:"url(#arrow-implements)" },
   TESTED_BY:    { dash:"2,4", width:1.5, opacity:0.6, marker:"url(#arrow-tested_by)" },
   DEPENDS_ON:   { dash:"8,4", width:1, opacity:0.6, marker:"url(#arrow-depends_on)" },
+  CALLS_ACTION: { dash:"2,3", width:1.5, opacity:0.65, marker:"url(#arrow-calls_action)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
@@ -1639,18 +1644,21 @@ function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
 
 var KIND_COLOR = {
   Community: "#1f6feb", File: "#58a6ff", Class: "#f0883e",
-  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e"
+  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e",
+  Action: "#d782ff", Table: "#56d4dd", Contract: "#7ee787"
 };
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
   CALLS: "#3fb950", IMPORTS_FROM: "#f0883e",
-  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)"
+  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)",
+  CALLS_ACTION: "#d782ff"
 };
 var EDGE_CFG = {
   CROSS_COMMUNITY: { dash: null, width: 2, opacity: 0.6, marker: "" },
   DEPENDS_ON:      { dash: "6,3", width: 1.5, opacity: 0.5, marker: "" },
   CONTAINS:        { dash: null, width: 1, opacity: 0.08, marker: "" },
   CALLS:           { dash: null, width: 1.5, opacity: 0.7, marker: "url(#arrow-calls)" },
+  CALLS_ACTION:    { dash: "2,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-calls_action)" },
   IMPORTS_FROM:    { dash: "6,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-imports)" },
   INHERITS:        { dash: "3,4", width: 2, opacity: 0.7, marker: "url(#arrow-inherits)" },
 };
@@ -1792,7 +1800,7 @@ var defs = svg.append("defs");
 var glow = defs.append("filter").attr("id","glow").attr("x","-50%").attr("y","-50%").attr("width","200%").attr("height","200%");
 glow.append("feGaussianBlur").attr("stdDeviation","3").attr("result","blur");
 glow.append("feComposite").attr("in","SourceGraphic").attr("in2","blur").attr("operator","over");
-[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"}].forEach(function(mk) {
+[{id:"arrow-calls",color:"#3fb950"},{id:"arrow-imports",color:"#f0883e"},{id:"arrow-inherits",color:"#d2a8ff"},{id:"arrow-calls_action",color:"#d782ff"}].forEach(function(mk) {
   defs.append("marker").attr("id", mk.id)
     .attr("viewBox","0 -5 10 10").attr("refX",28).attr("refY",0)
     .attr("markerWidth",8).attr("markerHeight",8).attr("orient","auto")
