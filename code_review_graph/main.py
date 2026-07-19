@@ -3,7 +3,8 @@
 Run as: code-review-graph serve
 Communicates via stdio (standard MCP transport), or use
 ``code-review-graph serve --http`` for Streamable HTTP on localhost (port 5555
-by default).
+by default). The HTTP transport enables FastMCP Host/Origin validation so the
+loopback endpoint cannot be driven cross-origin (e.g. via DNS rebinding).
 """
 
 from __future__ import annotations
@@ -1133,7 +1134,17 @@ def main(
         elif transport == "streamable-http":
             if host is None or port is None:
                 raise ValueError("streamable-http transport requires host and port")
-            mcp.run(transport="streamable-http", host=host, port=port)
+            # Enable FastMCP's Host/Origin validation. Without it the local HTTP
+            # MCP endpoint accepts requests from any Origin, so a web page the user
+            # visits could reach 127.0.0.1:<port> via DNS rebinding and drive the
+            # tools (which read the user's code). "auto" protects loopback-bound
+            # servers while leaving non-browser clients (no Origin header) working.
+            mcp.run(
+                transport="streamable-http",
+                host=host,
+                port=port,
+                host_origin_protection="auto",
+            )
         else:
             raise ValueError(f"unsupported transport: {transport!r}")
     finally:

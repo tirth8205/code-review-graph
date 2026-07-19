@@ -131,6 +131,9 @@ class TestServeMainTransport:
                 "transport": "streamable-http",
                 "host": "127.0.0.1",
                 "port": 5555,
+                # Host/Origin validation must be enabled so the loopback HTTP MCP
+                # endpoint cannot be driven cross-origin (e.g. via DNS rebinding).
+                "host_origin_protection": "auto",
             }
         ]
 
