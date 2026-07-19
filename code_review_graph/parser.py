@@ -5422,6 +5422,18 @@ class CodeParser:
             ):
                 continue
 
+            # --- JS/TS member-assigned functions (app.handle = function () {}) ---
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "expression_statement"
+                and self._extract_js_member_functions(
+                    child, source, language, file_path, nodes, edges,
+                    enclosing_class, enclosing_func,
+                    import_map, defined_names, _depth,
+                )
+            ):
+                continue
+
             # --- Functions ---
             if node_type in func_types and self._extract_functions(
                 child, source, language, file_path, nodes, edges,
@@ -7719,6 +7731,107 @@ class CodeParser:
             func_node, source, language, file_path, nodes, edges,
             enclosing_class=enclosing_class,
             enclosing_func=prop_name,
+            import_map=import_map,
+            defined_names=defined_names,
+            _depth=_depth + 1,
+        )
+        return True
+
+    def _extract_js_member_functions(
+        self,
+        child,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle JS/TS member-assigned functions.
+
+        Patterns handled (LHS is a ``member_expression``, RHS is a function):
+          app.handle = function handle(req, res) {}
+          Router.prototype.dispatch = (req) => {}
+          exports.render = function () {}
+
+        These prototype- and module-augmentation patterns carry the entire
+        public API of Express, Koa and many older JS modules, but were
+        previously invisible to the graph: only ``const x = fn``
+        (:func:`_extract_js_var_functions`) and class fields
+        (:func:`_extract_js_field_function`) produced Function nodes. The node
+        is qualified by its full member path (``file::app.handle``), matching
+        the ``file::Class.method`` shape used elsewhere.
+
+        Returns True if a function was extracted, so the caller can skip
+        generic recursion.
+        """
+        # ``child`` is the expression_statement wrapping the assignment.
+        assign = None
+        if child.type == "assignment_expression":
+            assign = child
+        else:
+            for sub in child.children:
+                if sub.type == "assignment_expression":
+                    assign = sub
+                    break
+        if assign is None:
+            return False
+
+        left = assign.child_by_field_name("left")
+        right = assign.child_by_field_name("right")
+        if left is None or right is None:
+            return False
+        if left.type != "member_expression":
+            return False
+        if right.type not in self._JS_FUNC_VALUE_TYPES:
+            return False
+
+        member_name = left.text.decode("utf-8", errors="replace")
+        # Skip computed access (``obj[key] = fn``) and any multi-line/odd
+        # member paths that would produce a malformed qualified name.
+        if not member_name or "[" in member_name or "\n" in member_name:
+            return False
+
+        is_test = _is_test_function(member_name, file_path)
+        kind = "Test" if is_test else "Function"
+        qualified = self._qualify(member_name, file_path, enclosing_class)
+        params = self._get_params(right, language, source)
+        ret_type = self._get_return_type(right, language, source)
+
+        nodes.append(NodeInfo(
+            kind=kind,
+            name=member_name,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            params=params,
+            return_type=ret_type,
+            is_test=is_test,
+        ))
+        container = (
+            self._qualify(enclosing_class, file_path, None)
+            if enclosing_class else file_path
+        )
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=container,
+            target=qualified,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+
+        # Recurse into the function body for calls, attributing them to the
+        # member function.
+        self._extract_from_tree(
+            right, source, language, file_path, nodes, edges,
+            enclosing_class=enclosing_class,
+            enclosing_func=member_name,
             import_map=import_map,
             defined_names=defined_names,
             _depth=_depth + 1,
