@@ -1361,6 +1361,261 @@ class Plain:
                 )
 
 
+class TestDeadGuardHelpers:
+    """Direct unit tests for dead-guard helper functions.
+
+    The bot flagged ``_node_is_in_child``,
+    ``_is_statically_false_condition`` and ``_is_in_static_dead_guard``
+    as untested.  The behaviour-level tests above exercise them through
+    ``parse_file()``, but these tests call them directly with
+    tree-sitter nodes so every branch is provably hit.
+    """
+
+    @staticmethod
+    def _parse(lang, source):
+        """Parse *source* and return (root, source_bytes)."""
+        import tree_sitter_language_pack as tsp
+
+        tree = tsp.get_parser(lang).parse(source)
+        return tree.root_node, source
+
+    @staticmethod
+    def _find(node, node_type):
+        """Return the first descendant of *node* with the given type."""
+        if node.type == node_type:
+            return node
+        for child in node.children:
+            found = TestDeadGuardHelpers._find(child, node_type)
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _find_call(node, name):
+        """Return the first ``call_expression`` whose function is *name*."""
+        if node.type == "call_expression":
+            func = node.child_by_field_name("function")
+            if func is not None and func.text == name:
+                return node
+        for child in node.children:
+            found = TestDeadGuardHelpers._find_call(child, name)
+            if found is not None:
+                return found
+        return None
+
+    # --- _node_is_in_child ---
+
+    def test_node_is_in_child_direct(self):
+        """A call directly inside a block is a descendant."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        block = self._find(root, "block")
+        call = self._find(root, "call_expression")
+        assert _node_is_in_child(call, block) is True
+
+    def test_node_is_in_child_nested(self):
+        """A call 3 levels deep is still a descendant."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { if true { g() } }")
+        outer_block = self._find(root, "block")
+        call = self._find_call(root, b"g")
+        assert _node_is_in_child(call, outer_block) is True
+
+    def test_node_is_in_child_sibling(self):
+        """A call in the else branch is NOT a descendant of the
+        consequence block."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { if false { a() } else { b() } }")
+        if_stmt = self._find(root, "if_statement")
+        consequence = if_stmt.child_by_field_name("consequence")
+        call_b = self._find_call(root, b"b")
+        assert _node_is_in_child(call_b, consequence) is False
+
+    def test_node_is_in_child_self(self):
+        """A node is a descendant of itself."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        block = self._find(root, "block")
+        assert _node_is_in_child(block, block) is True
+
+    def test_node_is_in_child_root(self):
+        """A module-level call is NOT inside an if consequence."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }\nfunc h() { if false { i() } }")
+        if_stmt = self._find(root, "if_statement")
+        assert if_stmt is not None, "if_statement not found in parse tree"
+        consequence = if_stmt.child_by_field_name("consequence")
+        assert consequence is not None, "consequence field not found"
+        call_g = self._find_call(root, b"g")
+        assert _node_is_in_child(call_g, consequence) is False
+
+    # --- _is_statically_false_condition ---
+
+    def test_false_literal(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if false { g() } }")
+        cond = self._find(root, "false")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_number_zero(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if (0) { g(); }")
+        cond = self._find(root, "number")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_parenthesized_false(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if ((false)) { g(); }")
+        cond = self._find(root, "parenthesized_expression")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_true_literal(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if true { g() } }")
+        cond = self._find(root, "true")
+        assert _is_statically_false_condition(cond) is False
+
+    def test_number_one(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if (1) { g(); }")
+        cond = self._find(root, "number")
+        assert _is_statically_false_condition(cond) is False
+
+    def test_variable_condition(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if x { g() } }")
+        cond = self._find(root, "identifier")
+        assert _is_statically_false_condition(cond) is False
+
+    # --- _is_in_static_dead_guard ---
+
+    def test_go_if_false_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { if false { g() } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_go_else_branch_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { if false { a() } else { b() } }")
+        call_b = self._find_call(root, b"b")
+        assert _is_in_static_dead_guard(call_b) is False
+
+    def test_ts_if_false_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (false) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_ts_if_zero_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (0) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_ts_if_true_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (true) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    def test_c_if0_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("c", b"void f() {\n#if 0\ng();\n#endif\n}\n")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_c_else_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse(
+            "c", b"void f() {\n#if 0\na();\n#else\nb();\n#endif\n}\n"
+        )
+        call_b = self._find_call(root, b"b")
+        assert _is_in_static_dead_guard(call_b) is False
+
+    def test_c_if1_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("c", b"void f() {\n#if 1\ng();\n#endif\n}\n")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    def test_no_guard_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    # --- _extract_calls integration ---
+
+    def test_extract_calls_skips_dead_go(self):
+        """_extract_calls returns True (skip) for a dead Go call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_false_call"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_ts(self):
+        """_extract_calls returns True (skip) for a dead TS call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.ts",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_false_call"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_c(self):
+        """_extract_calls returns True (skip) for a dead C call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.c",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_in_if0"
+        ]
+        assert dead == []
+
+    def test_extract_calls_keeps_live(self):
+        """_extract_calls returns False (keep) for a live call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        live = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "live_helper"
+        ]
+        assert len(live) == 1
+
+
 class TestValueReferences:
     """Tests for REFERENCES edge extraction from function-as-value patterns."""
 
