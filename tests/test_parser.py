@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1173,6 +1174,191 @@ class Plain:
         test_names = {n.name for n in test_nodes}
         assert "test_something" in test_names
         assert "helper" not in test_names
+
+    def test_c_dead_guard_if0_omits_dead_edges(self):
+        """CALLS edges inside ``#if 0`` / ``#elif 0`` blocks in C are
+        never emitted, including when the block wraps a whole function.
+        Calls in the ``#else`` / ``#elif`` branches of ``#if 0`` are
+        live and must be kept. Python's ast-based detector cannot reach
+        C, so this is handled by the tree-sitter dead-guard walk."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.c",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_in_if0: NOT emitted (#if 0 consequence)
+        assert hits("dead_in_if0") == []
+        # live_in_else: emitted (#else of #if 0 is live)
+        assert len(hits("live_in_else")) == 1
+        # dead_in_elifblock: NOT emitted (#if 0 consequence, elif form)
+        assert hits("dead_in_elifblock") == []
+        # live_in_elif: emitted (#elif of #if 0 is live). Regression
+        # guard: a detector excluding only preproc_else marks it dead.
+        assert len(hits("live_in_elif")) == 1
+        # dead_in_wrapped: NOT emitted. The call sits in a function that
+        # is itself inside #if 0 -- the scope-agnostic preprocessor walk
+        # must not stop at the function_definition.
+        assert hits("dead_in_wrapped") == []
+        # live_in_if1: emitted (#if 1 branch is taken)
+        assert len(hits("live_in_if1")) == 1
+        # dead_in_elif0: NOT emitted (#elif 0 consequence is dead)
+        assert hits("dead_in_elif0") == []
+        # Total: exactly 4 live edges
+        assert len(calls) == 4
+
+    def test_go_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if false`` blocks in Go are never
+        emitted. Go's ``if_statement`` and ``false`` literal are
+        detected by the tree-sitter dead-guard walk. Else branches and
+        ``if true`` stay live."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_false_call: NOT emitted (if false consequence in caller)
+        assert hits("dead_false_call") == []
+        # dead_in_consequence: NOT emitted (if false consequence)
+        assert hits("dead_in_consequence") == []
+        # live_in_else: emitted (else branch of if false)
+        assert len(hits("live_in_else")) == 1
+        # live_final_else: emitted (inside else branch, nested if)
+        assert len(hits("live_final_else")) == 1
+        # live_in_wrapped: emitted (func def is at module scope, not
+        # inside if false -- Go forbids func decl in if blocks)
+        assert len(hits("live_in_wrapped")) == 1
+        # some_condition: emitted (called in else branch, nested if)
+        assert len(hits("some_condition")) == 1
+        # live_in_if_true: emitted (if true is NOT a dead guard)
+        assert len(hits("live_in_if_true")) == 1
+        # Total: exactly 6 live edges
+        assert len(calls) == 6
+
+    def test_ts_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if (false)`` / ``if (0)`` blocks in
+        TypeScript are never emitted. The condition is wrapped in a
+        ``parenthesized_expression`` that must be unwrapped, and the
+        ``0`` literal uses node type ``number``. Else branches and
+        ``if (true)`` are live."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.ts",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_false_call: NOT emitted (if (false) consequence)
+        assert hits("dead_false_call") == []
+        # dead_zero_call: NOT emitted (if (0) consequence)
+        assert hits("dead_zero_call") == []
+        # dead_in_consequence: NOT emitted (if (false) consequence)
+        assert hits("dead_in_consequence") == []
+        # live_in_else: emitted (else branch of if (false))
+        assert len(hits("live_in_else")) == 1
+        # live_final_else: emitted (else-if chain, live branch)
+        assert len(hits("live_final_else")) == 1
+        # live_in_if_true: emitted (if (true) is NOT a dead guard)
+        assert len(hits("live_in_if_true")) == 1
+        # some_condition: emitted (called in else-if condition)
+        assert len(hits("some_condition")) == 1
+        # Total: exactly 5 live edges
+        assert len(calls) == 5
+
+    def test_dead_guard_covers_declarations_nested_in_dead_branch(self):
+        """A function or class declared inside a dead branch is never
+        evaluated, so calls in its body are dead. This matches what the
+        Python ast path does for a ``def``/``class`` under ``if False:``;
+        the walk must not stop at a declaration boundary. JS/TS class
+        declarations are not hoisted, so no reachable symbol is lost."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "nested.ts"
+            src.write_text(
+                "function caller() {\n"
+                "  if (false) {\n"
+                "    function inner_fn() { dead_in_fn(); }\n"
+                "    class Inner { method() { dead_in_class(); } }\n"
+                "  }\n"
+                "  live_after();\n"
+                "}\n"
+                "function sibling() { live_sibling(); }\n",
+                encoding="utf-8",
+            )
+            _nodes, edges = self.parser.parse_file(src)
+        targets = {
+            e.target.split("::")[-1]
+            for e in edges if e.kind == "CALLS"
+        }
+        # Dead: declared inside the never-evaluated branch.
+        assert "dead_in_fn" not in targets
+        assert "dead_in_class" not in targets
+        # Live: the guard must not leak past the branch it belongs to.
+        assert "live_after" in targets
+        assert "live_sibling" in targets
+
+    def test_dead_guard_calls_absent_from_graph_store(self):
+        """End-to-end: build a real graph from each non-Python fixture
+        and confirm the consumer-facing store never reports a
+        dead-branch call target. Mirrors the Python store-level check in
+        test_python_reachability.py for C/Go/TS."""
+        cases = [
+            (
+                "sample_dead_guard.c",
+                {"dead_in_if0", "dead_in_wrapped", "dead_in_elif0",
+                 "dead_in_elifblock"},
+                {"live_helper", "live_in_else", "live_in_elif",
+                 "live_in_if1"},
+            ),
+            (
+                "sample_dead_guard.go",
+                {"dead_false_call", "dead_in_consequence"},
+                {"live_helper", "live_in_else", "some_condition"},
+            ),
+            (
+                "sample_dead_guard.ts",
+                {"dead_false_call", "dead_zero_call", "dead_in_consequence"},
+                {"live_helper", "live_in_else", "live_in_if_true"},
+            ),
+        ]
+        for fixture, dead, live in cases:
+            nodes, edges = self.parser.parse_file(FIXTURES / fixture)
+            with tempfile.NamedTemporaryFile(
+                suffix=".db", delete=False,
+            ) as handle:
+                db_path = handle.name
+            try:
+                with GraphStore(db_path) as store:
+                    for node in nodes:
+                        store.upsert_node(node)
+                    for edge in edges:
+                        store.upsert_edge(edge)
+                    store.commit()
+                    targets = {
+                        t.split("::")[-1]
+                        for t in store.get_all_call_targets()
+                    }
+            finally:
+                Path(db_path).unlink(missing_ok=True)
+            for name in dead:
+                assert name not in targets, (
+                    f"{fixture}: dead target {name} leaked into the store"
+                )
+            for name in live:
+                assert name in targets, (
+                    f"{fixture}: live target {name} missing from the store"
+                )
 
 
 class TestValueReferences:
