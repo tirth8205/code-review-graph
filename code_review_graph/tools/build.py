@@ -51,6 +51,9 @@ def _run_postprocess(
     changed_files: list[str] | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    repo_root: str | None = None,
+    entry_point_qns: list[str] | None = None,
+    communities_were_affected: bool = False,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
 
@@ -147,14 +150,24 @@ def _run_postprocess(
         return warnings
 
     # -- Expensive: flows + communities (only for "full") --
-    use_incremental = not full_rebuild and bool(changed_files)
+    # Incremental mode also triggers when pre-replacement capture preserved
+    # entry-point QNs even if the relative changed_files list alone would
+    # miss absolute graph paths (#569).
+    use_incremental = not full_rebuild and (
+        bool(changed_files) or bool(entry_point_qns) or communities_were_affected
+    )
 
     stage_started = time.perf_counter()
     try:
         if use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
-            count = incremental_trace_flows(store, changed_files)
+            count = incremental_trace_flows(
+                store,
+                changed_files or [],
+                repo_root=repo_root,
+                entry_point_qns=entry_point_qns,
+            )
         else:
             from code_review_graph.flows import store_flows as _store_flows
             from code_review_graph.flows import trace_flows as _trace_flows
@@ -177,7 +190,12 @@ def _run_postprocess(
                 incremental_detect_communities,
             )
 
-            count = incremental_detect_communities(store, changed_files)
+            count = incremental_detect_communities(
+                store,
+                changed_files or [],
+                repo_root=repo_root,
+                force=communities_were_affected,
+            )
         else:
             from code_review_graph.communities import (
                 detect_communities as _detect_communities,
@@ -526,8 +544,18 @@ def build_or_update_graph(
                 **result,
             }
 
-        # Pass changed_files for incremental flow/community detection
-        changed = result.get("changed_files") if not full_rebuild else None
+        # Pass changed_files + pre-replacement flow/community capture for
+        # incremental postprocess (#569).
+        changed = None
+        entry_qns = None
+        communities_affected = False
+        if not full_rebuild:
+            changed = list(result.get("changed_files") or [])
+            changed.extend(result.get("dependent_files") or [])
+            entry_qns = list(result.get("flow_entry_point_qns") or [])
+            communities_affected = bool(
+                result.get("communities_were_affected")
+            )
         warnings = _run_postprocess(
             store,
             build_result,
@@ -536,6 +564,9 @@ def build_or_update_graph(
             changed_files=changed,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
+            repo_root=str(root),
+            entry_point_qns=entry_qns,
+            communities_were_affected=communities_affected,
         )
         if warnings:
             build_result["warnings"] = warnings

@@ -1071,6 +1071,33 @@ def incremental_update(
     if removed_any:
         store.commit()
 
+    # Capture flow/community memberships BEFORE node replacement. After
+    # remove_file_data() the old node IDs are gone, so postprocess can no
+    # longer discover affected flows via membership JOINs (#569).
+    from .communities import (
+        capture_community_assignments,
+        remap_community_assignments,
+    )
+    from .flows import (
+        clear_flows_for_files,
+        expand_changed_file_paths,
+        purge_orphan_flow_data,
+    )
+
+    replacement_paths: list[str] = []
+    for rel_path in to_parse:
+        abs_path = (repo_root / rel_path).resolve()
+        replacement_paths.append(str(abs_path))
+        replacement_paths.append(rel_path.replace("\\", "/"))
+    replacement_paths = expand_changed_file_paths(
+        store, replacement_paths, repo_root=repo_root,
+    )
+    flow_entry_point_qns = sorted(
+        clear_flows_for_files(store, replacement_paths)
+    )
+    community_by_qn = capture_community_assignments(store, replacement_paths)
+    communities_were_affected = bool(community_by_qn)
+
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 
     if use_serial or len(to_parse) < 8:
@@ -1110,6 +1137,11 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
+    # Remap community IDs onto the replacement nodes and drop any leftover
+    # flow memberships that still pointed at deleted node IDs.
+    remap_community_assignments(store, community_by_qn)
+    purge_orphan_flow_data(store)
+
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "incremental")
     _store_vcs_metadata(repo_root, store)
@@ -1138,6 +1170,8 @@ def incremental_update(
         "total_edges": total_edges,
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
+        "flow_entry_point_qns": flow_entry_point_qns,
+        "communities_were_affected": communities_were_affected,
         "errors": errors,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,

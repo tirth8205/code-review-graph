@@ -10,6 +10,7 @@ import logging
 import random
 import re
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any
 
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
@@ -846,10 +847,72 @@ def detect_communities(
     return results
 
 
+def capture_community_assignments(
+    store: GraphStore,
+    file_paths: list[str],
+) -> dict[str, int]:
+    """Capture ``qualified_name -> community_id`` for nodes in *file_paths*.
+
+    Must run **before** node replacement so assignments can be remapped onto
+    the new node rows after IDs churn (#569).
+    """
+    if not file_paths:
+        return {}
+
+    conn = store._conn
+    mapping: dict[str, int] = {}
+    for i in range(0, len(file_paths), _SQL_BATCH):
+        batch = file_paths[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT qualified_name, community_id FROM nodes "  # nosec B608
+            f"WHERE community_id IS NOT NULL AND file_path IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for qn, cid in rows:
+            if qn and cid is not None:
+                mapping[qn] = int(cid)
+    return mapping
+
+
+def remap_community_assignments(
+    store: GraphStore,
+    community_by_qn: dict[str, int],
+) -> int:
+    """Re-apply captured community IDs onto current nodes by qualified name.
+
+    Returns the number of nodes updated.
+    """
+    if not community_by_qn:
+        return 0
+
+    conn = store._conn
+    updated = 0
+    items = list(community_by_qn.items())
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for qn, cid in items:
+            cur = conn.execute(
+                "UPDATE nodes SET community_id = ? WHERE qualified_name = ?",
+                (cid, qn),
+            )
+            if cur.rowcount:
+                updated += cur.rowcount
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return updated
+
+
 def incremental_detect_communities(
     store: GraphStore,
     changed_files: list[str],
     min_size: int = 2,
+    repo_root: str | Path | None = None,
+    force: bool = False,
 ) -> int:
     """Re-detect communities only if changed files affect existing communities.
 
@@ -861,19 +924,26 @@ def incremental_detect_communities(
         store: The GraphStore instance.
         changed_files: List of file paths that have changed.
         min_size: Minimum number of nodes for a community to be included.
+        repo_root: Optional repo root used to expand relative/absolute paths.
+        force: When True, always re-run detection (used after pre-replacement
+            capture showed communities were affected even if path matching
+            would otherwise miss them).
 
     Returns:
         Number of communities detected, or 0 if skipped.
     """
-    if not changed_files:
+    if not changed_files and not force:
         return 0
 
+    from .flows import expand_changed_file_paths
+
+    expanded = expand_changed_file_paths(store, changed_files, repo_root=repo_root)
     conn = store._conn
 
     # Check if any communities are affected (batch to stay under SQLite limit)
     affected_count = 0
-    for i in range(0, len(changed_files), _SQL_BATCH):
-        batch = changed_files[i:i + _SQL_BATCH]
+    for i in range(0, len(expanded), _SQL_BATCH):
+        batch = expanded[i:i + _SQL_BATCH]
         placeholders = ",".join("?" * len(batch))
         row = conn.execute(
             f"SELECT COUNT(DISTINCT community_id) FROM nodes "  # nosec B608
@@ -882,9 +952,8 @@ def incremental_detect_communities(
         ).fetchone()
         if row:
             affected_count += row[0]
-    affected = (affected_count,) if affected_count else None
 
-    if not affected or affected[0] == 0:
+    if not force and affected_count == 0:
         return 0  # No communities affected, skip
 
     # Re-run full community detection (correct and fast enough)
