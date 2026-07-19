@@ -320,6 +320,8 @@ code-review-graph status                       # Graph statistics
 code-review-graph watch                        # Auto-update on file changes
 code-review-graph visualize                    # Generate interactive HTML graph
 code-review-graph visualize --format graphml   # Export GraphML
+code-review-graph visualize --format 3d        # Plasma/fusion 3D WebGL viewer
+code-review-graph visualize --format 3d --serve  # Serve 3D viewer on localhost:8766
 code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
 # Analysis

@@ -33,9 +33,14 @@ _FRAMEWORK_BASE_CLASSES = frozenset({
 })
 
 # Class name suffixes that indicate CDK/IaC constructs.
-# These are instantiated by framework wiring, not direct CALLS edges.
 # Used as fallback when INHERITS edges to external base classes are absent.
 _CDK_CLASS_SUFFIXES = ("Stack", "Construct", "Pipeline", "Resources", "Layer")
+
+# Matches the handler name of an [[eosio::on_notify("contract::action")]] macro,
+# used to detect cross-contract notification actions in legacy source scans.
+_ON_NOTIFY_RE = (
+    r"\[\[\s*eosio::on_notify[^\]]*\]][^;{()]*?\b([A-Za-z_]\w*)\s*\("
+)
 
 # Patterns for mock/stub variables in test files that should not be flagged dead.
 _MOCK_NAME_RE = re.compile(
@@ -64,7 +69,7 @@ def _antelope_runtime_symbols(file_path: str) -> tuple[frozenset[str], bool]:
         except OSError:
             pass
     names = set(re.findall(r"\bACTION\s+(?:[A-Za-z_]\w*::)?([A-Za-z_]\w*)\s*\(", text))
-    names.update(re.findall(r"\[\[\s*eosio::on_notify[^\\]]*\]][^;{()]*?\b([A-Za-z_]\w*)\s*\(", text, re.DOTALL))
+    names.update(re.findall(_ON_NOTIFY_RE, text, re.DOTALL))
     names.update(re.findall(r"\bstatic\s+[^;{()]+?\b((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
     names.update(re.findall(r"\b[A-Za-z_]\w*::((?:get|has|is)_[A-Za-z0-9_]*)\s*\(", text))
     return frozenset(names), ("TABLE " in text or "multi_index<" in text)

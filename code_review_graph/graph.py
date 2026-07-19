@@ -624,14 +624,15 @@ class GraphStore:
                 )
             else:
                 select_sql = (
-                    "SELECT id, source_qualified, target_qualified, file_path "
+                    "SELECT id, source_qualified, target_qualified, file_path, "
+                    "kind "
                     "FROM edges WHERE kind = ? "
                     "AND target_qualified NOT LIKE '%::%'"
                 )
             update_sql = "UPDATE edges SET target_qualified = ? WHERE id = ?"
         elif endpoint == "source_qualified":
             select_sql = (
-                "SELECT id, source_qualified, target_qualified, file_path "
+                "SELECT id, source_qualified, target_qualified, file_path, kind "
                 "FROM edges WHERE kind = ? "
                 "AND source_qualified NOT LIKE '%::%'"
             )
@@ -1642,15 +1643,22 @@ def node_to_dict(n: GraphNode) -> dict:
     # We deliberately do NOT dump every extra field: extras can carry large or
     # internal payloads (serialized signatures, resolver hints) that bloat the
     # exported graph and leak implementation detail into the visualization.
-    _NODE_EXTRA_WHITELIST = (
-        "antelope_kind", "antelope_runtime", "antelope_version",
-        "abi_action", "abi_table", "notebook_format", "message_type",
-    )
     extra = n.extra if isinstance(n.extra, dict) else {}
     for key in _NODE_EXTRA_WHITELIST:
         if key in extra:
             d[key] = extra[key]
     return d
+
+
+# Visualization-relevant subset of node/edge extra metadata. We deliberately
+# do NOT dump every extra field: extras can carry large or internal payloads
+# (serialized signatures, resolver hints) that bloat the exported graph and
+# leak implementation detail into the visualization.
+_NODE_EXTRA_WHITELIST = (
+    "antelope_kind", "antelope_runtime", "antelope_version",
+    "abi_action", "abi_table", "notebook_format", "message_type",
+)
+_EDGE_EXTRA_WHITELIST = ("antelope", "runtime")
 
 
 def edge_to_dict(e: GraphEdge) -> dict:
@@ -1664,7 +1672,6 @@ def edge_to_dict(e: GraphEdge) -> dict:
     # Whitelist a small subset of edge extra metadata for the visualization.
     # Only the Antelope/action-submission flag is meaningful to render; all
     # other extra keys are intentionally excluded.
-    _EDGE_EXTRA_WHITELIST = ("antelope", "runtime")
     extra = e.extra if isinstance(e.extra, dict) else {}
     for key in _EDGE_EXTRA_WHITELIST:
         if key in extra:
