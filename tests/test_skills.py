@@ -1131,6 +1131,70 @@ class TestInstallPlatformConfigs:
         assert "type" not in entry
         assert entry["args"][-1] == "serve"
 
+    def test_install_mimo_config_preserves_existing_servers(self, tmp_path):
+        """MiMo uses a local command array under its top-level ``mcp`` key."""
+        mimo_config = tmp_path / ".mimocode" / "mimocode.json"
+        mimo_config.parent.mkdir()
+        mimo_config.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+                    "mcp": {
+                        "other-server": {
+                            "type": "local",
+                            "command": ["other-server", "serve"],
+                        }
+                    },
+                    "theme": "dark",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "mimo": {
+                    **PLATFORMS["mimo"],
+                    "config_path": lambda root: mimo_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="mimo")
+
+        assert configured == ["MiMo Code"]
+        data = json.loads(mimo_config.read_text(encoding="utf-8"))
+        assert data["$schema"] == "https://mimo.xiaomi.com/mimocode/config.json"
+        assert data["theme"] == "dark"
+        assert data["mcp"]["other-server"]["command"] == ["other-server", "serve"]
+        command, args = _detect_serve_command()
+        assert data["mcp"]["code-review-graph"] == {
+            "type": "local",
+            "command": [command, *args, "--repo", str(tmp_path)],
+        }
+
+    def test_install_mimo_is_idempotent_and_dry_run_does_not_write(self, tmp_path):
+        mimo_config = tmp_path / ".mimocode" / "mimocode.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "mimo": {
+                    **PLATFORMS["mimo"],
+                    "config_path": lambda root: mimo_config,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            configured = install_platform_configs(tmp_path, target="mimo", dry_run=True)
+            assert configured == ["MiMo Code"]
+            assert not mimo_config.exists()
+
+            install_platform_configs(tmp_path, target="mimo")
+            first = mimo_config.read_text(encoding="utf-8")
+            install_platform_configs(tmp_path, target="mimo")
+
+        assert mimo_config.read_text(encoding="utf-8") == first
+
     def test_install_qwen_config(self, tmp_path):
         """Qwen Code uses ~/.qwen/settings.json with mcpServers (see #83)."""
         qwen_config = tmp_path / ".qwen" / "settings.json"

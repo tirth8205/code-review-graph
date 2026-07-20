@@ -98,6 +98,15 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": False,
     },
+    "mimo": {
+        "name": "MiMo Code",
+        "config_path": lambda root: root / ".mimocode" / "mimocode.json",
+        "key": "mcp",
+        "detect": lambda: bool(shutil.which("mimo"))
+        or (Path.home() / ".config" / "mimocode").exists(),
+        "format": "object",
+        "needs_type": False,
+    },
     "antigravity": {
         "name": "Antigravity",
         "config_path": lambda root: Path.home() / ".gemini" / "antigravity" / "mcp_config.json",
@@ -251,11 +260,11 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
-    if key == "opencode":
-        opencode_command = [command, *args]
+    if key in ("opencode", "mimo"):
+        local_command = [command, *args]
         if repo_root is not None:
-            opencode_command.extend(("--repo", str(repo_root)))
-        return {"type": "local", "command": opencode_command}
+            local_command.extend(("--repo", str(repo_root)))
+        return {"type": "local", "command": local_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
