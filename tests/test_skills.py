@@ -545,6 +545,27 @@ class TestGenerateCodexHooksConfig:
         assert "code-review-graph update --skip-flows" in post_cmd
         assert "code-review-graph status" in session_cmd
 
+    def test_command_windows_present_for_both_hooks(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        post = config["hooks"]["PostToolUse"][0]["hooks"][0]
+        session = config["hooks"]["SessionStart"][0]["hooks"][0]
+        assert "commandWindows" in post
+        assert "commandWindows" in session
+
+    def test_command_windows_uses_powershell(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        post = config["hooks"]["PostToolUse"][0]["hooks"][0]["commandWindows"]
+        session = config["hooks"]["SessionStart"][0]["hooks"][0]["commandWindows"]
+        prefix = "powershell.exe -NoProfile -NonInteractive -Command "
+        assert post.startswith(prefix)
+        assert "code-review-graph update --skip-flows" in post
+        assert "code-review-graph status" in session
+        # stdin must be drained and the hook must always exit 0
+        assert "[Console]::In.ReadToEnd() | Out-Null" in post
+        assert "[Console]::In.ReadToEnd() | Out-Null" in session
+        assert post.rstrip().endswith("exit 0")
+        assert session.rstrip().endswith("exit 0")
+
 
 class TestInstallCodexHooks:
     def test_creates_hooks_file(self, tmp_path, monkeypatch):

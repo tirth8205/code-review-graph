@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- Fixed Codex hooks on Windows: `code-review-graph install --platform codex` now
+  emits a `commandWindows` override (PowerShell) so hooks no longer fail with
+  `hook exited with code 1` (fixes #620).
+
 ## [2.3.7] - 2026-07-18
 
 **Maintainer-reconciliation release.** This release packages the verified work
