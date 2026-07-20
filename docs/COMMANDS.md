@@ -301,6 +301,8 @@ base: str = "HEAD~1"
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
 code-review-graph install --dry-run # Preview without writing files
 code-review-graph install --platform codex  # Configure one platform
+code-review-graph uninstall                 # Remove all CRG configs, hooks, skills, and data
+code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data + others)
 
 # Build and update
 code-review-graph build                        # Full build
@@ -311,6 +313,8 @@ code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph + show risk panel
 code-review-graph update --brief --verify      # ...and cross-check vs tiktoken
 code-review-graph postprocess                  # Re-run flows, communities, FTS
+code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
+code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
 code-review-graph embed --provider local       # Compute vector embeddings for semantic search
 code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
                                                 # Explicitly refresh an existing index (default: off)

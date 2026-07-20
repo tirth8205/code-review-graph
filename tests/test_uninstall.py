@@ -724,3 +724,100 @@ def test_cli_dry_run_and_confirmation_are_safe(
         cli.main()
     assert "aborted" in capsys.readouterr().out.lower()
     assert "code-review-graph" in config.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Platform-scoped unbind (``uninstall --platform``)
+# ---------------------------------------------------------------------------
+
+
+def test_normalise_platform_filter() -> None:
+    normalise = uninstall._normalise_platform_filter
+    assert normalise(None) is None
+    assert normalise([]) is None
+    assert normalise(["all"]) is None
+    assert normalise(["codex", "all"]) is None
+    assert normalise(["claude-code"]) == frozenset({"claude"})
+    assert normalise(["codex", "claude"]) == frozenset({"codex", "claude"})
+
+
+def _write_codex_config(path: Path) -> None:
+    _write(
+        path,
+        'theme = "dark"\n\n'
+        "[mcp_servers.code-review-graph]\n"
+        'command = "code-review-graph"\n\n'
+        "[mcp_servers.other]\n"
+        'command = "other"\n',
+    )
+
+
+def test_platform_scoped_unbind_removes_only_target_and_keeps_data(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """Unbinding one platform removes its MCP entry but keeps data + siblings."""
+    claude_config = fake_repo / ".mcp.json"
+    _write_json(claude_config, {"mcpServers": {"code-review-graph": {}, "other": {}}})
+    codex_config = fake_home / ".codex" / "config.toml"
+    _write_codex_config(codex_config)
+
+    data_db = fake_repo / ".code-review-graph" / "graph.db"
+    _write(data_db, "graph")
+
+    report = uninstall.run(repo=fake_repo, platforms=["claude"])
+
+    assert report.errors == []
+    # Claude's binding is gone, its sibling entry survives.
+    assert _read_jsonc(claude_config) == {"mcpServers": {"other": {}}}
+    # Codex was never named, so its binding is untouched.
+    assert "[mcp_servers.code-review-graph]" in codex_config.read_text(encoding="utf-8")
+    # Graph data is preserved even though keep_data was not requested.
+    assert data_db.exists()
+
+
+def test_platform_scoped_unbind_targets_user_scope_toml(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """A user-scope platform (Codex/TOML) unbinds without touching repo configs."""
+    claude_config = fake_repo / ".mcp.json"
+    _write_json(claude_config, {"mcpServers": {"code-review-graph": {}}})
+    codex_config = fake_home / ".codex" / "config.toml"
+    _write_codex_config(codex_config)
+
+    uninstall.run(repo=fake_repo, platforms=["codex"])
+
+    text = codex_config.read_text(encoding="utf-8")
+    assert "[mcp_servers.code-review-graph]" not in text
+    assert "[mcp_servers.other]" in text
+    # Claude was not named, so its repo binding stays put.
+    assert "code-review-graph" in claude_config.read_text(encoding="utf-8")
+
+
+def test_cli_uninstall_platform_scopes_to_one_binding(
+    fake_repo: Path,
+    fake_home: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from code_review_graph import cli
+
+    claude_config = fake_repo / ".mcp.json"
+    _write_json(claude_config, {"mcpServers": {"code-review-graph": {}, "other": {}}})
+    codex_config = fake_home / ".codex" / "config.toml"
+    _write_codex_config(codex_config)
+
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "code-review-graph", "uninstall",
+            "--platform", "claude", "--repo", str(fake_repo), "--yes",
+        ],
+    ):
+        cli.main()
+
+    out = capsys.readouterr().out.lower()
+    assert "unbind" in out
+    assert _read_jsonc(claude_config) == {"mcpServers": {"other": {}}}
+    assert "[mcp_servers.code-review-graph]" in codex_config.read_text(encoding="utf-8")

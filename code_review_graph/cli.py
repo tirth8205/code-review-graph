@@ -3,9 +3,10 @@
 Usage:
     code-review-graph install
     code-review-graph init
-    code-review-graph uninstall [--dry-run] [--yes] [--repo PATH]
+    code-review-graph uninstall [--platform NAME] [--dry-run] [--yes] [--repo PATH]
     code-review-graph build [--base BASE]
     code-review-graph update [--base BASE]
+    code-review-graph forget PATH [PATH ...] [--dry-run]
     code-review-graph watch
     code-review-graph status
     code-review-graph serve [--auto-watch] [--http] [--host ADDR] [--port PORT]
@@ -38,6 +39,7 @@ if sys.version_info < (3, 10):
     sys.exit(1)
 
 import argparse
+import fnmatch
 import json
 import logging
 import os
@@ -45,7 +47,7 @@ from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
-from typing import TypedDict
+from typing import Iterable, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,61 @@ def _confirm_yes_no(prompt: str, default_yes: bool = True) -> bool:
     if not answer:
         return default_yes
     return answer in ("y", "yes")
+
+
+def _match_files_to_forget(
+    stored_files: Iterable[str],
+    patterns: Iterable[str],
+    repo_root: Path,
+) -> list[str]:
+    """Resolve user-supplied paths/globs to stored graph file paths.
+
+    The graph keys every parsed file by its absolute path. A user may name a
+    file with an absolute path, a path relative to the repository root, a
+    directory whose contents should all be dropped, or a glob pattern. Each
+    stored file is compared against every pattern in all of those forms and the
+    sorted set of matching stored paths is returned.
+    """
+    root = repo_root.resolve()
+    stored = list(stored_files)
+    matched: set[str] = set()
+
+    for raw in patterns:
+        pattern = str(raw).strip()
+        if not pattern:
+            continue
+        expanded = Path(pattern).expanduser()
+        absolute = expanded if expanded.is_absolute() else root / expanded
+        absolute_str = os.path.normpath(str(absolute))
+        dir_prefix = absolute_str.rstrip(os.sep) + os.sep
+
+        for stored_path in stored:
+            normalised = os.path.normpath(stored_path)
+            try:
+                relative = os.path.relpath(normalised, str(root))
+            except ValueError:
+                relative = None
+
+            # Exact match against the absolute or the repo-relative form.
+            if normalised == absolute_str:
+                matched.add(stored_path)
+                continue
+            if relative is not None and os.path.normpath(relative) == os.path.normpath(
+                pattern
+            ):
+                matched.add(stored_path)
+                continue
+            # Every file underneath a named directory.
+            if normalised.startswith(dir_prefix):
+                matched.add(stored_path)
+                continue
+            # Glob patterns, matched against both the absolute and relative form.
+            if fnmatch.fnmatch(normalised, absolute_str) or (
+                relative is not None and fnmatch.fnmatch(relative, pattern)
+            ):
+                matched.add(stored_path)
+
+    return sorted(matched)
 
 
 def _handle_init(args: argparse.Namespace) -> None:
@@ -633,6 +690,13 @@ def main() -> None:
         help="Clean repositories only; do not edit files under the user home",
     )
     uninstall_cmd.add_argument(
+        "--platform",
+        choices=_PLATFORM_CHOICES,
+        default="all",
+        help="Unbind only this platform's MCP registration and keep the graph "
+             "data and every other integration. Default: all (full uninstall).",
+    )
+    uninstall_cmd.add_argument(
         "--dry-run",
         action="store_true",
         help="Print every planned action without writing or deleting anything",
@@ -766,6 +830,30 @@ def main() -> None:
         help="Output one machine-readable JSON object",
     )
     status_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory to store graph database (useful for network shares)"
+    )
+
+    # forget
+    forget_cmd = sub.add_parser(
+        "forget",
+        help="Remove already-parsed files from the graph without a full rebuild",
+    )
+    forget_cmd.add_argument(
+        "paths",
+        nargs="+",
+        metavar="PATH",
+        help="Files, directories, or glob patterns to drop from the graph. "
+             "Paths may be absolute or relative to the repository root.",
+    )
+    forget_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    forget_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the files that would be forgotten without modifying the graph",
+    )
+    forget_cmd.add_argument(
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
@@ -1272,11 +1360,14 @@ def main() -> None:
         from .uninstall import run as run_uninstall
 
         target_repo = Path(args.repo).expanduser() if args.repo else None
+        platform_target = getattr(args, "platform", "all") or "all"
+        scoped_platforms = None if platform_target == "all" else [platform_target]
         options = {
             "repo": target_repo,
             "all_repos": args.all_repos,
             "keep_data": args.keep_data,
             "keep_user_configs": args.keep_user_configs,
+            "platforms": scoped_platforms,
         }
 
         def _print_report(report: UninstallReport) -> None:
@@ -1290,19 +1381,31 @@ def main() -> None:
                 print(f"  error   {error}")
 
         preview = run_uninstall(**options, dry_run=True)
-        print("code-review-graph uninstall — planned actions:")
+        if scoped_platforms:
+            print(f"code-review-graph unbind ({platform_target}) — planned actions:")
+        else:
+            print("code-review-graph uninstall — planned actions:")
         _print_report(preview)
         if preview.total_actions == 0:
             if preview.errors:
                 raise SystemExit(1)
-            print("  (nothing to do — no code-review-graph artifacts found)")
+            if scoped_platforms:
+                print(
+                    f"  (nothing to do — {platform_target} has no "
+                    "code-review-graph MCP registration)"
+                )
+            else:
+                print("  (nothing to do — no code-review-graph artifacts found)")
             return
         if args.dry_run:
             print("\n[dry-run] No changes made.")
             if preview.errors:
                 raise SystemExit(1)
             return
-        if not args.yes and not _confirm_yes_no("\nProceed with uninstall?", default_yes=False):
+        action_word = "unbind" if scoped_platforms else "uninstall"
+        if not args.yes and not _confirm_yes_no(
+            f"\nProceed with {action_word}?", default_yes=False
+        ):
             print("Aborted.")
             return
 
@@ -1427,6 +1530,7 @@ def main() -> None:
         "update",
         "detect-changes",
         "status",
+        "forget",
         "watch",
         "visualize",
         "wiki",
@@ -1436,7 +1540,7 @@ def main() -> None:
         _handle_data_dir_option(args, repo_root)
 
     db_path = get_db_path(repo_root)
-    if args.command == "dead-code" and not db_path.exists():
+    if args.command in ("dead-code", "forget") and not db_path.exists():
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
@@ -1633,6 +1737,46 @@ def main() -> None:
                         print(f"SVN branch: {stored_svn_branch}")
                     if stored_rev:
                         print(f"SVN revision at build: {stored_rev}")
+
+        elif args.command == "forget":
+            stored_files = store.get_all_files()
+            targets = _match_files_to_forget(stored_files, args.paths, repo_root)
+            if not targets:
+                print("No parsed files matched the given path(s).")
+                print(f"The graph currently tracks {len(stored_files)} file(s).")
+            else:
+                header = (
+                    "[dry-run] Would forget these files:"
+                    if args.dry_run
+                    else "Forgetting these files:"
+                )
+                print(header)
+                for file_path in targets:
+                    try:
+                        display = os.path.relpath(file_path, str(repo_root))
+                    except ValueError:
+                        display = file_path
+                    print(f"  {display}")
+                if args.dry_run:
+                    print(
+                        f"\n[dry-run] {len(targets)} file(s) would be removed "
+                        "from the graph. No changes made."
+                    )
+                else:
+                    for file_path in targets:
+                        store.remove_file_data(file_path)
+                    # nodes_fts is an external-content FTS5 index with no delete
+                    # triggers, so refresh it to drop entries for the removed
+                    # rows and keep search results consistent (mirrors the
+                    # update -> postprocess path for deleted files).
+                    from .search import rebuild_fts_index
+
+                    rebuild_fts_index(store)
+                    remaining = len(stored_files) - len(targets)
+                    print(
+                        f"\nForgot {len(targets)} file(s); "
+                        f"{remaining} file(s) remain in the graph."
+                    )
 
         elif args.command == "watch":
             from .postprocessing import run_post_processing
