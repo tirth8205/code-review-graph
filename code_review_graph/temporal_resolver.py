@@ -168,7 +168,12 @@ def resolve_temporal_calls(store: GraphStore) -> dict:
 
         interface_qual = temporal_interfaces.get(interface_bare, interface_bare)
 
-        impls = implementors.get(interface_qual, [])
+        # ``implementors`` is keyed by the bare interface name (INHERITS'
+        # target_qualified is bare for Java), so look it up with the bare name.
+        # Using ``interface_qual`` (the fully-qualified name) never matches, so
+        # the ``len(impls) == 1`` branch was dead and every stub call resolved
+        # to the interface method instead of the concrete implementation.
+        impls = implementors.get(interface_bare, [])
         if len(impls) == 1:
             concrete_class = impls[0].split("::")[-1]
             fallback = f"{impls[0]}.{method_name}"

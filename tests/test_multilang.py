@@ -2783,6 +2783,27 @@ class TestTemporalResolver:
                 f"Resolved target should be qualified, got: {target!r}"
             )
 
+    def test_resolved_target_is_concrete_impl_not_interface(self, tmp_path):
+        # paymentActivity.charge(...) has a single implementor, so it must
+        # resolve to PaymentActivityImpl.charge, not the interface method
+        # PaymentActivity.charge. Regression: implementors was keyed by the
+        # bare interface name but looked up by the qualified name, so the
+        # unique-implementor branch was dead and every stub call resolved to
+        # the interface.
+        store, _ = self._build(tmp_path)
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%temporal_resolved%'"
+        ).fetchall()
+        targets = [t for (t,) in rows]
+        assert targets, "Expected at least one temporal-resolved CALLS edge"
+        assert any(t.endswith("PaymentActivityImpl.charge") for t in targets), (
+            f"Expected resolution to the concrete impl, got: {targets!r}"
+        )
+        assert not any(t.endswith("PaymentActivity.charge") for t in targets), (
+            f"Should not resolve to the interface method, got: {targets!r}"
+        )
+
 
 class TestKafkaParsing:
     """Tests for Kafka CONSUMES / PRODUCES edge detection."""
