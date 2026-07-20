@@ -534,9 +534,37 @@ _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 _SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
 
 
-def _decode_nul_paths(output: bytes) -> list[str]:
-    """Decode Git's NUL-delimited path output without quote mangling."""
-    return [os.fsdecode(path) for path in output.split(b"\0") if path]
+def _parse_name_status_z(output: bytes) -> list[str]:
+    """Decode ``git diff --name-status -z`` output to a list of changed paths.
+
+    Unlike ``--name-only``, ``--name-status`` distinguishes renames/copies. Its
+    ``-z`` records are NUL-separated fields: ``<status>`` then the path(s).
+    A rename/copy (``R``/``C``) emits ``<status>\\0<old>\\0<new>``; every other
+    status emits ``<status>\\0<path>``.
+
+    Both the old *and* new path of a rename are returned, so the old path is
+    seen by :func:`incremental_update` and purged when it no longer exists on
+    disk — keeping an incremental update equivalent to a full rebuild (a plain
+    ``--name-only`` diff reports only the new path, leaving the old file's nodes
+    and edges stale).
+    """
+    fields = [os.fsdecode(f) for f in output.split(b"\0") if f]
+    paths: list[str] = []
+    i = 0
+    n = len(fields)
+    while i < n:
+        status = fields[i]
+        i += 1
+        # Rename (R) and copy (C) statuses carry a similarity score (e.g. "R100")
+        # and are followed by TWO paths (old, new); all others by a single path.
+        if status[:1] in ("R", "C") and i + 1 < n:
+            paths.append(fields[i])      # old path (renamed away / copy source)
+            paths.append(fields[i + 1])  # new path
+            i += 2
+        elif i < n:
+            paths.append(fields[i])
+            i += 1
+    return paths
 
 
 def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
@@ -572,7 +600,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         return []
     try:
         result = subprocess.run(
-            ["git", "diff", "--name-only", "-z", base, "--"],
+            ["git", "diff", "--name-status", "-z", base, "--"],
             capture_output=True,
             cwd=str(repo_root),
             timeout=_GIT_TIMEOUT,
@@ -581,7 +609,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         if result.returncode != 0:
             # Fallback: try diff against empty tree (initial commit)
             result = subprocess.run(
-                ["git", "diff", "--name-only", "-z", "--cached"],
+                ["git", "diff", "--name-status", "-z", "--cached"],
                 capture_output=True,
                 cwd=str(repo_root),
                 timeout=_GIT_TIMEOUT,
@@ -590,7 +618,7 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         if result.returncode != 0:
             logger.warning("git diff failed while discovering changed files")
             return []
-        return _decode_nul_paths(result.stdout)
+        return _parse_name_status_z(result.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
