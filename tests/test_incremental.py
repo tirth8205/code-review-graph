@@ -525,9 +525,10 @@ class TestIsBinary:
 class TestGitOperations:
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files(self, mock_run, tmp_path):
+        # --name-status -z output: each record is <status>\0<path>[\0<path2>].
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=b"src/a.py\0src/b.py\0",
+            stdout=b"M\0src/a.py\0A\0src/b.py\0",
         )
         result = get_changed_files(tmp_path)
         assert result == ["src/a.py", "src/b.py"]
@@ -535,15 +536,28 @@ class TestGitOperations:
         call_args = mock_run.call_args
         assert "git" in call_args[0][0]
         assert "-z" in call_args[0][0]
+        # Renames must be detectable, so --name-status (not --name-only) is used.
+        assert "--name-status" in call_args[0][0]
         assert call_args[1].get("timeout") == 30
         assert "text" not in call_args[1]
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_reports_both_rename_paths(self, mock_run, tmp_path):
+        # A rename (R<score>) carries BOTH the old and new path; both must be
+        # returned so the old path's stale nodes/edges get purged downstream.
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"R100\0old/a.py\0new/b.py\0M\0keep.py\0",
+        )
+        result = get_changed_files(tmp_path)
+        assert result == ["old/a.py", "new/b.py", "keep.py"]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_fallback(self, mock_run, tmp_path):
         # First call fails, second succeeds
         mock_run.side_effect = [
             MagicMock(returncode=1, stdout=b""),
-            MagicMock(returncode=0, stdout=b"staged.py\0"),
+            MagicMock(returncode=0, stdout=b"A\0staged.py\0"),
         ]
         result = get_changed_files(tmp_path)
         assert result == ["staged.py"]

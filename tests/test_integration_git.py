@@ -233,6 +233,52 @@ def test_incremental_update_real_git(git_repo: Path) -> None:
         Path(db_path).unlink(missing_ok=True)
 
 
+def test_incremental_update_purges_renamed_source(tmp_path: Path) -> None:
+    """A committed rename must leave the graph equal to a full rebuild.
+
+    Regression: ``git diff --name-only`` reports only the *new* path of a
+    rename, so the old file's nodes/edges survived an incremental update while
+    a full rebuild dropped them. ``--name-status`` reports both paths, letting
+    the incremental purge remove the old path.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+
+    (repo / "a.py").write_text("def foo():\n    return 1\n")
+    _git(repo, "add", "a.py")
+    _git(repo, "commit", "-m", "add a.py")
+
+    # Full build with a.py on disk.
+    inc_store = GraphStore(str(tmp_path / "inc.db"))
+    full_build(repo, inc_store)
+    assert inc_store.get_nodes_by_file(str(repo / "a.py")), "a.py should be indexed"
+
+    # Rename a.py -> b.py and commit.
+    assert _git(repo, "mv", "a.py", "b.py").returncode == 0
+    _git(repo, "commit", "-m", "rename a.py to b.py")
+
+    # Incremental update across the rename (base defaults to HEAD~1).
+    incremental_update(repo, inc_store)
+
+    # The renamed-away source must be fully purged; the new path must exist.
+    assert inc_store.get_nodes_by_file(str(repo / "a.py")) == []
+    assert inc_store.get_nodes_by_file(str(repo / "b.py"))
+
+    # Incremental result must equal a fresh full rebuild of the post-rename tree.
+    full_store = GraphStore(str(tmp_path / "full.db"))
+    full_build(repo, full_store)
+
+    assert set(inc_store.get_all_files()) == set(full_store.get_all_files())
+    assert inc_store.get_stats().total_nodes == full_store.get_stats().total_nodes
+    assert inc_store.get_stats().total_edges == full_store.get_stats().total_edges
+
+    inc_store.close()
+    full_store.close()
+
+
 # ------------------------------------------------------------------
 # 4. base ref injection is rejected
 # ------------------------------------------------------------------
