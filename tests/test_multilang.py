@@ -655,6 +655,41 @@ class TestRubyParsing:
         names = {f.name for f in funcs}
         assert "initialize" in names or "find_by_id" in names or "save" in names
 
+    def test_finds_calls(self):
+        """Ruby method calls must produce CALLS edges.
+
+        Ruby's grammar uses the same ``call`` node type for both
+        ``require`` and ordinary method invocation, so the dispatcher must
+        not treat every ``call`` as an import. Paren calls (``save(user)``),
+        command calls (``puts ...``) and member calls (``User.new`` /
+        ``@users.size``) are all captured. Bare implicit-self calls with no
+        parens (e.g. a lone ``helper``) parse as ``identifier`` rather than
+        ``call`` and are intentionally not covered here.
+        """
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 1
+
+        targets = {e.target for e in calls}
+        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
+
+        # Paren, command and member calls are all captured.
+        assert "save" in target_names
+        assert "puts" in target_names
+        assert "new" in target_names
+        assert "size" in target_names
+
+        # A same-class call resolves to the defining method node, not a bare
+        # name, so callers_of/callees_of work within a file.
+        assert any(t.endswith("sample.rb::UserRepository.save") for t in targets)
+
+        # Calls are attributed to their enclosing method.
+        create_user_targets = {
+            e.target for e in calls
+            if e.source.endswith("UserRepository.create_user")
+        }
+        assert any(t.endswith("UserRepository.save") for t in create_user_targets)
+        assert any(t.endswith("new") for t in create_user_targets)
+
 
 class TestPHPParsing:
     def setup_method(self):

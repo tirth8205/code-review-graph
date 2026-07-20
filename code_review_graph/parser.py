@@ -5432,10 +5432,14 @@ class CodeParser:
 
             # --- Imports ---
             if node_type in import_types:
-                self._extract_imports(
+                if self._extract_imports(
                     child, language, source, file_path, edges,
-                )
-                continue
+                ):
+                    continue
+                # Node type is shared between imports and calls (e.g. Ruby
+                # `call` covers both `require` and method invocation). If it
+                # was not an import, fall through to call extraction below
+                # rather than dropping it.
 
             # --- Calls ---
             if node_type in call_types:
@@ -9377,8 +9381,15 @@ class CodeParser:
         source: bytes,
         file_path: str,
         edges: list[EdgeInfo],
-    ) -> None:
-        """Extract import edges from an import statement node."""
+    ) -> bool:
+        """Extract import edges from an import statement node.
+
+        Returns True if at least one import edge was emitted. Some grammars
+        reuse a single node type for both imports and ordinary calls (e.g.
+        Ruby's ``call`` covers both ``require``/``require_relative`` and method
+        invocation). Returning False lets the dispatcher fall through to call
+        extraction instead of silently dropping the call. See: Ruby call graph.
+        """
         imports = self._extract_import(child, language, source)
         for imp_target in imports:
             resolved = self._resolve_module_to_file(
@@ -9391,6 +9402,7 @@ class CodeParser:
                 file_path=file_path,
                 line=child.start_point[0] + 1,
             ))
+        return bool(imports)
 
     def _extract_calls(
         self,
@@ -13713,6 +13725,16 @@ class CodeParser:
                 if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
             return None
+
+        # Ruby: `call` nodes expose a `method` field for both receiver calls
+        # (`Bar.new.run` -> `run`) and paren calls (`helper_method(1)` ->
+        # `helper_method`). `require`/`require_relative` are handled earlier as
+        # imports, so they never reach here. Bare implicit-self calls with no
+        # parens parse as plain `identifier` (not `call`) and are not captured.
+        if language == "ruby" and node.type in ("call", "method_call"):
+            method_node = node.child_by_field_name("method")
+            if method_node is not None:
+                return method_node.text.decode("utf-8", errors="replace")
 
         # Bash: `command` node's first child is the command name.
         if language == "bash" and node.type == "command":
