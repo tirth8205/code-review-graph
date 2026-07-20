@@ -1603,3 +1603,18 @@ class TestJsMemberAssignedFunctions:
             and e.target.endswith("helper")
         ]
         assert len(calls) == 1
+
+    def test_member_call_resolves_to_member_assigned_function(self):
+        """A static member call resolves to its same-file member definition."""
+        path = Path("/test/application.js")
+        _, edges = self.parser.parse_bytes(
+            path,
+            b"app.handle = function () {};\n"
+            b"function start() { app.handle(); }\n",
+        )
+        calls = [
+            e for e in edges
+            if e.kind == "CALLS" and e.source == f"{path}::start"
+        ]
+        assert len(calls) == 1
+        assert calls[0].target == f"{path}::app.handle"
