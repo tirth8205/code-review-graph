@@ -9746,7 +9746,10 @@ class CodeParser:
         member_call = callee.text.decode("utf-8", errors="replace")
         if not member_call or "[" in member_call or "\n" in member_call:
             return None
-        return member_call
+        # Optional property access has the same static member path as regular
+        # access: ``app?.handle()`` can target ``app.handle = fn`` whenever
+        # the receiver is present at runtime.
+        return member_call.replace("?.", ".")
 
     def _get_member_call_receiver_method(
         self,

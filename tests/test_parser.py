@@ -1618,3 +1618,18 @@ class TestJsMemberAssignedFunctions:
         ]
         assert len(calls) == 1
         assert calls[0].target == f"{path}::app.handle"
+
+    def test_optional_member_call_resolves_to_member_assigned_function(self):
+        """Optional chaining retains the same static member-call target."""
+        path = Path("/test/application.js")
+        _, edges = self.parser.parse_bytes(
+            path,
+            b"app.handle = function () {};\n"
+            b"function start() { app?.handle(); }\n",
+        )
+        calls = [
+            e for e in edges
+            if e.kind == "CALLS" and e.source == f"{path}::start"
+        ]
+        assert len(calls) == 1
+        assert calls[0].target == f"{path}::app.handle"
