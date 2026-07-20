@@ -479,8 +479,9 @@ def query_graph(
                     continue
                 triggered = store.get_node(edge.target_qualified)
                 if triggered:
-                    results.append(node_to_dict(triggered))
-                edges_out.append(edge_to_dict(edge))
+                    add_result(node_to_dict(triggered), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "triggered_by":
             for edge in store.get_edges_by_target(qn):
@@ -488,8 +489,9 @@ def query_graph(
                     continue
                 trigger = store.get_node(edge.source_qualified)
                 if trigger:
-                    results.append(node_to_dict(trigger))
-                edges_out.append(edge_to_dict(edge))
+                    add_result(node_to_dict(trigger), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern in ("publishers_of", "listeners_of"):
             edge_kind = "PUBLISHES" if pattern == "publishers_of" else "HANDLES"
@@ -498,8 +500,9 @@ def query_graph(
                     continue
                 source = store.get_node(edge.source_qualified)
                 if source:
-                    results.append(node_to_dict(source))
-                edges_out.append(edge_to_dict(edge))
+                    add_result(node_to_dict(source), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "handlers_of":
             for edge in store.get_edges_by_target(qn):
@@ -507,8 +510,9 @@ def query_graph(
                     continue
                 handler = store.get_node(edge.source_qualified)
                 if handler:
-                    results.append(node_to_dict(handler))
-                edges_out.append(edge_to_dict(edge))
+                    add_result(node_to_dict(handler), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "endpoints_for":
             for edge in store.get_edges_by_source(qn):
@@ -516,7 +520,8 @@ def query_graph(
                     continue
                 endpoint = store.get_node(edge.target_qualified)
                 if endpoint and endpoint.kind == "Endpoint":
-                    results.append(node_to_dict(endpoint))
+                    add_result(node_to_dict(endpoint), edge)
+                elif endpoint is None:
                     edges_out.append(edge_to_dict(edge))
 
         elif pattern == "consumers_of":
@@ -527,9 +532,10 @@ def query_graph(
             for edge in store.get_config_consumers(key):
                 consumer = store.get_node(edge.source_qualified)
                 if consumer and consumer.qualified_name not in seen_config_sources:
-                    results.append(node_to_dict(consumer))
+                    add_result(node_to_dict(consumer), edge)
                     seen_config_sources.add(consumer.qualified_name)
-                edges_out.append(edge_to_dict(edge))
+                elif consumer is None:
+                    edges_out.append(edge_to_dict(edge))
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])

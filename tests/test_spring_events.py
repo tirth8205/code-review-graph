@@ -93,13 +93,9 @@ def _write_event_package(root: Path, package: str) -> tuple[Path, Path, Path]:
 
 def _event_calls(store: GraphStore):
     rows = store._conn.execute(
-        "SELECT source_qualified, target_qualified, extra FROM edges "
-        "WHERE kind = 'CALLS'"
+        "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind = 'CALLS'"
     ).fetchall()
-    return [
-        row for row in rows
-        if json.loads(row["extra"] or "{}").get("spring_event_resolved")
-    ]
+    return [row for row in rows if json.loads(row["extra"] or "{}").get("spring_event_resolved")]
 
 
 def test_event_resolver_does_not_cross_link_same_named_packages(tmp_path: Path) -> None:
@@ -177,3 +173,55 @@ def test_event_query_patterns_return_publishers_and_listeners(tmp_path: Path) ->
     assert listeners["status"] == "ok"
     assert [result["name"] for result in listeners["results"]] == ["on"]
     assert {edge["kind"] for edge in listeners["edges"]} == {"HANDLES"}
+
+
+def test_event_query_patterns_respect_max_results_and_report_count(tmp_path: Path) -> None:
+    pkg = "demo"
+    directory = tmp_path / pkg
+    directory.mkdir(parents=True)
+    (directory / "Evt.java").write_text(
+        "package demo;\nclass Evt {}\n",
+        encoding="utf-8",
+    )
+    for i in range(5):
+        (directory / f"Pub{i}.java").write_text(
+            "package demo;\n"
+            "import org.springframework.context.ApplicationEventPublisher;\n"
+            f"class Pub{i} {{\n"
+            "  ApplicationEventPublisher publisher;\n"
+            "  void fire() { publisher.publishEvent(new Evt()); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (directory / f"Lis{i}.java").write_text(
+            "package demo;\n"
+            "import org.springframework.context.event.EventListener;\n"
+            f"class Lis{i} {{\n"
+            "  @EventListener void on(Evt e) {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        full_build(tmp_path, store)
+
+    qn = "event::demo.Evt"
+
+    pub = query_graph("publishers_of", qn, repo_root=str(tmp_path), max_results=3)
+    assert pub["status"] == "ok"
+    assert len(pub["results"]) == 3
+    assert pub["result_count"] == 5
+    assert pub["results_omitted"] == 2
+    assert len(pub["edges"]) == 3
+
+    listeners = query_graph("listeners_of", qn, repo_root=str(tmp_path))
+    assert listeners["status"] == "ok"
+    assert listeners["result_count"] == 5
+    assert listeners["results_omitted"] == 0
+    assert len(listeners["edges"]) == 5
+
+    handlers = query_graph("handlers_of", qn, repo_root=str(tmp_path))
+    assert handlers["status"] == "ok"
+    assert handlers["result_count"] == 5
+    assert len(handlers["edges"]) == 5
