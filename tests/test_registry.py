@@ -334,3 +334,23 @@ class TestSetDataDir:
         data_dir = Path(self.tmp_dir) / "data"
         entry = self.registry.set_data_dir(str(repo), str(data_dir))
         assert entry["data_dir"] == str(data_dir.resolve())
+
+
+class TestRegistryNonAscii:
+    """#497: registry.json is serialized with json.dumps(..., indent=2), which
+    defaults to ensure_ascii=True — a registered repo path containing non-ASCII
+    characters gets written as literal \\uXXXX escapes instead of UTF-8.
+    """
+
+    def test_register_preserves_non_ascii_path(self, tmp_path):
+        registry_path = tmp_path / "registry.json"
+        registry = Registry(path=registry_path)
+
+        repo = tmp_path / "基于STM32的项目"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        registry.register(str(repo), alias="crg")
+
+        raw = registry_path.read_text(encoding="utf-8")
+        assert "基于STM32的项目" in raw
+        assert "\\u" not in raw

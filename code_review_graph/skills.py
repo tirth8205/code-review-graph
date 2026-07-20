@@ -554,7 +554,9 @@ def install_platform_configs(
             print(f"  [dry-run] {plat['name']}: would write {config_path}")
         else:
             config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+            config_path.write_text(
+                json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
             print(f"  {plat['name']}: configured {config_path}")
 
         _record_configured(key, plat)
@@ -922,7 +924,9 @@ def _merge_hooks_into_settings(
 
     existing["hooks"] = merged_hooks
 
-    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    settings_path.write_text(
+        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     logger.info("Wrote hooks config: %s", settings_path)
     return settings_path
 
@@ -1015,7 +1019,9 @@ def install_codex_hooks(repo_root: Path) -> Path:
             merged_hooks[hook_name] = hook_entries
 
     existing["hooks"] = merged_hooks
-    hooks_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    hooks_path.write_text(
+        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     logger.info("Wrote Codex hooks config: %s", hooks_path)
     return hooks_path
 
@@ -1298,7 +1304,9 @@ exit 0
     )
 
     existing["hooks"] = hooks_obj
-    settings_path.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    settings_path.write_text(
+        json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
     logger.info("Wrote Gemini CLI hooks config: %s", settings_path)
     return settings_path
 
@@ -1549,7 +1557,7 @@ def install_cursor_hooks() -> Path:
 
     cursor_dir.mkdir(parents=True, exist_ok=True)
     hooks_json_path.write_text(
-        json.dumps(existing, indent=2) + "\n",
+        json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     logger.info("Wrote Cursor hooks config: %s", hooks_json_path)
