@@ -1162,7 +1162,22 @@ def main() -> None:
         from .incremental import find_project_root, get_db_path
 
         requested_root = Path(args.repo).expanduser() if args.repo else None
-        repo_root = find_project_root(requested_root)
+        if requested_root is not None and (requested_root / ".code-review-graph").is_dir():
+            # An explicit --repo that already has its own .code-review-graph
+            # directory must be honored as-is. This matters for monorepos
+            # with a single .git at the top and independently
+            # build/register-ed modules as subdirectories (each carrying
+            # its own .code-review-graph marker but no .git of their own):
+            # find_project_root() below only walks *up* looking for
+            # .git/.svn, so it would silently climb past the module's own
+            # marker to the monorepo root and miss the graph that was
+            # built right here. build/register/status avoid this via
+            # tools._common._validate_repo_root; do the equivalent here,
+            # scoped to the case where evidence of a real build already
+            # exists at the requested path.
+            repo_root = requested_root.resolve()
+        else:
+            repo_root = find_project_root(requested_root)
         db_path = get_db_path(repo_root)
         if not db_path.exists():
             print(
