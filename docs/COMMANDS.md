@@ -29,7 +29,7 @@ Review a PR or branch diff.
 ```
 full_rebuild: bool = False           # True for full re-parse
 repo_root: str | None                # Auto-detected
-base: str = "HEAD~1"                 # VCS diff base for incremental updates
+base: str | None = None              # Diff base; None auto-resolves to the last-synced commit
 postprocess: str = "full"            # "full", "minimal", or "none"
 recurse_submodules: bool | None      # Falls back to CRG_RECURSE_SUBMODULES
 ```

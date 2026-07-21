@@ -667,7 +667,11 @@ def main() -> None:
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
-    update_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    update_cmd.add_argument(
+        "--base",
+        default=None,
+        help="Git diff base (default: the commit the graph was last built at)",
+    )
     update_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     update_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     update_cmd.add_argument(
@@ -1519,15 +1523,26 @@ def main() -> None:
                 )
             finally:
                 logging.disable(previous_disable)
-            updated = result.get("files_updated", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
             if not args.quiet:
-                print(
-                    f"Incremental: {updated} files updated, "
-                    f"{nodes} nodes, {edges} edges"
-                    f" (postprocess={pp})"
-                )
+                if result.get("build_type") == "full":
+                    # No usable incremental base (fresh/legacy graph, or the
+                    # last-synced commit was lost to a rewrite/shallow clone),
+                    # so the update fell back to a full rebuild.
+                    parsed = result.get("files_parsed", 0)
+                    print(
+                        f"Full rebuild (no usable incremental base): "
+                        f"{parsed} files, {nodes} nodes, {edges} edges"
+                        f" (postprocess={pp})"
+                    )
+                else:
+                    updated = result.get("files_updated", 0)
+                    print(
+                        f"Incremental: {updated} files updated, "
+                        f"{nodes} nodes, {edges} edges"
+                        f" (postprocess={pp})"
+                    )
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.
@@ -1545,7 +1560,10 @@ def main() -> None:
                     get_staged_and_unstaged,
                 )
 
-                changed = get_changed_files(repo_root, args.base)
+                # Reuse the base the update actually resolved to (args.base is
+                # None by default now, which get_changed_files cannot accept).
+                brief_base = result.get("base_resolved") or "HEAD~1"
+                changed = get_changed_files(repo_root, brief_base)
                 if not changed:
                     changed = get_staged_and_unstaged(repo_root)
                 if changed:
@@ -1553,7 +1571,7 @@ def main() -> None:
                         store,
                         changed,
                         repo_root=str(repo_root),
-                        base=args.base,
+                        base=brief_base,
                     )
                     original_tokens = estimate_file_tokens(repo_root, changed)
                     attach_context_savings(
