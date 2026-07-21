@@ -19,6 +19,7 @@ code-review-graph install --platform codex
 code-review-graph install --platform cursor
 code-review-graph install --platform claude-code
 code-review-graph install --platform codebuddy
+code-review-graph install --platform mimo
 ```
 
 ### Supported Platforms
@@ -33,6 +34,7 @@ code-review-graph install --platform codebuddy
 | **Zed** | `.zed/settings.json` |
 | **Continue** | `.continue/config.json` |
 | **OpenCode** | `opencode.jsonc` (preferred) or `opencode.json` |
+| **MiMo Code** | `.mimocode/mimocode.json` |
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
 | **Gemini CLI** | `.gemini/settings.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |
@@ -47,6 +49,10 @@ The CodeBuddy project layout follows its official documentation for
 [hooks](https://www.codebuddy.ai/docs/cli/hooks). The shared `.mcp.json` is
 merged with JSONC awareness, while hook commands resolve the repository at
 runtime so committed settings do not contain one developer's checkout path.
+
+MiMo Code uses a project-local configuration. The installer adds a local MCP
+server command under its top-level `mcp` object without modifying other servers
+or settings.
 
 ## Core Workflow
 

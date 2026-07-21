@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added MiMo Code as an MCP install target. `code-review-graph install
+  --platform mimo` writes the project-local `.mimocode/mimocode.json` using
+  MiMo's local command-array schema, preserves existing configuration, and is
+  removed by the symmetric uninstall workflow.
+
 ## [2.3.7] - 2026-07-18
 
 **Maintainer-reconciliation release.** This release packages the verified work

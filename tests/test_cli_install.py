@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from code_review_graph.cli import _handle_init
+from code_review_graph.cli import _PLATFORM_CHOICES, _handle_init
+from code_review_graph.skills import _detect_serve_command
 
 
 def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
@@ -18,6 +20,42 @@ def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
         no_skills=False,
         no_hooks=False,
     )
+
+
+def test_handle_init_mimo_registers_only_the_mimo_platform(monkeypatch, tmp_path, capsys):
+    assert "mimo" in _PLATFORM_CHOICES
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    targets: list[str] = []
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: targets.append(target) or ["MiMo Code"],
+    )
+
+    _handle_init(_args(tmp_path, "mimo"))
+
+    assert targets == ["mimo"]
+    assert "Configured 1 platform(s): MiMo Code" in capsys.readouterr().out
+
+
+def test_handle_init_mimo_writes_a_runnable_project_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+
+    _handle_init(_args(tmp_path, "mimo"))
+
+    config = json.loads(
+        (tmp_path / ".mimocode" / "mimocode.json").read_text(encoding="utf-8")
+    )
+    command, args = _detect_serve_command()
+    assert config["mcp"]["code-review-graph"] == {
+        "type": "local",
+        "command": [command, *args, "--repo", str(tmp_path)],
+    }
 
 
 def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
