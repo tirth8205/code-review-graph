@@ -1156,7 +1156,7 @@ def inject_claude_md(repo_root: Path) -> None:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity"),
+    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
@@ -1358,7 +1358,7 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     - ``"all"`` (default): writes every file — matches pre-filter behavior.
     - ``"claude"``: writes nothing (CLAUDE.md is handled by ``inject_claude_md``).
     - any other platform key (``cursor``, ``windsurf``, ``antigravity``,
-      ``opencode``): writes only the files associated with that platform.
+      ``opencode``, ``codex``): writes only the files associated with that platform.
 
     Returns list of filenames that were created or updated.
     """
