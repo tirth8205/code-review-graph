@@ -154,6 +154,27 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "format": "object",
         "needs_type": True,
     },
+    # IBM Bob keeps Shell and IDE global configuration in distinct files;
+    # both use mcpServers entries without a synthetic "type": "stdio" field.
+    # https://bob.ibm.com/docs/shell/configuration/mcp/mcp-bobshell
+    # https://bob.ibm.com/docs/ide/configuration/mcp/mcp-in-bob
+    "bob-shell": {
+        "name": "Bob Shell",
+        "config_path": lambda root: Path.home() / ".bob" / "mcp_settings.json",
+        "key": "mcpServers",
+        "detect": lambda: bool(shutil.which("bob"))
+        or (Path.home() / ".bob" / "mcp_settings.json").exists(),
+        "format": "object",
+        "needs_type": False,
+    },
+    "bob-ide": {
+        "name": "Bob IDE",
+        "config_path": lambda root: root / ".bob" / "mcp.json",
+        "key": "mcpServers",
+        "detect": lambda: (Path.home() / ".bob" / "mcp.json").exists(),
+        "format": "object",
+        "needs_type": False,
+    },
     "codebuddy": {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -430,6 +451,11 @@ def install_platform_configs(
         # Workspace-level Kiro detection
         if "kiro" not in platforms_to_install and (repo_root / ".kiro").is_dir():
             platforms_to_install["kiro"] = PLATFORMS["kiro"]
+        # Bob IDE and Bob Shell both use the workspace .bob directory. Treat
+        # an existing directory as an explicit project-level Bob signal, but
+        # never create it in unrelated repositories during an "all" install.
+        if "bob-ide" not in platforms_to_install and (repo_root / ".bob").is_dir():
+            platforms_to_install["bob-ide"] = PLATFORMS["bob-ide"]
 
         # Claude Code and CodeBuddy intentionally share the official project
         # .mcp.json/mcpServers contract. Process that exact pair once, but do

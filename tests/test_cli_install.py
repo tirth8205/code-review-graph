@@ -98,6 +98,16 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
     assert "Installed Cursor hooks" in out
 
 
+def test_platform_choices_use_current_bob_product_names():
+    choices = __import__(
+        "code_review_graph.cli", fromlist=["_PLATFORM_CHOICES"]
+    )._PLATFORM_CHOICES
+
+    assert "bob-shell" in choices
+    assert "bob-ide" in choices
+    assert "bob-cli" not in choices
+
+
 def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     monkeypatch, tmp_path, capsys
 ):
