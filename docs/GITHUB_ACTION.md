@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.6
+      - uses: tirth8205/code-review-graph@v2.3.7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -53,7 +53,7 @@ uses Node 24-based GitHub actions, including `actions/setup-python@v6`,
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.6
+      - uses: tirth8205/code-review-graph@v2.3.7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high
