@@ -1,7 +1,7 @@
 """Tests for the incremental graph update module."""
 
 import subprocess
-from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
+from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
 import code_review_graph.incremental as incremental_module
 from code_review_graph.graph import GraphStore
@@ -759,6 +759,67 @@ class TestParallelParsing:
         assert error is not None
         assert nodes == []
         assert edges == []
+
+    def test_parse_single_file_reuses_parser_in_worker(self, tmp_path):
+        (tmp_path / "first.py").write_text("first = 1\n")
+        (tmp_path / "second.py").write_text("second = 2\n")
+
+        with patch.object(incremental_module, "CodeParser") as parser_cls:
+            parser_cls.return_value.parse_bytes.return_value = ([], [])
+            _parse_single_file(("first.py", str(tmp_path)))
+            _parse_single_file(("second.py", str(tmp_path)))
+
+        parser_cls.assert_called_once_with(tmp_path)
+        assert parser_cls.return_value.parse_bytes.call_count == 2
+
+    def test_parse_single_file_does_not_reuse_parser_across_repos(self, tmp_path):
+        first_repo = tmp_path / "first"
+        second_repo = tmp_path / "second"
+        first_repo.mkdir()
+        second_repo.mkdir()
+        (first_repo / "mod.py").write_text("first = 1\n")
+        (second_repo / "mod.py").write_text("second = 2\n")
+
+        with patch.object(incremental_module, "CodeParser") as parser_cls:
+            parser_cls.return_value.parse_bytes.return_value = ([], [])
+            _parse_single_file(("mod.py", str(first_repo)))
+            _parse_single_file(("mod.py", str(second_repo)))
+
+        assert parser_cls.call_args_list == [
+            call(first_repo),
+            call(second_repo),
+        ]
+
+    def test_parse_single_file_keeps_thread_worker_parsers_isolated(self, tmp_path):
+        files = ["first.py", "second.py"]
+        for filename in files:
+            (tmp_path / filename).write_text(f"name = {filename!r}\n")
+
+        barrier = incremental_module.threading.Barrier(len(files))
+        parser_instances = []
+
+        class BlockingParser:
+            def __init__(self, repo_root):
+                self.repo_root = repo_root
+                parser_instances.append(self)
+
+            def parse_bytes(self, path, raw):
+                barrier.wait(timeout=5)
+                return [], []
+
+        with patch.object(incremental_module, "CodeParser", BlockingParser):
+            with incremental_module.concurrent.futures.ThreadPoolExecutor(
+                max_workers=len(files)
+            ) as executor:
+                results = list(
+                    executor.map(
+                        _parse_single_file,
+                        [(filename, str(tmp_path)) for filename in files],
+                    )
+                )
+
+        assert len(parser_instances) == len(files)
+        assert all(result[3] is None for result in results)
 
     def test_parallel_build_produces_same_results(self, tmp_path):
         """Serial and parallel builds produce identical node/edge counts."""

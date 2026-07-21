@@ -30,6 +30,12 @@ _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_coun
 # transport's file-descriptor lifetime problem.
 _MCP_STDIO_ACTIVE = False
 
+# Each process-pool worker runs this module in its own process, while each
+# thread-pool worker needs isolated parser state.  A thread-local cache covers
+# both cases and avoids rebuilding CodeParser (including its grammar probes and
+# parser caches) for every file in a parallel build.
+_PARSE_WORKER_STATE = threading.local()
+
 
 def _select_executor_kind() -> str:
     """Return 'process' or 'thread' for parallel parsing.
@@ -878,7 +884,7 @@ def find_dependents(
 def _parse_single_file(
     args: tuple[str, str],
 ) -> tuple[str, list, list, str | None, str]:
-    """Parse one file in a worker process.
+    """Parse one file in a process- or thread-pool worker.
 
     Returns ``(rel_path, nodes, edges, error_or_none, file_hash)``.
     Must be a module-level function so ``ProcessPoolExecutor`` can
@@ -889,7 +895,12 @@ def _parse_single_file(
     try:
         raw = abs_path.read_bytes()
         fhash = hashlib.sha256(raw).hexdigest()
-        parser = CodeParser(Path(repo_root_str))
+        parser = getattr(_PARSE_WORKER_STATE, "parser", None)
+        parser_repo_root = getattr(_PARSE_WORKER_STATE, "repo_root", None)
+        if parser is None or parser_repo_root != repo_root_str:
+            parser = CodeParser(Path(repo_root_str))
+            _PARSE_WORKER_STATE.parser = parser
+            _PARSE_WORKER_STATE.repo_root = repo_root_str
         nodes, edges = parser.parse_bytes(abs_path, raw)
         return (rel_path, nodes, edges, None, fhash)
     except Exception as e:
