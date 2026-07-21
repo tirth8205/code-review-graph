@@ -201,13 +201,80 @@ class TestBuildUpdateCommands:
                         ) as mock_postprocess:
                             cli.main()
 
+        # With no explicit --base, the CLI forwards None so the shared seam
+        # can resolve the base to the last-synced commit.
         mock_build.assert_called_once_with(
             full_rebuild=False,
             repo_root="repo-root",
-            base="HEAD~1",
+            base=None,
             postprocess="minimal",
         )
         mock_postprocess.assert_not_called()
+
+    def test_update_forwards_explicit_base_verbatim(self):
+        argv = [
+            "code-review-graph",
+            "update",
+            "--base",
+            "HEAD~3",
+            "--skip-flows",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_updated": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "minimal",
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ):
+                            cli.main()
+
+        assert mock_build.call_args.kwargs["base"] == "HEAD~3"
+
+    def test_update_reports_full_rebuild_fallback(self, capsys):
+        argv = ["code-review-graph", "update", "--repo", "repo-root"]
+        # build_or_update_graph falls back to a full rebuild when there is no
+        # usable incremental base; the CLI must say so rather than print
+        # "Incremental: 0 files updated", which reads as "nothing happened".
+        result = {
+            "status": "ok",
+            "build_type": "full",
+            "base_resolved": None,
+            "files_parsed": 2,
+            "total_nodes": 4,
+            "total_edges": 2,
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ):
+                            cli.main()
+
+        out = capsys.readouterr().out
+        assert "Full rebuild" in out
+        assert "Incremental:" not in out
 
 
 class TestDetectChangesCommand:

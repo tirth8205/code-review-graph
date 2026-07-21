@@ -556,6 +556,55 @@ def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
             store.set_metadata("svn_revision", rev)
 
 
+def _commit_object_exists(repo_root: Path, ref: str) -> bool:
+    """Return True if *ref* resolves to a commit object present in the repo.
+
+    This is an object-existence check, not an ancestry check: a commit that is
+    only reachable from a branch we have since switched away from is still a
+    valid ``git diff`` base, so we must accept it. Any git failure (missing
+    binary, timeout, unknown ref) is treated as "not usable".
+    """
+    if not ref or ref.startswith("-") or not _SAFE_GIT_REF.fullmatch(ref):
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def resolve_incremental_base(repo_root: Path, store: "GraphStore") -> str | None:
+    """Resolve the automatic diff base for a default incremental update.
+
+    The graph records the commit it was last built at (``git_head_sha``). Using
+    that as the diff base lets a single ``update`` reconcile every change since
+    the graph was last in sync, instead of only the most recent commit, which
+    is what a fixed ``HEAD~1`` base does. That fixed base silently misses work
+    that arrived through a multi-commit pull, rebase, or branch switch.
+
+    Returns:
+        - the stored commit SHA when it is still a usable diff base;
+        - ``"HEAD~1"`` for SVN or non-git working copies, whose change
+          discovery ignores or reinterprets the base anyway;
+        - ``None`` for a git repo with no usable anchor (a fresh or legacy
+          database, or a stored commit lost to a history rewrite or shallow
+          clone), signalling the caller to do a full rebuild rather than
+          diff against a wrong base.
+    """
+    if detect_vcs(repo_root) != "git":
+        return "HEAD~1"
+    stored = store.get_metadata("git_head_sha")
+    if stored and _commit_object_exists(repo_root, stored):
+        return stored
+    return None
+
+
 def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
     """Get list of changed files via git diff or svn status.
 
