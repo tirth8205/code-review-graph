@@ -18,6 +18,7 @@ else:  # pragma: no cover - Python 3.10 backport
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
+    _copilot_vscode_detected,
     _cursor_hook_scripts,
     _detect_serve_command,
     _in_poetry_project,
@@ -30,6 +31,7 @@ from code_review_graph.skills import (
     generate_skills,
     inject_claude_md,
     inject_platform_instructions,
+    install_antigravity_skills,
     install_codex_hooks,
     install_cursor_hooks,
     install_gemini_cli_hooks,
@@ -1195,7 +1197,8 @@ class TestInstallPlatformConfigs:
                 "gemini-cli": {**PLATFORMS["gemini-cli"], "detect": lambda: False},
             },
         ):
-            configured = install_platform_configs(tmp_path, target="all")
+            with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+                configured = install_platform_configs(tmp_path, target="all")
         assert "Codex" in configured
         assert "Claude Code" in configured
         assert "OpenCode" in configured
@@ -1299,6 +1302,34 @@ class TestGeminiCLIInstall:
         assert text.startswith("---\n")
         assert "name: explore-codebase" in text
         assert "description:" in text
+
+
+class TestAntigravitySkillsInstall:
+    def test_writes_workspace_scoped_skill_directories(self, tmp_path):
+        skills_root = install_antigravity_skills(tmp_path)
+
+        assert skills_root == tmp_path / ".agents" / "skills"
+        skill_path = skills_root / "explore-codebase" / "SKILL.md"
+        assert skill_path.exists()
+        text = skill_path.read_text(encoding="utf-8")
+        assert text.startswith("---\n")
+        assert "name: explore-codebase" in text
+        assert "description:" in text
+
+    def test_is_idempotent_and_preserves_unrelated_skills(self, tmp_path):
+        unrelated = tmp_path / ".agents" / "skills" / "user-skill" / "SKILL.md"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("user content\n", encoding="utf-8")
+
+        first_root = install_antigravity_skills(tmp_path)
+        first = (first_root / "review-changes" / "SKILL.md").read_text(encoding="utf-8")
+        second_root = install_antigravity_skills(tmp_path)
+
+        assert second_root == first_root
+        assert (second_root / "review-changes" / "SKILL.md").read_text(
+            encoding="utf-8"
+        ) == first
+        assert unrelated.read_text(encoding="utf-8") == "user content\n"
 
 
 class TestCursorHooksConfig:
@@ -1643,14 +1674,58 @@ class TestCopilotPlatform:
         assert not (tmp_path / "QODER.md").exists()
 
     def test_copilot_included_in_all_when_detected(self, tmp_path):
-        """install_platform_configs with target='all' includes Copilot when ~/.vscode exists."""
+        """Auto-detection requires the Copilot extension, not only VS Code."""
         fake_home = tmp_path / "fakehome"
-        (fake_home / ".vscode").mkdir(parents=True)
-        with patch("code_review_graph.skills.Path.home", return_value=fake_home):
+        (fake_home / ".vscode" / "extensions" / "github.copilot-1.2.3").mkdir(
+            parents=True
+        )
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.platform.system", return_value="Unknown"),
+            patch("code_review_graph.skills.shutil.which", return_value=None),
+        ):
             configured = install_platform_configs(tmp_path, target="all")
         assert "GitHub Copilot" in configured
         config_path = tmp_path / ".vscode" / "mcp.json"
         assert config_path.exists()
+
+    def test_copilot_detects_vscode_bundled_extension(self, tmp_path):
+        """Current VS Code bundles Copilot under its application extensions."""
+        fake_home = tmp_path / "fakehome"
+        app_root = tmp_path / "vscode" / "resources" / "app"
+        code_cli = app_root / "bin" / "code"
+        code_cli.parent.mkdir(parents=True)
+        code_cli.write_text("", encoding="utf-8")
+        manifest = app_root / "extensions" / "copilot" / "package.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            json.dumps({"publisher": "GitHub", "name": "copilot-chat"}),
+            encoding="utf-8",
+        )
+
+        def _which(command):
+            return str(code_cli) if command == "code" else None
+
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.shutil.which", side_effect=_which),
+        ):
+            assert _copilot_vscode_detected() is True
+
+    def test_copilot_not_detected_from_vscode_alone(self, tmp_path):
+        """An unrelated VS Code install must not trigger Copilot configuration."""
+        fake_home = tmp_path / "fakehome"
+        (fake_home / ".vscode" / "extensions" / "ms-python.python-1.0.0").mkdir(
+            parents=True
+        )
+        with (
+            patch("code_review_graph.skills.Path.home", return_value=fake_home),
+            patch("code_review_graph.skills.platform.system", return_value="Unknown"),
+            patch("code_review_graph.skills.shutil.which", return_value=None),
+        ):
+            configured = install_platform_configs(tmp_path, target="all")
+        assert "GitHub Copilot" not in configured
+        assert not (tmp_path / ".vscode" / "mcp.json").exists()
 
 
 class TestCopilotCLIPlatform:
@@ -1661,12 +1736,12 @@ class TestCopilotCLIPlatform:
         assert "copilot-cli" in PLATFORMS
         copilot_cli = PLATFORMS["copilot-cli"]
         assert copilot_cli["name"] == "GitHub Copilot CLI"
-        assert copilot_cli["key"] == "servers"
+        assert copilot_cli["key"] == "mcpServers"
         assert copilot_cli["format"] == "object"
         assert copilot_cli["needs_type"] is True
 
     def test_install_copilot_cli_config(self, tmp_path):
-        """install_platform_configs creates ~/.copilot/mcp-config.json with 'servers' key."""
+        """Install writes the documented Copilot CLI MCP schema."""
         fake_home = tmp_path / "fakehome"
         (fake_home / ".copilot").mkdir(parents=True)
         config_path = fake_home / ".copilot" / "mcp-config.json"
@@ -1684,10 +1759,11 @@ class TestCopilotCLIPlatform:
         assert "GitHub Copilot CLI" in configured
         assert config_path.exists()
         data = json.loads(config_path.read_text())
-        assert "code-review-graph" in data["servers"]
-        entry = data["servers"]["code-review-graph"]
-        assert entry["type"] == "stdio"
+        assert "code-review-graph" in data["mcpServers"]
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "local"
         assert "serve" in entry["args"]
+        assert entry["tools"] == ["*"]
 
     def test_install_copilot_cli_preserves_existing_servers(self, tmp_path):
         """Existing server entries are preserved when adding code-review-graph."""
@@ -1695,7 +1771,7 @@ class TestCopilotCLIPlatform:
         config_path = fake_home / ".copilot" / "mcp-config.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
-            json.dumps({"servers": {"other-server": {"command": "other"}}}),
+            json.dumps({"mcpServers": {"other-server": {"command": "other"}}}),
             encoding="utf-8",
         )
         with patch.dict(
@@ -1710,8 +1786,8 @@ class TestCopilotCLIPlatform:
         ):
             install_platform_configs(tmp_path, target="copilot-cli")
         data = json.loads(config_path.read_text())
-        assert "other-server" in data["servers"]
-        assert "code-review-graph" in data["servers"]
+        assert "other-server" in data["mcpServers"]
+        assert "code-review-graph" in data["mcpServers"]
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
         """Copilot CLI injection writes its GitHub instruction file."""
@@ -2173,7 +2249,8 @@ class TestInstallSkillsRespectTargetPlatform:
             no_instructions=True,
         )
         with patch("builtins.input", return_value="n"):
-            crg_cli._handle_init(args)
+            with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+                crg_cli._handle_init(args)
         return (tmp_path / ".claude" / "skills").is_dir()
 
     def test_cursor_install_does_not_create_claude_skills(self, tmp_path):

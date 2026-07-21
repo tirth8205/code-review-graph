@@ -98,6 +98,56 @@ def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys)
     assert "Installed Cursor hooks" in out
 
 
+def test_handle_init_antigravity_installs_only_workspace_skills(
+    monkeypatch, tmp_path, capsys
+):
+    import code_review_graph.skills as skills_module
+
+    monkeypatch.setattr(
+        "code_review_graph.incremental.find_repo_root",
+        lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: ["Antigravity"],
+    )
+
+    called = {"claude": False, "gemini": False, "antigravity": False}
+
+    def _generate_skills(repo_root):
+        called["claude"] = True
+        return repo_root / ".claude" / "skills"
+
+    def _install_gemini_cli_skills(repo_root):
+        called["gemini"] = True
+        return repo_root / ".gemini" / "skills"
+
+    def _install_antigravity_skills(repo_root):
+        called["antigravity"] = True
+        return repo_root / ".agents" / "skills"
+
+    monkeypatch.setattr(skills_module, "generate_skills", _generate_skills)
+    monkeypatch.setattr(
+        skills_module, "install_gemini_cli_skills", _install_gemini_cli_skills
+    )
+    monkeypatch.setattr(
+        skills_module,
+        "install_antigravity_skills",
+        _install_antigravity_skills,
+        raising=False,
+    )
+
+    _handle_init(_args(tmp_path, "antigravity"))
+    out = capsys.readouterr().out
+
+    assert called == {"claude": False, "gemini": False, "antigravity": True}
+    assert "Installed Antigravity skills" in out
+
+
 def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     monkeypatch, tmp_path, capsys
 ):

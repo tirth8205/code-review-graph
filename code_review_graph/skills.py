@@ -32,6 +32,92 @@ def _zed_settings_path() -> Path:
     return Path.home() / ".config" / "zed" / "settings.json"
 
 
+def _copilot_vscode_detected() -> bool:
+    """Return whether a GitHub Copilot extension is installed for VS Code."""
+    home = Path.home()
+    extension_dirs = [
+        home / ".vscode" / "extensions",
+        home / ".vscode-insiders" / "extensions",
+    ]
+
+    system = platform.system()
+    if system == "Darwin":
+        for applications_dir in (Path("/Applications"), home / "Applications"):
+            for app_name in (
+                "Visual Studio Code.app",
+                "Visual Studio Code - Insiders.app",
+            ):
+                extension_dirs.append(
+                    applications_dir
+                    / app_name
+                    / "Contents"
+                    / "Resources"
+                    / "app"
+                    / "extensions"
+                )
+    elif system == "Windows":
+        for env_name in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+            if install_root := os.environ.get(env_name):
+                for app_name in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
+                    extension_dirs.append(
+                        Path(install_root)
+                        / app_name
+                        / "resources"
+                        / "app"
+                        / "extensions"
+                    )
+    elif system == "Linux":
+        extension_dirs.extend(
+            [
+                Path("/usr/share/code/resources/app/extensions"),
+                Path("/usr/share/code-insiders/resources/app/extensions"),
+                Path("/usr/lib/code/resources/app/extensions"),
+                Path("/opt/visual-studio-code/resources/app/extensions"),
+                Path("/snap/code/current/usr/share/code/resources/app/extensions"),
+            ]
+        )
+
+    for command in ("code", "code-insiders"):
+        if executable := shutil.which(command):
+            try:
+                parents = Path(executable).resolve().parents[:6]
+            except OSError:
+                continue
+            for parent in parents:
+                extension_dirs.extend(
+                    [
+                        parent / "extensions",
+                        parent / "resources" / "app" / "extensions",
+                        parent / "Resources" / "app" / "extensions",
+                    ]
+                )
+
+    for extensions_dir in dict.fromkeys(extension_dirs):
+        try:
+            extension_paths = list(extensions_dir.iterdir())
+        except OSError:
+            continue
+        for extension_path in extension_paths:
+            name = extension_path.name.lower()
+            if name.startswith("github.copilot-"):
+                return True
+            if "copilot" not in name:
+                continue
+            try:
+                manifest = json.loads(
+                    (extension_path / "package.json").read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                str(manifest.get("publisher", "")).lower() == "github"
+                and str(manifest.get("name", "")).lower()
+                in {"copilot", "copilot-chat"}
+            ):
+                return True
+    return False
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
     for name in ("opencode.jsonc", "opencode.json"):
@@ -142,17 +228,19 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "name": "GitHub Copilot",
         "config_path": lambda root: root / ".vscode" / "mcp.json",
         "key": "servers",
-        "detect": lambda: (Path.home() / ".vscode").exists(),
+        "detect": _copilot_vscode_detected,
         "format": "object",
         "needs_type": True,
     },
     "copilot-cli": {
         "name": "GitHub Copilot CLI",
         "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
-        "key": "servers",
+        "key": "mcpServers",
         "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
+        "server_type": "local",
+        "entry_fields": {"tools": ["*"]},
     },
     "codebuddy": {
         "name": "CodeBuddy Code",
@@ -262,7 +350,8 @@ def _build_server_entry(
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
-        entry["type"] = "stdio"
+        entry["type"] = plat.get("server_type", "stdio")
+    entry.update(plat.get("entry_fields", {}))
     return entry
 
 
@@ -1322,6 +1411,29 @@ def install_gemini_cli_skills(repo_root: Path) -> Path:
         )
         skill_path.write_text(content, encoding="utf-8")
         logger.info("Wrote Gemini CLI skill: %s", skill_path)
+
+    return skills_root
+
+
+def install_antigravity_skills(repo_root: Path) -> Path:
+    """Install workspace-scoped Antigravity skills in .agents/skills/."""
+    skills_root = repo_root / ".agents" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote Antigravity skill: %s", skill_path)
 
     return skills_root
 
