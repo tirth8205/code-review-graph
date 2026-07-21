@@ -1516,3 +1516,120 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+class TestJsMemberAssignedFunctions:
+    """Member-assigned function expressions in JS/TS.
+
+    ``obj.method = function () {}`` / ``Foo.prototype.bar = () => {}`` are the
+    prototype- and module-augmentation patterns that Express, Koa and many
+    older JS libraries use for their entire public API. Only ``const x = fn``
+    (variable_declarator) and class fields were captured before, so these
+    definitions produced no Function node at all.
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_js_object_method_assignment_captured(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/application.js"),
+            b"app.handle = function handle(req, res, next) {\n"
+            b"  next();\n"
+            b"};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert "app.handle" in fns
+
+    def test_js_arrow_member_assignment_captured(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/router.js"),
+            b"router.dispatch = (req, res) => {\n"
+            b"  return res;\n"
+            b"};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert "router.dispatch" in fns
+
+    def test_ts_prototype_assignment_captured(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/proto.ts"),
+            b"Router.prototype.handle = function (req: Request): void {\n"
+            b"  this.stack.forEach((layer) => layer.handle(req));\n"
+            b"};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert "Router.prototype.handle" in fns
+
+    def test_member_function_qualified_name_and_contains(self):
+        """Qualified name is ``file::obj.method`` and a CONTAINS edge links it."""
+        path = Path("/test/application.js")
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"app.handle = function handle(req, res) {};\n",
+        )
+        contains = [
+            e for e in edges
+            if e.kind == "CONTAINS" and e.target == f"{path}::app.handle"
+        ]
+        assert len(contains) == 1
+        assert contains[0].source == str(path)
+
+    def test_non_function_member_assignment_not_captured(self):
+        """``obj.prop = <non-function>`` must not create a Function node."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/config.js"),
+            b"app.settings = { trust_proxy: false };\n"
+            b"app.locals = {};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert "app.settings" not in fns
+        assert "app.locals" not in fns
+
+    def test_member_function_body_calls_still_attributed(self):
+        """Calls inside a member-assigned function attribute to that function."""
+        path = Path("/test/application.js")
+        _, edges = self.parser.parse_bytes(
+            path,
+            b"function helper() { return 1; }\n"
+            b"app.handle = function handle() {\n"
+            b"  helper();\n"
+            b"};\n",
+        )
+        calls = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.source == f"{path}::app.handle"
+            and e.target.endswith("helper")
+        ]
+        assert len(calls) == 1
+
+    def test_member_call_resolves_to_member_assigned_function(self):
+        """A static member call resolves to its same-file member definition."""
+        path = Path("/test/application.js")
+        _, edges = self.parser.parse_bytes(
+            path,
+            b"app.handle = function () {};\n"
+            b"function start() { app.handle(); }\n",
+        )
+        calls = [
+            e for e in edges
+            if e.kind == "CALLS" and e.source == f"{path}::start"
+        ]
+        assert len(calls) == 1
+        assert calls[0].target == f"{path}::app.handle"
+
+    def test_optional_member_call_resolves_to_member_assigned_function(self):
+        """Optional chaining retains the same static member-call target."""
+        path = Path("/test/application.js")
+        _, edges = self.parser.parse_bytes(
+            path,
+            b"app.handle = function () {};\n"
+            b"function start() { app?.handle(); }\n",
+        )
+        calls = [
+            e for e in edges
+            if e.kind == "CALLS" and e.source == f"{path}::start"
+        ]
+        assert len(calls) == 1
+        assert calls[0].target == f"{path}::app.handle"
