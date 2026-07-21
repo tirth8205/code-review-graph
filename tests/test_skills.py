@@ -2187,3 +2187,79 @@ class TestInstallSkillsRespectTargetPlatform:
 
     def test_all_target_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "all") is True
+
+
+class TestNonAsciiConfigPreservation:
+    """#497: json.dumps(..., indent=2) defaults to ensure_ascii=True, so any
+    non-ASCII content round-tripped through these config writers (a repo path,
+    or a pre-existing custom field) gets serialized as literal \\uXXXX escapes
+    instead of UTF-8. Technically valid JSON, but some MCP hosts / process
+    launchers don't decode \\uXXXX correctly when consuming these files directly
+    (see #497) — write real UTF-8 instead.
+    """
+
+    NON_ASCII = "基于STM32的项目"
+
+    def test_install_platform_configs_preserves_non_ascii_cwd(self, tmp_path):
+        repo_root = tmp_path / self.NON_ASCII
+        repo_root.mkdir()
+
+        install_platform_configs(repo_root, target="claude")
+
+        raw = (repo_root / ".mcp.json").read_text(encoding="utf-8")
+        assert self.NON_ASCII in raw
+        assert "\\u" not in raw
+
+    def test_merge_hooks_into_settings_preserves_non_ascii_field(self, tmp_path):
+        settings_dir = tmp_path / ".claude"
+        settings_dir.mkdir()
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"customSetting": self.NON_ASCII}), encoding="utf-8",
+        )
+
+        install_hooks(tmp_path, platform="claude")
+
+        raw = (settings_dir / "settings.json").read_text(encoding="utf-8")
+        assert self.NON_ASCII in raw
+        assert "\\u" not in raw
+
+    def test_install_codex_hooks_preserves_non_ascii_field(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "hooks.json").write_text(
+            json.dumps({"customSetting": self.NON_ASCII}), encoding="utf-8",
+        )
+
+        install_codex_hooks(tmp_path / "repo")
+
+        raw = (codex_dir / "hooks.json").read_text(encoding="utf-8")
+        assert self.NON_ASCII in raw
+        assert "\\u" not in raw
+
+    def test_install_gemini_cli_hooks_preserves_non_ascii_field(self, tmp_path):
+        settings_dir = tmp_path / ".gemini"
+        settings_dir.mkdir()
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"customSetting": self.NON_ASCII}), encoding="utf-8",
+        )
+
+        install_gemini_cli_hooks(tmp_path)
+
+        raw = (settings_dir / "settings.json").read_text(encoding="utf-8")
+        assert self.NON_ASCII in raw
+        assert "\\u" not in raw
+
+    def test_install_cursor_hooks_preserves_non_ascii_field(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        cursor_dir = tmp_path / ".cursor"
+        cursor_dir.mkdir()
+        (cursor_dir / "hooks.json").write_text(
+            json.dumps({"customSetting": self.NON_ASCII}), encoding="utf-8",
+        )
+
+        install_cursor_hooks()
+
+        raw = (cursor_dir / "hooks.json").read_text(encoding="utf-8")
+        assert self.NON_ASCII in raw
+        assert "\\u" not in raw
