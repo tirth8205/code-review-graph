@@ -144,3 +144,38 @@ def test_tool_command_missing_graph_exits_nonzero(tmp_path, monkeypatch, capsys)
 
     assert exc_info.value.code == 1
     assert "No graph found" in capsys.readouterr().err
+
+
+def test_tool_command_honors_repo_flag_over_ancestor_git_in_monorepo(
+    tmp_path, monkeypatch, capsys,
+):
+    """Regression test: a single ``.git`` at a monorepo root must not shadow
+    a module subdirectory's own ``.code-review-graph`` graph when ``--repo``
+    points directly at that module (e.g. ``llvm-project`` with ``llvm/`` and
+    ``clang/`` independently built/registered as CRG projects)."""
+    monorepo = tmp_path / "monorepo"
+    module = monorepo / "llvm"
+    module.mkdir(parents=True)
+    (monorepo / ".git").mkdir()
+
+    # A graph exists for the module itself...
+    module_data = module / ".code-review-graph"
+    module_data.mkdir()
+    (module_data / "graph.db").touch()
+
+    # ...but NOT at the monorepo root, so the buggy resolution (walking up
+    # to the nearest .git) would report "no graph found" there instead.
+    monorepo_data = monorepo / ".code-review-graph"
+    monorepo_data.mkdir()
+
+    argv = ["code-review-graph", "search", "raw_ostream", "--repo", str(module)]
+    result = {"status": "ok", "tool": "semantic_search_nodes"}
+
+    with patch.object(sys, "argv", argv):
+        with patch(
+            "code_review_graph.tools.semantic_search_nodes", return_value=result,
+        ) as tool:
+            cli.main()
+
+    assert json.loads(capsys.readouterr().out) == result
+    tool.assert_called_once_with(repo_root=str(module), query="raw_ostream", kind=None, limit=20)
