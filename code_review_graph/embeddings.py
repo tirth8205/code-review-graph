@@ -681,6 +681,13 @@ def get_provider(
             "Valid: local, openai, google, minimax"
         )
 
+    # When no explicit provider is given but OpenAI-compatible env vars are
+    # configured, default to the openai provider so MCP tool calls that omit
+    # the optional `provider` parameter still use the configured backend
+    # (#551).
+    if not name and os.environ.get("CRG_OPENAI_API_KEY") and os.environ.get("CRG_OPENAI_BASE_URL"):
+        name = "openai"
+
     if name == "openai":
         api_key = os.environ.get("CRG_OPENAI_API_KEY")
         base_url = os.environ.get("CRG_OPENAI_BASE_URL")

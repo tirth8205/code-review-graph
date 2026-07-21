@@ -237,6 +237,28 @@ class TestGetProviderValidation:
         assert get_provider("") is mock_cls.return_value
         assert get_provider("   ") is mock_cls.return_value
 
+    @patch("code_review_graph.embeddings.OpenAIEmbeddingProvider")
+    def test_none_defaults_to_openai_when_env_configured(self, mock_cls):
+        """When provider is omitted but OpenAI env vars are set, default to
+        the OpenAI-compatible provider instead of local (#551)."""
+        mock_cls.return_value = MagicMock()
+        env = {
+            "CRG_OPENAI_API_KEY": "fake-key",
+            "CRG_OPENAI_BASE_URL": "http://localhost:11434/v1",
+            "CRG_OPENAI_MODEL": "nomic-embed-text",
+            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            provider = get_provider(None)
+        assert provider is mock_cls.return_value
+        mock_cls.assert_called_once_with(
+            api_key="fake-key",
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            dimension=None,
+            batch_size=None,
+        )
+
 
 class TestGetProviderModel:
     """Tests for model parameter in get_provider()."""
