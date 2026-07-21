@@ -316,17 +316,24 @@ def query_graph(
                     node = candidates[0]
                     target = node.qualified_name
                 elif len(candidates) > 1:
+                    candidate_count = (
+                        len(candidates)
+                        if java_candidates is not None
+                        else store.count_search_nodes(target)
+                    )
                     ranked = _rank_disambiguation_candidates(candidates, target)
                     return {
                         "status": "ambiguous",
                         "summary": (
-                            f"'{target}' matches {len(candidates)} node(s). "
+                            f"'{target}' matches {candidate_count} node(s). "
                             "Re-run with a qualified_name from disambiguation."
                         ),
                         # Preserve the established key while adding the clearer
                         # agent-facing name introduced by #458.
                         "candidates": ranked,
                         "disambiguation": ranked,
+                        "candidate_count": candidate_count,
+                        "candidates_truncated": candidate_count > len(candidates),
                         "hint": (
                             "Use a qualified_name from disambiguation as the "
                             "target parameter."
@@ -354,7 +361,27 @@ def query_graph(
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
             if node:
+                cpp_overload_count = (
+                    store.count_nodes_by_name(
+                        node.name,
+                        language="cpp",
+                        kinds=("Function", "Test"),
+                    )
+                    if node.language == "cpp"
+                    else 0
+                )
                 for e in store.iter_edges_by_target_name(node.name):
+                    # A C++ overload set deliberately keeps the target bare.
+                    # Its candidates support disambiguation, but do not prove
+                    # that any one exact overload was called.
+                    if (
+                        "ambiguous_targets" in e.extra
+                        or "unresolved_targets" in e.extra
+                        or (node.language == "cpp" and e.extra.get("receiver"))
+                    ):
+                        continue
+                    if cpp_overload_count > 1:
+                        continue
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
@@ -370,12 +397,46 @@ def query_graph(
                         callee = store.get_node(e.target_qualified)
                         if callee:
                             add_result(node_to_dict(callee), e)
-                        elif "::" not in e.target_qualified:
-                            add_result({
+                        elif (
+                            isinstance(e.extra.get("ambiguous_targets"), list)
+                            or isinstance(e.extra.get("unresolved_targets"), list)
+                            or "::" not in e.target_qualified
+                            or (node is not None and node.language == "cpp")
+                        ):
+                            unresolved = (
+                                e.extra.get("ambiguous_targets")
+                                or e.extra.get("unresolved_targets")
+                            )
+                            result: dict[str, Any] = {
                                 "kind": "Function",
                                 "name": e.target_qualified,
                                 "qualified_name": e.target_qualified,
-                            }, e)
+                            }
+                            if isinstance(unresolved, list):
+                                resolution = (
+                                    "ambiguous"
+                                    if e.extra.get("ambiguous_targets")
+                                    else "unresolved"
+                                )
+                                result["resolution"] = resolution
+                                result["candidates"] = [
+                                    _sanitize_name(candidate)
+                                    for candidate in unresolved[:20]
+                                    if isinstance(candidate, str)
+                                ]
+                                candidate_count = e.extra.get(
+                                    f"{resolution}_target_count",
+                                )
+                                if not isinstance(candidate_count, int):
+                                    candidate_count = len(unresolved)
+                                result["candidate_count"] = candidate_count
+                                result["candidates_truncated"] = bool(
+                                    e.extra.get(
+                                        f"{resolution}_targets_truncated",
+                                    )
+                                    or candidate_count > len(result["candidates"])
+                                )
+                            add_result(result, e)
 
         elif pattern == "imports_of":
             for e in store.iter_edges_by_source(qn):
@@ -448,8 +509,19 @@ def query_graph(
                     seen.add(test_qn)
             # Also search by naming convention
             name = node.name if node else target
-            test_nodes = store.search_nodes(f"test_{name}", limit=10)
-            test_nodes += store.search_nodes(f"Test{name}", limit=10)
+            cpp_overload_set = bool(
+                node
+                and node.language == "cpp"
+                and store.count_nodes_by_name(
+                    node.name,
+                    language="cpp",
+                    kinds=("Function", "Test"),
+                ) > 1
+            )
+            test_nodes = []
+            if not cpp_overload_set:
+                test_nodes = store.search_nodes(f"test_{name}", limit=10)
+                test_nodes += store.search_nodes(f"Test{name}", limit=10)
             for t in test_nodes:
                 if t.qualified_name not in seen and t.is_test:
                     result = node_to_dict(t)
