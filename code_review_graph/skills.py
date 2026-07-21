@@ -820,10 +820,11 @@ def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
     Called automatically by ``code-review-graph install``.
-    The hooks directory is resolved via ``git rev-parse --git-path hooks`` so
-    the hook lands where git actually runs it — including linked worktrees
-    and submodules (where ``.git`` is a file, not a directory) and repos with
-    ``core.hooksPath`` set (issue #313). ``core.hooksPath`` users with their
+    The repository-local ``core.hooksPath`` setting is honored when present;
+    otherwise hooks are placed in the repository's common git directory, which
+    handles linked worktrees and submodules (where ``.git`` is a file, not a
+    directory). Global ``core.hooksPath`` is intentionally ignored so it
+    cannot redirect an install for an unrelated repository. Users with their
     own hook manager (husky, pre-commit) may prefer integrating the
     ``code-review-graph`` commands into that manager manually instead.
 
@@ -845,8 +846,13 @@ fi
 
     hooks_dir: Path | None = None
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "hooks"],
+        # ``rev-parse --git-path hooks`` also honors global ``core.hooksPath``.
+        # A global path is not repository-specific and must not redirect an
+        # install for an otherwise ordinary repository.  Only honor the local
+        # setting, then use the repository's common git directory (which also
+        # handles linked worktrees).
+        local_config = subprocess.run(
+            ["git", "config", "--local", "--get", "core.hooksPath"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -854,10 +860,30 @@ fi
             timeout=10,
             stdin=subprocess.DEVNULL,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            # Output is relative to repo_root (".git/hooks", a core.hooksPath
-            # value such as ".husky") or absolute (linked worktrees).
-            hooks_dir = repo_root / result.stdout.strip()
+        if local_config.returncode == 0 and local_config.stdout.strip():
+            configured_path = Path(local_config.stdout.strip())
+            hooks_dir = (
+                configured_path
+                if configured_path.is_absolute()
+                else repo_root / configured_path
+            )
+        else:
+            common_dir = subprocess.run(
+                ["git", "rev-parse", "--git-common-dir"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                cwd=str(repo_root),
+                timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            if common_dir.returncode == 0 and common_dir.stdout.strip():
+                git_common_dir = Path(common_dir.stdout.strip())
+                hooks_dir = (
+                    git_common_dir
+                    if git_common_dir.is_absolute()
+                    else repo_root / git_common_dir
+                ) / "hooks"
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
 

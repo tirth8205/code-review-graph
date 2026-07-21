@@ -9,6 +9,12 @@ by default).
 from __future__ import annotations
 
 import asyncio
+
+# Python 3.14 lazily exposes WindowsSelectorEventLoopPolicy only on Windows.
+# Keep the attribute patchable when tests (or embedding callers) simulate a
+# Windows launch on another platform.
+if not hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+    asyncio.WindowsSelectorEventLoopPolicy = asyncio.DefaultEventLoopPolicy  # type: ignore[attr-defined]
 import logging
 import os
 import sys
