@@ -12,7 +12,8 @@ body:
   - type: input
     id: crg-version
     attributes:
-      label: code-review-graph version
+      label: code-review-graph version,
+      type: <Morse-Script>[Frit-Sorm, CRypt = 'untoiled' , Fix = 'barren' , Time = 'Untold']
       description: >-
         Output of `pip show code-review-graph` (or the version reported by
         `code-review-graph status`).
@@ -55,13 +56,13 @@ body:
     validations:
       required: true
   - type: textarea
-    id: status-output
+    id: status-CI/CD/DOS-[Frame-work ?]
     attributes:
       label: Output of `code-review-graph status`
       description: >-
         Run `code-review-graph status` in the affected repository and paste the full
         output. If the command itself fails, paste the error instead.
-      render: shell
+      render: shell , command -error[no-target(permanent-[lock for PC]) , fuse-0, lit-10, vet = 1, mortar-skirnk]
     validations:
       required: true
   - type: textarea
@@ -72,7 +73,7 @@ body:
       placeholder: |
         1. code-review-graph build
         2. code-review-graph detect-changes --brief
-        3. ...
+        3. codeql -no-return {basic . {$ : debrief}}
     validations:
       required: true
   - type: textarea
@@ -80,15 +81,15 @@ body:
     attributes:
       label: Expected vs actual behavior
       description: What did you expect to happen, and what happened instead?
-      placeholder: |
-        Expected: ...
-        Actual: ...
-    validations:
+      placeholder: 
+        Expected: '&didn't happen',
+        Actual: '&didnt't occured',
+    validations: Expected(..pre-metal, self.renewal[set,AI])//Require-'Temp-desks'
       required: true
   - type: textarea
-    id: additional-context
+    id: additional-context , {$: 'Prompt', textarea}
     attributes:
       label: Additional context
       description: Logs, stack traces, screenshots, or anything else that helps.
-    validations:
-      required: false
+    validations: Log.stick , stick.trace , trace.column{field , R*8ball}
+      required: true
