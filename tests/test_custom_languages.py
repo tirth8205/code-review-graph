@@ -67,6 +67,34 @@ def load(repo_root: Path):
     )
 
 
+# --- name_field fixtures (issue #691): BibTeX / LaTeX / Markdown -------------
+
+NAME_FIELD_TOML = """\
+[languages.bibtex]
+extensions = [".bib"]
+grammar = "bibtex"
+class_node_types = ["entry"]
+name_field = ["key"]
+
+[languages.latex]
+extensions = [".tex"]
+grammar = "latex"
+class_node_types = ["section", "chapter", "subsection"]
+function_node_types = ["new_command_definition"]
+name_field = ["name", "text", "declaration"]
+
+[languages.markdown]
+extensions = [".md"]
+grammar = "markdown"
+class_node_types = ["section"]
+name_field = ["inline"]
+"""
+
+BIBTEX_SOURCE = "@article{smith2020,\n  title = {Hello},\n  author = {Smith}\n}\n"
+LATEX_SOURCE = "\\section{Introduction}\n\\newcommand{\\foo}{bar}\n"
+MARKDOWN_SOURCE = "# My Heading\n\nSome text.\n"
+
+
 @pytest.fixture(autouse=True)
 def _clear_loader_cache():
     custom_languages.clear_cache()
@@ -304,3 +332,128 @@ class TestParserIntegration:
             assert row[0] == "erlang"
         finally:
             store.close()
+
+
+class TestNameFieldLoader:
+    """Loader validation for the optional name_field key (issue #691)."""
+
+    def test_name_field_string_normalised_to_tuple(self, tmp_path):
+        write_config(tmp_path, (
+            "[languages.bibtex]\n"
+            'extensions = [".bib"]\n'
+            'grammar = "bibtex"\n'
+            'class_node_types = ["entry"]\n'
+            'name_field = "key"\n'
+        ))
+        result = load(tmp_path)
+        assert result["bibtex"].name_field == ("key",)
+
+    def test_name_field_list_preserved_in_order(self, tmp_path):
+        write_config(tmp_path, NAME_FIELD_TOML)
+        result = load(tmp_path)
+        assert result["latex"].name_field == ("name", "text", "declaration")
+
+    def test_name_field_omitted_defaults_empty(self, tmp_path):
+        write_config(tmp_path, ERLANG_TOML)
+        assert load(tmp_path)["erlang"].name_field == ()
+
+    def test_invalid_name_field_type_skips_entry(self, tmp_path, caplog):
+        write_config(tmp_path, (
+            "[languages.bibtex]\n"
+            'extensions = [".bib"]\n'
+            'grammar = "bibtex"\n'
+            'class_node_types = ["entry"]\n'
+            "name_field = 5\n"
+        ))
+        with caplog.at_level(logging.WARNING):
+            result = load(tmp_path)
+        assert "bibtex" not in result
+        assert "name_field" in caplog.text
+
+    def test_empty_name_field_element_skips_entry(self, tmp_path, caplog):
+        write_config(tmp_path, (
+            "[languages.bibtex]\n"
+            'extensions = [".bib"]\n'
+            'grammar = "bibtex"\n'
+            'class_node_types = ["entry"]\n'
+            'name_field = ["key", ""]\n'
+        ))
+        with caplog.at_level(logging.WARNING):
+            result = load(tmp_path)
+        assert "bibtex" not in result
+
+    def test_one_bad_name_field_does_not_break_others(self, tmp_path, caplog):
+        write_config(tmp_path, (
+            "[languages.bibtex]\n"
+            'extensions = [".bib"]\n'
+            'grammar = "bibtex"\n'
+            'class_node_types = ["entry"]\n'
+            "name_field = 5\n"
+            "\n"
+            "[languages.markdown]\n"
+            'extensions = [".md"]\n'
+            'grammar = "markdown"\n'
+            'class_node_types = ["section"]\n'
+            'name_field = ["inline"]\n'
+        ))
+        with caplog.at_level(logging.WARNING):
+            result = load(tmp_path)
+        assert "bibtex" not in result
+        assert "markdown" in result
+
+
+class TestNameFieldResolution:
+    """End-to-end name resolution for the four shapes in issue #691."""
+
+    def _parse(self, tmp_path: Path, filename: str, source: str):
+        write_config(tmp_path, NAME_FIELD_TOML)
+        src = tmp_path / filename
+        src.write_text(source, encoding="utf-8")
+        parser = CodeParser(tmp_path)
+        return parser.parse_file(src)
+
+    def _named(self, nodes, kind):
+        return {n.name for n in nodes if n.kind == kind}
+
+    def test_bibtex_entry_named_by_key(self, tmp_path):
+        nodes, _ = self._parse(tmp_path, "refs.bib", BIBTEX_SOURCE)
+        assert "smith2020" in self._named(nodes, "Class")
+
+    def test_bibtex_does_not_use_inner_field_labels(self, tmp_path):
+        # Anti-trap: title/author are identifiers deeper in the entry subtree.
+        nodes, _ = self._parse(tmp_path, "refs.bib", BIBTEX_SOURCE)
+        names = self._named(nodes, "Class")
+        assert "title" not in names
+        assert "author" not in names
+
+    def test_latex_section_named_without_braces(self, tmp_path):
+        nodes, _ = self._parse(tmp_path, "paper.tex", LATEX_SOURCE)
+        classes = self._named(nodes, "Class")
+        assert "Introduction" in classes
+        assert "{Introduction}" not in classes
+
+    def test_latex_newcommand_resolved_via_declaration(self, tmp_path):
+        # Ordered list must pick `declaration` (field), not the `text` node
+        # inside the implementation body ({bar}).
+        nodes, _ = self._parse(tmp_path, "paper.tex", LATEX_SOURCE)
+        funcs = self._named(nodes, "Function")
+        assert "\\foo" in funcs
+        assert "bar" not in funcs
+
+    def test_markdown_section_named_via_typed_descendant(self, tmp_path):
+        nodes, _ = self._parse(tmp_path, "README.md", MARKDOWN_SOURCE)
+        assert "My Heading" in self._named(nodes, "Class")
+
+    def test_without_name_field_definitions_are_dropped(self, tmp_path):
+        # Same BibTeX source but no name_field → entry has no resolvable name
+        # and is dropped, proving the feature is the reason it now appears.
+        write_config(tmp_path, (
+            "[languages.bibtex]\n"
+            'extensions = [".bib"]\n'
+            'grammar = "bibtex"\n'
+            'class_node_types = ["entry"]\n'
+        ))
+        src = tmp_path / "refs.bib"
+        src.write_text(BIBTEX_SOURCE, encoding="utf-8")
+        nodes, _ = CodeParser(tmp_path).parse_file(src)
+        assert self._named(nodes, "Class") == set()

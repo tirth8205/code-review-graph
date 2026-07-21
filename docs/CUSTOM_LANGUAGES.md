@@ -47,6 +47,7 @@ Each custom language is one `[languages.<name>]` table.
 | `class_node_types` | list of strings | no* | Node types that define classes/records/types. Matching nodes become `Class` nodes. |
 | `import_node_types` | list of strings | no* | Node types for import/include statements. Each yields an `IMPORTS_FROM` edge. |
 | `call_node_types` | list of strings | no* | Node types for call expressions. Each yields a `CALLS` edge from the enclosing function. |
+| `name_field` | string or list of strings | no | Ordered candidates for locating a definition's name when it is not a `name` field or a plain `identifier` child (see below). |
 | `comment` | string | no | Free-form note for humans; ignored by the parser. |
 
 \* At least one of the four node-type lists must be non-empty, otherwise the
@@ -66,6 +67,58 @@ The loader never crashes a build. Anything invalid is skipped with a
 - Two custom languages cannot claim the same extension (first one wins).
 - At most **20** custom languages are loaded per repo.
 - Malformed TOML disables custom languages for that build (with a warning).
+- `name_field` must be a string or a list of non-empty strings (max 8
+  candidates); anything else skips the entry with a warning.
+
+### Naming definitions with `name_field`
+
+By default the parser finds a definition's name from an `identifier`-like child
+or a field literally called `name`. Many grammars keep the name elsewhere — in
+a differently named field, or nested a level or two below it. When that happens
+the definition is extracted **unnamed and silently dropped**. `name_field` tells
+the parser where to look.
+
+Each candidate is tried in order and resolved in two passes:
+
+1. **Field first** — a child accessed by that tree-sitter field name. Fields are
+   tried across *all* candidates before any type search, so a precise field
+   always wins over a broader match.
+2. **Typed descendant** — if no candidate matched a field, the first descendant
+   whose *node type* equals a candidate (bounded depth). This covers names that
+   sit under a fieldless wrapper.
+
+The resolved node is then descended to its first text-bearing leaf and cleaned
+(surrounding `{}`/quotes/whitespace stripped; multi-line or oversized text is
+rejected). Because resolution is anchored on your configured candidates, it
+never grabs an unrelated inner identifier.
+
+```toml
+[languages.bibtex]
+extensions = [".bib"]
+grammar = "bibtex"
+class_node_types = ["entry"]
+name_field = ["key"]            # @article{smith2020,...} -> "smith2020"
+
+[languages.latex]
+extensions = [".tex"]
+grammar = "latex"
+class_node_types = ["section", "chapter", "subsection"]
+function_node_types = ["new_command_definition"]
+name_field = ["name", "text", "declaration"]
+#   \section{Introduction}   -> "Introduction" (via `text`)
+#   \newcommand{\foo}{bar}    -> "\foo"        (via `declaration`)
+
+[languages.markdown]
+extensions = [".md"]
+grammar = "markdown"
+class_node_types = ["section"]
+name_field = ["inline"]         # "# My Heading" -> "My Heading" (typed descendant)
+```
+
+Use a **list** when a grammar's node types keep their names in different places
+(LaTeX `section` uses `text`, `\newcommand` uses `declaration`): the first
+candidate that resolves wins. Omitting `name_field` preserves the previous
+behavior exactly.
 
 ## Finding the right node type names
 

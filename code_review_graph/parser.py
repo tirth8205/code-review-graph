@@ -12817,6 +12817,98 @@ class CodeParser:
             return f"{file_path}::{enclosing_class}.{name}"
         return f"{file_path}::{name}"
 
+    # Leaf node types that typically carry a definition's name across grammars.
+    # Used when descending from a configured ``name_field`` target to a clean
+    # text leaf (config-driven custom languages only).
+    _CUSTOM_NAME_LEAF_TYPES = (
+        "word", "identifier", "name", "simple_identifier",
+        "command_name", "key_brace", "type_identifier",
+        "property_identifier", "constant",
+    )
+    #: Depth guard for custom name-field descent / descendant search.
+    _MAX_CUSTOM_NAME_DEPTH = 4
+    #: Cap on a resolved custom name before it is rejected as junk.
+    _MAX_CUSTOM_NAME_LEN = 256
+
+    def _custom_name_leaf(self, node, depth: int):
+        """Return the first text-bearing leaf of a known name type within
+        ``depth`` levels of ``node`` (preorder), or None."""
+        if node.type in self._CUSTOM_NAME_LEAF_TYPES and node.child_count == 0:
+            return node
+        if depth <= 0:
+            return None
+        for child in node.children:
+            found = self._custom_name_leaf(child, depth - 1)
+            if found is not None:
+                return found
+        return None
+
+    def _find_custom_descendant(self, node, type_name: str, depth: int):
+        """Return the first descendant of ``node`` whose type == ``type_name``
+        within ``depth`` levels (preorder), or None."""
+        if depth <= 0:
+            return None
+        for child in node.children:
+            if child.type == type_name:
+                return child
+            found = self._find_custom_descendant(child, type_name, depth - 1)
+            if found is not None:
+                return found
+        return None
+
+    def _clean_custom_name(self, text: str) -> Optional[str]:
+        """Strip wrapping braces/quotes/whitespace; reject empty, multi-line,
+        or oversized text so a bad target never becomes a garbage name."""
+        cleaned = text.strip().strip("{}\"'").strip()
+        if not cleaned or "\n" in cleaned or len(cleaned) > self._MAX_CUSTOM_NAME_LEN:
+            return None
+        return cleaned
+
+    def _custom_leaf_name(self, node) -> Optional[str]:
+        """Resolve a configured ``name_field`` target node to a clean name.
+
+        Prefers a text-bearing leaf of a known name type; falls back to the
+        target's own text (covers fieldless wrappers like Markdown ``inline``).
+        """
+        leaf = self._custom_name_leaf(node, self._MAX_CUSTOM_NAME_DEPTH)
+        target = leaf if leaf is not None else node
+        return self._clean_custom_name(
+            target.text.decode("utf-8", errors="replace")
+        )
+
+    def _resolve_custom_name(self, node, language: str) -> Optional[str]:
+        """Resolve a definition name for a config-driven custom language using
+        the language's ordered ``name_field`` candidates.
+
+        Two passes so grammar *fields* are always preferred over a broader
+        *type* search: this avoids matching an unrelated same-typed node in a
+        different field (e.g. LaTeX ``\\newcommand`` whose ``implementation``
+        body contains a ``text`` node — the ``declaration`` field must win).
+        Returns None when no candidate resolves (caller then applies the legacy
+        ``name`` field fallback).
+        """
+        custom = self._custom_languages.get(language)
+        candidates = custom.name_field if custom is not None else ()
+        if not candidates:
+            return None
+        # Pass 1: field lookups (authoritative).
+        for cand in candidates:
+            target = node.child_by_field_name(cand)
+            if target is not None:
+                resolved = self._custom_leaf_name(target)
+                if resolved:
+                    return resolved
+        # Pass 2: typed-descendant search (for fieldless shapes).
+        for cand in candidates:
+            target = self._find_custom_descendant(
+                node, cand, self._MAX_CUSTOM_NAME_DEPTH
+            )
+            if target is not None:
+                resolved = self._custom_leaf_name(target)
+                if resolved:
+                    return resolved
+        return None
+
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
         # Dart: function_signature has a return-type node before the identifier;
@@ -13083,6 +13175,9 @@ class CodeParser:
         # grammar-specific (Erlang ``atom``, Haskell ``variable``) and thus
         # not in the generic child-type list above.
         if language in self._custom_languages:
+            resolved = self._resolve_custom_name(node, language)
+            if resolved:
+                return resolved
             name_child = node.child_by_field_name("name")
             if name_child is not None:
                 return name_child.text.decode("utf-8", errors="replace")
