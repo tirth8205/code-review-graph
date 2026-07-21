@@ -10,6 +10,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 import tempfile
@@ -20,13 +21,16 @@ import pytest
 from code_review_graph.changes import parse_git_diff_ranges
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
+    _commit_object_exists,
     collect_all_files,
     full_build,
     get_all_tracked_files,
     get_changed_files,
     get_staged_and_unstaged,
     incremental_update,
+    resolve_incremental_base,
 )
+from code_review_graph.tools.build import build_or_update_graph
 from code_review_graph.wiki import get_wiki_page
 
 
@@ -352,3 +356,198 @@ def test_wiki_page_path_traversal_blocked(tmp_path: Path) -> None:
     # Attempt a path traversal — should return None
     result = get_wiki_page(str(wiki_dir), "../../etc/passwd")
     assert result is None
+
+
+# ------------------------------------------------------------------
+# 6. Auto-resolved incremental base (last-synced commit, not HEAD~1)
+# ------------------------------------------------------------------
+
+
+def _init_repo(tmp_path: Path) -> Path:
+    """A git repo with one commit adding ``a.py``."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "a.py").write_text("def alpha():\n    return 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "c0")
+    return repo
+
+
+def _commit_file(repo: Path, name: str) -> None:
+    (repo / f"{name}.py").write_text(f"def {name}():\n    return 1\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", name)
+
+
+def test_commit_object_exists(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert _commit_object_exists(repo, head) is True
+    assert _commit_object_exists(repo, "0" * 40) is False
+    # Injection-shaped refs are rejected before ever reaching git.
+    assert _commit_object_exists(repo, "--output=/tmp/evil") is False
+
+
+def test_resolve_incremental_base(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+    store = GraphStore(str(repo / "graph.db"))
+    try:
+        # Usable anchor -> the stored SHA.
+        store.set_metadata("git_head_sha", head)
+        assert resolve_incremental_base(repo, store) == head
+        # Unreachable anchor (rewrite / shallow clone) -> None (full rebuild).
+        store.set_metadata("git_head_sha", "0" * 40)
+        assert resolve_incremental_base(repo, store) is None
+    finally:
+        store.close()
+
+    # No anchor at all (fresh / legacy database) -> None.
+    store2 = GraphStore(str(repo / "graph2.db"))
+    try:
+        assert resolve_incremental_base(repo, store2) is None
+    finally:
+        store2.close()
+
+
+def test_resolve_incremental_base_non_git(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    store = GraphStore(str(plain / "graph.db"))
+    try:
+        # Non-git working copies keep the concrete "HEAD~1" default so the
+        # SVN/plain change-discovery path never receives None.
+        assert resolve_incremental_base(plain, store) == "HEAD~1"
+    finally:
+        store.close()
+
+
+def test_update_auto_base_catches_commits_missed_by_head1(tmp_path: Path) -> None:
+    """The headline bug: after several out-of-band commits, a default update
+    must reconcile all of them, not only the newest."""
+    repo = _init_repo(tmp_path)
+    c0 = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+
+    for name in ("beta", "gamma", "delta"):
+        _commit_file(repo, name)
+
+    # Old behaviour, reproduced explicitly: HEAD~1 sees only the last commit.
+    head1 = get_changed_files(repo, "HEAD~1")
+    assert head1 == ["delta.py"]
+
+    # New behaviour: auto base resolves to c0 and catches every commit since.
+    res = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), base=None, postprocess="none"
+    )
+    assert res["base_resolved"] == c0
+    assert set(res["changed_files"]) == {"beta.py", "gamma.py", "delta.py"}
+
+
+def test_update_auto_base_across_divergent_branch_switch(tmp_path: Path) -> None:
+    """Build on one branch, then switch to a divergent branch whose HEAD~1 is
+    NOT the anchor. A fixed HEAD~1 base would miss the difference and leave the
+    other branch's files stale; the resolved anchor reconciles it.
+    """
+    repo = _init_repo(tmp_path)  # main @ c0 with a.py
+
+    # A sibling branch off c0 that adds its own file, then back to main.
+    _git(repo, "checkout", "-b", "sibling")
+    _commit_file(repo, "sibling_only")
+    _git(repo, "checkout", "main")
+
+    # Advance main by two commits and build the graph at main's tip.
+    _commit_file(repo, "main_one")
+    _commit_file(repo, "main_two")
+    main_tip = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+
+    # Switch to the divergent sibling. Its HEAD~1 is c0, not main's tip, so a
+    # fixed-HEAD~1 update could never reconcile against where the graph is.
+    _git(repo, "checkout", "sibling")
+    res = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), base=None, postprocess="none"
+    )
+    # The resolved base is the commit the graph was actually built at.
+    assert res["base_resolved"] == main_tip
+    assert res["build_type"] == "incremental"
+    # The diff main_tip..sibling adds sibling's file and drops main's files.
+    changed = set(res["changed_files"])
+    assert {"sibling_only.py", "main_one.py", "main_two.py"} <= changed
+
+
+def test_update_without_usable_anchor_falls_back_to_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+
+    # Corrupt the anchor to an unreachable SHA (as a history rewrite would).
+    from code_review_graph.incremental import get_db_path
+
+    store = GraphStore(str(get_db_path(repo)))
+    try:
+        store.set_metadata("git_head_sha", "0" * 40)
+    finally:
+        store.close()
+
+    _commit_file(repo, "epsilon")
+    res = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), base=None, postprocess="none"
+    )
+    assert res["build_type"] == "full"
+    assert res["base_resolved"] is None
+
+
+def test_update_explicit_base_bypasses_auto_resolution(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    for name in ("beta", "gamma"):
+        _commit_file(repo, name)
+
+    # An explicit base is honoured verbatim and stays incremental.
+    res = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), base="HEAD~1", postprocess="none"
+    )
+    assert res["build_type"] == "incremental"
+    assert res["base_resolved"] == "HEAD~1"
+    assert res["changed_files"] == ["gamma.py"]
+
+
+def test_mcp_tool_base_defaults_to_none() -> None:
+    """The MCP wrapper must default base to None so omitted-base calls reach
+    the auto-resolution path instead of a hardcoded HEAD~1."""
+    from code_review_graph.main import build_or_update_graph_tool
+
+    # FastMCP may wrap the tool; the underlying callable is stored on ``.fn``.
+    fn = getattr(build_or_update_graph_tool, "fn", build_or_update_graph_tool)
+    assert inspect.signature(fn).parameters["base"].default is None
+
+
+def test_cli_update_brief_default_base_does_not_crash(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """`update --brief` with no explicit --base must not crash. The base now
+    defaults to None, which the brief impact path cannot pass to git directly;
+    it has to reuse the resolved base."""
+    from code_review_graph import cli
+
+    repo = _init_repo(tmp_path)
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    _commit_file(repo, "brief_new")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["code-review-graph", "update", "--brief", "--repo", str(repo)],
+    )
+    cli.main()  # would raise AttributeError/TypeError on a None base before the fix
+
+    out = capsys.readouterr().out
+    # It ran the incremental update and the brief impact summary without error.
+    assert "Incremental:" in out
+    assert "changed file" in out

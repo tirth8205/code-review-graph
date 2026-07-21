@@ -98,7 +98,7 @@ mcp = FastMCP(
 async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
-    base: str = "HEAD~1",
+    base: Optional[str] = None,
     postprocess: str = "full",
     recurse_submodules: Optional[bool] = None,
     embedding_provider: Optional[str] = None,
@@ -120,7 +120,10 @@ async def build_or_update_graph_tool(
     Args:
         full_rebuild: If True, re-parse all files. Default: False (incremental).
         repo_root: Repository root path. Auto-detected from current directory if omitted.
-        base: Git ref to diff against for incremental updates. Default: HEAD~1.
+        base: Git ref to diff against for incremental updates. When omitted,
+            resolves automatically to the commit the graph was last built at,
+            so one update catches everything since the last sync (not just the
+            latest commit). Pass an explicit ref to override.
         postprocess: Post-processing level: "full" (default), "minimal" (signatures+FTS only),
                      or "none" (skip all post-processing). Use "minimal" for faster builds.
         recurse_submodules: If True, include files from git submodules.
