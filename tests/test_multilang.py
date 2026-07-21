@@ -2971,6 +2971,8 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()
@@ -3667,3 +3669,117 @@ class TestAnsibleMetaParsing:
     def test_depends_on_name_key_collections(self):
         dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
         assert "security.hardening" in dep_targets
+
+
+class TestAntelopeAbiParsing:
+    """Correctness + safety of the Antelope ``*.abi`` parser.
+
+    A ``.abi`` file is a JSON contract descriptor.  Foreign chain ABIs
+    (e.g. Ethereum/Solidity, which are top-level JSON arrays), ordinary JSON
+    objects, and malformed data must never crash parsing and must not be
+    modelled as contract surfaces.
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _parse(self, name: str, body: bytes):
+        return self.parser.parse_bytes(Path(name), body)
+
+    def test_detects_abi_language(self):
+        assert self.parser.detect_language(Path("eosio.token.abi")) == "antelope_abi"
+
+    def test_antelope_abi_models_actions_and_tables(self):
+        abi = (
+            b'{"version":"eosio::abi/1.1",'
+            b'"actions":[{"name":"transfer"},{"name":"issue"}],'
+            b'"tables":[{"name":"accounts"}]}'
+        )
+        nodes, edges = self._parse("eosio.token.abi", abi)
+        kinds = {n.kind for n in nodes}
+        names = {n.name for n in nodes}
+        assert "Contract" in kinds
+        assert "Action" in kinds and "Table" in kinds
+        assert {"transfer", "issue", "accounts"} <= names
+        # Every action/table is wired to a contract-surface source node.
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert len(calls) == 3
+        assert all(e.extra.get("antelope") for e in calls)
+
+    def test_ethereum_array_abi_is_skipped_safely(self):
+        # Solidity/Ethereum ABIs are JSON arrays — previously reached .get()
+        # and crashed. They must be skipped without producing nodes.
+        eth = (
+            b'[{"type":"function","name":"transfer","inputs":[]},'
+            b'{"type":"event","name":"Transfer"}]'
+        )
+        nodes, edges = self._parse("Token.abi", eth)
+        assert nodes == [] and edges == []
+
+    def test_plain_json_object_is_skipped(self):
+        plain = b'{"name":"config","value":42,"nested":{"a":1}}'
+        nodes, edges = self._parse("config.abi", plain)
+        assert nodes == [] and edges == []
+
+    def test_malformed_json_is_skipped(self):
+        nodes, edges = self._parse("bad.abi", b"{not valid json")
+        assert nodes == [] and edges == []
+
+    def test_non_string_version_is_skipped(self):
+        # A version that is present but not a string is malformed -> skip.
+        bad = b'{"version":123,"actions":[{"name":"x"}]}'
+        nodes, edges = self._parse("weird.abi", bad)
+        assert nodes == [] and edges == []
+
+    def test_antelope_version_string_recognized_without_actions(self):
+        # A document with an Antelope version but no action/table keys is
+        # still treated as a (minimal) contract descriptor.
+        abi = b'{"version":"eosio::abi/1.0"}'
+        nodes, edges = self._parse("empty.abi", abi)
+        assert any(n.kind == "Contract" for n in nodes)
+
+
+class TestAntelopeContractAnnotation:
+    """C++ contract annotation: arbitrary layouts + tightened table evidence."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_table_only_tagged_for_real_table_struct(self):
+        # A contract WITHOUT a TABLE/multi_index declaration should not get a
+        # phantom table_schema node for an ordinary helper method.
+        src = (
+            b'#include <eosio/eosio.hpp>\n'
+            b'class widget {\n'
+            b'public:\n'
+            b'  uint64_t primary_key() const { return id; }\n'   # not a table
+            b'  uint64_t by_name() const { return name; }\n'      # not an index
+            b'};'
+        )
+        nodes, _ = self.parser.parse_bytes(Path("src/widget.cpp"), src)
+        antelope = [n for n in nodes if n.extra.get("antelope_kind")]
+        assert antelope == [], "ordinary C++ object must not become a table"
+
+    def test_table_struct_tagged_when_declared(self):
+        src = (
+            b'#include <eosio/eosio.hpp>\n'
+            b'class token : public eosio::contract {\n'
+            b'public:\n'
+            b'  TABLE account { uint64_t id; uint64_t primary_key() const { return id; } };\n'
+            b'  ACTION issue() {}\n'
+            b'};'
+        )
+        nodes, edges = self.parser.parse_bytes(Path("include/token.hpp"), src)
+        kinds = {n.name: n.extra.get("antelope_kind") for n in nodes}
+        # The `TABLE` macro hides the struct name from tree-sitter, so the
+        # table_schema tag is attached to the `TABLE` node itself.
+        assert kinds.get("TABLE") == "table_schema"
+        assert kinds.get("issue") == "action"
+        # The action is wired to a contract-surface source node.
+        assert any(e.kind == "CALLS" and e.extra.get("antelope") for e in edges)
+
+    def test_contract_detected_outside_contracts_dir(self):
+        # Layout independence: a contract in src/ (not /contracts/) is modelled.
+        src = b'class c { public: ACTION run() {} };'
+        nodes, _ = self.parser.parse_bytes(Path("src/c.cpp"), src)
+        assert any(n.extra.get("antelope_kind") == "action" for n in nodes)

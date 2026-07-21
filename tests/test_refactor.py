@@ -989,3 +989,46 @@ class TestFindDeadCodeModuleScope:
         dead = find_dead_code(self.store)
         dead_names = {d["name"] for d in dead}
         assert "launch" not in dead_names
+
+
+class TestAntelopeDeadCodeLookup:
+    """Indexed, filesystem-free Antelope runtime detection in dead-code scan.
+
+    Detection must rely on the in-DB ``antelope_kind`` tag (no repo-wide
+    source rescan) and must work for contracts in any directory layout.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed_node(self, name, file_path, antelope_kind=None):
+        extra = {"antelope_kind": antelope_kind} if antelope_kind else {}
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=file_path,
+            line_start=1, line_end=5, language="cpp", extra=extra,
+        ))
+
+    def test_antelope_action_is_entry_point_via_indexed_tag(self):
+        from code_review_graph.refactor import _antelope_is_runtime_symbol
+        self._seed_node("transfer", "/repo/src/eosio.token.cpp", "action")
+        node = self.store.get_node("/repo/src/eosio.token.cpp::transfer")
+        assert _antelope_is_runtime_symbol(self.store, node) is True
+
+    def test_ordinary_function_without_tag_is_not_antelope(self):
+        from code_review_graph.refactor import _antelope_is_runtime_symbol
+        # No antelope tag, and the file does NOT contain contract signals.
+        self._seed_node("helper", "/repo/src/utils.cpp")
+        node = self.store.get_node("/repo/src/utils.cpp::helper")
+        assert _antelope_is_runtime_symbol(self.store, node) is False
+
+    def test_antelope_action_not_flagged_as_dead(self):
+        # A tagged action must not appear as dead code under the indexed path.
+        self._seed_node("issue", "/repo/packages/contracts/token.cpp", "action")
+        dead = find_dead_code(self.store)
+        assert "issue" not in {d["name"] for d in dead}
