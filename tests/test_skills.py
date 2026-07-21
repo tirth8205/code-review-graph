@@ -5,6 +5,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
@@ -495,6 +496,8 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "update" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["commandWindows"].startswith("more >nul & ")
+        assert "code-review-graph update --skip-flows" in inner["commandWindows"]
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -506,9 +509,99 @@ class TestGenerateCodexHooksConfig:
         assert inner["type"] == "command"
         assert "status" in inner["command"]
         assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["commandWindows"].startswith("more >nul & ")
+        assert "code-review-graph status" in inner["commandWindows"]
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="requires cmd.exe")
+    @pytest.mark.parametrize(
+        ("hook_name", "expected_args"),
+        [
+            ("PostToolUse", "update --skip-flows"),
+            ("SessionStart", "status"),
+        ],
+    )
+    def test_windows_command_executes_in_git_repo_and_drains_stdin(
+        self, tmp_path, hook_name, expected_args, monkeypatch
+    ):
+        subprocess.run(["git", "init", "--quiet"], cwd=tmp_path, check=True)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        marker = tmp_path / "hook-invocations.txt"
+        (bin_dir / "code-review-graph.cmd").write_text(
+            '@echo off\r\n>>"%CRG_HOOK_MARKER%" echo %*\r\nexit /b 0\r\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CRG_HOOK_MARKER", str(marker))
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
+        config = generate_codex_hooks_config(tmp_path)
+        command = config["hooks"][hook_name][0]["hooks"][0]["commandWindows"]
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        proc = subprocess.Popen(
+            [comspec, "/c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=tmp_path,
+        )
+        payload = json.dumps({"payload": "x" * (2 * 1024 * 1024)}).encode()
+        assert proc.stdin is not None
+        write_result = {}
+
+        def write_payload():
+            try:
+                write_result["bytes_written"] = proc.stdin.write(payload)
+                proc.stdin.close()
+            except OSError as exc:  # pragma: no cover - Windows regression guard
+                write_result["error"] = exc
+
+        writer = threading.Thread(target=write_payload, daemon=True)
+        writer.start()
+        writer.join(timeout=30)
+        if writer.is_alive():
+            proc.kill()
+            writer.join(timeout=5)
+            proc.wait(timeout=5)
+            pytest.fail("hook command did not drain stdin within 30 seconds")
+        if "error" in write_result:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"hook command closed stdin early: {write_result['error']}")
+        assert write_result["bytes_written"] == len(payload)
+        proc.stdin = None
+        try:
+            _stdout, stderr = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _stdout, stderr = proc.communicate()
+            pytest.fail(
+                "hook command did not exit within 30 seconds: "
+                f"{stderr.decode(errors='replace')}"
+            )
+
+        assert proc.returncode == 0, stderr.decode(errors="replace")
+        assert expected_args in marker.read_text(encoding="utf-8")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="requires cmd.exe")
+    @pytest.mark.parametrize("hook_name", ["PostToolUse", "SessionStart"])
+    def test_windows_command_fails_open_outside_git_repo(self, tmp_path, hook_name):
+        config = generate_codex_hooks_config(tmp_path)
+        command = config["hooks"][hook_name][0]["hooks"][0]["commandWindows"]
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+
+        completed = subprocess.run(
+            [comspec, "/c", command],
+            input=b'{"event":"outside-repo"}',
+            cwd=tmp_path,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert completed.returncode == 0, completed.stderr.decode(errors="replace")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="requires a Unix shell")
     def test_post_tool_use_command_handles_large_stdin_payload(self, tmp_path):
         config = generate_codex_hooks_config(tmp_path)
         cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
@@ -557,6 +650,40 @@ class TestInstallCodexHooks:
         assert "hooks" in data
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
+
+    def test_upgrades_existing_hooks_with_windows_commands(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        repo_root = tmp_path / "repo"
+        old_config = generate_codex_hooks_config(repo_root)
+        expected_windows_commands = {}
+        for hook_name, entries in old_config["hooks"].items():
+            hook = entries[0]["hooks"][0]
+            expected_windows_commands[hook_name] = hook.pop("commandWindows")
+
+        custom_entry = {
+            "matcher": "Custom",
+            "hooks": [{"type": "command", "command": "echo custom"}],
+        }
+        old_config["hooks"]["PostToolUse"].append(custom_entry)
+        codex_dir = tmp_path / ".codex"
+        codex_dir.mkdir(parents=True)
+        (codex_dir / "hooks.json").write_text(
+            json.dumps(old_config), encoding="utf-8"
+        )
+
+        install_codex_hooks(repo_root)
+
+        data = json.loads((codex_dir / "hooks.json").read_text(encoding="utf-8"))
+        assert custom_entry in data["hooks"]["PostToolUse"]
+        for hook_name, expected_command in expected_windows_commands.items():
+            generated_hooks = [
+                hook
+                for entry in data["hooks"][hook_name]
+                for hook in entry.get("hooks", [])
+                if hook.get("commandWindows") == expected_command
+            ]
+            assert len(generated_hooks) == 1
 
     def test_merges_with_existing(self, tmp_path, monkeypatch):
         # Path.home() ignores HOME on Windows; patch it like the cursor tests do.
