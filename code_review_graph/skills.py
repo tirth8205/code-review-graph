@@ -21,6 +21,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Codex hook command used on Windows (PowerShell). Drains stdin so large
+# tool payloads never break the hook, then runs the CRG command and exits 0.
+_CODEX_WINDOWS_HOOK_PREFIX = "powershell.exe -NoProfile -NonInteractive -Command "
+
 
 # --- Multi-platform MCP install ---
 
@@ -788,6 +792,12 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 " && code-review-graph update --skip-flows"
                                 " || true"
                             ),
+                            "commandWindows": (
+                                _CODEX_WINDOWS_HOOK_PREFIX
+                                + "[Console]::In.ReadToEnd() | Out-Null; "
+                                "code-review-graph update --skip-flows; "
+                                "exit 0"
+                            ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -805,6 +815,12 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 " && code-review-graph status"
                                 " || echo 'Not a git repo, skipping'"
+                            ),
+                            "commandWindows": (
+                                _CODEX_WINDOWS_HOOK_PREFIX
+                                + "[Console]::In.ReadToEnd() | Out-Null; "
+                                "code-review-graph status; "
+                                "exit 0"
                             ),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
