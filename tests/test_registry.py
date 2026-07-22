@@ -334,3 +334,77 @@ class TestSetDataDir:
         data_dir = Path(self.tmp_dir) / "data"
         entry = self.registry.set_data_dir(str(repo), str(data_dir))
         assert entry["data_dir"] == str(data_dir.resolve())
+
+
+class TestRegistryLocationIsolation:
+    """The registry must never fall back to the real home directory in tests."""
+
+    def test_default_path_follows_the_env_override(self, tmp_path, monkeypatch):
+        from code_review_graph.registry import default_registry_path
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "elsewhere"))
+        assert default_registry_path() == tmp_path / "elsewhere" / "registry.json"
+
+    def test_override_is_read_per_call_not_at_import(self, tmp_path, monkeypatch):
+        """A module-level constant would freeze the value at first import.
+
+        The autouse fixture sets CRG_HOME before any test runs, so an
+        import-time constant would capture the wrong directory and every later
+        override would be ignored.
+        """
+        from code_review_graph.registry import default_registry_path
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "first"))
+        first = default_registry_path()
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "second"))
+        assert default_registry_path() != first
+        assert default_registry_path() == tmp_path / "second" / "registry.json"
+
+    def test_blank_override_falls_back_to_home(self, monkeypatch):
+        from code_review_graph.constants import crg_home
+
+        monkeypatch.setenv("CRG_HOME", "   ")
+        assert crg_home() == Path.home() / ".code-review-graph"
+
+    def test_bare_registry_writes_under_the_override(self, tmp_path, monkeypatch):
+        """Registry() with no path argument must land in the sandbox.
+
+        This is the leak that put pytest tmp paths into a developer's real
+        ~/.code-review-graph/registry.json.
+        """
+        # Point Path.home() at a fake home too, so the assertion that nothing
+        # was written there needs no access to the developer's real one.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+        sandbox = tmp_path / "sandbox"
+        monkeypatch.setenv("CRG_HOME", str(sandbox))
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+
+        Registry().register(str(repo), alias="leaky")
+
+        sandboxed = sandbox / "registry.json"
+        assert sandboxed.exists()
+        assert "leaky" in sandboxed.read_text(encoding="utf-8")
+        assert not (fake_home / ".code-review-graph").exists()
+
+    def test_get_data_dir_uses_the_sandboxed_registry(self, tmp_path, monkeypatch):
+        """incremental.get_data_dir() builds its own Registry() internally."""
+        from code_review_graph.incremental import get_data_dir
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "sandbox"))
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        external = tmp_path / "external"
+
+        Registry().set_data_dir(str(repo), str(external))
+
+        assert get_data_dir(repo) == external.resolve()
+        assert (tmp_path / "sandbox" / "registry.json").exists()

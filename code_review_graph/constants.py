@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 
 
 def _bounded_float_env(
@@ -71,3 +72,28 @@ IMPACT_DEPTH_DECAY = _bounded_float_env(
 IMPACT_SCORE_FLOOR = _bounded_float_env(
     "CRG_IMPACT_SCORE_FLOOR", 0.05, lower=0.0, upper=1.0,
 )
+
+
+#: Overrides the per-user state directory that holds ``registry.json``,
+#: ``watch.toml``, ``daemon.pid``, ``daemon-state.json`` and ``logs/``.
+#: Follows the same convention as CRG_DATA_DIR.
+CRG_HOME_ENV = "CRG_HOME"
+
+_DEFAULT_CRG_HOME = Path.home() / ".code-review-graph"
+
+
+def crg_home() -> Path:
+    """Return the per-user state directory for code-review-graph.
+
+    ``$CRG_HOME`` wins when set and non-empty; otherwise
+    ``~/.code-review-graph``.
+
+    Resolved per call rather than captured in a module-level constant. An
+    import-time constant cannot be redirected afterwards, which is what let
+    the test suite write into the real home directory of whoever ran it: by
+    the time a fixture set the variable, the value had already been frozen.
+    """
+    override = os.environ.get(CRG_HOME_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _DEFAULT_CRG_HOME

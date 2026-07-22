@@ -13,22 +13,29 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from .constants import crg_home
+
 logger = logging.getLogger(__name__)
 
-# Default registry path
-_REGISTRY_DIR = Path.home() / ".code-review-graph"
-_REGISTRY_PATH = _REGISTRY_DIR / "registry.json"
+def default_registry_path() -> Path:
+    """Return the full path to ``registry.json``.
+
+    Lives under :func:`~code_review_graph.constants.crg_home`, so ``$CRG_HOME``
+    redirects it along with the rest of the per-user state.
+    """
+    return crg_home() / "registry.json"
 
 
 class Registry:
     """Manages a JSON-based registry of code-review-graph repositories.
 
     Each entry stores the repo path and an optional alias.
-    The registry lives at ``~/.code-review-graph/registry.json``.
+    The registry lives at ``~/.code-review-graph/registry.json``, or under
+    ``$CRG_HOME`` when that is set.
     """
 
     def __init__(self, path: Path | None = None) -> None:
-        self._path = path or _REGISTRY_PATH
+        self._path = path or default_registry_path()
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._repos: list[dict[str, str]] = []
