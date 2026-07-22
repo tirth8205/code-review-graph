@@ -180,10 +180,20 @@ def aggregate(results: list[dict]) -> dict:
     """Aggregate over rows where both sides of the comparison exist."""
     ok = [r for r in results if r.get("status") == "ok"]
     ratios = [float(r["baseline_to_graph_ratio"]) for r in ok]
+    no_graph = sum(1 for r in results if r.get("status") == "no_graph_results")
     return {
         "total_rows": len(results),
         "ok_rows": len(ok),
         "error_rows": sum(1 for r in results if r.get("status") == "error"),
+        # Excluded rows are reported, not just dropped: a run where the graph
+        # answered nothing must not be readable as "no result" when it is
+        # really "every query failed". A high no_graph_results_rows count
+        # against a populated graph means the vector index is missing —
+        # re-run the eval with --embed.
+        "no_graph_results_rows": no_graph,
+        "no_baseline_match_rows": sum(
+            1 for r in results if r.get("status") == "no_baseline_match"
+        ),
         "median_baseline_to_graph_ratio": (
             round(statistics.median(ratios), 1) if ratios else None
         ),
