@@ -114,6 +114,70 @@ class TestGraphStore:
         result = self.store.get_nodes_by_file("/test/file.py")
         assert len(result) == 2
 
+    def test_store_file_preserves_qualified_name_collisions(self):
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+
+        self.store.store_file_nodes_edges("/test/file.py", nodes, [])
+
+        stored = self.store.get_nodes_by_file("/test/file.py")
+        assert sorted((node.line_start, node.line_end) for node in stored) == [
+            (10, 12),
+            (20, 24),
+        ]
+
+    def test_reindex_same_colliding_definition_updates_in_place(self):
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges("/test/file.py", nodes, [])
+        original = next(
+            node for node in self.store.get_nodes_by_file("/test/file.py")
+            if node.line_start == 20
+        )
+
+        node_id = self.store.upsert_node(nodes[1])
+
+        stored = self.store.get_nodes_by_file("/test/file.py")
+        assert len(stored) == 2
+        assert node_id == original.id
+
+    def test_recursive_edge_resolves_for_disambiguated_node(self):
+        base_qualified = "/test/file.py::render"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path="/test/file.py",
+                     line_start=20, line_end=24, language="python"),
+        ]
+        edges = [
+            EdgeInfo(
+                kind="CALLS", source=base_qualified, target=base_qualified,
+                file_path="/test/file.py", line=22,
+            )
+        ]
+
+        self.store.store_file_nodes_edges("/test/file.py", nodes, edges)
+
+        disambiguated = next(
+            node for node in self.store.get_nodes_by_file("/test/file.py")
+            if node.line_start == 20
+        )
+        callers = self.store.get_edges_by_target(disambiguated.qualified_name)
+        callees = self.store.get_edges_by_source(disambiguated.qualified_name)
+        assert disambiguated.qualified_name == f"{base_qualified}:L20"
+        assert len(callers) == 1
+        assert len(callees) == 1
+        assert self.store.get_node(callers[0].source_qualified) == disambiguated
+        assert self.store.get_node(callees[0].target_qualified) == disambiguated
+
     def test_store_after_remove_no_transaction_error(self):
         """Regression test for #135: store_file_nodes_edges after
         remove_file_data must not raise 'cannot start a transaction

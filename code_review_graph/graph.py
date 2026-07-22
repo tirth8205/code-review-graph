@@ -197,8 +197,13 @@ class GraphStore:
 
     def upsert_node(self, node: NodeInfo, file_hash: str = "") -> int:
         """Insert or update a node. Returns the node ID."""
+        node_id, _ = self._upsert_node(node, file_hash)
+        return node_id
+
+    def _upsert_node(self, node: NodeInfo, file_hash: str = "") -> tuple[int, str]:
+        """Insert or update a node and return its ID and stored identity."""
         now = time.time()
-        qualified = self._make_qualified(node)
+        qualified = self._qualified_for_upsert(node)
         extra = json.dumps(node.extra) if node.extra else "{}"
 
         self._conn.execute(
@@ -227,7 +232,35 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
-        return row["id"]
+        return row["id"], qualified
+
+    def _qualified_for_upsert(self, node: NodeInfo) -> str:
+        """Return a stable identity, suffixing genuine same-file collisions."""
+        base = self._make_qualified(node)
+        rows = self._conn.execute(
+            "SELECT qualified_name, line_start FROM nodes "
+            "WHERE file_path = ? AND name = ? AND parent_name IS ? ORDER BY id",
+            (node.file_path, node.name, node.parent_name),
+        ).fetchall()
+
+        candidates = [
+            row for row in rows
+            if row["qualified_name"] == base
+            or row["qualified_name"].startswith(f"{base}:L")
+        ]
+        for row in candidates:
+            if row["line_start"] == node.line_start:
+                return row["qualified_name"]
+
+        if self.get_node(base) is None:
+            return base
+
+        qualified = f"{base}:L{node.line_start}"
+        ordinal = 2
+        while self.get_node(qualified) is not None:
+            qualified = f"{base}:L{node.line_start}:{ordinal}"
+            ordinal += 1
+        return qualified
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
         """Insert or update an edge."""
@@ -285,10 +318,7 @@ class GraphStore:
         self._begin_immediate()
         try:
             self.remove_file_data(file_path)
-            for node in nodes:
-                self.upsert_node(node, file_hash=fhash)
-            for edge in edges:
-                self.upsert_edge(edge)
+            self._store_nodes_edges(nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -303,15 +333,79 @@ class GraphStore:
         try:
             for file_path, nodes, edges, fhash in batch:
                 self.remove_file_data(file_path)
-                for node in nodes:
-                    self.upsert_node(node, file_hash=fhash)
-                for edge in edges:
-                    self.upsert_edge(edge)
+                self._store_nodes_edges(nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
         self._invalidate_cache()
+
+    def _store_nodes_edges(
+        self, nodes: list[NodeInfo], edges: list[EdgeInfo], file_hash: str,
+    ) -> None:
+        """Store one file's nodes and align edges with collision identities."""
+        identities: dict[str, list[tuple[NodeInfo, str]]] = {}
+        for node in nodes:
+            node_id = self.upsert_node(node, file_hash=file_hash)
+            row = self._conn.execute(
+                "SELECT qualified_name FROM nodes WHERE id = ?", (node_id,),
+            ).fetchone()
+            qualified = row["qualified_name"]
+            identities.setdefault(self._make_qualified(node), []).append(
+                (node, qualified),
+            )
+
+        collisions = {
+            base: entries for base, entries in identities.items()
+            if len(entries) > 1
+        }
+        for edge in edges:
+            self.upsert_edge(self._align_edge_with_collisions(edge, collisions))
+
+    def _align_edge_with_collisions(
+        self,
+        edge: EdgeInfo,
+        collisions: dict[str, list[tuple[NodeInfo, str]]],
+    ) -> EdgeInfo:
+        """Point an edge at the colliding definition evidenced by its line."""
+        source = edge.source
+        source_candidates = collisions.get(source, [])
+        containing_sources = [
+            (node, qualified)
+            for node, qualified in source_candidates
+            if node.line_start <= edge.line <= node.line_end
+        ]
+        if containing_sources:
+            _, source = min(
+                containing_sources,
+                key=lambda item: item[0].line_end - item[0].line_start,
+            )
+
+        target = edge.target
+        target_candidates = collisions.get(target, [])
+        if edge.kind == "CONTAINS" and target_candidates:
+            starting_targets = [
+                qualified
+                for node, qualified in target_candidates
+                if node.line_start == edge.line
+            ]
+            if len(starting_targets) == 1:
+                target = starting_targets[0]
+        elif edge.source == edge.target and source != edge.source:
+            # A recursive call inside a collided definition resolves to that
+            # definition rather than the canonical first occurrence.
+            target = source
+
+        if source == edge.source and target == edge.target:
+            return edge
+        return EdgeInfo(
+            kind=edge.kind,
+            source=source,
+            target=target,
+            file_path=edge.file_path,
+            line=edge.line,
+            extra=edge.extra,
+        )
 
     def set_metadata(self, key: str, value: str) -> None:
         self._conn.execute(
