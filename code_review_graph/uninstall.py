@@ -936,25 +936,29 @@ def _process_platform_configs(
         config_scope, boundary = destination
         if config_scope != scope:
             continue
-        identity = (path, key, format_name)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if format_name == "toml":
-            _remove_toml_entry(path, key, boundary, report, dry_run=dry_run)
-        elif format_name in {"object", "array"}:
-            _remove_mcp_entry(
-                path,
-                key=key,
-                format_name=format_name,
-                boundary=boundary,
-                report=report,
-                dry_run=dry_run,
-            )
-        else:
-            report.skipped_paths.append(
-                f"{path} ({platform_name} has unsupported config format {format_name!r})"
-            )
+        # Legacy keys cover entries written by older releases under a key the
+        # platform never read (e.g. Copilot CLI's "servers", #616).
+        legacy_keys = tuple(str(k) for k in spec.get("legacy_keys", ()))
+        for entry_key in (key, *legacy_keys):
+            identity = (path, entry_key, format_name)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if format_name == "toml":
+                _remove_toml_entry(path, entry_key, boundary, report, dry_run=dry_run)
+            elif format_name in {"object", "array"}:
+                _remove_mcp_entry(
+                    path,
+                    key=entry_key,
+                    format_name=format_name,
+                    boundary=boundary,
+                    report=report,
+                    dry_run=dry_run,
+                )
+            else:
+                report.skipped_paths.append(
+                    f"{path} ({platform_name} has unsupported config format {format_name!r})"
+                )
 
 
 def _generated_skill_slugs() -> list[str]:
@@ -1090,7 +1094,10 @@ def _process_repo(
                 relative,
                 (skills._CLAUDE_MD_SECTION_MARKER, skills._CLAUDE_MD_SECTION),
             )[1]
-            for relative in skills._PLATFORM_INSTRUCTION_FILES
+            for relative in (
+                *skills._PLATFORM_INSTRUCTION_FILES,
+                *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
+            )
         },
     }
     for relative, section in instruction_sections.items():
