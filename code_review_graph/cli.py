@@ -840,6 +840,28 @@ def main() -> None:
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
     eval_cmd.add_argument("--report", action="store_true", help="Generate report from results")
     eval_cmd.add_argument("--output-dir", default=None, help="Output directory for results")
+    eval_cmd.add_argument(
+        "--embed",
+        action="store_true",
+        help=(
+            "Build the vector index after each graph build. Required by the "
+            "agent_baseline, search_quality and multi_hop_retrieval "
+            "benchmarks: without it their natural-language questions hit "
+            "FTS5 only and return zero results (default: disabled)"
+        ),
+    )
+    eval_cmd.add_argument(
+        "--embed-provider",
+        choices=["local", "openai", "google", "minimax"],
+        default=None,
+        help="Provider for --embed (default: local, needs "
+             "code-review-graph[embeddings])",
+    )
+    eval_cmd.add_argument(
+        "--embed-model",
+        default=None,
+        help="Model for --embed (default: the provider's own default)",
+    )
 
     # detect-changes
     detect_cmd = sub.add_parser(
@@ -1262,6 +1284,9 @@ def main() -> None:
                 repos=repos,
                 benchmarks=benchmarks,
                 output_dir=getattr(args, "output_dir", None),
+                embed=getattr(args, "embed", False),
+                embedding_provider=getattr(args, "embed_provider", None),
+                embedding_model=getattr(args, "embed_model", None),
             )
             print(f"\nCompleted {len(results)} benchmark(s).")
             print("Run 'code-review-graph eval --report' to generate tables.")

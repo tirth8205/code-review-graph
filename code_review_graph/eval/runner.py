@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import sqlite3
 import subprocess
 from datetime import date
 from pathlib import Path
@@ -144,10 +145,99 @@ def write_csv(results: list[dict], path: Path) -> None:
         writer.writerows(results)
 
 
+#: Benchmarks that put a natural-language question through ``hybrid_search``.
+#: Without a vector index these fall back to FTS5, which scores a full
+#: sentence against no document and returns nothing.
+SEMANTIC_BENCHMARKS = frozenset(
+    {"agent_baseline", "search_quality", "multi_hop_retrieval"},
+)
+
+
+def _embedding_count(store) -> int | None:
+    """Return the number of stored vectors, or None if the table is absent.
+
+    Only a missing table is treated as "no index". A lock or a malformed
+    database is a different failure and must not be reported to the user as
+    "re-run with --embed", which would send them after the wrong problem.
+    """
+    try:
+        row = store._conn.execute("SELECT count(*) FROM embeddings").fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    return int(row[0]) if row else 0
+
+
+def _build_embedding_index(
+    store,
+    db_path,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    """Bootstrap the vector index for an already-built graph.
+
+    Mirrors ``tools.docs.embed_graph``, but reads the graph through the
+    runner's already-open ``GraphStore`` rather than opening a second one.
+    ``EmbeddingStore`` still opens its own connection to the same database —
+    that is safe here because the two are used sequentially, not
+    concurrently: vectors are written and orphans purged through the
+    embedding connection, then nodes are read back through the graph
+    connection. Both run in autocommit (``isolation_level=None``), so the
+    reads see committed data with no transaction snapshot in between.
+    """
+    from code_review_graph.embeddings import EmbeddingStore, embed_all_nodes
+
+    try:
+        emb_store = EmbeddingStore(db_path, provider=provider, model=model)
+    except ValueError as exc:
+        logger.error("  embedding index unavailable: %s", exc)
+        return
+
+    try:
+        if not emb_store.available:
+            logger.error(
+                "  embedding provider %r is not available — install "
+                "code-review-graph[embeddings] for the local provider, or "
+                "check the cloud provider's environment variables. "
+                "Semantic benchmarks will report no_graph_results.",
+                provider or "local",
+            )
+            return
+        embedded = embed_all_nodes(store, emb_store)
+        logger.info(
+            "  embedding index: %d new vector(s), %d total",
+            embedded,
+            emb_store.count(),
+        )
+    finally:
+        emb_store.close()
+
+
+def _warn_if_semantic_index_missing(store, benchmark_names: list[str]) -> None:
+    """Warn before running a semantic benchmark against an unindexed graph.
+
+    The failure is otherwise silent: rows come back ``no_graph_results`` and
+    ``aggregate()`` excludes them, so the run reports ``median: None`` rather
+    than an error.
+    """
+    requested = SEMANTIC_BENCHMARKS.intersection(benchmark_names)
+    if not requested or _embedding_count(store):
+        return
+    logger.warning(
+        "  no vector index — %s will score natural-language questions "
+        "against FTS5 alone and return zero hits. Re-run with --embed.",
+        ", ".join(sorted(requested)),
+    )
+
+
 def run_eval(
     repos: list[str] | None = None,
     benchmarks: list[str] | None = None,
     output_dir: str | Path | None = None,
+    embed: bool = False,
+    embedding_provider: str | None = None,
+    embedding_model: str | None = None,
 ) -> dict[str, list[dict]]:
     """Run evaluation benchmarks across repositories.
 
@@ -155,6 +245,14 @@ def run_eval(
         repos: List of repo config names to evaluate (None = all).
         benchmarks: List of benchmark names to run (None = all).
         output_dir: Directory for CSV output files.
+        embed: Build the vector index after the graph build. Default off,
+            because the local provider loads a model and cloud providers
+            transmit source-derived text and may incur API cost. Benchmarks
+            that put a natural-language question through ``hybrid_search``
+            (``agent_baseline``, ``search_quality``, ``multi_hop_retrieval``)
+            need this — FTS5 alone matches nothing on a full sentence.
+        embedding_provider: Provider for the index (default ``local``).
+        embedding_model: Exact model (default: provider's own default).
 
     Returns:
         Dict mapping ``{repo}_{benchmark}`` to list of result dicts.
@@ -201,6 +299,18 @@ def run_eval(
         pp_result = run_post_processing(store)
         for warning in pp_result.get("warnings", []):
             logger.warning("  postprocessing: %s", warning)
+
+        # run_post_processing's embedding step is a refresh, not a bootstrap:
+        # refresh_embeddings() returns early on a graph with no existing
+        # vectors, by design, so no build path can silently load a model or
+        # incur API cost. The eval framework therefore has to build the index
+        # explicitly, or every semantic query returns zero hits and the
+        # affected rows are dropped from the aggregate as "no_graph_results".
+        if embed:
+            _build_embedding_index(
+                store, db_path, embedding_provider, embedding_model,
+            )
+        _warn_if_semantic_index_missing(store, benchmark_names)
 
         for bench_name in benchmark_names:
             if bench_name not in BENCHMARK_REGISTRY:

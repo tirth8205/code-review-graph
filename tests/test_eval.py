@@ -963,3 +963,129 @@ def test_reporter_impact_f1_skips_error_and_co_change_rows():
     # the co-change row (different metric) must not pollute the column.
     assert "0.5" in tables
     assert "0.9" not in tables
+
+
+# -- Semantic index guard (agent_baseline and friends) ---------------------
+
+
+def test_agent_baseline_aggregate_reports_excluded_rows():
+    """A run where the graph answered nothing must not read as 'no result'.
+
+    ``ok_rows == 0`` with ``median is None`` is ambiguous on its own: it looks
+    the same whether zero questions were asked or every query came back empty.
+    The excluded-row counts disambiguate it.
+    """
+    from code_review_graph.eval.benchmarks import agent_baseline
+
+    results = [
+        {"status": "no_graph_results", "baseline_to_graph_ratio": ""},
+        {"status": "no_graph_results", "baseline_to_graph_ratio": ""},
+        {"status": "no_baseline_match", "baseline_to_graph_ratio": ""},
+    ]
+    agg = agent_baseline.aggregate(results)
+
+    assert agg["ok_rows"] == 0
+    assert agg["median_baseline_to_graph_ratio"] is None
+    assert agg["no_graph_results_rows"] == 2
+    assert agg["no_baseline_match_rows"] == 1
+
+
+def test_agent_baseline_aggregate_counts_zero_on_a_healthy_run():
+    from code_review_graph.eval.benchmarks import agent_baseline
+
+    agg = agent_baseline.aggregate([
+        {"status": "ok", "baseline_to_graph_ratio": "10.0"},
+        {"status": "ok", "baseline_to_graph_ratio": "20.0"},
+    ])
+
+    assert agg["ok_rows"] == 2
+    assert agg["no_graph_results_rows"] == 0
+    assert agg["no_baseline_match_rows"] == 0
+    assert agg["median_baseline_to_graph_ratio"] == 15.0
+
+
+def test_warns_when_semantic_benchmark_runs_without_a_vector_index(caplog):
+    """The silent-zero path must announce itself before the benchmark runs."""
+    import logging
+
+    from code_review_graph.eval.runner import _warn_if_semantic_index_missing
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = _make_repo(tmpdir)
+        store = _build_store(repo_path)
+        try:
+            with caplog.at_level(logging.WARNING):
+                _warn_if_semantic_index_missing(store, ["agent_baseline"])
+        finally:
+            store.close()
+
+    assert "no vector index" in caplog.text
+    assert "--embed" in caplog.text
+
+
+def test_no_warning_for_benchmarks_that_do_not_use_semantic_search(caplog):
+    import logging
+
+    from code_review_graph.eval.runner import _warn_if_semantic_index_missing
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = _make_repo(tmpdir)
+        store = _build_store(repo_path)
+        try:
+            with caplog.at_level(logging.WARNING):
+                _warn_if_semantic_index_missing(store, ["token_efficiency"])
+        finally:
+            store.close()
+
+    assert "no vector index" not in caplog.text
+
+
+def test_no_warning_once_the_index_is_populated(caplog, monkeypatch):
+    import logging
+
+    from code_review_graph.eval import runner
+
+    monkeypatch.setattr(runner, "_embedding_count", lambda store: 42)
+
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_semantic_index_missing(object(), ["agent_baseline"])
+
+    assert "no vector index" not in caplog.text
+
+
+def test_embedding_count_reraises_non_missing_table_errors():
+    """A lock or a corrupt database must not be reported as 'no index'.
+
+    Reclassifying it would tell the user to re-run with --embed and send
+    them after the wrong problem.
+    """
+    import sqlite3
+
+    from code_review_graph.eval.runner import _embedding_count
+
+    class _Boom:
+        class _Conn:
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+        _conn = _Conn()
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        _embedding_count(_Boom())
+
+
+def test_embedding_count_returns_none_for_a_missing_table():
+    import sqlite3
+
+    from code_review_graph.eval.runner import _embedding_count
+
+    class _NoTable:
+        class _Conn:
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                raise sqlite3.OperationalError("no such table: embeddings")
+
+        _conn = _Conn()
+
+    assert _embedding_count(_NoTable()) is None
