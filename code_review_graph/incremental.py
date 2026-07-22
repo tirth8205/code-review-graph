@@ -1143,7 +1143,7 @@ def incremental_update(
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith(".php") for rp in all_files)
+    scoped_changed = any(rp.endswith((".php", ".rs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
 
     return {

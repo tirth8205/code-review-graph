@@ -27,6 +27,18 @@ It is deliberately conservative so it never fabricates an edge:
 
 Rewritten edges are tagged ``confidence_tier = INFERRED`` to distinguish a
 heuristically resolved scoped call from a directly-extracted one.
+
+Language notes:
+
+* PHP scopes are namespace-qualified (``App\\Mail\\Mailer``) and PHP keywords
+  are case-insensitive, so ``self`` / ``static`` (any case) mean the enclosing
+  class.
+* Rust scoped calls come through as ``::``-joined path segments.  Only genuine
+  two-segment ``Type::method`` targets are resolved; multi-segment module paths
+  (``crate::mailer::Mailer::new``) are left alone because resolving them by
+  their last two segments would point at an unrelated type.  ``Self`` (the
+  associated-function receiver) resolves to the enclosing type, while lowercase
+  ``self`` is a *module* path — never a type — so it is not resolved here.
 """
 
 from __future__ import annotations
@@ -41,13 +53,25 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Languages whose scoped/static calls dangle as ``Class::method`` targets.
-_SCOPED_LANGUAGES = ("php",)
+_SCOPED_LANGUAGES = ("php", "rust")
 
 # Node kinds that can be a scoped-call target (methods live under a class).
 _METHOD_KINDS = ("Function", "Test", "Method")
 
-# Scope receivers that refer to the enclosing class rather than a named one.
-_SELF_SCOPES = {"self", "static"}
+# PHP scope receivers (case-insensitive) that mean the enclosing class.
+_PHP_SELF_SCOPES = {"self", "static"}
+
+# Separators that split an import target into path segments across languages
+# (PHP ``App\Mail\Mailer``, Rust ``crate::mail::Mailer``, resolved paths).
+_IMPORT_SEGMENT_SEPARATORS = ("::", "\\", "/")
+
+
+def _import_segments(target: str) -> list[str]:
+    """Split an import target into its path segments on any separator."""
+    normalized = target
+    for sep in _IMPORT_SEGMENT_SEPARATORS[1:]:
+        normalized = normalized.replace(sep, "::")
+    return [seg for seg in normalized.split("::") if seg]
 
 
 def _is_unresolved_scoped_target(target: str) -> bool:
@@ -83,25 +107,56 @@ def _enclosing_class(source_qualified: str) -> Optional[str]:
     return tail.rsplit(".", 1)[0]
 
 
-def _php_scope_parts(target: str) -> Optional[tuple[str, str]]:
-    """Split a PHP ``Class::method`` target into (class-short-name, method)."""
-    scope, _, method = target.partition("::")
-    if not scope or not method or "::" in method:
-        return None
-    # Strip a namespace prefix: ``App\Mail\Mailer`` → ``Mailer``.
-    class_name = scope.strip("\\").rsplit("\\", 1)[-1]
-    if not class_name:
-        return None
-    return class_name, method
+def _scope_and_method(
+    target: str, language: str
+) -> Optional[tuple[Optional[str], str, bool]]:
+    """Parse a raw scoped target into ``(class, method, needs_enclosing)``.
+
+    ``class`` is ``None`` when ``needs_enclosing`` is set (``self`` / ``Self`` /
+    ``static``), signalling the caller's enclosing class should be used.
+    Returns ``None`` for targets that must be left untouched (``parent::``, a
+    Rust module path, a lowercase ``self::`` module call, …).
+    """
+    if language == "php":
+        scope, _, method = target.partition("::")
+        if not scope or not method or "::" in method:
+            return None
+        lowered = scope.strip("\\").casefold()
+        if lowered in _PHP_SELF_SCOPES:
+            return None, method, True
+        if lowered == "parent":
+            return None
+        # Strip a namespace prefix: ``App\Mail\Mailer`` → ``Mailer``.
+        class_name = scope.strip("\\").rsplit("\\", 1)[-1]
+        if not class_name:
+            return None
+        return class_name, method, False
+
+    if language == "rust":
+        # Only genuine two-segment ``Type::method`` calls are resolvable;
+        # longer module paths are deliberately left alone.
+        segments = target.split("::")
+        if len(segments) != 2:
+            return None
+        scope, method = segments
+        if not scope or not method:
+            return None
+        if scope == "Self":
+            return None, method, True
+        if scope == "self":
+            # ``self::foo`` is a module-relative function, never a type method.
+            return None
+        return scope, method, False
+
+    return None
 
 
 def _short_class_name(target: str) -> str:
     """Last identifier segment of an import target (path, FQN or module path)."""
-    for sep in ("/", "\\", "::"):
-        if sep in target:
-            target = target.rsplit(sep, 1)[-1]
+    segments = _import_segments(target)
+    tail = segments[-1] if segments else target
     # Drop a trailing extension (``Mailer.php`` → ``Mailer``) and any ``.method``.
-    return target.split(".", 1)[0]
+    return tail.split(".", 1)[0]
 
 
 def resolve_scoped_calls(store: GraphStore) -> dict:
@@ -115,36 +170,38 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
     conn = store._conn
 
     lang_placeholders = ",".join("?" for _ in _SCOPED_LANGUAGES)
-    scoped_files: set[str] = {
-        row["file_path"]
+    # file_language: file_path → language, restricted to the scoped languages.
+    file_language: dict[str, str] = {
+        row["file_path"]: row["language"]
         for row in conn.execute(
-            "SELECT DISTINCT file_path FROM nodes "
+            "SELECT DISTINCT file_path, language FROM nodes "
             f"WHERE language IN ({lang_placeholders})",  # nosec B608
             _SCOPED_LANGUAGES,
         ).fetchall()
     }
-    if not scoped_files:
+    if not file_language:
         return {"files_indexed": 0, "calls_resolved": 0}
 
     # ------------------------------------------------------------------
-    # method_map: (class_casefold, method_casefold) → [qualified_name, ...]
+    # method_map: (language, class_casefold, method_casefold) → [qualified, ...]
+    # Keyed by language so a PHP class never resolves a same-named Rust type.
     # ------------------------------------------------------------------
-    method_map: dict[tuple[str, str], list[str]] = {}
+    method_map: dict[tuple[str, str, str], list[str]] = {}
     file_of: dict[str, str] = {}
     kind_placeholders = ",".join("?" for _ in _METHOD_KINDS)
     for row in conn.execute(
-        "SELECT name, parent_name, qualified_name, file_path FROM nodes "
+        "SELECT name, parent_name, qualified_name, file_path, language FROM nodes "
         f"WHERE kind IN ({kind_placeholders}) "  # nosec B608
         f"AND language IN ({lang_placeholders}) "  # nosec B608
         "AND parent_name IS NOT NULL",
         (*_METHOD_KINDS, *_SCOPED_LANGUAGES),
     ).fetchall():
-        key = (row["parent_name"].casefold(), row["name"].casefold())
+        key = (row["language"], row["parent_name"].casefold(), row["name"].casefold())
         method_map.setdefault(key, []).append(row["qualified_name"])
         file_of[row["qualified_name"]] = row["file_path"]
 
     if not method_map:
-        return {"files_indexed": len(scoped_files), "calls_resolved": 0}
+        return {"files_indexed": len(file_language), "calls_resolved": 0}
 
     # ------------------------------------------------------------------
     # imports_by_file: caller file → set of imported target strings, used to
@@ -179,7 +236,7 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         for target in imported:
             if _short_class_name(target).casefold() != class_name.casefold():
                 continue
-            segments = target.replace("/", "\\").strip("\\").split("\\")
+            segments = _import_segments(target)
             if len(segments) < 2:
                 continue
             namespace_tail = segments[-2].casefold()
@@ -199,24 +256,28 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
 
     resolved = 0
     for row in calls_rows:
-        if row["file_path"] not in scoped_files:
+        language = file_language.get(row["file_path"])
+        if language is None:
             continue
         target = row["target_qualified"]
         if not _is_unresolved_scoped_target(target):
             continue
 
-        parts = _php_scope_parts(target)
-        if parts is None:
+        parsed = _scope_and_method(target, language)
+        if parsed is None:
             continue
-        class_name, method = parts
+        class_name, method, needs_enclosing = parsed
 
-        if class_name.casefold() in _SELF_SCOPES:
+        if needs_enclosing:
             enclosing = _enclosing_class(row["source_qualified"])
             if not enclosing:
                 continue
             class_name = enclosing
+        assert class_name is not None  # non-enclosing parse always sets a class
 
-        candidates = method_map.get((class_name.casefold(), method.casefold()))
+        candidates = method_map.get(
+            (language, class_name.casefold(), method.casefold())
+        )
         if not candidates:
             continue
 
@@ -252,6 +313,6 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
 
     logger.info(
         "Scoped resolver: resolved %d CALLS edges across %d files",
-        resolved, len(scoped_files),
+        resolved, len(file_language),
     )
-    return {"files_indexed": len(scoped_files), "calls_resolved": resolved}
+    return {"files_indexed": len(file_language), "calls_resolved": resolved}
