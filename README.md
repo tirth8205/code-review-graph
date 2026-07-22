@@ -555,6 +555,16 @@ export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways wit
                                                         # (e.g. Qwen text-embedding-v4 caps at 10)
 ```
 
+[Eden AI](https://www.edenai.co) (EU-based, GDPR-compliant, OpenAI-compatible) works the
+same way — point the base URL at the Eden AI gateway and use `provider/model` model ids:
+
+```bash
+export CRG_OPENAI_BASE_URL=https://api.edenai.run/v3    # EU residency: https://api.eu.edenai.run/v3
+export CRG_OPENAI_API_KEY=your-edenai-key               # https://app.edenai.run/admin/api-settings/features-preferences
+export CRG_OPENAI_MODEL=openai/text-embedding-3-small   # provider/model naming; returns 1536-dim
+export CRG_OPENAI_DIMENSION=1536
+```
+
 The cloud-egress warning is auto-skipped when the base URL points to localhost
 (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
 
