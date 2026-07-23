@@ -1732,6 +1732,55 @@ def _csharp_attribute_names(node) -> list[str]:
     return names
 
 
+def _php_attribute_names(node) -> list[str]:
+    """Return PHP attribute names from ``attribute_list`` children of *node*.
+
+    PHP 8 attributes (``#[Test]``, ``#[DataProvider('x')]``) are
+    ``attribute_list`` nodes wrapping one or more ``attribute_group`` nodes,
+    each wrapping one or more ``attribute`` nodes whose ``name`` child is the
+    attribute name -- one level deeper than C#'s ``attribute_list >
+    attribute``. See: #693
+    """
+    names: list[str] = []
+    for sub in node.children:
+        if sub.type != "attribute_list":
+            continue
+        for group in sub.children:
+            if group.type != "attribute_group":
+                continue
+            for attr in group.children:
+                if attr.type != "attribute":
+                    continue
+                for ident in attr.children:
+                    if ident.type == "name":
+                        names.append(
+                            ident.text.decode("utf-8", errors="replace").strip(),
+                        )
+                        break
+    return names
+
+
+_PHP_TEST_DOC_TAG_RE = re.compile(r"@test\b")
+
+
+def _php_docblock_marks_test(node) -> bool:
+    """Return True if a PHPUnit ``/** @test */`` docblock precedes *node*.
+
+    PHPUnit's legacy convention marks a test method with an ``@test`` tag in
+    the doc comment immediately above it, instead of a ``test_`` name prefix
+    or a ``#[Test]`` attribute. Tree-sitter represents that comment as a
+    preceding sibling of the ``method_declaration``, not a child, so it needs
+    its own check rather than reuse of the attribute-based extraction above.
+    See: #693
+    """
+    sib = node.prev_sibling
+    return bool(
+        sib is not None
+        and sib.type == "comment"
+        and _PHP_TEST_DOC_TAG_RE.search(sib.text.decode("utf-8", errors="replace"))
+    )
+
+
 def _csharp_namespaces(root_node) -> list[str]:
     """Return all namespaces declared in a C# compilation unit.
 
@@ -9185,6 +9234,15 @@ class CodeParser:
         # See: #295
         if language == "csharp":
             deco_list.extend(_csharp_attribute_names(child))
+        # PHP: `#[Test]` attributes wrap `attribute_list > attribute_group >
+        # attribute > name`. PHPUnit's legacy `/** @test */` docblock tag is
+        # a preceding-sibling `comment` node instead, so it needs a separate
+        # check; when present it's folded into `deco_list` as `"Test"` since
+        # that's already in `_TEST_ANNOTATIONS`. See: #693
+        if language == "php":
+            deco_list.extend(_php_attribute_names(child))
+            if _php_docblock_marks_test(child):
+                deco_list.append("Test")
         if deco_list:
             decorators = tuple(deco_list)
 
