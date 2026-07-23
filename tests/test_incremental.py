@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch  # noqa: F401 – patch used in tests
 import code_review_graph.incremental as incremental_module
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
+    _decode_name_status_paths,
     _is_binary,
     _load_ignore_patterns,
     _parse_single_file,
@@ -527,7 +528,7 @@ class TestGitOperations:
     def test_get_changed_files(self, mock_run, tmp_path):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=b"src/a.py\0src/b.py\0",
+            stdout=b"M\0src/a.py\0A\0src/b.py\0",
         )
         result = get_changed_files(tmp_path)
         assert result == ["src/a.py", "src/b.py"]
@@ -543,7 +544,7 @@ class TestGitOperations:
         # First call fails, second succeeds
         mock_run.side_effect = [
             MagicMock(returncode=1, stdout=b""),
-            MagicMock(returncode=0, stdout=b"staged.py\0"),
+            MagicMock(returncode=0, stdout=b"A\0staged.py\0"),
         ]
         result = get_changed_files(tmp_path)
         assert result == ["staged.py"]
@@ -554,7 +555,7 @@ class TestGitOperations:
     def test_get_changed_files_rejects_failed_fallback(self, mock_run, tmp_path):
         mock_run.side_effect = [
             MagicMock(returncode=128, stdout=b""),
-            MagicMock(returncode=128, stdout=b"misleading.py\0"),
+            MagicMock(returncode=128, stdout=b"A\0misleading.py\0"),
         ]
 
         assert get_changed_files(tmp_path) == []
@@ -981,5 +982,59 @@ class TestStartWatchThread:
             with patch.dict("sys.modules", {"watchdog": None}):
                 thread = start_watch_thread(tmp_path, store, daemon=True)
             assert thread is None
+        finally:
+            store.close()
+
+
+class TestRenamePurgeParity:
+    """Issue #684: a rename must purge the old path so an incremental update
+    converges to the same graph as a full rebuild."""
+
+    def _git(self, cwd, *args):
+        subprocess.run(
+            ["git", "-c", "user.email=t@test", "-c", "user.name=t", *args],
+            cwd=str(cwd), check=True, capture_output=True,
+        )
+
+    def test_decode_name_status_emits_both_rename_paths(self):
+        out = b"M\0app.py\0R100\0old.py\0new.py\0A\0added.py\0"
+        assert _decode_name_status_paths(out) == ["app.py", "old.py", "new.py", "added.py"]
+
+    def test_decode_name_status_copy_records_and_dedupe(self):
+        out = b"C75\0src/a.py\0src/b.py\0M\0src/a.py\0"
+        assert _decode_name_status_paths(out) == ["src/a.py", "src/b.py"]
+
+    def test_decode_name_status_empty(self):
+        assert _decode_name_status_paths(b"") == []
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_reports_both_sides_of_rename(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"R100\0old.py\0new.py\0",
+        )
+        assert get_changed_files(tmp_path) == ["old.py", "new.py"]
+
+    def test_rename_purges_old_path_end_to_end(self, tmp_path):
+        self._git(tmp_path, "init", "-q")
+        (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
+        self._git(tmp_path, "add", ".")
+        self._git(tmp_path, "commit", "-qm", "init")
+
+        store = GraphStore(tmp_path / "g.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=["a.py"])
+            assert store.get_nodes_by_file(str(tmp_path / "a.py"))
+
+            self._git(tmp_path, "mv", "a.py", "b.py")
+            self._git(tmp_path, "commit", "-qm", "rename")
+
+            changed = get_changed_files(tmp_path, base="HEAD~1")
+            assert set(changed) == {"a.py", "b.py"}
+
+            incremental_update(tmp_path, store, changed_files=changed)
+            # Old path fully purged, new path present — full-rebuild parity.
+            assert store.get_nodes_by_file(str(tmp_path / "a.py")) == []
+            assert store.get_nodes_by_file(str(tmp_path / "b.py"))
         finally:
             store.close()
