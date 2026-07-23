@@ -68,6 +68,12 @@ code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
 code-review-graph install --platform gemini-cli   # configure only Gemini CLI
 code-review-graph install --platform antigravity   # configure only Antigravity
+code-review-graph install --platform windsurf     # configure only Windsurf
+code-review-graph install --platform zed          # configure only Zed
+code-review-graph install --platform continue     # configure only Continue
+code-review-graph install --platform opencode     # configure only OpenCode
+code-review-graph install --platform qwen         # configure only Qwen
+code-review-graph install --platform qoder        # configure only Qoder
 code-review-graph install --platform kiro         # configure only Kiro
 code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
