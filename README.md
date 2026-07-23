@@ -67,6 +67,7 @@ code-review-graph install --platform codex       # configure only Codex
 code-review-graph install --platform cursor      # configure only Cursor
 code-review-graph install --platform claude-code  # configure only Claude Code
 code-review-graph install --platform gemini-cli   # configure only Gemini CLI
+code-review-graph install --platform antigravity   # configure only Antigravity
 code-review-graph install --platform kiro         # configure only Kiro
 code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
