@@ -1,5 +1,7 @@
 <h1 align="center">code-review-graph</h1>
 
+<a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/23329" alt="tirth8205%2Fcode-review-graph | Trendshift" width="250" height="55"/></a>
+
 <p align="center">
   <strong>Stop burning tokens. Start reviewing smarter.</strong>
 </p>
