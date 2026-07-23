@@ -406,3 +406,53 @@ class TestDetectChangesEndToEnd:
         savings = result["context_savings"]
         assert result["changed_functions"]
         assert savings["saved_percent"] < 100
+
+
+class TestGraphToolExplicitRepoResolution:
+    """Issue #697: an explicit --repo must win over the upward git-root walk."""
+
+    def _make_monorepo(self, tmp_path):
+        mono = tmp_path / "mono"
+        (mono / ".git").mkdir(parents=True)
+        module = mono / "llvm"
+        crg = module / ".code-review-graph"
+        crg.mkdir(parents=True)
+        (crg / "graph.db").write_bytes(b"")
+        return mono, module
+
+    def test_explicit_repo_in_monorepo_uses_subproject_root(self, tmp_path):
+        _, module = self._make_monorepo(tmp_path)
+        argv = ["code-review-graph", "search", "raw_ostream", "--repo", str(module)]
+        with patch.object(sys, "argv", argv):
+            with patch.object(cli, "_run_graph_tool_command") as mock_run:
+                cli.main()
+
+        mock_run.assert_called_once()
+        repo_root = mock_run.call_args.args[1]
+        assert repo_root == module.resolve()
+
+    def test_explicit_repo_without_markers_errors_cleanly(self, tmp_path, capsys):
+        bare = tmp_path / "not-a-project"
+        bare.mkdir()
+        argv = ["code-review-graph", "search", "x", "--repo", str(bare)]
+        with patch.object(sys, "argv", argv):
+            with patch.object(cli, "_run_graph_tool_command") as mock_run:
+                try:
+                    cli.main()
+                    raised = False
+                except SystemExit as exc:
+                    raised = exc.code == 1
+        assert raised
+        mock_run.assert_not_called()
+        assert "does not look like a project root" in capsys.readouterr().err
+
+    def test_repo_inside_module_resolves_to_nearest_marker(self, tmp_path):
+        _, module = self._make_monorepo(tmp_path)
+        nested = module / "src" / "deep"
+        nested.mkdir(parents=True)
+        argv = ["code-review-graph", "search", "x", "--repo", str(nested)]
+        with patch.object(sys, "argv", argv):
+            with patch.object(cli, "_run_graph_tool_command") as mock_run:
+                cli.main()
+
+        assert mock_run.call_args.args[1] == module.resolve()
