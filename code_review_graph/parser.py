@@ -322,6 +322,111 @@ def _python_unreachable_call_positions(
     visitor.visit(tree)
     return frozenset(visitor.positions)
 
+
+# ---------------------------------------------------------------------------
+# Non-Python static dead-guard detection (tree-sitter ancestor walk).
+#
+# ``_python_unreachable_call_positions`` above uses the ``ast`` module and so
+# only covers Python.  The helpers below cover languages ``ast`` cannot parse,
+# walking the tree-sitter ancestor chain of a call node:
+#
+#   * Go / TypeScript / JavaScript:  ``if false { ... }`` / ``if (0) { ... }``
+#   * C / C++:                       ``#if 0`` / ``#elif 0`` preprocessor blocks
+#
+# Only the consequence (true branch) is dead; ``else`` / ``#else`` / ``#elif``
+# branches stay live.
+# ---------------------------------------------------------------------------
+
+
+def _node_is_in_child(node, child_node) -> bool:
+    """Return True if *node* is *child_node* or one of its descendants.
+
+    Compares byte ranges because the tree-sitter Python bindings create a
+    fresh ``Node`` object on every ``child_by_field_name`` call, so ``is``
+    identity fails even when both sides refer to the same tree node.
+    """
+    start_byte, end_byte = child_node.start_byte, child_node.end_byte
+    cursor = node
+    while cursor is not None:
+        if cursor.start_byte == start_byte and cursor.end_byte == end_byte:
+            return True
+        cursor = cursor.parent
+    return False
+
+
+def _is_statically_false_condition(cond) -> bool:
+    """Return True if *cond* is a statically-false literal (non-Python).
+
+    * ``parenthesized_expression`` (TS/JS wrap ``if (expr)``) is unwrapped.
+    * ``false`` -- Go and TS/JS boolean literal.
+    * ``number`` equal to ``0`` -- TS/JS ``if (0)``.
+    """
+    if cond.type == "parenthesized_expression":
+        inner = cond.named_children
+        return _is_statically_false_condition(inner[0]) if inner else False
+    if cond.type == "false":
+        return True
+    # Literal ``0`` only. ``0x0`` / ``0.0`` are equally falsy but are left
+    # undetected on purpose: missing one is a dropped suppression, never a
+    # wrongly-suppressed live call, and evaluating arbitrary numeric literals
+    # invites its own bugs. Python's ``if 0:`` is handled by the ast path.
+    if cond.type == "number" and cond.text == b"0":
+        return True
+    return False
+
+
+def _is_in_static_dead_guard(node) -> bool:
+    """Return True if *node* sits in a statically-dead branch (non-Python).
+
+    Two independent ancestor walks:
+
+    * A walk for Go / TS / JS ``if false`` / ``if (0)``.
+    * A walk for C/C++ ``#if 0`` / ``#elif 0``.
+
+    Neither walk stops at a function or class boundary. A declaration
+    nested inside a dead branch is never evaluated, so calls in its body
+    are dead too -- matching what the Python ``ast`` path above already
+    does for a ``def`` or ``class`` under ``if False:``. Unlike Python,
+    JS/TS class declarations are not hoisted, so there is no reachable
+    symbol to preserve either.
+    """
+    # Go / TS / JS: ``if`` with a statically-false condition.
+    cursor = node.parent
+    while cursor is not None:
+        node_type = cursor.type
+        if node_type == "if_statement":
+            condition = cursor.child_by_field_name("condition")
+            consequence = cursor.child_by_field_name("consequence")
+            if (
+                condition is not None
+                and consequence is not None
+                and _is_statically_false_condition(condition)
+                and _node_is_in_child(node, consequence)
+            ):
+                return True
+        cursor = cursor.parent
+
+    # C / C++: ``#if 0`` / ``#elif 0`` preprocessor block.
+    preproc = node.parent
+    while preproc is not None:
+        if preproc.type in ("preproc_if", "preproc_elif"):
+            condition = preproc.child_by_field_name("condition")
+            if (
+                condition is not None
+                and condition.type == "number_literal"
+                and condition.text == b"0"
+            ):
+                alternative = preproc.child_by_field_name("alternative")
+                if not (
+                    alternative is not None
+                    and _node_is_in_child(node, alternative)
+                ):
+                    return True
+        preproc = preproc.parent
+
+    return False
+
+
 # SQL keywords that can appear after FROM/JOIN but are NOT table names.
 _SQL_KEYWORDS: frozenset[str] = frozenset({
     "SELECT", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
@@ -9418,6 +9523,11 @@ class CodeParser:
             and (child.start_point[0] + 1, child.start_point[1])
             in _python_unreachable_call_positions(source)
         ):
+            return True
+
+        # Non-Python languages: tree-sitter dead-guard walk (Go/TS/JS
+        # ``if false``, C/C++ ``#if 0``).  ``ast`` above cannot reach them.
+        if language != "python" and _is_in_static_dead_guard(child):
             return True
 
         call_name = self._get_call_name(child, language, source)
