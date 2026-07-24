@@ -354,7 +354,9 @@ def query_graph(
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
             if node:
-                for e in store.iter_edges_by_target_name(node.name):
+                for e in store.iter_edges_by_target_name(
+                    node.name, language=node.language or None,
+                ):
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
@@ -468,7 +470,9 @@ def query_graph(
             # (e.g. "sample.dart::Animal"). Search by plain name too. See: #87
             if total_results == 0 and node:
                 for kind in ("INHERITS", "IMPLEMENTS"):
-                    for e in store.iter_edges_by_target_name(node.name, kind=kind):
+                    for e in store.iter_edges_by_target_name(
+                        node.name, kind=kind, language=node.language or None,
+                    ):
                         child = store.get_node(e.source_qualified)
                         if child:
                             add_result(node_to_dict(child), e)

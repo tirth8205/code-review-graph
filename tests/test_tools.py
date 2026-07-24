@@ -289,6 +289,40 @@ class TestQueryGraphCallTargetFallbacks:
             "external_helper",
         }
 
+    def test_callers_of_bare_fallback_does_not_cross_languages(self):
+        """Regression for #708: a bare-name CALLS edge from an unrelated
+        language (e.g. an Apex ``.clone()`` call) must not be reported as a
+        caller of a same-named function in a different language (JS)."""
+        js_file = str(self.root / "clone.js")
+        apex_file = str(self.root / "Clone.cls")
+        with GraphStore(self.db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Function", name="clone", file_path=js_file,
+                line_start=1, line_end=3, language="javascript",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="apexCaller", file_path=apex_file,
+                line_start=1, line_end=5, language="apex",
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{apex_file}::apexCaller",
+                target="clone",
+                file_path=apex_file,
+                line=3,
+            ))
+            store.commit()
+
+        result = query_graph(
+            pattern="callers_of",
+            target=f"{js_file}::clone",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        names = {r["name"] for r in result["results"]}
+        assert "apexCaller" not in names
+
 
 def _seed_repo_relative_graph(root: Path) -> None:
     """Seed graph data with cwd-relative paths, as eval repos currently do."""

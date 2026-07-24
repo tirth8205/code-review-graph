@@ -398,7 +398,9 @@ class GraphStore:
             ).fetchall())
         return [self._row_to_edge(row) for row in rows]
 
-    def search_edges_by_target_name(self, name: str, kind: str = "CALLS") -> list[GraphEdge]:
+    def search_edges_by_target_name(
+        self, name: str, kind: str = "CALLS", language: str | None = None,
+    ) -> list[GraphEdge]:
         """Search for edges where target_qualified matches an unqualified name.
 
         CALLS edges often store unqualified target names (e.g. ``generateTestCode``)
@@ -406,17 +408,31 @@ class GraphStore:
         method finds those edges by exact match on the plain function name so that
         reverse call tracing (callers_of) works even when qualified-name lookup
         returns nothing.
+
+        When ``language`` is given, only edges whose source node was parsed from
+        that language are returned. Bare (unqualified) names are ambiguous across
+        the whole graph, so without this filter a common method name like
+        ``clone`` can match a same-named method in an unrelated language (#708).
         """
-        return list(self.iter_edges_by_target_name(name, kind=kind))
+        return list(self.iter_edges_by_target_name(name, kind=kind, language=language))
 
     def iter_edges_by_target_name(
-        self, name: str, kind: str = "CALLS",
+        self, name: str, kind: str = "CALLS", language: str | None = None,
     ) -> Iterator[GraphEdge]:
         """Yield exact bare-target edges without materializing all matches."""
-        rows = self._conn.execute(
-            "SELECT * FROM edges WHERE target_qualified = ? AND kind = ?",
-            (name, kind),
-        )
+        if language:
+            rows = self._conn.execute(
+                "SELECT edges.* FROM edges "
+                "JOIN nodes ON nodes.qualified_name = edges.source_qualified "
+                "WHERE edges.target_qualified = ? AND edges.kind = ? "
+                "AND nodes.language = ?",
+                (name, kind, language),
+            )
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM edges WHERE target_qualified = ? AND kind = ?",
+                (name, kind),
+            )
         for row in rows:
             yield self._row_to_edge(row)
 
