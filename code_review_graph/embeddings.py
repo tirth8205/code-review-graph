@@ -671,9 +671,11 @@ def get_provider(
 
     Args:
         provider: Provider name. One of "local", "google", "minimax", "openai",
-                  or None for local. Names are case-insensitive and surrounding
-                  whitespace is ignored; unknown names raise ValueError instead
-                  of silently falling back to the local provider.
+                  or None. When omitted, configured OpenAI-compatible
+                  credentials select OpenAI; otherwise the local provider is
+                  used. Names are case-insensitive and surrounding whitespace
+                  is ignored; unknown names raise ValueError instead of
+                  silently falling back to the local provider.
                   Google requires GOOGLE_API_KEY env var and explicit opt-in.
                   MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
                   OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
@@ -697,6 +699,17 @@ def get_provider(
             f"Unknown embedding provider '{name}'. "
             "Valid: local, openai, google, minimax"
         )
+
+    # When no explicit provider is given but OpenAI-compatible env vars are
+    # configured, default to the openai provider so MCP tool calls that omit
+    # the optional `provider` parameter still use the configured backend
+    # (#551).
+    if (
+        provider is None
+        and os.environ.get("CRG_OPENAI_API_KEY")
+        and os.environ.get("CRG_OPENAI_BASE_URL")
+    ):
+        name = "openai"
 
     if name == "openai":
         api_key = os.environ.get("CRG_OPENAI_API_KEY")

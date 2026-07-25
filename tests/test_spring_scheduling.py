@@ -94,13 +94,18 @@ def test_schedule_queries_follow_triggers_edges(tmp_path: Path) -> None:
     assert triggered["status"] == "ok"
     assert [result["name"] for result in triggered["results"]] == ["sync"]
     assert {edge["kind"] for edge in triggered["edges"]} == {"TRIGGERS"}
+    assert triggered["result_count"] == 1
+    assert triggered["results_omitted"] == 0
 
     schedulers = query_graph(
         "triggered_by",
         f"{path}::Tasks.sync",
         repo_root=str(tmp_path),
+        max_results=1,
     )
     assert schedulers["status"] == "ok"
-    assert len(schedulers["results"]) == 2
+    assert len(schedulers["results"]) == 1
+    assert schedulers["result_count"] == 2
+    assert schedulers["results_omitted"] == 1
     assert {result["kind"] for result in schedulers["results"]} == {"Scheduler"}
     assert {edge["kind"] for edge in schedulers["edges"]} == {"TRIGGERS"}

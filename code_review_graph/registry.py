@@ -51,7 +51,7 @@ class Registry:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {"repos": self._repos}
         self._path.write_text(
-            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
     def register(
