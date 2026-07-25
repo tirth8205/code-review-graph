@@ -101,6 +101,106 @@ class TestGraphStore:
         assert self.store.get_node("/test/file.py") is None
         assert self.store.get_node("/test/file.py::my_func") is None
 
+    def test_remove_file_permanently_removes_references_and_same_db_embeddings(self):
+        deleted_path = "/test/deleted.py"
+        survivor_path = "/test/survivor.py"
+        deleted_qn = f"{deleted_path}::removed"
+        survivor_qn = f"{survivor_path}::caller"
+        self.store.store_file_nodes_edges(
+            deleted_path,
+            [
+                self._make_file_node(deleted_path),
+                self._make_func_node("removed", deleted_path),
+            ],
+            [],
+        )
+        self.store.store_file_nodes_edges(
+            survivor_path,
+            [
+                self._make_file_node(survivor_path),
+                self._make_func_node("caller", survivor_path),
+            ],
+            [
+                EdgeInfo(
+                    kind="CALLS",
+                    source=survivor_qn,
+                    target=deleted_qn,
+                    file_path=survivor_path,
+                ),
+            ],
+        )
+        self.store._conn.execute(
+            "CREATE TABLE embeddings ("
+            "qualified_name TEXT PRIMARY KEY, vector BLOB NOT NULL, "
+            "text_hash TEXT NOT NULL, provider TEXT NOT NULL)"
+        )
+        self.store._conn.executemany(
+            "INSERT INTO embeddings VALUES (?, ?, ?, ?)",
+            [
+                (deleted_qn, b"deleted", "deleted", "test"),
+                (survivor_qn, b"survivor", "survivor", "test"),
+                ("unrelated::orphan", b"orphan", "orphan", "test"),
+            ],
+        )
+        self.store.commit()
+
+        self.store.remove_file_permanently(deleted_path)
+        self.store.commit()
+
+        assert self.store.get_nodes_by_file(deleted_path) == []
+        assert self.store.get_node(survivor_qn) is not None
+        assert self.store.get_edges_by_source(survivor_qn) == []
+        embeddings = self.store._conn.execute(
+            "SELECT qualified_name FROM embeddings ORDER BY qualified_name"
+        ).fetchall()
+        assert [row["qualified_name"] for row in embeddings] == [
+            survivor_qn,
+            "unrelated::orphan",
+        ]
+
+    def test_replacement_preserves_incoming_edges_from_other_files(self):
+        target_path = "/test/target.py"
+        caller_path = "/test/caller.py"
+        target_qn = f"{target_path}::target"
+        caller_qn = f"{caller_path}::caller"
+        self.store.store_file_nodes_edges(
+            target_path,
+            [
+                self._make_file_node(target_path),
+                self._make_func_node("target", target_path),
+            ],
+            [],
+        )
+        self.store.store_file_nodes_edges(
+            caller_path,
+            [
+                self._make_file_node(caller_path),
+                self._make_func_node("caller", caller_path),
+            ],
+            [
+                EdgeInfo(
+                    kind="CALLS",
+                    source=caller_qn,
+                    target=target_qn,
+                    file_path=caller_path,
+                ),
+            ],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_path,
+            [
+                self._make_file_node(target_path),
+                self._make_func_node("target", target_path),
+            ],
+            [],
+        )
+
+        incoming = self.store.get_edges_by_target(target_qn)
+        assert [(edge.source_qualified, edge.file_path) for edge in incoming] == [
+            (caller_qn, caller_path),
+        ]
+
     def test_store_file_nodes_edges(self):
         nodes = [self._make_file_node(), self._make_func_node()]
         edges = [

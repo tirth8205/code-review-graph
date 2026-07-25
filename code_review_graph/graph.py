@@ -269,6 +269,34 @@ class GraphStore:
         self._conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
         self._invalidate_cache()
 
+    def remove_file_permanently(self, file_path: str) -> None:
+        """Remove a deleted file and every graph reference to its nodes."""
+        qualified_names = [
+            row["qualified_name"]
+            for row in self._conn.execute(
+                "SELECT qualified_name FROM nodes WHERE file_path = ?",
+                (file_path,),
+            ).fetchall()
+        ]
+        self.remove_file_data(file_path)
+        if qualified_names:
+            placeholders = ",".join("?" for _ in qualified_names)
+            self._conn.execute(  # nosec B608 - placeholders only
+                f"DELETE FROM edges WHERE source_qualified IN ({placeholders}) "
+                f"OR target_qualified IN ({placeholders})",
+                (*qualified_names, *qualified_names),
+            )
+        has_embeddings = self._conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'embeddings'",
+        ).fetchone()
+        if has_embeddings is not None:
+            self._conn.executemany(
+                "DELETE FROM embeddings WHERE qualified_name = ?",
+                ((qualified_name,) for qualified_name in qualified_names),
+            )
+        self._invalidate_cache()
+
     def _begin_immediate(self) -> None:
         """Start an IMMEDIATE transaction, rolling back any prior uncommitted
         transaction first (regression guard for #135 / #489).
