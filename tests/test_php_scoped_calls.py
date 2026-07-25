@@ -187,6 +187,106 @@ def test_ambiguous_same_named_methods_disambiguated_by_import(tmp_path: Path) ->
     assert "Mail/Mailer" not in resolved[0]["target_qualified"]
 
 
+def test_php_method_matching_is_case_insensitive(tmp_path: Path) -> None:
+    # PHP class/function names are case-insensitive, so a differently-cased call
+    # still resolves to the same definition.
+    _build(
+        tmp_path,
+        {
+            "src/Mailer.php": (
+                "<?php\n"
+                "class Mailer {\n"
+                "    public static function dispatch($to) { return true; }\n"
+                "}\n"
+            ),
+            "src/Ctrl.php": (
+                "<?php\n"
+                "class Ctrl {\n"
+                "    public function reg($e) { return MAILER::Dispatch($e); }\n"
+                "}\n"
+            ),
+        },
+    )
+    result = query_graph("callers_of", "dispatch", repo_root=str(tmp_path))
+    assert result["status"] == "ok"
+    assert [r["name"] for r in result["results"]] == ["reg"]
+
+
+def test_unrelated_import_namespace_does_not_resolve(tmp_path: Path) -> None:
+    # Two same-named classes in different namespaces; the caller imports a third
+    # namespace matching neither, so the ambiguous call stays unresolved rather
+    # than picking an unrelated same-named definition on a single shared segment.
+    store = _build(
+        tmp_path,
+        {
+            "src/Billing/Mailer.php": (
+                "<?php\n"
+                "namespace App\\Billing;\n"
+                "class Mailer {\n"
+                "    public static function dispatch($to) { return 1; }\n"
+                "}\n"
+            ),
+            "src/Shipping/Mailer.php": (
+                "<?php\n"
+                "namespace App\\Shipping;\n"
+                "class Mailer {\n"
+                "    public static function dispatch($to) { return 2; }\n"
+                "}\n"
+            ),
+            "src/Http/Ctrl.php": (
+                "<?php\n"
+                "namespace App\\Http;\n"
+                "use App\\Warehouse\\Mailer;\n"
+                "class Ctrl {\n"
+                "    public function reg($e) { return Mailer::dispatch($e); }\n"
+                "}\n"
+            ),
+        },
+    )
+    assert not any(c["confidence_tier"] == "INFERRED" for c in _calls(store))
+    dangling = [c for c in _calls(store) if c["target_qualified"] == "Mailer::dispatch"]
+    assert len(dangling) == 1
+
+
+def test_import_suffix_match_selects_correct_namespace(tmp_path: Path) -> None:
+    # A deep import path must select by the full path suffix, not a single
+    # shared middle segment: ``App\Order\Queue\Mailer`` picks Order/Queue/Mailer
+    # over an unrelated Queue/Mailer that only shares the ``Queue`` segment.
+    store = _build(
+        tmp_path,
+        {
+            "src/Queue/Mailer.php": (
+                "<?php\n"
+                "namespace App\\Queue;\n"
+                "class Mailer {\n"
+                "    public static function dispatch($to) { return 1; }\n"
+                "}\n"
+            ),
+            "src/Order/Queue/Mailer.php": (
+                "<?php\n"
+                "namespace App\\Order\\Queue;\n"
+                "class Mailer {\n"
+                "    public static function dispatch($to) { return 2; }\n"
+                "}\n"
+            ),
+            "src/Http/Ctrl.php": (
+                "<?php\n"
+                "namespace App\\Http;\n"
+                "use App\\Order\\Queue\\Mailer;\n"
+                "class Ctrl {\n"
+                "    public function reg($e) { return Mailer::dispatch($e); }\n"
+                "}\n"
+            ),
+        },
+    )
+    resolved = [
+        c for c in _calls(store)
+        if c["confidence_tier"] == "INFERRED" and "dispatch" in c["target_qualified"]
+    ]
+    assert len(resolved) == 1
+    assert "Order/Queue/Mailer" in resolved[0]["target_qualified"]
+
+
 def test_unresolved_external_scoped_call_is_left_untouched(tmp_path: Path) -> None:
     # ``Redis`` is not defined anywhere in the graph — the edge must stay a
     # raw, directly-extracted target and must not fabricate a resolved caller.

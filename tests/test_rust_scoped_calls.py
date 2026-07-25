@@ -189,6 +189,131 @@ def test_unresolved_external_scoped_call_is_left_untouched(tmp_path: Path) -> No
     assert external[0]["confidence_tier"] == "EXTRACTED"
 
 
+def test_case_sensitive_identifiers_are_not_conflated(tmp_path: Path) -> None:
+    # Rust is case-sensitive: a call to ``Mailer::send`` must NOT resolve to a
+    # differently-cased definition ``Mailer::Send``. The edge must stay a raw,
+    # directly-extracted target rather than a bogus resolved caller.
+    store = _build(
+        tmp_path,
+        {
+            "src/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn Send(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/signup.rs": (
+                "use crate::mailer::Mailer;\n"
+                "pub fn register(email: &str) -> bool {\n"
+                "    Mailer::send(email)\n"
+                "}\n"
+            ),
+        },
+    )
+    dangling = [c for c in _calls(store) if c["target_qualified"] == "Mailer::send"]
+    assert len(dangling) == 1
+    assert dangling[0]["confidence_tier"] == "EXTRACTED"
+    # And nothing falsely resolved onto the capital-S ``Send`` definition.
+    assert not any(
+        c["target_qualified"].endswith("Mailer.Send")
+        and c["confidence_tier"] == "INFERRED"
+        for c in _calls(store)
+    )
+
+
+def test_case_sensitive_matching_definition_resolves(tmp_path: Path) -> None:
+    # The exact-case sibling of the previous test: ``Mailer::Send`` resolves.
+    _build(
+        tmp_path,
+        {
+            "src/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn Send(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/signup.rs": (
+                "use crate::mailer::Mailer;\n"
+                "pub fn register(email: &str) -> bool {\n"
+                "    Mailer::Send(email)\n"
+                "}\n"
+            ),
+        },
+    )
+    result = query_graph("callers_of", "Send", repo_root=str(tmp_path))
+    assert result["status"] == "ok"
+    assert [r["name"] for r in result["results"]] == ["register"]
+
+
+def test_import_suffix_match_selects_correct_module(tmp_path: Path) -> None:
+    # Two same-named types with the same method in different modules; the
+    # imported one must win by a multi-segment path-suffix match, not by a
+    # single shared segment.
+    store = _build(
+        tmp_path,
+        {
+            "src/billing/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn go(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/shipping/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn go(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/app.rs": (
+                "use crate::shipping::mailer::Mailer;\n"
+                "pub fn run() -> bool {\n"
+                "    Mailer::go(\"x\")\n"
+                "}\n"
+            ),
+        },
+    )
+    resolved = [
+        c for c in _calls(store)
+        if c["confidence_tier"] == "INFERRED" and c["target_qualified"].endswith(
+            "Mailer.go"
+        )
+    ]
+    assert len(resolved) == 1
+    assert "shipping/mailer.rs" in resolved[0]["target_qualified"]
+    assert "billing/mailer.rs" not in resolved[0]["target_qualified"]
+
+
+def test_unrelated_import_path_does_not_resolve(tmp_path: Path) -> None:
+    # The imported module matches neither same-named definition's path, so the
+    # ambiguous call must be left unresolved rather than pick an unrelated one.
+    store = _build(
+        tmp_path,
+        {
+            "src/billing/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn go(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/shipping/mailer.rs": (
+                "pub struct Mailer;\n"
+                "impl Mailer {\n"
+                "    pub fn go(to: &str) -> bool { true }\n"
+                "}\n"
+            ),
+            "src/app.rs": (
+                "use crate::warehouse::mailer::Mailer;\n"
+                "pub fn run() -> bool {\n"
+                "    Mailer::go(\"x\")\n"
+                "}\n"
+            ),
+        },
+    )
+    assert not any(c["confidence_tier"] == "INFERRED" for c in _calls(store))
+    dangling = [c for c in _calls(store) if c["target_qualified"] == "Mailer::go"]
+    assert len(dangling) == 1
+
+
 def test_multi_segment_module_path_is_left_untouched(tmp_path: Path) -> None:
     # A fully-qualified ``crate::mailer::Mailer::dispatch`` is a multi-segment
     # path; resolving it by its last two segments would be unsound, so it stays

@@ -74,6 +74,39 @@ def _import_segments(target: str) -> list[str]:
     return [seg for seg in normalized.split("::") if seg]
 
 
+def _fold(name: str, language: str) -> str:
+    """Case-fold identifiers for PHP (case-insensitive) but not Rust.
+
+    PHP class and function names are matched case-insensitively by the language,
+    so ``Mailer::DISPATCH`` and ``mailer::dispatch`` name the same symbol.  Rust
+    identifiers are case-sensitive, so ``Mailer::send`` and ``Mailer::Send`` are
+    different symbols and must never be conflated.
+    """
+    return name.casefold() if language == "php" else name
+
+
+def _path_tokens(file_path: str) -> list[str]:
+    """Path split into segments, with the file extension stripped off the last.
+
+    ``/repo/src/Queue/Mailer.php`` → ``["repo", "src", "Queue", "Mailer"]``;
+    ``/repo/src/mailer.rs`` → ``["repo", "src", "mailer"]``.
+    """
+    parts = [p for p in file_path.split("/") if p]
+    if parts:
+        parts[-1] = parts[-1].rsplit(".", 1)[0]
+    return parts
+
+
+def _common_suffix_len(a: list[str], b: list[str], language: str) -> int:
+    """Length of the longest common trailing run of *a* and *b* (case per lang)."""
+    count = 0
+    for left, right in zip(reversed(a), reversed(b)):
+        if _fold(left, language) != _fold(right, language):
+            break
+        count += 1
+    return count
+
+
 def _is_unresolved_scoped_target(target: str) -> bool:
     """True when *target* is a raw ``Class::method`` string, not a node key.
 
@@ -151,14 +184,6 @@ def _scope_and_method(
     return None
 
 
-def _short_class_name(target: str) -> str:
-    """Last identifier segment of an import target (path, FQN or module path)."""
-    segments = _import_segments(target)
-    tail = segments[-1] if segments else target
-    # Drop a trailing extension (``Mailer.php`` → ``Mailer``) and any ``.method``.
-    return tail.split(".", 1)[0]
-
-
 def resolve_scoped_calls(store: GraphStore) -> dict:
     """Rewrite resolvable ``Class::method`` CALLS targets to node qualified names.
 
@@ -183,8 +208,9 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         return {"files_indexed": 0, "calls_resolved": 0}
 
     # ------------------------------------------------------------------
-    # method_map: (language, class_casefold, method_casefold) → [qualified, ...]
-    # Keyed by language so a PHP class never resolves a same-named Rust type.
+    # method_map: (language, class_key, method_key) → [qualified, ...]
+    # Keyed by language so a PHP class never resolves a same-named Rust type;
+    # keys are case-folded for PHP only (Rust identifiers are case-sensitive).
     # ------------------------------------------------------------------
     method_map: dict[tuple[str, str, str], list[str]] = {}
     file_of: dict[str, str] = {}
@@ -196,7 +222,8 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         "AND parent_name IS NOT NULL",
         (*_METHOD_KINDS, *_SCOPED_LANGUAGES),
     ).fetchall():
-        key = (row["language"], row["parent_name"].casefold(), row["name"].casefold())
+        lang = row["language"]
+        key = (lang, _fold(row["parent_name"], lang), _fold(row["name"], lang))
         method_map.setdefault(key, []).append(row["qualified_name"])
         file_of[row["qualified_name"]] = row["file_path"]
 
@@ -216,7 +243,7 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         )
 
     def disambiguate(
-        candidates: list[str], caller_file: str, class_name: str
+        candidates: list[str], caller_file: str, class_name: str, language: str
     ) -> Optional[str]:
         imported = imports_by_file.get(caller_file, set())
         if not imported:
@@ -228,25 +255,38 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         matched = [c for c in candidates if file_of.get(c) in imported_paths]
         if len(matched) == 1:
             return matched[0]
-        # (2) Fall back to matching a fully-qualified ``use`` target that could
-        # not be resolved to a path (no composer PSR-4 map): line the import's
-        # namespace segments up against the candidate file paths so that
-        # ``use App\Queue\Mailer`` picks ``src/Queue/Mailer.php`` over
-        # ``src/Mail/Mailer.php``.
-        for target in imported:
-            if _short_class_name(target).casefold() != class_name.casefold():
-                continue
-            segments = _import_segments(target)
-            if len(segments) < 2:
-                continue
-            namespace_tail = segments[-2].casefold()
-            ns_matched = [
-                c for c in candidates
-                if namespace_tail
-                in {part.casefold() for part in file_of.get(c, "").split("/")}
-            ]
-            if len(ns_matched) == 1:
-                return ns_matched[0]
+        # (2) Fall back to a fully-qualified ``use`` target that could not be
+        # resolved to a path (no composer PSR-4 map). Score each candidate by
+        # how much of the imported namespace/module path matches a *suffix* of
+        # the candidate's file path, so ``use App\Order\Queue\Mailer`` picks
+        # ``src/Order/Queue/Mailer.php`` over an unrelated ``src/Queue/Mailer.php``
+        # that merely shares a single segment. The class name lives in the path
+        # for PHP (``Mailer.php``) but not for Rust (``mailer.rs`` holds the
+        # ``Mailer`` type), so each import is scored both with and without its
+        # trailing class segment.
+        best: Optional[str] = None
+        best_score = 0
+        tied = False
+        for candidate in candidates:
+            tokens = _path_tokens(file_of.get(candidate, ""))
+            score = 0
+            for target in imported:
+                segments = _import_segments(target)
+                if not segments:
+                    continue
+                if _fold(segments[-1], language) != _fold(class_name, language):
+                    continue
+                score = max(
+                    score,
+                    _common_suffix_len(segments, tokens, language),
+                    _common_suffix_len(segments[:-1], tokens, language),
+                )
+            if score > best_score:
+                best_score, best, tied = score, candidate, False
+            elif score == best_score and score > 0:
+                tied = True
+        if best_score >= 1 and not tied:
+            return best
         return None
 
     calls_rows = conn.execute(
@@ -276,7 +316,7 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         assert class_name is not None  # non-enclosing parse always sets a class
 
         candidates = method_map.get(
-            (language, class_name.casefold(), method.casefold())
+            (language, _fold(class_name, language), _fold(method, language))
         )
         if not candidates:
             continue
@@ -285,7 +325,9 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
             new_target = candidates[0]
             via = "single_match"
         else:
-            new_target = disambiguate(candidates, row["file_path"], class_name)
+            new_target = disambiguate(
+                candidates, row["file_path"], class_name, language
+            )
             if new_target is None:
                 continue
             via = "import"
