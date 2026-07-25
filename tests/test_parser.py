@@ -1957,3 +1957,213 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+class TestTypeScriptTypeDeclarations:
+    """TS interfaces / type aliases / enums are graph nodes, and type positions
+    are dependencies.
+
+    Before this, ``_CLASS_TYPES`` covered only ``class_declaration`` for TS, so a
+    types-only module produced zero symbol nodes and its blast radius collapsed
+    to whole-file ``IMPORTS_FROM`` fan-out. Java/C#/PHP already indexed
+    ``interface_declaration``. See: #737
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def _project(self, root: Path) -> tuple[Path, Path]:
+        types = root / "types.ts"
+        types.write_text(
+            "export interface Finding {\n"
+            "  id: string;\n"
+            "}\n\n"
+            "export type Verdict = 'ok' | 'bad';\n\n"
+            "export enum Severity {\n"
+            "  Low,\n"
+            "  High,\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        use = root / "use.ts"
+        use.write_text(
+            "import { Finding, Verdict, Severity } from './types';\n\n"
+            "export function summarize(items: Finding[]): Verdict {\n"
+            "  const cache: Map<string, Severity> = new Map();\n"
+            "  return cache.size ? 'bad' : 'ok';\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return types, use
+
+    def test_interface_type_alias_and_enum_become_nodes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            types, _ = self._project(Path(tmp_dir))
+
+            nodes, _ = self.parser.parse_file(types)
+
+            names = {n.name for n in nodes if n.kind == "Class"}
+            assert {"Finding", "Verdict", "Severity"} <= names
+
+    def test_declaration_name_is_not_a_reference_to_itself(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            types, _ = self._project(Path(tmp_dir))
+
+            _, edges = self.parser.parse_file(types)
+
+            refs = [e for e in edges if e.kind == "REFERENCES"]
+            assert not [e for e in refs if e.source == e.target]
+
+    def test_type_annotation_emits_reference_to_the_declaring_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            types, use = self._project(root)
+
+            _, edges = self.parser.parse_file(use)
+
+            refs = {
+                (e.source, e.target)
+                for e in edges
+                if e.kind == "REFERENCES"
+            }
+            assert (f"{use}::summarize", f"{types.resolve()}::Finding") in refs
+            assert (f"{use}::summarize", f"{types.resolve()}::Verdict") in refs
+
+    def test_type_argument_inside_a_generic_is_a_reference(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            types, use = self._project(root)
+
+            _, edges = self.parser.parse_file(use)
+
+            # Severity appears only as Map<string, Severity>.
+            assert any(
+                e.kind == "REFERENCES"
+                and e.source == f"{use}::summarize"
+                and e.target == f"{types.resolve()}::Severity"
+                for e in edges
+            )
+
+    def test_unknown_and_builtin_types_do_not_emit_references(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            _, use = self._project(root)
+
+            _, edges = self.parser.parse_file(use)
+
+            bare = {e.target.split("::")[-1] for e in edges if e.kind == "REFERENCES"}
+            # Neither a predefined type nor an unimported global becomes an edge.
+            assert "string" not in bare
+            assert "Map" not in bare
+
+    def test_interface_member_attributes_to_the_interface_not_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            types, _ = self._project(root)
+            wrapper = root / "wrapper.ts"
+            wrapper.write_text(
+                "import { Verdict } from './types';\n\n"
+                "export interface Wrapper {\n"
+                "  nested: Verdict;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(wrapper)
+
+            assert any(
+                e.kind == "REFERENCES"
+                and e.source == f"{wrapper}::Wrapper"
+                and e.target == f"{types.resolve()}::Verdict"
+                for e in edges
+            )
+
+    def test_class_heritage_emits_inherits_edges(self):
+        """`class C extends B implements I` nests its clauses under
+        class_heritage, so scanning only direct children found no bases at all.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base = root / "base.ts"
+            base.write_text(
+                "export class Base {}\n"
+                "export interface Findable { id: string }\n",
+                encoding="utf-8",
+            )
+            impl = root / "impl.ts"
+            impl.write_text(
+                "import { Base, Findable } from './base';\n\n"
+                "export class Impl extends Base implements Findable {\n"
+                "  id = 'x';\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(impl)
+
+            inherits = {
+                (e.source, e.target) for e in edges if e.kind == "INHERITS"
+            }
+            assert (f"{impl}::Impl", "Base") in inherits
+            assert (f"{impl}::Impl", "Findable") in inherits
+
+    def test_interface_extends_emits_inherits_edge(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base = root / "base.ts"
+            base.write_text("export interface Findable { id: string }\n", encoding="utf-8")
+            wrapper = root / "wrapper.ts"
+            wrapper.write_text(
+                "import { Findable } from './base';\n\n"
+                "export interface Wrapper extends Findable {\n"
+                "  extra: string;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(wrapper)
+
+            inherits = {(e.source, e.target) for e in edges if e.kind == "INHERITS"}
+            assert (f"{wrapper}::Wrapper", "Findable") in inherits
+
+    def test_heritage_does_not_double_emit_a_reference(self):
+        """A base is already an INHERITS edge; it must not also be REFERENCES."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base = root / "base.ts"
+            base.write_text("export interface Findable { id: string }\n", encoding="utf-8")
+            wrapper = root / "wrapper.ts"
+            wrapper.write_text(
+                "import { Findable } from './base';\n\n"
+                "export interface Wrapper extends Findable {\n"
+                "  extra: string;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(wrapper)
+
+            bare = {e.target.split("::")[-1] for e in edges if e.kind == "REFERENCES"}
+            assert "Findable" not in bare
+
+    def test_tsx_type_positions_are_also_covered(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            types, _ = self._project(root)
+            panel = root / "Panel.tsx"
+            panel.write_text(
+                "import { Finding } from './types';\n\n"
+                "export function Panel({ finding }: { finding: Finding }) {\n"
+                "  return null;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            _, edges = self.parser.parse_file(panel)
+
+            assert any(
+                e.kind == "REFERENCES"
+                and e.source == f"{panel}::Panel"
+                and e.target == f"{types.resolve()}::Finding"
+                for e in edges
+            )
