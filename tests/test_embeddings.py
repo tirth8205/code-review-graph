@@ -259,6 +259,24 @@ class TestGetProviderValidation:
             batch_size=None,
         )
 
+    @patch("code_review_graph.embeddings.OpenAIEmbeddingProvider")
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_explicit_blank_stays_local_when_openai_env_configured(
+        self, _mock_available, local_cls, openai_cls,
+    ):
+        """Only an omitted provider should use the configured OpenAI default."""
+        local_cls.return_value = MagicMock()
+        env = {
+            "CRG_OPENAI_API_KEY": "fake-key",
+            "CRG_OPENAI_BASE_URL": "http://localhost:11434/v1",
+            "CRG_OPENAI_MODEL": "nomic-embed-text",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            assert get_provider("") is local_cls.return_value
+            assert get_provider("   ") is local_cls.return_value
+        openai_cls.assert_not_called()
+
 
 class TestGetProviderModel:
     """Tests for model parameter in get_provider()."""
