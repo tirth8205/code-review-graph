@@ -1838,8 +1838,11 @@ def _csharp_attribute_names(node) -> list[str]:
     return names
 
 
+_PHPUNIT_TEST_ATTRIBUTE = "phpunit\\framework\\attributes\\test"
+
+
 def _php_attribute_aliases(node) -> dict[str, str]:
-    """Return PHP import aliases mapped to their final symbol name."""
+    """Return aliases that resolve specifically to PHPUnit's Test attribute."""
     root = node
     while root.parent is not None:
         root = root.parent
@@ -1867,7 +1870,24 @@ def _php_attribute_aliases(node) -> dict[str, str]:
                     target_text = target.text.decode(
                         "utf-8", errors="replace",
                     ).strip()
-                    aliases[alias_text] = target_text.lstrip("\\").rsplit("\\", 1)[-1]
+                    if current.parent.type == "namespace_use_group":
+                        declaration = current.parent.parent
+                        prefix = next(
+                            (
+                                child
+                                for child in declaration.children
+                                if child.type == "namespace_name"
+                            ),
+                            None,
+                        )
+                        if prefix is not None:
+                            prefix_text = prefix.text.decode(
+                                "utf-8", errors="replace",
+                            ).strip()
+                            target_text = f"{prefix_text}\\{target_text}"
+                    normalized_target = target_text.lstrip("\\").casefold()
+                    if normalized_target == _PHPUNIT_TEST_ATTRIBUTE:
+                        aliases[alias_text.casefold()] = "Test"
         stack.extend(reversed(current.children))
     return aliases
 
@@ -1896,12 +1916,16 @@ def _php_attribute_names(node) -> list[str]:
                         raw_name = ident.text.decode(
                             "utf-8", errors="replace",
                         ).strip()
-                        names.append(raw_name.lstrip("\\").rsplit("\\", 1)[-1])
+                        normalized = raw_name.lstrip("\\")
+                        if normalized.casefold() == _PHPUNIT_TEST_ATTRIBUTE:
+                            names.append("Test")
+                        else:
+                            names.append(normalized)
                         break
     if not names:
         return []
     aliases = _php_attribute_aliases(node)
-    return [aliases.get(name, name) for name in names]
+    return [aliases.get(name.casefold(), name) for name in names]
 
 
 _PHP_TEST_DOC_TAG_RE = re.compile(r"(?<![\w-])@test(?![\w-])")

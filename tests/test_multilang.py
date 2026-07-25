@@ -793,6 +793,7 @@ class TestPHPTestAnnotations:
             "use PHPUnit\\Framework\\Attributes\\Test;\n\n"
             "use PHPUnit\\Framework\\Attributes\\Test as UnitTest;\n"
             "use PHPUnit\\Framework\\Attributes\\DataProvider;\n\n"
+            "use App\\Attributes\\Test as OtherTest;\n\n"
             "class ExampleTest extends TestCase\n"
             "{\n"
             "    public function test_prefixed_method_should_be_detected(): void\n"
@@ -816,6 +817,14 @@ class TestPHPTestAnnotations:
             "    }\n\n"
             "    #[DataProvider('rows'), Test]\n"
             "    public function grouped_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\App\\Attributes\\Test]\n"
+            "    public function unrelated_qualified_attribute(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[OtherTest]\n"
+            "    public function unrelated_aliased_attribute(): void\n"
             "    {\n"
             "    }\n\n"
             "    /** @test-case is documentation, not a PHPUnit tag. */\n"
@@ -866,6 +875,22 @@ class TestPHPTestAnnotations:
         m = next(n for n in nodes if n.name == "grouped_attribute_method")
         assert m.kind == "Test"
         assert m.is_test is True
+
+    def test_unrelated_qualified_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_qualified_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_unrelated_aliased_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_aliased_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
 
     def test_similar_docblock_tag_is_not_detected(self, tmp_path):
         nodes, _ = self._parse(tmp_path)
