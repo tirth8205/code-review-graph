@@ -10,6 +10,7 @@ import pytest
 from code_review_graph.embeddings import (
     LOCAL_DEFAULT_MODEL,
     EmbeddingStore,
+    GoogleEmbeddingProvider,
     LocalEmbeddingProvider,
     MiniMaxEmbeddingProvider,
     OpenAIEmbeddingProvider,
@@ -187,6 +188,48 @@ class TestLocalEmbeddingProviderModelName:
             provider = LocalEmbeddingProvider()
             assert provider._model_name == "BAAI/bge-small-en-v1.5"
             assert provider.name == "local:BAAI/bge-small-en-v1.5"
+
+
+class TestGoogleEmbeddingProviderRetryLogging:
+    def test_retryable_error_logs_attempt_fraction_then_succeeds(self, caplog):
+        fn = MagicMock(side_effect=[RuntimeError("429 rate limited"), [1.0]])
+
+        with patch("code_review_graph.embeddings.time.sleep") as sleep:
+            result = GoogleEmbeddingProvider._call_with_retry(fn)
+
+        assert result == [1.0]
+        assert fn.call_count == 2
+        sleep.assert_called_once_with(1)
+        assert "Gemini API retry 1/3 in 1s (RuntimeError)" in caplog.text
+
+    def test_non_retryable_error_logs_once_without_sleeping(self, caplog):
+        caplog.set_level("DEBUG")
+        fn = MagicMock(side_effect=ValueError("400 invalid request"))
+
+        with (
+            patch("code_review_graph.embeddings.time.sleep") as sleep,
+            pytest.raises(ValueError, match="400 invalid request"),
+        ):
+            GoogleEmbeddingProvider._call_with_retry(fn)
+
+        fn.assert_called_once_with()
+        sleep.assert_not_called()
+        assert "Non-retryable Gemini API error: ValueError" in caplog.text
+
+    def test_exhausted_retries_log_each_attempt_and_final_error(self, caplog):
+        fn = MagicMock(side_effect=RuntimeError("503 unavailable"))
+
+        with (
+            patch("code_review_graph.embeddings.time.sleep") as sleep,
+            pytest.raises(RuntimeError, match="503 unavailable"),
+        ):
+            GoogleEmbeddingProvider._call_with_retry(fn)
+
+        assert fn.call_count == 3
+        assert [call.args for call in sleep.call_args_list] == [(1,), (2,)]
+        assert "Gemini API retry 1/3 in 1s (RuntimeError)" in caplog.text
+        assert "Gemini API retry 2/3 in 2s (RuntimeError)" in caplog.text
+        assert "Gemini API request failed after 3 requests" in caplog.text
 
 
 class TestGetProviderValidation:

@@ -220,8 +220,10 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
                 err_str = str(e)
                 is_retryable = any(status in err_str for status in retryable_statuses)
                 if not is_retryable:
-                    logger.debug("Non-retryable Gemini API error: %s",
-                    type(e).__name__,)
+                    logger.debug(
+                        "Non-retryable Gemini API error: %s",
+                        type(e).__name__,
+                    )
                     raise
                 if attempt == max_retries - 1:
                     logger.error(
@@ -232,14 +234,15 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
 
                 wait = 2 ** attempt
 
-                logger.warning("Gemini API retry %d%d in %ds (%s): %s",
-                               attempt + 1,
-                               max_retries,
-                               wait,
-                               type(e).__name__,
-                               e,
+                logger.warning(
+                    "Gemini API retry %d/%d in %ds (%s): %s",
+                    attempt + 1,
+                    max_retries,
+                    wait,
+                    type(e).__name__,
+                    e,
                 )
-                
+
                 time.sleep(wait)
 
     def embed_query(self, text: str) -> list[float]:
