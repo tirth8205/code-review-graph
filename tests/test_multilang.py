@@ -791,6 +791,8 @@ class TestPHPTestAnnotations:
             "namespace Tests;\n\n"
             "use PHPUnit\\Framework\\TestCase;\n"
             "use PHPUnit\\Framework\\Attributes\\Test;\n\n"
+            "use PHPUnit\\Framework\\Attributes\\Test as UnitTest;\n"
+            "use PHPUnit\\Framework\\Attributes\\DataProvider;\n\n"
             "class ExampleTest extends TestCase\n"
             "{\n"
             "    public function test_prefixed_method_should_be_detected(): void\n"
@@ -802,6 +804,22 @@ class TestPHPTestAnnotations:
             "    }\n\n"
             "    #[Test]\n"
             "    public function php8_attribute_annotated_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\PHPUnit\\Framework\\Attributes\\Test]\n"
+            "    public function qualified_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[UnitTest]\n"
+            "    public function aliased_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[DataProvider('rows'), Test]\n"
+            "    public function grouped_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    /** @test-case is documentation, not a PHPUnit tag. */\n"
+            "    public function documented_helper(): void\n"
             "    {\n"
             "    }\n\n"
             "    public function helperNotATest(): void\n"
@@ -830,6 +848,30 @@ class TestPHPTestAnnotations:
         assert m.kind == "Test"
         assert m.is_test is True
         assert m.extra.get("decorators") == ["Test"]
+
+    def test_qualified_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "qualified_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_aliased_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "aliased_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_grouped_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "grouped_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_similar_docblock_tag_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "documented_helper")
+        assert m.kind == "Function"
+        assert m.is_test is False
 
     def test_plain_method_not_detected(self, tmp_path):
         nodes, _ = self._parse(tmp_path)

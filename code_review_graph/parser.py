@@ -1838,6 +1838,40 @@ def _csharp_attribute_names(node) -> list[str]:
     return names
 
 
+def _php_attribute_aliases(node) -> dict[str, str]:
+    """Return PHP import aliases mapped to their final symbol name."""
+    root = node
+    while root.parent is not None:
+        root = root.parent
+
+    aliases: dict[str, str] = {}
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current.type == "namespace_use_clause":
+            alias = current.child_by_field_name("alias")
+            if alias is not None:
+                target = next(
+                    (
+                        child
+                        for child in current.children
+                        if child.type in ("name", "qualified_name")
+                        and child != alias
+                    ),
+                    None,
+                )
+                if target is not None:
+                    alias_text = alias.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip()
+                    target_text = target.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip()
+                    aliases[alias_text] = target_text.lstrip("\\").rsplit("\\", 1)[-1]
+        stack.extend(reversed(current.children))
+    return aliases
+
+
 def _php_attribute_names(node) -> list[str]:
     """Return PHP attribute names from ``attribute_list`` children of *node*.
 
@@ -1858,15 +1892,19 @@ def _php_attribute_names(node) -> list[str]:
                 if attr.type != "attribute":
                     continue
                 for ident in attr.children:
-                    if ident.type == "name":
-                        names.append(
-                            ident.text.decode("utf-8", errors="replace").strip(),
-                        )
+                    if ident.type in ("name", "qualified_name"):
+                        raw_name = ident.text.decode(
+                            "utf-8", errors="replace",
+                        ).strip()
+                        names.append(raw_name.lstrip("\\").rsplit("\\", 1)[-1])
                         break
-    return names
+    if not names:
+        return []
+    aliases = _php_attribute_aliases(node)
+    return [aliases.get(name, name) for name in names]
 
 
-_PHP_TEST_DOC_TAG_RE = re.compile(r"@test\b")
+_PHP_TEST_DOC_TAG_RE = re.compile(r"(?<![\w-])@test(?![\w-])")
 
 
 def _php_docblock_marks_test(node) -> bool:
