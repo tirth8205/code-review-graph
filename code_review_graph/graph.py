@@ -269,33 +269,48 @@ class GraphStore:
         self._conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
         self._invalidate_cache()
 
-    def remove_file_permanently(self, file_path: str) -> None:
-        """Remove a deleted file and every graph reference to its nodes."""
-        qualified_names = [
-            row["qualified_name"]
-            for row in self._conn.execute(
-                "SELECT qualified_name FROM nodes WHERE file_path = ?",
-                (file_path,),
-            ).fetchall()
-        ]
-        self.remove_file_data(file_path)
-        if qualified_names:
-            placeholders = ",".join("?" for _ in qualified_names)
-            self._conn.execute(  # nosec B608 - placeholders only
-                f"DELETE FROM edges WHERE source_qualified IN ({placeholders}) "
-                f"OR target_qualified IN ({placeholders})",
-                (*qualified_names, *qualified_names),
-            )
+    def remove_file_permanently(self, file_path: str) -> int:
+        """Remove one deleted file and every graph reference to its nodes."""
+        return self.remove_files_permanently([file_path])
+
+    def remove_files_permanently(self, file_paths: list[str]) -> int:
+        """Atomically remove deleted files and graph references to their nodes."""
+        changed = 0
         has_embeddings = self._conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type = 'table' AND name = 'embeddings'",
         ).fetchone()
-        if has_embeddings is not None:
-            self._conn.executemany(
-                "DELETE FROM embeddings WHERE qualified_name = ?",
-                ((qualified_name,) for qualified_name in qualified_names),
-            )
+        self._begin_immediate()
+        try:
+            for file_path in dict.fromkeys(file_paths):
+                exists = self._conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM nodes WHERE file_path = ?) OR "
+                    "EXISTS(SELECT 1 FROM edges WHERE file_path = ?)",
+                    (file_path, file_path),
+                ).fetchone()[0]
+                if not exists:
+                    continue
+                changed += 1
+                if has_embeddings is not None:
+                    self._conn.execute(
+                        "DELETE FROM embeddings WHERE qualified_name IN "
+                        "(SELECT qualified_name FROM nodes WHERE file_path = ?)",
+                        (file_path,),
+                    )
+                self._conn.execute(
+                    "DELETE FROM edges WHERE file_path = ? OR source_qualified IN "
+                    "(SELECT qualified_name FROM nodes WHERE file_path = ?) OR "
+                    "target_qualified IN "
+                    "(SELECT qualified_name FROM nodes WHERE file_path = ?)",
+                    (file_path, file_path, file_path),
+                )
+                self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (file_path,))
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
         self._invalidate_cache()
+        return changed
 
     def _begin_immediate(self) -> None:
         """Start an IMMEDIATE transaction, rolling back any prior uncommitted

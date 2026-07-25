@@ -1141,6 +1141,24 @@ class TestWatchReconciliation:
         finally:
             store.close()
 
+    def test_watch_pure_file_deletion_counts_change_and_calls_callback_once(self, tmp_path):
+        source = tmp_path / "deleted.py"
+        source.write_text("def deleted():\n    pass\n")
+        store = GraphStore(tmp_path / "graph.db")
+        incremental_update(tmp_path, store, changed_files=["deleted.py"])
+        source.unlink()
+        callback = MagicMock()
+        handler = _create_watch_handler(tmp_path, store, callback)
+        try:
+            from watchdog.events import FileDeletedEvent
+
+            handler.process([FileDeletedEvent(str(source))])
+
+            callback.assert_called_once_with(store)
+            assert store.get_nodes_by_file(str(source)) == []
+        finally:
+            store.close()
+
     def test_watch_directory_create_indexes_parseable_descendants(self, tmp_path):
         store = GraphStore(tmp_path / "graph.db")
         handler = _create_watch_handler(tmp_path, store, None)
@@ -1227,6 +1245,33 @@ class TestWatchReconciliation:
             assert store.get_all_files() == []
         finally:
             store.close()
+
+    def test_watch_rejects_file_below_symlinked_ancestor_outside_repo(self, tmp_path):
+        outside = tmp_path.parent / f"{tmp_path.name}-outside"
+        outside.mkdir()
+        outside_file = outside / "escaped.py"
+        outside_file.write_text("def escaped():\n    pass\n")
+        linked_dir = tmp_path / "linked"
+        linked_dir.symlink_to(outside, target_is_directory=True)
+        store = GraphStore(tmp_path / "graph.db")
+        callback = MagicMock()
+        handler = _create_watch_handler(tmp_path, store, callback)
+        try:
+            from watchdog.events import DirCreatedEvent, FileCreatedEvent
+
+            handler.process(
+                [
+                    FileCreatedEvent(str(linked_dir / "escaped.py")),
+                    DirCreatedEvent(str(linked_dir)),
+                ]
+            )
+
+            callback.assert_not_called()
+            assert store.get_all_files() == []
+        finally:
+            store.close()
+            outside_file.unlink()
+            outside.rmdir()
 
     def test_watch_update_and_callback_never_overlap(self, tmp_path):
         source = tmp_path / "source.py"

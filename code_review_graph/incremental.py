@@ -801,10 +801,8 @@ def _reconcile_stale_files(
     files = current_files if current_files is not None else collect_all_files(repo_root)
     current_paths = {str(repo_root / file_path) for file_path in files}
     stale_files = sorted(set(store.get_all_files()) - current_paths)
-    for stale_file in stale_files:
-        store.remove_file_permanently(stale_file)
     if stale_files:
-        store.commit()
+        store.remove_files_permanently(stale_files)
     return stale_files
 
 
@@ -1052,6 +1050,7 @@ def incremental_update(
     total_nodes = 0
     total_edges = 0
     errors = []
+    missing_paths: set[str] = set()
 
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
@@ -1061,7 +1060,7 @@ def incremental_update(
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
             if str(abs_path) not in stale_files:
-                store.remove_file_permanently(str(abs_path))
+                missing_paths.add(str(abs_path))
             continue
         if parser.detect_language(abs_path) is None:
             continue
@@ -1120,7 +1119,8 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
-    files_updated = parsed_files + len(stale_files)
+    removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
+    files_updated = parsed_files + len(stale_files) + removed_files
     if files_updated:
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
@@ -1179,6 +1179,8 @@ def _create_watch_handler(
 
     ignore_patterns = _load_ignore_patterns(repo_root)
     parser = CodeParser(repo_root)
+    lexical_root = Path(os.path.abspath(repo_root))
+    resolved_root = lexical_root.resolve()
 
     class WatchBatchProcessor:
         def __init__(self) -> None:
@@ -1187,10 +1189,25 @@ def _create_watch_handler(
         def _relative_path(self, path: str) -> str | None:
             candidate = Path(os.path.abspath(path))
             try:
-                relative = candidate.relative_to(repo_root)
+                relative = candidate.relative_to(lexical_root)
             except ValueError:
                 return None
-            if candidate.is_symlink() or _should_ignore(str(relative), ignore_patterns):
+            existing = candidate
+            while not existing.exists() and existing != lexical_root:
+                existing = existing.parent
+            try:
+                existing.resolve().relative_to(resolved_root)
+            except ValueError:
+                return None
+            if any(
+                component.is_symlink()
+                for component in [
+                    lexical_root / Path(*relative.parts[:index])
+                    for index in range(1, len(relative.parts) + 1)
+                ]
+            ):
+                return None
+            if _should_ignore(str(relative), ignore_patterns):
                 return None
             return str(relative)
 
@@ -1204,6 +1221,11 @@ def _create_watch_handler(
 
         def _parseable_file(self, relative_path: str) -> bool:
             absolute_path = repo_root / relative_path
+            resolved_path = absolute_path.resolve()
+            try:
+                resolved_path.relative_to(resolved_root)
+            except ValueError:
+                return False
             return (
                 absolute_path.is_file()
                 and not absolute_path.is_symlink()
