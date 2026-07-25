@@ -446,8 +446,11 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
         body: dict[str, Any] = {"model": self._model, "input": texts}
         # OpenAI v3 models (text-embedding-3-*) support dimension reduction;
-        # only forward the param when the user explicitly pinned one.
-        if self._dimension is not None:
+        # only forward the param when the user explicitly pinned one AND the
+        # endpoint is expected to honor it. Compatibility providers like
+        # SiliconFlow (BAAI/bge-m3) reject unknown `dimensions` with HTTP 400,
+        # so we gate this on the v3 model name prefix to keep them healthy.
+        if self._dimension is not None and self._model.startswith("text-embedding-3-"):
             body["dimensions"] = self._dimension
 
         payload = _json.dumps(body).encode("utf-8")

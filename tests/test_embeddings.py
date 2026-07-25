@@ -679,6 +679,65 @@ class TestOpenAIEmbeddingProvider:
         payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
         assert payload["dimensions"] == 256
 
+    def test_auto_learned_dimension_omitted_for_non_v3_models(self):
+        # Many OpenAI-compatible providers (SiliconFlow, Cohere, voyage-3,
+        # custom vLLM gateways) reject the `dimensions` body field with
+        # HTTP 400. The provider auto-learns dimension from the first
+        # response and would otherwise forward it on every subsequent call.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="BAAI/bge-m3",
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            vec = p.embed_query("x")
+        assert len(vec) == 1024
+        assert p.dimension == 1024  # still learned for cache key
+
+        # Second call would have auto-forwarded dimensions before the fix.
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            p.embed_query("y")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert "dimensions" not in payload, (
+            f"non-v3 model {p._model!r} should not send `dimensions`; "
+            f"got payload keys: {list(payload)}"
+        )
+
+    def test_explicit_dimension_ignored_for_non_v3_models(self):
+        # Even when the user pins a dimension explicitly, we don't forward
+        # it to non-v3 endpoints — they reject it. Pinning a dimension
+        # here only sets the cache partition key.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="BAAI/bge-m3", dimension=1024,
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert "dimensions" not in payload
+
+    def test_explicit_dimension_forwarded_for_v3_models(self):
+        # Regression guard: v3 models must still honor the pinned dimension.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="text-embedding-3-large", dimension=512,
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 512]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["dimensions"] == 512
+
     def test_base_url_trailing_slash_stripped(self):
         p = OpenAIEmbeddingProvider(
             api_key="k", base_url="http://localhost:3000/v1/", model="m",
