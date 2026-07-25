@@ -377,7 +377,55 @@ class TestGraphStore:
             (20, 24),
         ]
 
-    def test_reindex_same_colliding_definition_updates_in_place(self):
+    def test_reindex_line_shift_preserves_collision_identities_and_callers(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        original_qns = {
+            node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        caller_nodes = [
+            NodeInfo(kind="Function", name="call_first", file_path=caller_file,
+                     line_start=1, line_end=3, language="python"),
+            NodeInfo(kind="Function", name="call_second", file_path=caller_file,
+                     line_start=5, line_end=7, language="python"),
+        ]
+        caller_edges = [
+            EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::{caller.name}", target=target,
+                file_path=caller_file, line=caller.line_start + 1,
+            )
+            for caller, target in zip(caller_nodes, sorted(original_qns))
+        ]
+        self.store.store_file_nodes_edges(caller_file, caller_nodes, caller_edges)
+
+        shifted_nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=11, line_end=13, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=21, line_end=25, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, shifted_nodes, [])
+
+        shifted_qns = {
+            node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        assert shifted_qns == original_qns
+        for qualified_name in original_qns:
+            callers = self.store.get_edges_by_target(qualified_name)
+            assert self.store.get_node(qualified_name) is not None
+            assert len(callers) == 1
+            assert self.store.get_node(callers[0].source_qualified) is not None
+
+    def test_upsert_same_colliding_definition_updates_in_place(self):
         nodes = [
             NodeInfo(kind="Function", name="render", file_path="/test/file.py",
                      line_start=10, line_end=12, language="python"),
@@ -392,8 +440,7 @@ class TestGraphStore:
 
         node_id = self.store.upsert_node(nodes[1])
 
-        stored = self.store.get_nodes_by_file("/test/file.py")
-        assert len(stored) == 2
+        assert len(self.store.get_nodes_by_file("/test/file.py")) == 2
         assert node_id == original.id
 
     def test_recursive_edge_resolves_for_disambiguated_node(self):
@@ -419,11 +466,39 @@ class TestGraphStore:
         )
         callers = self.store.get_edges_by_target(disambiguated.qualified_name)
         callees = self.store.get_edges_by_source(disambiguated.qualified_name)
-        assert disambiguated.qualified_name == f"{base_qualified}:L20"
+        assert disambiguated.qualified_name.startswith(f"{base_qualified}:S")
         assert len(callers) == 1
         assert len(callees) == 1
         assert self.store.get_node(callers[0].source_qualified) == disambiguated
         assert self.store.get_node(callees[0].target_qualified) == disambiguated
+
+    def test_ambiguous_call_target_keeps_canonical_identity(self):
+        target_file = "/test/target.py"
+        base_qualified = f"{target_file}::render"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        disambiguated = next(
+            node for node in self.store.get_nodes_by_file(target_file)
+            if node.qualified_name != base_qualified
+        )
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path="/test/caller.py",
+            line_start=1, line_end=3, language="python",
+        )
+        edge = EdgeInfo(
+            kind="CALLS", source="/test/caller.py::call_render",
+            target=base_qualified, file_path="/test/caller.py", line=2,
+        )
+
+        self.store.store_file_nodes_edges("/test/caller.py", [caller], [edge])
+
+        assert len(self.store.get_edges_by_target(base_qualified)) == 1
+        assert self.store.get_edges_by_target(disambiguated.qualified_name) == []
 
     def test_store_after_remove_no_transaction_error(self):
         """Regression test for #135: store_file_nodes_edges after

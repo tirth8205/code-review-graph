@@ -7,6 +7,7 @@ Supports impact-radius queries and subgraph extraction.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -279,7 +280,7 @@ class GraphStore:
         candidates = [
             row for row in rows
             if row["qualified_name"] == base
-            or row["qualified_name"].startswith(f"{base}:L")
+            or row["qualified_name"].startswith(f"{base}:S")
         ]
         for row in candidates:
             if row["line_start"] == node.line_start:
@@ -288,12 +289,30 @@ class GraphStore:
         if self.get_node(base) is None:
             return base
 
-        qualified = f"{base}:L{node.line_start}"
+        semantic = self._semantic_disambiguator(node)
+        qualified_base = f"{base}:S{semantic}"
+        qualified = qualified_base
         ordinal = 2
         while self.get_node(qualified) is not None:
-            qualified = f"{base}:L{node.line_start}:{ordinal}"
+            qualified = f"{qualified_base}:{ordinal}"
             ordinal += 1
         return qualified
+
+    @staticmethod
+    def _semantic_disambiguator(node: NodeInfo) -> str:
+        """Hash definition semantics that survive harmless source line shifts."""
+        signature = (
+            node.kind,
+            node.name,
+            node.parent_name,
+            node.language,
+            node.params,
+            node.return_type,
+            node.modifiers,
+            node.is_test,
+        )
+        payload = json.dumps(signature, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
         """Insert or update an edge."""
