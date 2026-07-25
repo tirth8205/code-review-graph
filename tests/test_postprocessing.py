@@ -418,5 +418,5 @@ class TestResolveBareEndpointsStep:
             result = run_post_processing(self.store)
 
         assert "bare_edges_resolved" not in result
-        assert any("Bare-endpoint resolution" in w for w in result["warnings"])
+        assert any("Call-target resolution" in w for w in result["warnings"])
         assert "communities_detected" in result

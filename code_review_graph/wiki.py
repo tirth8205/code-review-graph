@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 def _slugify(name: str) -> str:
     """Convert a community name to a safe filename slug."""
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    normalized = unicodedata.normalize("NFKD", name)
+    ascii_str = normalized.encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_str.lower()).strip("-")
     return slug[:80] or "unnamed"
 
 

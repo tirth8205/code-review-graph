@@ -239,6 +239,65 @@ class TestCrossRepoSearch:
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    def test_cross_repo_search_merges_by_local_rank(self, tmp_path):
+        """Cross-repo results use local rank instead of incomparable raw scores."""
+        from code_review_graph.tools import cross_repo_search_func
+
+        android_repo = tmp_path / "android"
+        ios_repo = tmp_path / "ios"
+        android_repo.mkdir()
+        ios_repo.mkdir()
+        android_db = tmp_path / "android.db"
+        ios_db = tmp_path / "ios.db"
+        android_db.touch()
+        ios_db.touch()
+
+        android_results = [
+            {"name": "Splash", "score": 0.032},
+            {"name": "SplashWelcomeScreen", "score": 0.016},
+        ]
+        ios_results = [
+            {"name": "SplashViewController", "score": 3.0},
+            {"name": "SplashScreen", "score": 2.0},
+        ]
+
+        with (
+            patch("code_review_graph.registry.Registry") as mock_registry_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.get_db_path",
+                side_effect=[android_db, ios_db],
+            ),
+            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.hybrid_search",
+                side_effect=[android_results, ios_results],
+            ) as mock_search,
+        ):
+            mock_registry_cls.return_value.list_repos.return_value = [
+                {"path": str(android_repo), "alias": "android"},
+                {"path": str(ios_repo), "alias": "ios"},
+            ]
+            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+
+            result = cross_repo_search_func(query="splash", limit=2)
+
+        assert result["status"] == "ok"
+        assert [item["repo"] for item in result["results"]] == [
+            "android",
+            "ios",
+            "android",
+            "ios",
+        ]
+        assert [item["score"] for item in result["results"]] == [0.032, 3.0, 0.016, 2.0]
+        assert [item["repo_path"] for item in result["results"]] == [
+            str(android_repo),
+            str(ios_repo),
+            str(android_repo),
+            str(ios_repo),
+        ]
+        assert result["summary"] == "Found 4 result(s) across 2 repo(s) for 'splash'"
+        assert [call.kwargs["limit"] for call in mock_search.call_args_list] == [2, 2]
+
 
 class TestSetDataDir:
     """Tests for set_data_dir and get_data_dir_for_repo methods."""
@@ -334,3 +393,23 @@ class TestSetDataDir:
         data_dir = Path(self.tmp_dir) / "data"
         entry = self.registry.set_data_dir(str(repo), str(data_dir))
         assert entry["data_dir"] == str(data_dir.resolve())
+
+
+class TestRegistryNonAscii:
+    """#497: registry.json is serialized with json.dumps(..., indent=2), which
+    defaults to ensure_ascii=True — a registered repo path containing non-ASCII
+    characters gets written as literal \\uXXXX escapes instead of UTF-8.
+    """
+
+    def test_register_preserves_non_ascii_path(self, tmp_path):
+        registry_path = tmp_path / "registry.json"
+        registry = Registry(path=registry_path)
+
+        repo = tmp_path / "基于STM32的项目"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        registry.register(str(repo), alias="crg")
+
+        raw = registry_path.read_text(encoding="utf-8")
+        assert "基于STM32的项目" in raw
+        assert "\\u" not in raw
