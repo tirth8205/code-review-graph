@@ -1027,6 +1027,52 @@ class TestStartWatchThread:
 
 
 class TestWatchReconciliation:
+    @pytest.mark.parametrize(
+        "event_factory",
+        [
+            pytest.param("FileOpenedEvent", id="file-opened"),
+            pytest.param("FileClosedEvent", id="file-closed"),
+            pytest.param("FileClosedNoWriteEvent", id="file-closed-no-write"),
+            pytest.param("DirModifiedEvent", id="directory-modified"),
+        ],
+    )
+    def test_watch_dispatch_ignores_irrelevant_events(self, tmp_path, event_factory):
+        from watchdog import events
+
+        store = GraphStore(tmp_path / "graph.db")
+        debouncer = MagicMock()
+        with patch(
+            "watchdog.utils.event_debouncer.EventDebouncer",
+            return_value=debouncer,
+        ):
+            handler = _create_watch_handler(tmp_path, store, None)
+        try:
+            event_type = getattr(events, event_factory)
+
+            handler.dispatch(event_type(str(tmp_path / "source.py")))
+
+            debouncer.handle_event.assert_not_called()
+        finally:
+            store.close()
+
+    def test_watch_file_batch_skips_repository_inventory(self, tmp_path):
+        source = tmp_path / "source.py"
+        source.write_text("def source():\n    return 1\n")
+        store = GraphStore(tmp_path / "graph.db")
+        handler = _create_watch_handler(tmp_path, store, None)
+        try:
+            from watchdog.events import FileModifiedEvent
+
+            with patch(
+                "code_review_graph.incremental.collect_all_files",
+                side_effect=AssertionError("watch batch inventoried repository"),
+            ):
+                handler.process([FileModifiedEvent(str(source))])
+
+            assert store.get_nodes_by_file(str(source))
+        finally:
+            store.close()
+
     def test_watch_reconciles_before_observer_startup(self, tmp_path):
         deleted = tmp_path / "offline.py"
         deleted.write_text("def offline():\n    pass\n")
@@ -1125,7 +1171,11 @@ class TestWatchReconciliation:
         try:
             from watchdog.events import DirMovedEvent
 
-            handler.process([DirMovedEvent(str(source_dir), str(destination_dir))])
+            with patch(
+                "code_review_graph.incremental.collect_all_files",
+                side_effect=AssertionError("directory move inventoried repository"),
+            ):
+                handler.process([DirMovedEvent(str(source_dir), str(destination_dir))])
 
             assert store.get_nodes_by_file(str(source)) == []
             assert store.get_nodes_by_file(str(destination))
@@ -1145,7 +1195,11 @@ class TestWatchReconciliation:
         try:
             from watchdog.events import DirDeletedEvent
 
-            handler.process([DirDeletedEvent(str(package))])
+            with patch(
+                "code_review_graph.incremental.collect_all_files",
+                side_effect=AssertionError("directory delete inventoried repository"),
+            ):
+                handler.process([DirDeletedEvent(str(package))])
 
             assert store.get_nodes_by_file(str(source)) == []
         finally:
@@ -1210,6 +1264,8 @@ class TestWatchReconciliation:
             store.close()
 
     def test_watch_update_failure_propagates_to_boundary(self, tmp_path):
+        broken = tmp_path / "broken.py"
+        broken.write_text("def broken():\n    pass\n")
         store = GraphStore(tmp_path / "graph.db")
         handler = _create_watch_handler(tmp_path, store, None)
         try:
@@ -1219,7 +1275,7 @@ class TestWatchReconciliation:
                 "code_review_graph.incremental.incremental_update",
                 side_effect=RuntimeError("update failed"),
             ):
-                handler.process([FileCreatedEvent(str(tmp_path / "broken.py"))])
+                handler.process([FileCreatedEvent(str(broken))])
 
             with pytest.raises(RuntimeError, match="watch update failed"):
                 handler.raise_if_failed()
@@ -1242,6 +1298,47 @@ class TestWatchReconciliation:
 
             with pytest.raises(RuntimeError, match="watch update failed"):
                 handler.raise_if_failed()
+        finally:
+            store.close()
+
+    def test_watch_parse_errors_propagate_to_boundary(self, tmp_path):
+        broken = tmp_path / "broken.py"
+        broken.write_text("def broken():\n    pass\n")
+        store = GraphStore(tmp_path / "graph.db")
+        handler = _create_watch_handler(tmp_path, store, None)
+        result = {
+            "files_updated": 0,
+            "errors": [{"file": "broken.py", "error": "parse failed"}],
+        }
+        try:
+            from watchdog.events import FileCreatedEvent
+
+            with patch(
+                "code_review_graph.incremental.incremental_update",
+                return_value=result,
+            ):
+                handler.process([FileCreatedEvent(str(broken))])
+
+            with pytest.raises(RuntimeError, match="watch update failed"):
+                handler.raise_if_failed()
+        finally:
+            store.close()
+
+    @pytest.mark.parametrize("filename", ["unsupported.txt", "binary.py"])
+    def test_watch_unsupported_or_binary_paths_skip_postprocessing(self, tmp_path, filename):
+        source = tmp_path / filename
+        content = b"plain text" if filename.endswith(".txt") else b"\x00binary"
+        source.write_bytes(content)
+        store = GraphStore(tmp_path / "graph.db")
+        callback = MagicMock()
+        handler = _create_watch_handler(tmp_path, store, callback)
+        try:
+            from watchdog.events import FileCreatedEvent
+
+            handler.process([FileCreatedEvent(str(source))])
+
+            callback.assert_not_called()
+            assert store.get_all_files() == []
         finally:
             store.close()
 

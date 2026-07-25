@@ -1012,6 +1012,7 @@ def incremental_update(
     store: GraphStore,
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
+    reconcile_stale: bool = True,
 ) -> dict:
     """Incremental update: re-parse changed + dependent files only."""
     parser = CodeParser(repo_root)
@@ -1020,7 +1021,7 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
-    stale_files = _reconcile_stale_files(repo_root, store)
+    stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
 
     if not changed_files and not stale_files:
         return {
@@ -1030,6 +1031,7 @@ def incremental_update(
             "changed_files": [],
             "dependent_files": [],
             "stale_files_removed": 0,
+            "errors": [],
         }
 
     # Find dependent files (files that import from changed files)
@@ -1176,13 +1178,14 @@ def _create_watch_handler(
     from watchdog.utils.event_debouncer import EventDebouncer
 
     ignore_patterns = _load_ignore_patterns(repo_root)
+    parser = CodeParser(repo_root)
 
     class WatchBatchProcessor:
         def __init__(self) -> None:
             self.failure: BaseException | None = None
 
         def _relative_path(self, path: str) -> str | None:
-            candidate = Path(path)
+            candidate = Path(os.path.abspath(path))
             try:
                 relative = candidate.relative_to(repo_root)
             except ValueError:
@@ -1191,35 +1194,57 @@ def _create_watch_handler(
                 return None
             return str(relative)
 
+        def _stored_descendants(self, relative_directory: str) -> set[str]:
+            directory = str(repo_root / relative_directory) + os.sep
+            return {
+                str(Path(file_path).relative_to(repo_root))
+                for file_path in store.get_all_files()
+                if file_path.startswith(directory)
+            }
+
+        def _parseable_file(self, relative_path: str) -> bool:
+            absolute_path = repo_root / relative_path
+            return (
+                absolute_path.is_file()
+                and not absolute_path.is_symlink()
+                and parser.detect_language(absolute_path) is not None
+                and not _is_binary(absolute_path)
+            )
+
+        def _parseable_descendants(self, relative_directory: str) -> set[str]:
+            directory = repo_root / relative_directory
+            if not directory.is_dir() or directory.is_symlink():
+                return set()
+            return {
+                str(path.relative_to(repo_root))
+                for path in directory.rglob("*")
+                if self._parseable_file(str(path.relative_to(repo_root)))
+                and not _should_ignore(str(path.relative_to(repo_root)), ignore_patterns)
+            }
+
         def _event_paths(self, event: FileSystemEvent) -> set[str]:
             paths: set[str] = set()
             source = self._relative_path(os.fsdecode(event.src_path))
-            if source is not None:
-                paths.add(source)
             destination_path = getattr(event, "dest_path", "")
             destination = (
                 self._relative_path(os.fsdecode(destination_path))
                 if destination_path
                 else None
             )
-            if destination is not None:
-                destination_absolute = repo_root / destination
-                if event.is_directory and destination_absolute.is_dir():
-                    paths.update(
-                        str(path.relative_to(repo_root))
-                        for path in destination_absolute.rglob("*")
-                        if path.is_file() and not path.is_symlink()
-                    )
-                else:
+            if event.is_directory:
+                if source is not None and event.event_type in {"deleted", "moved"}:
+                    paths.update(self._stored_descendants(source))
+                if destination is not None:
+                    paths.update(self._parseable_descendants(destination))
+                elif source is not None and event.event_type == "created":
+                    paths.update(self._parseable_descendants(source))
+            else:
+                if source is not None and event.event_type in {"deleted", "moved"}:
+                    paths.add(source)
+                elif source is not None and self._parseable_file(source):
+                    paths.add(source)
+                if destination is not None and self._parseable_file(destination):
                     paths.add(destination)
-            elif event.is_directory and event.event_type == "created":
-                source_absolute = repo_root / source if source is not None else None
-                if source_absolute is not None and source_absolute.is_dir():
-                    paths.update(
-                        str(path.relative_to(repo_root))
-                        for path in source_absolute.rglob("*")
-                        if path.is_file() and not path.is_symlink()
-                    )
             return paths
 
         def process(self, events: list[FileSystemEvent]) -> None:
@@ -1227,7 +1252,16 @@ def _create_watch_handler(
                 changed_files = sorted(
                     {path for event in events for path in self._event_paths(event)}
                 )
-                result = incremental_update(repo_root, store, changed_files=changed_files)
+                if not changed_files:
+                    return
+                result = incremental_update(
+                    repo_root,
+                    store,
+                    changed_files=changed_files,
+                    reconcile_stale=False,
+                )
+                if result["errors"]:
+                    raise RuntimeError("incremental watch update reported parse errors")
                 if result["files_updated"] > 0 and on_files_updated is not None:
                     on_files_updated(store)
             except BaseException as exc:
@@ -1242,6 +1276,10 @@ def _create_watch_handler(
 
     class GraphUpdateHandler(FileSystemEventHandler):
         def dispatch(self, event: FileSystemEvent) -> None:
+            if event.event_type not in {"created", "modified", "deleted", "moved"}:
+                return
+            if event.is_directory and event.event_type == "modified":
+                return
             debouncer.handle_event(event)
 
         def start(self) -> None:
@@ -1267,7 +1305,7 @@ def watch(
 ) -> None:
     """Watch for file changes and auto-update the graph.
 
-    Uses a 300ms debounce to batch rapid-fire saves into a single update.
+    Uses a one-second debounce to batch rapid-fire saves into a single update.
 
     Args:
         repo_root: Repository root to watch.
@@ -1280,6 +1318,8 @@ def watch(
     from watchdog.observers import Observer
 
     initial = incremental_update(repo_root, store, changed_files=[])
+    if initial["errors"]:
+        raise RuntimeError("initial watch reconciliation reported parse errors")
     if initial["files_updated"] > 0 and on_files_updated is not None:
         on_files_updated(store)
     handler = _create_watch_handler(repo_root, store, on_files_updated)
