@@ -303,8 +303,6 @@ class TestWatchCallbackIntegration:
         assert "on_files_updated" in sig.parameters
 
     def test_watch_callback_not_called_without_updates(self, tmp_path):
-        import threading
-
         from code_review_graph.incremental import watch
 
         (tmp_path / ".git").mkdir()
@@ -313,20 +311,16 @@ class TestWatchCallbackIntegration:
         callback = MagicMock()
 
         try:
+            with (
+                patch("watchdog.observers.Observer") as observer,
+                patch("time.sleep", side_effect=KeyboardInterrupt),
+            ):
+                watch(tmp_path, store, on_files_updated=callback)
 
-            def run_watch():
-                try:
-                    watch(tmp_path, store, on_files_updated=callback)
-                except KeyboardInterrupt:
-                    pass
-
-            t = threading.Thread(target=run_watch, daemon=True)
-            t.start()
-
-            import time
-
-            time.sleep(0.5)
             callback.assert_not_called()
+            observer.return_value.start.assert_called_once()
+            observer.return_value.stop.assert_called()
+            observer.return_value.join.assert_called_once()
         finally:
             store.close()
 
