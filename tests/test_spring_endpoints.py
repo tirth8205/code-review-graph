@@ -119,8 +119,16 @@ def test_endpoint_queries_follow_addressable_handles_edges(tmp_path: Path) -> No
     ]
     assert {edge["kind"] for edge in handlers["edges"]} == {"HANDLES"}
 
-    routes = query_graph("endpoints_for", handler_qn, repo_root=str(tmp_path))
+    routes = query_graph(
+        "endpoints_for",
+        handler_qn,
+        repo_root=str(tmp_path),
+        max_results=2,
+    )
     assert routes["status"] == "ok"
-    assert len(routes["results"]) == 4
+    assert len(routes["results"]) == 2
+    assert routes["result_count"] == 4
+    assert routes["results_omitted"] == 2
+    assert len(routes["edges"]) == 2
     assert {result["kind"] for result in routes["results"]} == {"Endpoint"}
     assert {edge["kind"] for edge in routes["edges"]} == {"HANDLES"}

@@ -655,6 +655,41 @@ class TestRubyParsing:
         names = {f.name for f in funcs}
         assert "initialize" in names or "find_by_id" in names or "save" in names
 
+    def test_finds_calls(self):
+        """Ruby method calls must produce CALLS edges.
+
+        Ruby's grammar uses the same ``call`` node type for both
+        ``require`` and ordinary method invocation, so the dispatcher must
+        not treat every ``call`` as an import. Paren calls (``save(user)``),
+        command calls (``puts ...``) and member calls (``User.new`` /
+        ``@users.size``) are all captured. Bare implicit-self calls with no
+        parens (e.g. a lone ``helper``) parse as ``identifier`` rather than
+        ``call`` and are intentionally not covered here.
+        """
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 1
+
+        targets = {e.target for e in calls}
+        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
+
+        # Paren, command and member calls are all captured.
+        assert "save" in target_names
+        assert "puts" in target_names
+        assert "new" in target_names
+        assert "size" in target_names
+
+        # A same-class call resolves to the defining method node, not a bare
+        # name, so callers_of/callees_of work within a file.
+        assert any(t.endswith("sample.rb::UserRepository.save") for t in targets)
+
+        # Calls are attributed to their enclosing method.
+        create_user_targets = {
+            e.target for e in calls
+            if e.source.endswith("UserRepository.create_user")
+        }
+        assert any(t.endswith("UserRepository.save") for t in create_user_targets)
+        assert any(t.endswith("new") for t in create_user_targets)
+
 
 class TestPHPParsing:
     def setup_method(self):
@@ -2782,6 +2817,27 @@ class TestTemporalResolver:
             assert "." in target or "::" in target, (
                 f"Resolved target should be qualified, got: {target!r}"
             )
+
+    def test_resolved_target_is_concrete_impl_not_interface(self, tmp_path):
+        # paymentActivity.charge(...) has a single implementor, so it must
+        # resolve to PaymentActivityImpl.charge, not the interface method
+        # PaymentActivity.charge. Regression: implementors was keyed by the
+        # bare interface name but looked up by the qualified name, so the
+        # unique-implementor branch was dead and every stub call resolved to
+        # the interface.
+        store, _ = self._build(tmp_path)
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%temporal_resolved%'"
+        ).fetchall()
+        targets = [t for (t,) in rows]
+        assert targets, "Expected at least one temporal-resolved CALLS edge"
+        assert any(t.endswith("PaymentActivityImpl.charge") for t in targets), (
+            f"Expected resolution to the concrete impl, got: {targets!r}"
+        )
+        assert not any(t.endswith("PaymentActivity.charge") for t in targets), (
+            f"Should not resolve to the interface method, got: {targets!r}"
+        )
 
 
 class TestKafkaParsing:
