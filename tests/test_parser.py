@@ -1586,6 +1586,22 @@ class TestJsMemberAssignedFunctions:
         assert "app.settings" not in fns
         assert "app.locals" not in fns
 
+    def test_function_local_member_assignments_are_not_module_definitions(self):
+        """Sibling local assignments must not collide as ``file::x.run``."""
+        path = Path("/test/local_assignments.js")
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"function a() { x.run = function () {}; }\n"
+            b"function b() { x.run = function () {}; }\n",
+        )
+        functions = [n for n in nodes if n.kind == "Function"]
+        assert {n.name for n in functions} == {"a", "b"}
+        assert all(n.name != "x.run" for n in functions)
+        assert all(
+            not (e.kind == "CONTAINS" and e.target == f"{path}::x.run")
+            for e in edges
+        )
+
     def test_member_function_body_calls_still_attributed(self):
         """Calls inside a member-assigned function attribute to that function."""
         path = Path("/test/application.js")

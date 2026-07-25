@@ -7799,6 +7799,15 @@ class CodeParser:
         if right.type not in self._JS_FUNC_VALUE_TYPES:
             return False
 
+        # An assignment nested in a function belongs to that function's
+        # runtime scope, not to the module-level object namespace.  Without
+        # lexical scope in the member name, identical assignments in sibling
+        # functions would both become ``file::obj.method`` and produce
+        # duplicate CONTAINS targets.  Restrict this feature to module/class
+        # contexts, where the member path is a stable definition identity.
+        if enclosing_func:
+            return False
+
         member_name = left.text.decode("utf-8", errors="replace")
         # Skip computed access (``obj[key] = fn``) and any multi-line/odd
         # member paths that would produce a malformed qualified name.
