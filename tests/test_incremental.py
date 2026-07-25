@@ -1,6 +1,7 @@
 """Tests for the incremental graph update module."""
 
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
 import code_review_graph.incremental as incremental_module
@@ -22,6 +23,7 @@ from code_review_graph.incremental import (
     get_staged_and_unstaged,
     incremental_update,
     start_watch_thread,
+    watch,
 )
 
 
@@ -1044,3 +1046,103 @@ class TestStartWatchThread:
             assert thread is None
         finally:
             store.close()
+
+
+class TestWatchRenameHandling:
+    """Renames arrive as a single watchdog move event, not delete + create."""
+
+    @staticmethod
+    def _handler(repo_root, store):
+        """Run watch() far enough to capture the handler it registers."""
+        captured = {}
+
+        class FakeObserver:
+            def schedule(self, handler, path, recursive=False):
+                captured["handler"] = handler
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+            def join(self):
+                pass
+
+        import watchdog.observers
+
+        with patch.object(watchdog.observers, "Observer", FakeObserver), patch(
+            "time.sleep", side_effect=KeyboardInterrupt
+        ):
+            watch(repo_root, store)
+        return captured["handler"]
+
+    def test_file_rename_purges_old_path_and_indexes_new(self, tmp_path):
+        (tmp_path / "new.py").write_text("def a():\n    pass\n")
+        store = MagicMock()
+        handler = self._handler(tmp_path, store)
+
+        scheduled = []
+        handler._schedule = scheduled.append
+        handler.on_moved(
+            SimpleNamespace(
+                is_directory=False,
+                src_path=str(tmp_path / "old.py"),
+                dest_path=str(tmp_path / "new.py"),
+            )
+        )
+
+        store.remove_file_data.assert_called_once_with(str(tmp_path / "old.py"))
+        assert scheduled == [str(tmp_path / "new.py")]
+
+    def test_directory_rename_rekeys_indexed_files(self, tmp_path):
+        new_dir = tmp_path / "newpkg"
+        new_dir.mkdir()
+        (new_dir / "mod.py").write_text("def a():\n    pass\n")
+        old_dir = tmp_path / "oldpkg"
+
+        store = MagicMock()
+        store.get_all_files.return_value = [
+            str(old_dir / "mod.py"),
+            str(tmp_path / "unrelated.py"),
+        ]
+        handler = self._handler(tmp_path, store)
+
+        scheduled = []
+        handler._schedule = scheduled.append
+        handler.on_moved(
+            SimpleNamespace(
+                is_directory=True,
+                src_path=str(old_dir),
+                dest_path=str(new_dir),
+            )
+        )
+
+        # Only files beneath the renamed directory are touched.
+        store.remove_file_data.assert_called_once_with(str(old_dir / "mod.py"))
+        assert scheduled == [str(new_dir / "mod.py")]
+
+    def test_on_deleted_still_purges(self, tmp_path):
+        """Regression guard for the _remove() extraction."""
+        store = MagicMock()
+        handler = self._handler(tmp_path, store)
+
+        handler.on_deleted(
+            SimpleNamespace(is_directory=False, src_path=str(tmp_path / "gone.py"))
+        )
+
+        store.remove_file_data.assert_called_once_with(str(tmp_path / "gone.py"))
+
+    def test_paths_outside_the_repo_are_ignored(self, tmp_path):
+        store = MagicMock()
+        handler = self._handler(tmp_path, store)
+
+        handler.on_moved(
+            SimpleNamespace(
+                is_directory=False,
+                src_path="/somewhere/else/old.py",
+                dest_path="/somewhere/else/new.py",
+            )
+        )
+
+        store.remove_file_data.assert_not_called()

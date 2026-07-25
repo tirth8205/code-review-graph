@@ -1258,22 +1258,64 @@ def watch(
             if self._should_handle(event.src_path):
                 self._schedule(event.src_path)
 
-        def on_deleted(self, event):
-            if event.is_directory:
-                return
+        def _remove(self, abs_path: str):
+            """Purge one path's nodes and edges from the graph."""
             # Only handle files we would normally track
             try:
-                rel = str(Path(event.src_path).relative_to(repo_root))
+                rel = str(Path(abs_path).relative_to(repo_root))
             except ValueError:
                 return
             if _should_ignore(rel, ignore_patterns):
                 return
             try:
-                store.remove_file_data(event.src_path)
+                store.remove_file_data(abs_path)
                 store.commit()
                 logger.info("Removed: %s", rel)
             except Exception as e:
                 logger.error("Error removing %s: %s", rel, e)
+
+        def on_deleted(self, event):
+            if event.is_directory:
+                return
+            self._remove(event.src_path)
+
+        def on_moved(self, event):
+            """Handle a rename.
+
+            Watchdog reports a rename as a single move event rather than a
+            delete followed by a create, so without this handler the old path's
+            nodes and edges survive and the new path is never indexed — the
+            watched graph drifts from a full rebuild.
+            """
+            if event.is_directory:
+                self._move_directory(event.src_path, event.dest_path)
+                return
+            self._remove(event.src_path)
+            if self._should_handle(event.dest_path):
+                self._schedule(event.dest_path)
+
+        def _move_directory(self, src_dir: str, dest_dir: str):
+            """Re-key every indexed file beneath a renamed directory.
+
+            A directory rename arrives as one event with no per-file events for
+            the contents, so each tracked file underneath has to be purged at
+            its old path and re-indexed at the new one.
+            """
+            prefix = os.path.join(src_dir, "")
+            try:
+                indexed = store.get_all_files()
+            except Exception as e:
+                logger.error("Error listing files under %s: %s", src_dir, e)
+                return
+            for old_path in indexed:
+                if not old_path.startswith(prefix):
+                    continue
+                self._remove(old_path)
+                new_path = os.path.join(
+                    dest_dir, os.path.relpath(old_path, src_dir)
+                )
+                if self._should_handle(new_path):
+                    self._schedule(new_path)
 
         def _schedule(self, abs_path: str):
             """Add file to pending set and reset the debounce timer."""
