@@ -10,6 +10,7 @@ import pytest
 from code_review_graph.embeddings import (
     LOCAL_DEFAULT_MODEL,
     EmbeddingStore,
+    GoogleEmbeddingProvider,
     LocalEmbeddingProvider,
     MiniMaxEmbeddingProvider,
     OpenAIEmbeddingProvider,
@@ -189,6 +190,48 @@ class TestLocalEmbeddingProviderModelName:
             assert provider.name == "local:BAAI/bge-small-en-v1.5"
 
 
+class TestGoogleEmbeddingProviderRetryLogging:
+    def test_retryable_error_logs_attempt_fraction_then_succeeds(self, caplog):
+        fn = MagicMock(side_effect=[RuntimeError("429 rate limited"), [1.0]])
+
+        with patch("code_review_graph.embeddings.time.sleep") as sleep:
+            result = GoogleEmbeddingProvider._call_with_retry(fn)
+
+        assert result == [1.0]
+        assert fn.call_count == 2
+        sleep.assert_called_once_with(1)
+        assert "Gemini API retry 1/3 in 1s (RuntimeError)" in caplog.text
+
+    def test_non_retryable_error_logs_once_without_sleeping(self, caplog):
+        caplog.set_level("DEBUG")
+        fn = MagicMock(side_effect=ValueError("400 invalid request"))
+
+        with (
+            patch("code_review_graph.embeddings.time.sleep") as sleep,
+            pytest.raises(ValueError, match="400 invalid request"),
+        ):
+            GoogleEmbeddingProvider._call_with_retry(fn)
+
+        fn.assert_called_once_with()
+        sleep.assert_not_called()
+        assert "Non-retryable Gemini API error: ValueError" in caplog.text
+
+    def test_exhausted_retries_log_each_attempt_and_final_error(self, caplog):
+        fn = MagicMock(side_effect=RuntimeError("503 unavailable"))
+
+        with (
+            patch("code_review_graph.embeddings.time.sleep") as sleep,
+            pytest.raises(RuntimeError, match="503 unavailable"),
+        ):
+            GoogleEmbeddingProvider._call_with_retry(fn)
+
+        assert fn.call_count == 3
+        assert [call.args for call in sleep.call_args_list] == [(1,), (2,)]
+        assert "Gemini API retry 1/3 in 1s (RuntimeError)" in caplog.text
+        assert "Gemini API retry 2/3 in 2s (RuntimeError)" in caplog.text
+        assert "Gemini API request failed after 3 requests" in caplog.text
+
+
 class TestGetProviderValidation:
     """Unknown provider names must raise instead of silently using local."""
 
@@ -236,6 +279,46 @@ class TestGetProviderValidation:
         assert get_provider(None) is mock_cls.return_value
         assert get_provider("") is mock_cls.return_value
         assert get_provider("   ") is mock_cls.return_value
+
+    @patch("code_review_graph.embeddings.OpenAIEmbeddingProvider")
+    def test_none_defaults_to_openai_when_env_configured(self, mock_cls):
+        """When provider is omitted but OpenAI env vars are set, default to
+        the OpenAI-compatible provider instead of local (#551)."""
+        mock_cls.return_value = MagicMock()
+        env = {
+            "CRG_OPENAI_API_KEY": "fake-key",
+            "CRG_OPENAI_BASE_URL": "http://localhost:11434/v1",
+            "CRG_OPENAI_MODEL": "nomic-embed-text",
+            "CRG_ACCEPT_CLOUD_EMBEDDINGS": "1",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            provider = get_provider(None)
+        assert provider is mock_cls.return_value
+        mock_cls.assert_called_once_with(
+            api_key="fake-key",
+            base_url="http://localhost:11434/v1",
+            model="nomic-embed-text",
+            dimension=None,
+            batch_size=None,
+        )
+
+    @patch("code_review_graph.embeddings.OpenAIEmbeddingProvider")
+    @patch("code_review_graph.embeddings.LocalEmbeddingProvider")
+    @patch("code_review_graph.embeddings._check_available", return_value=True)
+    def test_explicit_blank_stays_local_when_openai_env_configured(
+        self, _mock_available, local_cls, openai_cls,
+    ):
+        """Only an omitted provider should use the configured OpenAI default."""
+        local_cls.return_value = MagicMock()
+        env = {
+            "CRG_OPENAI_API_KEY": "fake-key",
+            "CRG_OPENAI_BASE_URL": "http://localhost:11434/v1",
+            "CRG_OPENAI_MODEL": "nomic-embed-text",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            assert get_provider("") is local_cls.return_value
+            assert get_provider("   ") is local_cls.return_value
+        openai_cls.assert_not_called()
 
 
 class TestGetProviderModel:

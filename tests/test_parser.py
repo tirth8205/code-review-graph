@@ -3,6 +3,7 @@
 import tempfile
 from pathlib import Path
 
+from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -1173,6 +1174,446 @@ class Plain:
         test_names = {n.name for n in test_nodes}
         assert "test_something" in test_names
         assert "helper" not in test_names
+
+    def test_c_dead_guard_if0_omits_dead_edges(self):
+        """CALLS edges inside ``#if 0`` / ``#elif 0`` blocks in C are
+        never emitted, including when the block wraps a whole function.
+        Calls in the ``#else`` / ``#elif`` branches of ``#if 0`` are
+        live and must be kept. Python's ast-based detector cannot reach
+        C, so this is handled by the tree-sitter dead-guard walk."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.c",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_in_if0: NOT emitted (#if 0 consequence)
+        assert hits("dead_in_if0") == []
+        # live_in_else: emitted (#else of #if 0 is live)
+        assert len(hits("live_in_else")) == 1
+        # dead_in_elifblock: NOT emitted (#if 0 consequence, elif form)
+        assert hits("dead_in_elifblock") == []
+        # live_in_elif: emitted (#elif of #if 0 is live). Regression
+        # guard: a detector excluding only preproc_else marks it dead.
+        assert len(hits("live_in_elif")) == 1
+        # dead_in_wrapped: NOT emitted. The call sits in a function that
+        # is itself inside #if 0 -- the scope-agnostic preprocessor walk
+        # must not stop at the function_definition.
+        assert hits("dead_in_wrapped") == []
+        # live_in_if1: emitted (#if 1 branch is taken)
+        assert len(hits("live_in_if1")) == 1
+        # dead_in_elif0: NOT emitted (#elif 0 consequence is dead)
+        assert hits("dead_in_elif0") == []
+        # Total: exactly 4 live edges
+        assert len(calls) == 4
+
+    def test_go_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if false`` blocks in Go are never
+        emitted. Go's ``if_statement`` and ``false`` literal are
+        detected by the tree-sitter dead-guard walk. Else branches and
+        ``if true`` stay live."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_false_call: NOT emitted (if false consequence in caller)
+        assert hits("dead_false_call") == []
+        # dead_in_consequence: NOT emitted (if false consequence)
+        assert hits("dead_in_consequence") == []
+        # live_in_else: emitted (else branch of if false)
+        assert len(hits("live_in_else")) == 1
+        # live_final_else: emitted (inside else branch, nested if)
+        assert len(hits("live_final_else")) == 1
+        # live_in_wrapped: emitted (func def is at module scope, not
+        # inside if false -- Go forbids func decl in if blocks)
+        assert len(hits("live_in_wrapped")) == 1
+        # some_condition: emitted (called in else branch, nested if)
+        assert len(hits("some_condition")) == 1
+        # live_in_if_true: emitted (if true is NOT a dead guard)
+        assert len(hits("live_in_if_true")) == 1
+        # Total: exactly 6 live edges
+        assert len(calls) == 6
+
+    def test_ts_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if (false)`` / ``if (0)`` blocks in
+        TypeScript are never emitted. The condition is wrapped in a
+        ``parenthesized_expression`` that must be unwrapped, and the
+        ``0`` literal uses node type ``number``. Else branches and
+        ``if (true)`` are live."""
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.ts",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        # live_helper: emitted (no guard)
+        assert len(hits("live_helper")) == 1
+        # dead_false_call: NOT emitted (if (false) consequence)
+        assert hits("dead_false_call") == []
+        # dead_zero_call: NOT emitted (if (0) consequence)
+        assert hits("dead_zero_call") == []
+        # dead_in_consequence: NOT emitted (if (false) consequence)
+        assert hits("dead_in_consequence") == []
+        # live_in_else: emitted (else branch of if (false))
+        assert len(hits("live_in_else")) == 1
+        # live_final_else: emitted (else-if chain, live branch)
+        assert len(hits("live_final_else")) == 1
+        # live_in_if_true: emitted (if (true) is NOT a dead guard)
+        assert len(hits("live_in_if_true")) == 1
+        # some_condition: emitted (called in else-if condition)
+        assert len(hits("some_condition")) == 1
+        # Total: exactly 5 live edges
+        assert len(calls) == 5
+
+    def test_dead_guard_covers_declarations_nested_in_dead_branch(self):
+        """A function or class declared inside a dead branch is never
+        evaluated, so calls in its body are dead. This matches what the
+        Python ast path does for a ``def``/``class`` under ``if False:``;
+        the walk must not stop at a declaration boundary. JS/TS class
+        declarations are not hoisted, so no reachable symbol is lost."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "nested.ts"
+            src.write_text(
+                "function caller() {\n"
+                "  if (false) {\n"
+                "    function inner_fn() { dead_in_fn(); }\n"
+                "    class Inner { method() { dead_in_class(); } }\n"
+                "  }\n"
+                "  live_after();\n"
+                "}\n"
+                "function sibling() { live_sibling(); }\n",
+                encoding="utf-8",
+            )
+            _nodes, edges = self.parser.parse_file(src)
+        targets = {
+            e.target.split("::")[-1]
+            for e in edges if e.kind == "CALLS"
+        }
+        # Dead: declared inside the never-evaluated branch.
+        assert "dead_in_fn" not in targets
+        assert "dead_in_class" not in targets
+        # Live: the guard must not leak past the branch it belongs to.
+        assert "live_after" in targets
+        assert "live_sibling" in targets
+
+    def test_dead_guard_calls_absent_from_graph_store(self):
+        """End-to-end: build a real graph from each non-Python fixture
+        and confirm the consumer-facing store never reports a
+        dead-branch call target. Mirrors the Python store-level check in
+        test_python_reachability.py for C/Go/TS."""
+        cases = [
+            (
+                "sample_dead_guard.c",
+                {"dead_in_if0", "dead_in_wrapped", "dead_in_elif0",
+                 "dead_in_elifblock"},
+                {"live_helper", "live_in_else", "live_in_elif",
+                 "live_in_if1"},
+            ),
+            (
+                "sample_dead_guard.go",
+                {"dead_false_call", "dead_in_consequence"},
+                {"live_helper", "live_in_else", "some_condition"},
+            ),
+            (
+                "sample_dead_guard.ts",
+                {"dead_false_call", "dead_zero_call", "dead_in_consequence"},
+                {"live_helper", "live_in_else", "live_in_if_true"},
+            ),
+        ]
+        for fixture, dead, live in cases:
+            nodes, edges = self.parser.parse_file(FIXTURES / fixture)
+            with tempfile.NamedTemporaryFile(
+                suffix=".db", delete=False,
+            ) as handle:
+                db_path = handle.name
+            try:
+                with GraphStore(db_path) as store:
+                    for node in nodes:
+                        store.upsert_node(node)
+                    for edge in edges:
+                        store.upsert_edge(edge)
+                    store.commit()
+                    targets = {
+                        t.split("::")[-1]
+                        for t in store.get_all_call_targets()
+                    }
+            finally:
+                Path(db_path).unlink(missing_ok=True)
+            for name in dead:
+                assert name not in targets, (
+                    f"{fixture}: dead target {name} leaked into the store"
+                )
+            for name in live:
+                assert name in targets, (
+                    f"{fixture}: live target {name} missing from the store"
+                )
+
+
+class TestDeadGuardHelpers:
+    """Direct unit tests for dead-guard helper functions.
+
+    The bot flagged ``_node_is_in_child``,
+    ``_is_statically_false_condition`` and ``_is_in_static_dead_guard``
+    as untested.  The behaviour-level tests above exercise them through
+    ``parse_file()``, but these tests call them directly with
+    tree-sitter nodes so every branch is provably hit.
+    """
+
+    @staticmethod
+    def _parse(lang, source):
+        """Parse *source* and return (root, source_bytes)."""
+        import tree_sitter_language_pack as tsp
+
+        tree = tsp.get_parser(lang).parse(source)
+        return tree.root_node, source
+
+    @staticmethod
+    def _find(node, node_type):
+        """Return the first descendant of *node* with the given type."""
+        if node.type == node_type:
+            return node
+        for child in node.children:
+            found = TestDeadGuardHelpers._find(child, node_type)
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _find_call(node, name):
+        """Return the first ``call_expression`` whose function is *name*."""
+        if node.type == "call_expression":
+            func = node.child_by_field_name("function")
+            if func is not None and func.text == name:
+                return node
+        for child in node.children:
+            found = TestDeadGuardHelpers._find_call(child, name)
+            if found is not None:
+                return found
+        return None
+
+    # --- _node_is_in_child ---
+
+    def test_node_is_in_child_direct(self):
+        """A call directly inside a block is a descendant."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        block = self._find(root, "block")
+        call = self._find(root, "call_expression")
+        assert _node_is_in_child(call, block) is True
+
+    def test_node_is_in_child_nested(self):
+        """A call 3 levels deep is still a descendant."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { if true { g() } }")
+        outer_block = self._find(root, "block")
+        call = self._find_call(root, b"g")
+        assert _node_is_in_child(call, outer_block) is True
+
+    def test_node_is_in_child_sibling(self):
+        """A call in the else branch is NOT a descendant of the
+        consequence block."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { if false { a() } else { b() } }")
+        if_stmt = self._find(root, "if_statement")
+        consequence = if_stmt.child_by_field_name("consequence")
+        call_b = self._find_call(root, b"b")
+        assert _node_is_in_child(call_b, consequence) is False
+
+    def test_node_is_in_child_self(self):
+        """A node is a descendant of itself."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        block = self._find(root, "block")
+        assert _node_is_in_child(block, block) is True
+
+    def test_node_is_in_child_root(self):
+        """A module-level call is NOT inside an if consequence."""
+        from code_review_graph.parser import _node_is_in_child
+
+        root, _ = self._parse("go", b"func f() { g() }\nfunc h() { if false { i() } }")
+        if_stmt = self._find(root, "if_statement")
+        assert if_stmt is not None, "if_statement not found in parse tree"
+        consequence = if_stmt.child_by_field_name("consequence")
+        assert consequence is not None, "consequence field not found"
+        call_g = self._find_call(root, b"g")
+        assert _node_is_in_child(call_g, consequence) is False
+
+    # --- _is_statically_false_condition ---
+
+    def test_false_literal(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if false { g() } }")
+        cond = self._find(root, "false")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_number_zero(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if (0) { g(); }")
+        cond = self._find(root, "number")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_parenthesized_false(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if ((false)) { g(); }")
+        cond = self._find(root, "parenthesized_expression")
+        assert _is_statically_false_condition(cond) is True
+
+    def test_true_literal(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if true { g() } }")
+        cond = self._find(root, "true")
+        assert _is_statically_false_condition(cond) is False
+
+    def test_number_one(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("typescript", b"f(); if (1) { g(); }")
+        cond = self._find(root, "number")
+        assert _is_statically_false_condition(cond) is False
+
+    def test_variable_condition(self):
+        from code_review_graph.parser import _is_statically_false_condition
+
+        root, _ = self._parse("go", b"func f() { if x { g() } }")
+        cond = self._find(root, "identifier")
+        assert _is_statically_false_condition(cond) is False
+
+    # --- _is_in_static_dead_guard ---
+
+    def test_go_if_false_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { if false { g() } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_go_else_branch_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { if false { a() } else { b() } }")
+        call_b = self._find_call(root, b"b")
+        assert _is_in_static_dead_guard(call_b) is False
+
+    def test_ts_if_false_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (false) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_ts_if_zero_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (0) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_ts_if_true_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("typescript", b"function f() { if (true) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    def test_c_if0_dead(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("c", b"void f() {\n#if 0\ng();\n#endif\n}\n")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is True
+
+    def test_c_else_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse(
+            "c", b"void f() {\n#if 0\na();\n#else\nb();\n#endif\n}\n"
+        )
+        call_b = self._find_call(root, b"b")
+        assert _is_in_static_dead_guard(call_b) is False
+
+    def test_c_if1_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("c", b"void f() {\n#if 1\ng();\n#endif\n}\n")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    def test_no_guard_live(self):
+        from code_review_graph.parser import _is_in_static_dead_guard
+
+        root, _ = self._parse("go", b"func f() { g() }")
+        call = self._find_call(root, b"g")
+        assert _is_in_static_dead_guard(call) is False
+
+    # --- _extract_calls integration ---
+
+    def test_extract_calls_skips_dead_go(self):
+        """_extract_calls returns True (skip) for a dead Go call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_false_call"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_ts(self):
+        """_extract_calls returns True (skip) for a dead TS call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.ts",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_false_call"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_c(self):
+        """_extract_calls returns True (skip) for a dead C call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.c",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_in_if0"
+        ]
+        assert dead == []
+
+    def test_extract_calls_keeps_live(self):
+        """_extract_calls returns False (keep) for a live call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.go",
+        )
+        live = [
+            e for e in edges
+            if e.kind == "CALLS" and e.target.split("::")[-1] == "live_helper"
+        ]
+        assert len(live) == 1
 
 
 class TestValueReferences:
