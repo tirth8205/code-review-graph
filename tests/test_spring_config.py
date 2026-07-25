@@ -157,9 +157,17 @@ def test_consumers_query_matches_direct_and_prefix_dependencies(tmp_path: Path) 
         )
         store.store_file_nodes_edges(str(java_path), java_nodes, java_edges, "java")
 
-    direct = query_graph("consumers_of", "payment.gateway.url", repo_root=str(tmp_path))
+    direct = query_graph(
+        "consumers_of",
+        "payment.gateway.url",
+        repo_root=str(tmp_path),
+        max_results=1,
+    )
     assert direct["status"] == "ok"
     assert [result["name"] for result in direct["results"]] == ["KafkaSettings"]
+    assert direct["result_count"] == 1
+    assert direct["results_omitted"] == 0
+    assert len(direct["edges"]) == 1
 
     prefix = query_graph(
         "consumers_of",
@@ -168,4 +176,6 @@ def test_consumers_query_matches_direct_and_prefix_dependencies(tmp_path: Path) 
     )
     assert prefix["status"] == "ok"
     assert [result["name"] for result in prefix["results"]] == ["KafkaSettings"]
+    assert prefix["result_count"] == 1
+    assert prefix["results_omitted"] == 0
     assert {edge["kind"] for edge in prefix["edges"]} == {"DEPENDS_ON_CONFIG"}

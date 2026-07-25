@@ -253,3 +253,31 @@ class TestWiki:
         assert content_first != content_second
         assert content_first != content_third
         assert content_second != content_third
+
+
+    def test_slugify_unicode(self):
+        """Test _slugify with ASCII, accented characters, CJK scripts, and empty/special inputs."""
+        assert _slugify("Data Processing") == "data-processing"
+        assert _slugify("café") == "cafe"
+        assert _slugify("tiếng-việt") == "tieng-viet"
+
+        # Multilingual Latin accented scripts (French, German, Spanish, Swedish/Danish, Polish)
+        assert _slugify("déjà vu") == "deja-vu"
+        assert _slugify("München") == "munchen"
+        assert _slugify("El Niño") == "el-nino"
+        assert _slugify("Malmö") == "malmo"
+        assert _slugify("København") == "kbenhavn"
+
+        # Fullwidth characters
+        assert _slugify("Ｐｙｔｈｏｎ") == "python"
+
+        # Empty and special characters
+        assert _slugify("") == "unnamed"
+        assert _slugify("---") == "unnamed"
+
+        # Non-ASCII CJK scripts fall back to unnamed
+        assert _slugify("パーサー") == "unnamed"
+        assert _slugify("解析器") == "unnamed"
+
+
+
