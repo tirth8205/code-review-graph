@@ -408,6 +408,63 @@ class TestDetectChangesEndToEnd:
         assert savings["saved_percent"] < 100
 
 
+def test_explicit_monorepo_subproject_runs_a_real_graph_search(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    """The CLI must open the graph at the explicit subproject, not its parent repo."""
+    mono = tmp_path / "mono"
+    (mono / ".git").mkdir(parents=True)
+    module = mono / "llvm"
+    nested = module / "src" / "deep"
+    nested.mkdir(parents=True)
+    (module / "stream.py").write_text(
+        "def raw_stream_lookup():\n    return 1\n",
+        encoding="utf-8",
+    )
+
+    # Keep registry writes away from the developer's real home.
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("CRG_HOME", str(state_dir))
+    from code_review_graph import registry as registry_module
+
+    monkeypatch.setattr(
+        registry_module,
+        "_REGISTRY_PATH",
+        state_dir / "registry.json",
+        raising=False,
+    )
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.search import rebuild_fts_index
+
+    db_path = module / ".code-review-graph" / "graph.db"
+    db_path.parent.mkdir(parents=True)
+    store = GraphStore(db_path)
+    try:
+        full_build(module, store)
+        rebuild_fts_index(store)
+    finally:
+        store.close()
+
+    argv = [
+        "code-review-graph",
+        "search",
+        "raw_stream_lookup",
+        "--repo",
+        str(nested),
+    ]
+    with patch.object(sys, "argv", argv):
+        cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok"
+    assert any(row["name"] == "raw_stream_lookup" for row in result["results"])
+
+
 class TestGraphToolExplicitRepoResolution:
     """Issue #697: an explicit --repo must win over the upward git-root walk."""
 
