@@ -48,6 +48,9 @@ breaking changes.
   repeated implementation blocks. Nested/aliased `use` trees, `Self` and
   turbofish calls, and bounded cached Cargo path/workspace dependency resolution
   now retain their original graph targets (replacing PR #526).
+- Added workspace-scoped Antigravity agent skills under
+  `.agents/skills/<skill>/SKILL.md`, using the current documented discovery
+  path and preserving unrelated user skills (safe port from PR #531).
 - Added an explicit local JSON visualization export. The output is written
   atomically inside the ignored graph data directory and is documented as
   potentially containing absolute paths and code-structure metadata (PR #449).
@@ -92,6 +95,9 @@ breaking changes.
   enclosing-class, import, qualified-name, or namespace evidence. This keeps
   incremental work bounded to changed files and leaves unrelated globally
   unique `Class::method` names unresolved (safe subset of PR #568).
+- GitHub Copilot auto-detection now requires an installed Copilot VS Code
+  extension, while Copilot CLI output uses its documented `mcpServers`
+  container, local server type, and tool allowlist (safe port from PR #129).
 - Incremental Git change discovery now reads NUL-delimited byte output, so
   Unicode, whitespace, newline, and literal arrow paths are preserved while
   rename/copy records keep destination-only semantics (PR #618).

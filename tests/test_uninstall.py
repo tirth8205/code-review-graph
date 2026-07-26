@@ -325,6 +325,7 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         fake_repo / ".claude" / "skills",
         fake_repo / ".gemini" / "skills",
         fake_repo / ".codebuddy" / "skills",
+        fake_repo / ".agents" / "skills",
     ]
     generated_slug = next(iter(skills._SKILLS)).removesuffix(".md")
     for root in generated_roots:

@@ -1059,7 +1059,7 @@ def _process_repo(
             dry_run=dry_run,
         )
 
-    for root_name in (".claude", ".gemini", ".codebuddy"):
+    for root_name in (".claude", ".gemini", ".codebuddy", ".agents"):
         for slug in _generated_skill_slugs():
             _remove_skill_file(
                 repo_root / root_name / "skills" / slug / "SKILL.md",

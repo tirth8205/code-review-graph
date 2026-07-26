@@ -251,6 +251,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         generate_skills,
         inject_claude_md,
         inject_platform_instructions,
+        install_antigravity_skills,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
@@ -273,6 +274,11 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target in ("gemini-cli", "all"):
             gemini_skills_dir = install_gemini_cli_skills(repo_root)
             print(f"Installed Gemini CLI skills in {gemini_skills_dir}")
+
+        # Antigravity discovers workspace skills under .agents/skills/.
+        if target in ("antigravity", "all"):
+            antigravity_skills_dir = install_antigravity_skills(repo_root)
+            print(f"Installed Antigravity skills in {antigravity_skills_dir}")
 
         # CodeBuddy discovers project skills under .codebuddy/skills/.
         if target in ("codebuddy", "all"):
