@@ -936,16 +936,16 @@ def _process_platform_configs(
         config_scope, boundary = destination
         if config_scope != scope:
             continue
-        # Legacy keys cover entries written by older releases under a key the
-        # platform never read (e.g. Copilot CLI's "servers", #616).
-        legacy_keys = tuple(str(k) for k in spec.get("legacy_keys", ()))
+        legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
         for entry_key in (key, *legacy_keys):
             identity = (path, entry_key, format_name)
             if identity in seen:
                 continue
             seen.add(identity)
             if format_name == "toml":
-                _remove_toml_entry(path, entry_key, boundary, report, dry_run=dry_run)
+                _remove_toml_entry(
+                    path, entry_key, boundary, report, dry_run=dry_run
+                )
             elif format_name in {"object", "array"}:
                 _remove_mcp_entry(
                     path,
@@ -957,7 +957,8 @@ def _process_platform_configs(
                 )
             else:
                 report.skipped_paths.append(
-                    f"{path} ({platform_name} has unsupported config format {format_name!r})"
+                    f"{path} ({platform_name} has unsupported config format "
+                    f"{format_name!r})"
                 )
 
 

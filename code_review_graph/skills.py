@@ -149,13 +149,16 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "copilot-cli": {
         "name": "GitHub Copilot CLI",
         "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
-        # Copilot CLI only reads "mcpServers"; releases before #616 wrote
-        # "servers", which it silently ignores.
+        # Copilot CLI reads "mcpServers"; releases before #616 wrote
+        # "servers", which the client silently ignores.
         "key": "mcpServers",
         "legacy_keys": ("servers",),
         "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
+        # Validated with the released Copilot CLI in #658.
+        "server_type": "local",
+        "entry_fields": {"tools": ["*"]},
     },
     "codebuddy": {
         "name": "CodeBuddy Code",
@@ -265,7 +268,8 @@ def _build_server_entry(
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
-        entry["type"] = "stdio"
+        entry["type"] = plat.get("server_type", "stdio")
+    entry.update(plat.get("entry_fields", {}))
     return entry
 
 
@@ -545,12 +549,16 @@ def install_platform_configs(
             arr.append(arr_entry)
             existing[server_key] = arr
         else:
-            # Drop entries older releases wrote under a key the platform never
-            # reads (e.g. Copilot CLI's "servers" vs "mcpServers", #616).
+            # Remove entries written under keys the client never read, then
+            # install the validated entry under the current key.
             migrated = False
             for legacy_key in plat.get("legacy_keys", ()):
                 legacy = existing.get(legacy_key)
-                if isinstance(legacy, dict) and legacy.pop("code-review-graph", None):
+                if (
+                    isinstance(legacy, dict)
+                    and "code-review-graph" in legacy
+                ):
+                    del legacy["code-review-graph"]
                     if not legacy:
                         del existing[legacy_key]
                     migrated = True
@@ -1131,8 +1139,8 @@ cover what you need.
 """
 
 # Maps instruction file path → (marker, section) for files that need content
-# different from the default _CLAUDE_MD_SECTION. Includes legacy paths so
-# uninstall can strip sections written by older releases.
+# different from the default _CLAUDE_MD_SECTION. Legacy paths remain here so
+# uninstall can identify sections written by older releases.
 _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
     ".github/instructions/code-review-graph.instructions.md": (
         _CLAUDE_MD_SECTION_MARKER,
@@ -1185,25 +1193,19 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
-    # Copilot (VS Code and CLI) only auto-loads instruction files matching
-    # .github/instructions/**/*.instructions.md (#616).
     ".github/instructions/code-review-graph.instructions.md": ("copilot", "copilot-cli"),
     "CODEBUDDY.md": ("codebuddy",),
 }
 
-# Superseded locations written by older releases, cleaned up on install so
-# upgrades don't leave stale never-loaded copies behind (#616).
+# Superseded paths written by older releases. Reinstall removes only the exact
+# generated section and leaves any user-authored content intact.
 _LEGACY_PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
 }
 
 
 def _remove_legacy_instruction_file(path: Path) -> None:
-    """Strip our injected section from a superseded instruction file.
-
-    Deletes the file when nothing else remains. Files without our marker, or
-    with a section that no longer matches any known release, are left alone.
-    """
+    """Strip an exact generated section from a superseded instruction file."""
     if not path.exists():
         return
     content = path.read_text(encoding="utf-8", errors="replace")
