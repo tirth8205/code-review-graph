@@ -774,6 +774,137 @@ class Service extends \\Framework\\Base implements Contract, \\Other\\Marker {
         assert "Service::factory" in calls
 
 
+class TestPHPTestAnnotations:
+    """Regression tests for #693: PHP test methods were only recognised by
+    the ``test_`` name prefix. Neither PHPUnit's legacy ``/** @test */``
+    docblock tag nor the PHP 8 ``#[Test]`` attribute was detected, so those
+    methods were misclassified as production ``Function`` nodes. Mirrors the
+    C# attribute fix from #295: PHP attributes need their own capture path
+    (``attribute_list > attribute_group > attribute``, one level deeper than
+    C#'s), and the docblock tag needs a separate preceding-sibling check.
+    """
+
+    def _parse(self, tmp_path):
+        p = tmp_path / "ExampleTest.php"
+        p.write_text(
+            "<?php\n"
+            "namespace Tests;\n\n"
+            "use PHPUnit\\Framework\\TestCase;\n"
+            "use PHPUnit\\Framework\\Attributes\\Test;\n\n"
+            "use PHPUnit\\Framework\\Attributes\\Test as UnitTest;\n"
+            "use PHPUnit\\Framework\\Attributes\\DataProvider;\n\n"
+            "use App\\Attributes\\Test as OtherTest;\n\n"
+            "class ExampleTest extends TestCase\n"
+            "{\n"
+            "    public function test_prefixed_method_should_be_detected(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    /** @test */\n"
+            "    public function docblock_annotated_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[Test]\n"
+            "    public function php8_attribute_annotated_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\PHPUnit\\Framework\\Attributes\\Test]\n"
+            "    public function qualified_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[UnitTest]\n"
+            "    public function aliased_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[DataProvider('rows'), Test]\n"
+            "    public function grouped_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\App\\Attributes\\Test]\n"
+            "    public function unrelated_qualified_attribute(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[OtherTest]\n"
+            "    public function unrelated_aliased_attribute(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    /** @test-case is documentation, not a PHPUnit tag. */\n"
+            "    public function documented_helper(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    public function helperNotATest(): void\n"
+            "    {\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return CodeParser().parse_file(p)
+
+    def test_name_prefix_still_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "test_prefixed_method_should_be_detected")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_docblock_annotation_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "docblock_annotated_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "php8_attribute_annotated_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+        assert m.extra.get("decorators") == ["Test"]
+
+    def test_qualified_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "qualified_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_aliased_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "aliased_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_grouped_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "grouped_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_unrelated_qualified_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_qualified_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_unrelated_aliased_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_aliased_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_similar_docblock_tag_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "documented_helper")
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_plain_method_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "helperNotATest")
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+
 class TestPHPImportResolution:
     """PHP ``use`` imports resolve to absolute file paths (PSR-4 layout)."""
 
