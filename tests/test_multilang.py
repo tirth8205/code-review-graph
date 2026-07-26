@@ -655,6 +655,41 @@ class TestRubyParsing:
         names = {f.name for f in funcs}
         assert "initialize" in names or "find_by_id" in names or "save" in names
 
+    def test_finds_calls(self):
+        """Ruby method calls must produce CALLS edges.
+
+        Ruby's grammar uses the same ``call`` node type for both
+        ``require`` and ordinary method invocation, so the dispatcher must
+        not treat every ``call`` as an import. Paren calls (``save(user)``),
+        command calls (``puts ...``) and member calls (``User.new`` /
+        ``@users.size``) are all captured. Bare implicit-self calls with no
+        parens (e.g. a lone ``helper``) parse as ``identifier`` rather than
+        ``call`` and are intentionally not covered here.
+        """
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        assert len(calls) >= 1
+
+        targets = {e.target for e in calls}
+        target_names = {t.split("::")[-1].split(".")[-1] for t in targets}
+
+        # Paren, command and member calls are all captured.
+        assert "save" in target_names
+        assert "puts" in target_names
+        assert "new" in target_names
+        assert "size" in target_names
+
+        # A same-class call resolves to the defining method node, not a bare
+        # name, so callers_of/callees_of work within a file.
+        assert any(t.endswith("sample.rb::UserRepository.save") for t in targets)
+
+        # Calls are attributed to their enclosing method.
+        create_user_targets = {
+            e.target for e in calls
+            if e.source.endswith("UserRepository.create_user")
+        }
+        assert any(t.endswith("UserRepository.save") for t in create_user_targets)
+        assert any(t.endswith("new") for t in create_user_targets)
+
 
 class TestPHPParsing:
     def setup_method(self):
@@ -737,6 +772,137 @@ class Service extends \\Framework\\Base implements Contract, \\Other\\Marker {
         # Existing PHP call formatting must stay unchanged.
         assert "save" in calls
         assert "Service::factory" in calls
+
+
+class TestPHPTestAnnotations:
+    """Regression tests for #693: PHP test methods were only recognised by
+    the ``test_`` name prefix. Neither PHPUnit's legacy ``/** @test */``
+    docblock tag nor the PHP 8 ``#[Test]`` attribute was detected, so those
+    methods were misclassified as production ``Function`` nodes. Mirrors the
+    C# attribute fix from #295: PHP attributes need their own capture path
+    (``attribute_list > attribute_group > attribute``, one level deeper than
+    C#'s), and the docblock tag needs a separate preceding-sibling check.
+    """
+
+    def _parse(self, tmp_path):
+        p = tmp_path / "ExampleTest.php"
+        p.write_text(
+            "<?php\n"
+            "namespace Tests;\n\n"
+            "use PHPUnit\\Framework\\TestCase;\n"
+            "use PHPUnit\\Framework\\Attributes\\Test;\n\n"
+            "use PHPUnit\\Framework\\Attributes\\Test as UnitTest;\n"
+            "use PHPUnit\\Framework\\Attributes\\DataProvider;\n\n"
+            "use App\\Attributes\\Test as OtherTest;\n\n"
+            "class ExampleTest extends TestCase\n"
+            "{\n"
+            "    public function test_prefixed_method_should_be_detected(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    /** @test */\n"
+            "    public function docblock_annotated_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[Test]\n"
+            "    public function php8_attribute_annotated_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\PHPUnit\\Framework\\Attributes\\Test]\n"
+            "    public function qualified_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[UnitTest]\n"
+            "    public function aliased_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[DataProvider('rows'), Test]\n"
+            "    public function grouped_attribute_method(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[\\App\\Attributes\\Test]\n"
+            "    public function unrelated_qualified_attribute(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    #[OtherTest]\n"
+            "    public function unrelated_aliased_attribute(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    /** @test-case is documentation, not a PHPUnit tag. */\n"
+            "    public function documented_helper(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    public function helperNotATest(): void\n"
+            "    {\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        return CodeParser().parse_file(p)
+
+    def test_name_prefix_still_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "test_prefixed_method_should_be_detected")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_docblock_annotation_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "docblock_annotated_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "php8_attribute_annotated_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+        assert m.extra.get("decorators") == ["Test"]
+
+    def test_qualified_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "qualified_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_aliased_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "aliased_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_grouped_php8_attribute_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "grouped_attribute_method")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_unrelated_qualified_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_qualified_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_unrelated_aliased_attribute_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(
+            n for n in nodes if n.name == "unrelated_aliased_attribute"
+        )
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_similar_docblock_tag_is_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "documented_helper")
+        assert m.kind == "Function"
+        assert m.is_test is False
+
+    def test_plain_method_not_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "helperNotATest")
+        assert m.kind == "Function"
+        assert m.is_test is False
 
 
 class TestPHPImportResolution:
@@ -2782,6 +2948,27 @@ class TestTemporalResolver:
             assert "." in target or "::" in target, (
                 f"Resolved target should be qualified, got: {target!r}"
             )
+
+    def test_resolved_target_is_concrete_impl_not_interface(self, tmp_path):
+        # paymentActivity.charge(...) has a single implementor, so it must
+        # resolve to PaymentActivityImpl.charge, not the interface method
+        # PaymentActivity.charge. Regression: implementors was keyed by the
+        # bare interface name but looked up by the qualified name, so the
+        # unique-implementor branch was dead and every stub call resolved to
+        # the interface.
+        store, _ = self._build(tmp_path)
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' "
+            "AND extra LIKE '%temporal_resolved%'"
+        ).fetchall()
+        targets = [t for (t,) in rows]
+        assert targets, "Expected at least one temporal-resolved CALLS edge"
+        assert any(t.endswith("PaymentActivityImpl.charge") for t in targets), (
+            f"Expected resolution to the concrete impl, got: {targets!r}"
+        )
+        assert not any(t.endswith("PaymentActivity.charge") for t in targets), (
+            f"Should not resolve to the interface method, got: {targets!r}"
+        )
 
 
 class TestKafkaParsing:

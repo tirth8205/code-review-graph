@@ -67,6 +67,10 @@ _NODE_TYPE_KEYS = (
     "call_node_types",
 )
 
+#: Hard cap on ``name_field`` probe candidates per language.  Bounds the
+#: per-node name resolution work (fail-safe ingestion invariant).
+MAX_NAME_FIELD_CANDIDATES = 8
+
 
 @dataclass(frozen=True)
 class CustomLanguage:
@@ -80,6 +84,7 @@ class CustomLanguage:
     import_node_types: tuple[str, ...] = ()
     call_node_types: tuple[str, ...] = ()
     comment: str = ""
+    name_field: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +299,31 @@ def _validate_entry(
         )
         return None
 
+    # ``name_field``: optional ordered list of name-resolution candidates.
+    # Accepts a bare string (normalised to a 1-tuple) or a list of non-empty
+    # strings.  Each candidate is later probed first as a tree-sitter field
+    # name and then as a descendant node type (see CodeParser._get_name).
+    raw_name_field = table.get("name_field", [])
+    if isinstance(raw_name_field, str):
+        raw_name_field = [raw_name_field]
+    if not isinstance(raw_name_field, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_name_field
+    ):
+        logger.warning(
+            "%s: custom language %r: name_field must be a string or a list of "
+            "non-empty strings — skipping",
+            config_path, name,
+        )
+        return None
+    if len(raw_name_field) > MAX_NAME_FIELD_CANDIDATES:
+        logger.warning(
+            "%s: custom language %r: name_field has more than %d candidates — "
+            "skipping",
+            config_path, name, MAX_NAME_FIELD_CANDIDATES,
+        )
+        return None
+    name_field = tuple(item.strip() for item in raw_name_field)
+
     comment = table.get("comment", "")
     if not isinstance(comment, str):
         comment = ""
@@ -319,4 +349,5 @@ def _validate_entry(
         import_node_types=node_types["import_node_types"],
         call_node_types=node_types["call_node_types"],
         comment=comment,
+        name_field=name_field,
     )
