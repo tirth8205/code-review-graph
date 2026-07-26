@@ -7,8 +7,10 @@
 - Added `code-review-graph forget PATH [PATH ...]` to drop already-parsed files
   from the graph without a full rebuild. Paths may be absolute, relative to the
   repository root, a directory (every file underneath is dropped), or a glob
-  pattern, and `--dry-run` previews the selection. The FTS index is refreshed
-  after removal so search results stay consistent (#678).
+  pattern, and `--dry-run` previews the selection. The result is equivalent to
+  rebuilding the graph without those files: surviving referrers are re-parsed so
+  no edge is left pointing at a deleted node, and flows, communities, the FTS
+  index, and embeddings are all repaired (#678).
 - Added `--platform NAME` to `code-review-graph uninstall` to unbind a single
   platform's MCP registration while preserving the graph data and every other
   configured integration. Without `--platform` the command still performs the

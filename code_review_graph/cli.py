@@ -1763,15 +1763,15 @@ def main() -> None:
                         "from the graph. No changes made."
                     )
                 else:
-                    for file_path in targets:
-                        store.remove_file_data(file_path)
-                    # nodes_fts is an external-content FTS5 index with no delete
-                    # triggers, so refresh it to drop entries for the removed
-                    # rows and keep search results consistent (mirrors the
-                    # update -> postprocess path for deleted files).
-                    from .search import rebuild_fts_index
+                    from .forget import forget_files
 
-                    rebuild_fts_index(store)
+                    summary = forget_files(store, repo_root, targets)
+                    reparsed = summary.get("reparsed", [])
+                    if reparsed:
+                        print(
+                            f"  re-resolved {len(reparsed)} referring file(s) "
+                            "so no edges dangle"
+                        )
                     remaining = len(stored_files) - len(targets)
                     print(
                         f"\nForgot {len(targets)} file(s); "

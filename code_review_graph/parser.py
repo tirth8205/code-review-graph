@@ -2295,6 +2295,11 @@ class CodeParser:
         self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
+        # Absolute file paths to treat as absent during import resolution.
+        # ``forget`` sets this (via :meth:`exclude_files`) so a re-parsed
+        # referrer resolves exactly as it would in a build where the forgotten
+        # files never existed on disk. See ``forget.forget_files``.
+        self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
@@ -12501,22 +12506,39 @@ class CodeParser:
                         if names:
                             import_map[names[-1]] = module
 
+    def exclude_files(self, paths: set[str]) -> None:
+        """Treat these files as absent when resolving imports.
+
+        ``forget`` calls this before re-parsing the surviving referrers of a
+        forgotten file so their imports resolve exactly as they would in a
+        build where the forgotten files never existed: an import that would
+        point at a forgotten file falls back to a bare module, and the calls
+        it feeds stay bare too.
+        """
+        self._excluded_files = {str(Path(p).resolve()) for p in paths}
+        # Drop resolutions cached before the exclusions were applied.
+        self._module_file_cache.clear()
+
     def _resolve_module_to_file(
         self, module: str, file_path: str, language: str,
     ) -> Optional[str]:
         """Resolve a module/import path to an absolute file path.
 
         Uses self._module_file_cache to avoid repeated filesystem lookups.
+        Files marked via :meth:`exclude_files` resolve to ``None`` so callers
+        fall back to the bare module string, matching a build without them.
         """
         caller_dir = str(Path(file_path).parent)
         cache_key = f"{language}:{caller_dir}:{module}"
         if cache_key in self._module_file_cache:
-            return self._module_file_cache[cache_key]
-
-        resolved = self._do_resolve_module(module, file_path, language)
-        if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
-            self._module_file_cache.clear()
-        self._module_file_cache[cache_key] = resolved
+            resolved = self._module_file_cache[cache_key]
+        else:
+            resolved = self._do_resolve_module(module, file_path, language)
+            if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
+                self._module_file_cache.clear()
+            self._module_file_cache[cache_key] = resolved
+        if resolved is not None and resolved in self._excluded_files:
+            return None
         return resolved
 
     def _do_resolve_module(
