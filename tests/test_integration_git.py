@@ -352,3 +352,50 @@ def test_wiki_page_path_traversal_blocked(tmp_path: Path) -> None:
     # Attempt a path traversal — should return None
     result = get_wiki_page(str(wiki_dir), "../../etc/passwd")
     assert result is None
+
+
+def test_incremental_rename_matches_a_fresh_full_rebuild(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A committed rename must not leave graph state behind at the old path."""
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    repo = tmp_path / "rename-repo"
+    repo.mkdir()
+    assert _git(repo, "init").returncode == 0
+    assert _git(repo, "config", "user.email", "test@test.com").returncode == 0
+    assert _git(repo, "config", "user.name", "Test").returncode == 0
+
+    (repo / "a.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
+    assert _git(repo, "add", "--", "a.py").returncode == 0
+    assert _git(repo, "commit", "-m", "add a.py").returncode == 0
+
+    incremental_store = GraphStore(tmp_path / "incremental.db")
+    full_store = None
+    try:
+        full_build(repo, incremental_store)
+        assert incremental_store.get_nodes_by_file(str(repo / "a.py"))
+
+        assert _git(repo, "mv", "--", "a.py", "b.py").returncode == 0
+        assert _git(repo, "commit", "-m", "rename a.py to b.py").returncode == 0
+
+        incremental_update(repo, incremental_store)
+
+        full_store = GraphStore(tmp_path / "full.db")
+        full_build(repo, full_store)
+
+        assert set(incremental_store.get_all_files()) == set(
+            full_store.get_all_files()
+        )
+        assert (
+            incremental_store.get_stats().total_nodes
+            == full_store.get_stats().total_nodes
+        )
+        assert (
+            incremental_store.get_stats().total_edges
+            == full_store.get_stats().total_edges
+        )
+    finally:
+        incremental_store.close()
+        if full_store is not None:
+            full_store.close()
