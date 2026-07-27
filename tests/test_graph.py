@@ -425,6 +425,159 @@ class TestGraphStore:
             assert len(callers) == 1
             assert self.store.get_node(callers[0].source_qualified) is not None
 
+    def test_reindex_collision_shrink_preserves_survivor_identity_and_caller(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        survivor = next(
+            node for node in self.store.get_nodes_by_file(target_file)
+            if node.line_start == 20
+        )
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path=caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::call_render",
+                target=survivor.qualified_name, file_path=caller_file, line=2,
+            )],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [NodeInfo(kind="Function", name="render", file_path=target_file,
+                      line_start=21, line_end=25, language="python")],
+            [],
+        )
+
+        stored = self.store.get_nodes_by_file(target_file)
+        assert len(stored) == 1
+        assert stored[0].qualified_name == survivor.qualified_name
+        callers = self.store.get_edges_by_target(survivor.qualified_name)
+        assert len(callers) == 1
+        assert self.store.get_node(callers[0].target_qualified) == stored[0]
+
+        later_caller_file = "/test/later_caller.py"
+        later_caller = NodeInfo(
+            kind="Function", name="call_render", file_path=later_caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            later_caller_file,
+            [later_caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{later_caller_file}::call_render",
+                target=f"{target_file}::render", file_path=later_caller_file, line=2,
+            )],
+        )
+        callers = self.store.get_edges_by_target(survivor.qualified_name)
+        assert len(callers) == 2
+
+    def test_reindex_collision_growth_preserves_existing_identity_and_caller(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        original = NodeInfo(
+            kind="Function", name="render", file_path=target_file,
+            line_start=20, line_end=24, language="python",
+        )
+        self.store.store_file_nodes_edges(target_file, [original], [])
+        original_qn = self.store.get_nodes_by_file(target_file)[0].qualified_name
+        caller = NodeInfo(
+            kind="Function", name="call_render", file_path=caller_file,
+            line_start=1, line_end=3, language="python",
+        )
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [caller],
+            [EdgeInfo(
+                kind="CALLS", source=f"{caller_file}::call_render",
+                target=original_qn, file_path=caller_file, line=2,
+            )],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=10, line_end=12, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=21, line_end=25, language="python"),
+            ],
+            [],
+        )
+
+        survivor = self.store.get_node(original_qn)
+        assert survivor is not None
+        assert (survivor.line_start, survivor.line_end) == (21, 25)
+        callers = self.store.get_edges_by_target(original_qn)
+        assert len(callers) == 1
+        assert self.store.get_node(callers[0].target_qualified) == survivor
+
+    def test_reindex_collision_reorder_preserves_identities_and_callers(self):
+        target_file = "/test/target.py"
+        caller_file = "/test/caller.py"
+        nodes = [
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=10, line_end=12, language="python", params="(first)"),
+            NodeInfo(kind="Function", name="render", file_path=target_file,
+                     line_start=20, line_end=24, language="python", params="(second)"),
+        ]
+        self.store.store_file_nodes_edges(target_file, nodes, [])
+        original_qns = {
+            node.params: node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        caller_nodes = [
+            NodeInfo(kind="Function", name="call_first", file_path=caller_file,
+                     line_start=1, line_end=3, language="python"),
+            NodeInfo(kind="Function", name="call_second", file_path=caller_file,
+                     line_start=5, line_end=7, language="python"),
+        ]
+        self.store.store_file_nodes_edges(
+            caller_file,
+            caller_nodes,
+            [
+                EdgeInfo(
+                    kind="CALLS", source=f"{caller_file}::call_first",
+                    target=original_qns["(first)"], file_path=caller_file, line=2,
+                ),
+                EdgeInfo(
+                    kind="CALLS", source=f"{caller_file}::call_second",
+                    target=original_qns["(second)"], file_path=caller_file, line=6,
+                ),
+            ],
+        )
+
+        self.store.store_file_nodes_edges(
+            target_file,
+            [
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=10, line_end=14, language="python", params="(second)"),
+                NodeInfo(kind="Function", name="render", file_path=target_file,
+                         line_start=20, line_end=22, language="python", params="(first)"),
+            ],
+            [],
+        )
+
+        reordered = {
+            node.params: node.qualified_name
+            for node in self.store.get_nodes_by_file(target_file)
+        }
+        assert reordered == original_qns
+        for qualified_name in original_qns.values():
+            callers = self.store.get_edges_by_target(qualified_name)
+            assert len(callers) == 1
+            assert self.store.get_node(callers[0].target_qualified) is not None
+
     def test_upsert_same_colliding_definition_updates_in_place(self):
         nodes = [
             NodeInfo(kind="Function", name="render", file_path="/test/file.py",
