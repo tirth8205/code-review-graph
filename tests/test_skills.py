@@ -15,6 +15,7 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - Python 3.10 backport
     import tomli as tomllib
 
+from code_review_graph import skills as skills_module
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
@@ -676,7 +677,7 @@ class TestInjectPlatformInstructionsFiltering:
         assert set(updated) == {
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
-            ".github/code-review-graph.instruction.md",
+            ".github/instructions/code-review-graph.instructions.md",
             "CODEBUDDY.md",
         }
 
@@ -685,7 +686,7 @@ class TestInjectPlatformInstructionsFiltering:
         assert set(updated) == {
             "AGENTS.md", "GEMINI.md", ".cursorrules", ".windsurfrules",
             "QODER.md", ".kiro/steering/code-review-graph.md",
-            ".github/code-review-graph.instruction.md",
+            ".github/instructions/code-review-graph.instructions.md",
             "CODEBUDDY.md",
         }
 
@@ -697,7 +698,12 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / ".cursorrules").exists()
         assert not (tmp_path / ".windsurfrules").exists()
         assert not (tmp_path / "QODER.md").exists()
-        assert not (tmp_path / ".github" / "code-review-graph.instruction.md").exists()
+        assert not (
+            tmp_path
+            / ".github"
+            / "instructions"
+            / "code-review-graph.instructions.md"
+        ).exists()
 
     def test_cursor_writes_only_cursor_files(self, tmp_path):
         updated = inject_platform_instructions(tmp_path, target="cursor")
@@ -1205,7 +1211,8 @@ class TestInstallPlatformConfigs:
                 "gemini-cli": {**PLATFORMS["gemini-cli"], "detect": lambda: False},
             },
         ):
-            configured = install_platform_configs(tmp_path, target="all")
+            with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+                configured = install_platform_configs(tmp_path, target="all")
         assert "Codex" in configured
         assert "Claude Code" in configured
         assert "OpenCode" in configured
@@ -1619,20 +1626,27 @@ class TestCopilotPlatform:
         assert list(data["servers"].keys()).count("code-review-graph") == 1
 
     def test_copilot_instructions_file_written(self, tmp_path):
-        """inject_platform_instructions creates .github/code-review-graph.instruction.md."""
+        """Copilot instructions use VS Code's auto-loaded workspace path."""
         updated = inject_platform_instructions(tmp_path, target="copilot")
-        assert ".github/code-review-graph.instruction.md" in updated
-        instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
+        expected = ".github/instructions/code-review-graph.instructions.md"
+        assert updated == [expected]
+        instructions = tmp_path / expected
         assert instructions.exists()
         content = instructions.read_text()
         assert _CLAUDE_MD_SECTION_MARKER in content
 
     def test_copilot_instructions_idempotent(self, tmp_path):
         """Running inject twice produces identical content."""
+        instructions = (
+            tmp_path
+            / ".github"
+            / "instructions"
+            / "code-review-graph.instructions.md"
+        )
         inject_platform_instructions(tmp_path, target="copilot")
-        first = (tmp_path / ".github" / "code-review-graph.instruction.md").read_text()
+        first = instructions.read_text()
         inject_platform_instructions(tmp_path, target="copilot")
-        second = (tmp_path / ".github" / "code-review-graph.instruction.md").read_text()
+        second = instructions.read_text()
         assert first == second
 
     def test_copilot_dry_run(self, tmp_path):
@@ -1645,7 +1659,9 @@ class TestCopilotPlatform:
     def test_copilot_writes_only_copilot_instructions(self, tmp_path):
         """inject_platform_instructions with target='copilot' writes only copilot file."""
         updated = inject_platform_instructions(tmp_path, target="copilot")
-        assert updated == [".github/code-review-graph.instruction.md"]
+        assert updated == [
+            ".github/instructions/code-review-graph.instructions.md"
+        ]
         assert not (tmp_path / "AGENTS.md").exists()
         assert not (tmp_path / "GEMINI.md").exists()
         assert not (tmp_path / ".cursorrules").exists()
@@ -1667,16 +1683,19 @@ class TestCopilotCLIPlatform:
     """Tests for GitHub Copilot CLI platform support."""
 
     def test_copilot_cli_platform_entry_exists(self):
-        """PLATFORMS dict has a 'copilot-cli' key with correct metadata."""
+        """Copilot CLI uses the schema accepted by the released client."""
         assert "copilot-cli" in PLATFORMS
         copilot_cli = PLATFORMS["copilot-cli"]
         assert copilot_cli["name"] == "GitHub Copilot CLI"
-        assert copilot_cli["key"] == "servers"
+        assert copilot_cli["key"] == "mcpServers"
+        assert copilot_cli["legacy_keys"] == ("servers",)
         assert copilot_cli["format"] == "object"
         assert copilot_cli["needs_type"] is True
+        assert copilot_cli["server_type"] == "local"
+        assert copilot_cli["entry_fields"] == {"tools": ["*"]}
 
     def test_install_copilot_cli_config(self, tmp_path):
-        """install_platform_configs creates ~/.copilot/mcp-config.json with 'servers' key."""
+        """Install writes the released Copilot CLI MCP contract."""
         fake_home = tmp_path / "fakehome"
         (fake_home / ".copilot").mkdir(parents=True)
         config_path = fake_home / ".copilot" / "mcp-config.json"
@@ -1694,9 +1713,11 @@ class TestCopilotCLIPlatform:
         assert "GitHub Copilot CLI" in configured
         assert config_path.exists()
         data = json.loads(config_path.read_text())
-        assert "code-review-graph" in data["servers"]
-        entry = data["servers"]["code-review-graph"]
-        assert entry["type"] == "stdio"
+        assert "servers" not in data
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "local"
+        assert entry["tools"] == ["*"]
+        assert entry["cwd"] == str(tmp_path)
         assert "serve" in entry["args"]
 
     def test_install_copilot_cli_preserves_existing_servers(self, tmp_path):
@@ -1705,7 +1726,12 @@ class TestCopilotCLIPlatform:
         config_path = fake_home / ".copilot" / "mcp-config.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
-            json.dumps({"servers": {"other-server": {"command": "other"}}}),
+            json.dumps(
+                {
+                    "mcpServers": {"other-server": {"command": "other"}},
+                    "theme": "dark",
+                }
+            ),
             encoding="utf-8",
         )
         with patch.dict(
@@ -1720,17 +1746,154 @@ class TestCopilotCLIPlatform:
         ):
             install_platform_configs(tmp_path, target="copilot-cli")
         data = json.loads(config_path.read_text())
-        assert "other-server" in data["servers"]
-        assert "code-review-graph" in data["servers"]
+        assert data["mcpServers"]["other-server"] == {"command": "other"}
+        assert "code-review-graph" in data["mcpServers"]
+        assert data["theme"] == "dark"
+
+    def test_install_copilot_cli_migrates_empty_legacy_entry(self, tmp_path):
+        """An empty generated legacy entry must not survive migration."""
+        config_path = tmp_path / "fakehome" / ".copilot" / "mcp-config.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "current-server": {"command": "keep-current"},
+                    },
+                    "servers": {
+                        "code-review-graph": {},
+                        "legacy-server": {"command": "keep-legacy"},
+                    },
+                    "theme": "dark",
+                }
+            ),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "copilot-cli": {
+                    **PLATFORMS["copilot-cli"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="copilot-cli")
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["mcpServers"]["current-server"] == {
+            "command": "keep-current",
+        }
+        entry = data["mcpServers"]["code-review-graph"]
+        assert entry["type"] == "local"
+        assert entry["tools"] == ["*"]
+        assert data["servers"] == {
+            "legacy-server": {"command": "keep-legacy"},
+        }
+        assert data["theme"] == "dark"
+
+    def test_install_copilot_cli_drops_emptied_legacy_key(self, tmp_path):
+        """Migration removes the obsolete container when no user entries remain."""
+        config_path = tmp_path / "fakehome" / ".copilot" / "mcp-config.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({"servers": {"code-review-graph": {}}}),
+            encoding="utf-8",
+        )
+        with patch.dict(
+            PLATFORMS,
+            {
+                "copilot-cli": {
+                    **PLATFORMS["copilot-cli"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="copilot-cli")
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "servers" not in data
+        assert "code-review-graph" in data["mcpServers"]
+
+    def test_install_copilot_cli_reinstall_is_byte_for_byte_idempotent(
+        self, tmp_path
+    ):
+        """A second install must not rewrite an already valid client config."""
+        config_path = tmp_path / "fakehome" / ".copilot" / "mcp-config.json"
+        with patch.dict(
+            PLATFORMS,
+            {
+                "copilot-cli": {
+                    **PLATFORMS["copilot-cli"],
+                    "config_path": lambda root: config_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            install_platform_configs(tmp_path, target="copilot-cli")
+            first = config_path.read_bytes()
+            install_platform_configs(tmp_path, target="copilot-cli")
+            second = config_path.read_bytes()
+
+        assert second == first
 
     def test_copilot_cli_writes_only_copilot_instructions(self, tmp_path):
         """Copilot CLI injection writes its GitHub instruction file."""
         updated = inject_platform_instructions(tmp_path, target="copilot-cli")
-        assert ".github/code-review-graph.instruction.md" in updated
-        instructions = tmp_path / ".github" / "code-review-graph.instruction.md"
+        expected = ".github/instructions/code-review-graph.instructions.md"
+        assert updated == [expected]
+        instructions = tmp_path / expected
         assert instructions.exists()
         content = instructions.read_text()
         assert _CLAUDE_MD_SECTION_MARKER in content
+
+    def test_copilot_cli_reinstall_migrates_generated_legacy_instruction(
+        self, tmp_path
+    ):
+        """Reinstall removes only CRG content from the superseded path."""
+        legacy = tmp_path / ".github" / "code-review-graph.instruction.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(
+            "# User notes\n\n" + skills_module._COPILOT_SECTION,
+            encoding="utf-8",
+        )
+
+        inject_platform_instructions(tmp_path, target="copilot-cli")
+
+        assert legacy.read_text(encoding="utf-8") == "# User notes\n"
+        current = (
+            tmp_path
+            / ".github"
+            / "instructions"
+            / "code-review-graph.instructions.md"
+        )
+        assert current.exists()
+
+    def test_copilot_cli_reinstall_deletes_generated_only_legacy_instruction(
+        self, tmp_path
+    ):
+        """A legacy file containing only the generated section is removed."""
+        legacy = tmp_path / ".github" / "code-review-graph.instruction.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(skills_module._COPILOT_SECTION, encoding="utf-8")
+
+        inject_platform_instructions(tmp_path, target="copilot-cli")
+
+        assert not legacy.exists()
+
+    def test_copilot_cli_reinstall_leaves_user_legacy_instruction_untouched(
+        self, tmp_path
+    ):
+        """A user-authored file without the CRG marker is never rewritten."""
+        legacy = tmp_path / ".github" / "code-review-graph.instruction.md"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("# User instructions\n", encoding="utf-8")
+
+        inject_platform_instructions(tmp_path, target="copilot-cli")
+
+        assert legacy.read_text(encoding="utf-8") == "# User instructions\n"
 
 
 class TestDetectServeCommand:
@@ -2183,7 +2346,8 @@ class TestInstallSkillsRespectTargetPlatform:
             no_instructions=True,
         )
         with patch("builtins.input", return_value="n"):
-            crg_cli._handle_init(args)
+            with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+                crg_cli._handle_init(args)
         return (tmp_path / ".claude" / "skills").is_dir()
 
     def test_cursor_install_does_not_create_claude_skills(self, tmp_path):
