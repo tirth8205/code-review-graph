@@ -149,10 +149,16 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "copilot-cli": {
         "name": "GitHub Copilot CLI",
         "config_path": lambda root: Path.home() / ".copilot" / "mcp-config.json",
-        "key": "servers",
+        # Copilot CLI reads "mcpServers"; releases before #616 wrote
+        # "servers", which the client silently ignores.
+        "key": "mcpServers",
+        "legacy_keys": ("servers",),
         "detect": lambda: (Path.home() / ".copilot").exists(),
         "format": "object",
         "needs_type": True,
+        # Validated with the released Copilot CLI in #658.
+        "server_type": "local",
+        "entry_fields": {"tools": ["*"]},
     },
     "codebuddy": {
         "name": "CodeBuddy Code",
@@ -262,7 +268,8 @@ def _build_server_entry(
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
-        entry["type"] = "stdio"
+        entry["type"] = plat.get("server_type", "stdio")
+    entry.update(plat.get("entry_fields", {}))
     return entry
 
 
@@ -542,8 +549,21 @@ def install_platform_configs(
             arr.append(arr_entry)
             existing[server_key] = arr
         else:
+            # Remove entries written under keys the client never read, then
+            # install the validated entry under the current key.
+            migrated = False
+            for legacy_key in plat.get("legacy_keys", ()):
+                legacy = existing.get(legacy_key)
+                if (
+                    isinstance(legacy, dict)
+                    and "code-review-graph" in legacy
+                ):
+                    del legacy["code-review-graph"]
+                    if not legacy:
+                        del existing[legacy_key]
+                    migrated = True
             servers = existing.get(server_key, {})
-            if "code-review-graph" in servers:
+            if "code-review-graph" in servers and not migrated:
                 print(f"  {plat['name']}: already configured in {config_path}")
                 _record_configured(key, plat)
                 continue
@@ -1119,8 +1139,13 @@ cover what you need.
 """
 
 # Maps instruction file path → (marker, section) for files that need content
-# different from the default _CLAUDE_MD_SECTION.
+# different from the default _CLAUDE_MD_SECTION. Legacy paths remain here so
+# uninstall can identify sections written by older releases.
 _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
+    ".github/instructions/code-review-graph.instructions.md": (
+        _CLAUDE_MD_SECTION_MARKER,
+        _COPILOT_SECTION,
+    ),
     ".github/code-review-graph.instruction.md": (_CLAUDE_MD_SECTION_MARKER, _COPILOT_SECTION),
 }
 
@@ -1168,9 +1193,34 @@ _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     ".windsurfrules": ("windsurf",),
     "QODER.md": ("qoder",),
     ".kiro/steering/code-review-graph.md": ("kiro",),
-    ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
+    ".github/instructions/code-review-graph.instructions.md": ("copilot", "copilot-cli"),
     "CODEBUDDY.md": ("codebuddy",),
 }
+
+# Superseded paths written by older releases. Reinstall removes only the exact
+# generated section and leaves any user-authored content intact.
+_LEGACY_PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
+    ".github/code-review-graph.instruction.md": ("copilot", "copilot-cli"),
+}
+
+
+def _remove_legacy_instruction_file(path: Path) -> None:
+    """Strip an exact generated section from a superseded instruction file."""
+    if not path.exists():
+        return
+    content = path.read_text(encoding="utf-8", errors="replace")
+    if _CLAUDE_MD_SECTION_MARKER not in content:
+        return
+    for section in (_COPILOT_SECTION, _CLAUDE_MD_SECTION):
+        content = content.replace(section, "")
+    if _CLAUDE_MD_SECTION_MARKER in content:
+        return
+    if content.strip():
+        path.write_text(content.rstrip() + "\n", encoding="utf-8")
+        logger.info("Removed legacy instruction section from %s", path)
+    else:
+        path.unlink()
+        logger.info("Removed legacy instruction file %s", path)
 
 
 # --- Gemini CLI hooks + skills (workspace-level: .gemini/) ---
@@ -1381,6 +1431,10 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
             marker, section = _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION
         if _inject_instructions(path, marker, section):
             updated.append(filename)
+    for filename, owners in _LEGACY_PLATFORM_INSTRUCTION_FILES.items():
+        if target != "all" and target not in owners:
+            continue
+        _remove_legacy_instruction_file(repo_root / filename)
     return updated
 
 
