@@ -47,6 +47,41 @@ class TestTsconfigResolver:
             result = self.resolver.resolve_alias("@/foo", file_path)
         assert result is None
 
+    def test_resolve_alias_from_jsconfig(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "jsconfig.json").write_text(
+                '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["./src/*"]}}}',
+                encoding="utf-8",
+            )
+            (root / "src").mkdir()
+            (root / "src" / "utils.js").write_text("export const a = 1;\n", encoding="utf-8")
+
+            result = self.resolver.resolve_alias("@/utils", str(root / "main.js"))
+
+        assert result is not None
+        assert result.endswith("utils.js")
+
+    def test_tsconfig_takes_precedence_over_jsconfig(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "tsconfig.json").write_text(
+                '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["./ts-src/*"]}}}',
+                encoding="utf-8",
+            )
+            (root / "jsconfig.json").write_text(
+                '{"compilerOptions": {"baseUrl": ".", "paths": {"@/*": ["./js-src/*"]}}}',
+                encoding="utf-8",
+            )
+            for sub, ext in (("ts-src", ".ts"), ("js-src", ".js")):
+                (root / sub).mkdir()
+                (root / sub / f"utils{ext}").write_text("export const a = 1;\n", encoding="utf-8")
+
+            result = self.resolver.resolve_alias("@/utils", str(root / "main.ts"))
+
+        assert result is not None
+        assert result.endswith(str(Path("ts-src") / "utils.ts"))
+
     def test_caching(self):
         importer = str(FIXTURES / "alias_importer.ts")
         self.resolver.resolve_alias("@/lib/utils", importer)

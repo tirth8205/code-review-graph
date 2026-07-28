@@ -18,8 +18,11 @@ logger = logging.getLogger(__name__)
 # Extensions probed when resolving an alias target
 _PROBE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".vue"]
 
-# Tsconfig filenames to look for when walking up the directory tree
-_TSCONFIG_NAMES = ["tsconfig.json", "tsconfig.app.json"]
+# Tsconfig filenames to look for when walking up the directory tree.
+# ``jsconfig.json`` uses the same schema for ``compilerOptions.paths`` and is the
+# convention in plain-JS projects (Vue, Nuxt, Vite); it is checked last so that
+# ``tsconfig.json`` wins when both are present.
+_TSCONFIG_NAMES = ["tsconfig.json", "tsconfig.app.json", "jsconfig.json"]
 
 
 class TsconfigResolver:
