@@ -2,7 +2,9 @@
 
 import json
 import os
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -585,6 +587,47 @@ def _make_openai_response(vectors: list[list[float]]) -> MagicMock:
     return mock
 
 
+@pytest.fixture
+def openai_loopback_server():
+    """Serve deterministic OpenAI-compatible embeddings on loopback."""
+    payloads: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            size = int(self.headers["Content-Length"])
+            payload = json.loads(self.rfile.read(size))
+            payloads.append(payload)
+
+            dimension = payload.get("dimensions", 7)
+            response = {
+                "data": [
+                    {"embedding": [0.1] * dimension, "index": index}
+                    for index, _text in enumerate(payload["input"])
+                ],
+                "model": payload["model"],
+            }
+            body = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/v1", payloads
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 class TestIsLocalhostUrl:
     """Ensure localhost detection is robust against subdomain tricks."""
 
@@ -678,6 +721,100 @@ class TestOpenAIEmbeddingProvider:
             p.embed_query("x")
         payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
         assert payload["dimensions"] == 256
+
+    def test_loopback_auto_learned_dimension_is_never_resent(
+        self, openai_loopback_server,
+    ):
+        base_url, payloads = openai_loopback_server
+        provider = OpenAIEmbeddingProvider(
+            api_key="k",
+            base_url=base_url,
+            model="text-embedding-3-small",
+        )
+
+        assert len(provider.embed_query("first")) == 7
+        assert provider.dimension == 7
+        assert len(provider.embed_query("second")) == 7
+
+        assert len(payloads) == 2
+        assert all("dimensions" not in payload for payload in payloads)
+
+    def test_loopback_explicit_dimension_is_sent_for_custom_model_alias(
+        self, openai_loopback_server,
+    ):
+        base_url, payloads = openai_loopback_server
+        provider = OpenAIEmbeddingProvider(
+            api_key="k",
+            base_url=base_url,
+            model="azure-production-deployment",
+            dimension=4,
+        )
+
+        assert len(provider.embed_query("custom alias")) == 4
+        assert payloads == [{
+            "model": "azure-production-deployment",
+            "input": ["custom alias"],
+            "dimensions": 4,
+        }]
+
+    def test_auto_learned_dimension_omitted_for_non_v3_models(self):
+        # Many OpenAI-compatible providers (SiliconFlow, Cohere, voyage-3,
+        # custom vLLM gateways) reject the `dimensions` body field with
+        # HTTP 400. The provider auto-learns dimension from the first
+        # response and would otherwise forward it on every subsequent call.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="BAAI/bge-m3",
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            vec = p.embed_query("x")
+        assert len(vec) == 1024
+        assert p.dimension == 1024
+
+        # Second call would have auto-forwarded dimensions before the fix.
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            p.embed_query("y")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert "dimensions" not in payload, (
+            f"non-v3 model {p._model!r} should not send `dimensions`; "
+            f"got payload keys: {list(payload)}"
+        )
+
+    def test_explicit_dimension_forwarded_for_non_v3_models(self):
+        # Explicit requests must not be inferred from the model name. OpenAI-
+        # compatible gateways can expose dimension-capable models under
+        # arbitrary aliases.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="BAAI/bge-m3", dimension=1024,
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 1024]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["dimensions"] == 1024
+
+    def test_explicit_dimension_forwarded_for_v3_models(self):
+        # Regression guard: v3 models must still honor the pinned dimension.
+        p = OpenAIEmbeddingProvider(
+            api_key="k", base_url="http://localhost:3000/v1",
+            model="text-embedding-3-large", dimension=512,
+        )
+        with patch(
+            "urllib.request.urlopen",
+            return_value=_make_openai_response([[0.1] * 512]),
+        ) as mock_urlopen:
+            p.embed_query("x")
+        payload = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        assert payload["dimensions"] == 512
 
     def test_base_url_trailing_slash_stripped(self):
         p = OpenAIEmbeddingProvider(

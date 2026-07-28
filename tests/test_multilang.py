@@ -785,7 +785,8 @@ class TestPHPTestAnnotations:
     """
 
     def _parse(self, tmp_path):
-        p = tmp_path / "ExampleTest.php"
+        p = tmp_path / "tests" / "ExampleTest.php"
+        p.parent.mkdir()
         p.write_text(
             "<?php\n"
             "namespace Tests;\n\n"
@@ -797,6 +798,9 @@ class TestPHPTestAnnotations:
             "class ExampleTest extends TestCase\n"
             "{\n"
             "    public function test_prefixed_method_should_be_detected(): void\n"
+            "    {\n"
+            "    }\n\n"
+            "    public function testItAddsTwoNumbers(): void\n"
             "    {\n"
             "    }\n\n"
             "    /** @test */\n"
@@ -834,6 +838,9 @@ class TestPHPTestAnnotations:
             "    public function helperNotATest(): void\n"
             "    {\n"
             "    }\n"
+            "}\n\n"
+            "function testDatabaseAvailable(): void\n"
+            "{\n"
             "}\n",
             encoding="utf-8",
         )
@@ -844,6 +851,18 @@ class TestPHPTestAnnotations:
         m = next(n for n in nodes if n.name == "test_prefixed_method_should_be_detected")
         assert m.kind == "Test"
         assert m.is_test is True
+
+    def test_phpunit_camel_case_name_prefix_detected(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "testItAddsTwoNumbers")
+        assert m.kind == "Test"
+        assert m.is_test is True
+
+    def test_phpunit_name_prefix_does_not_mark_top_level_function(self, tmp_path):
+        nodes, _ = self._parse(tmp_path)
+        m = next(n for n in nodes if n.name == "testDatabaseAvailable")
+        assert m.kind == "Function"
+        assert m.is_test is False
 
     def test_docblock_annotation_detected(self, tmp_path):
         nodes, _ = self._parse(tmp_path)

@@ -64,7 +64,7 @@ def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
     """
     try:
         root = _resolve_root(repo_root)
-        db_path = get_db_path(root)
+        db_path = get_db_path(root, read_only=True)
         if not db_path.exists():
             return None
 
@@ -87,36 +87,36 @@ def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
         finally:
             connection.close()
 
+        provenance: dict[str, Any] = {}
         updated_at = rows.get("last_updated")
-        if not isinstance(updated_at, str) or not updated_at:
-            return None
+        if isinstance(updated_at, str) and updated_at:
+            provenance["updated_at"] = updated_at
+            try:
+                built_at = datetime.fromisoformat(updated_at)
+                # Match aware timestamps with an aware ``now`` in the same
+                # timezone; None preserves the stored naive/local format.
+                now = datetime.now(tz=built_at.tzinfo)
+                provenance["age_seconds"] = max(
+                    0, int((now - built_at).total_seconds()),
+                )
+            except (OverflowError, TypeError, ValueError):
+                # A malformed timestamp only removes the derived age. The raw
+                # timestamp and independently valid branch/SHA remain useful.
+                pass
 
-        provenance: dict[str, Any] = {"updated_at": updated_at}
-        try:
-            built_at = datetime.fromisoformat(updated_at)
-            # Match aware timestamps with an aware ``now`` in the same
-            # timezone; None preserves the stored naive/local format.
-            now = datetime.now(tz=built_at.tzinfo)
-            provenance["age_seconds"] = max(
-                0, int((now - built_at).total_seconds()),
-            )
-        except (OverflowError, TypeError, ValueError):
-            # A malformed timestamp only removes the derived age. The raw
-            # timestamp and independently valid branch/SHA remain useful.
-            pass
-
-        branch = rows.get("git_branch")
-        if isinstance(branch, str) and branch:
-            provenance["built_on_branch"] = branch
         head_sha = rows.get("git_head_sha")
         if isinstance(head_sha, str) and head_sha:
             provenance["built_at_sha"] = head_sha
-        live_head_sha = _read_live_git_head(root)
-        if live_head_sha:
-            provenance["head_sha"] = live_head_sha
-            if isinstance(head_sha, str) and head_sha:
-                provenance["head_matches_build"] = live_head_sha == head_sha
-        return provenance
+        if provenance:
+            branch = rows.get("git_branch")
+            if isinstance(branch, str) and branch:
+                provenance["built_on_branch"] = branch
+            live_head_sha = _read_live_git_head(root)
+            if live_head_sha:
+                provenance["head_sha"] = live_head_sha
+                if isinstance(head_sha, str) and head_sha:
+                    provenance["head_matches_build"] = live_head_sha == head_sha
+        return provenance or None
     except Exception:
         return None
 

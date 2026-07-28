@@ -8,9 +8,20 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ._common import _get_store, compact_response
+from ..incremental import get_db_path
+from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
 logger = logging.getLogger(__name__)
+
+
+def _not_ready(reason: str, summary: str) -> dict[str, Any]:
+    """Return a compact response that directs callers to initialize the graph."""
+    return {
+        "status": "not_ready",
+        "reason": reason,
+        "summary": summary,
+        "next_tool_suggestions": ["build_or_update_graph"],
+    }
 
 
 def _has_git_changes(root: Path, base: str) -> bool:
@@ -51,11 +62,36 @@ def get_minimal_context(
         changed_files: Explicit changed files. Auto-detected from git if None.
         repo_root: Repository root path. Auto-detected if None.
         base: Git ref for diff comparison.
+
+    Returns:
+        Compact graph context, or ``status: not_ready`` when the graph is
+        missing, empty, or known to have been built at a different Git commit.
     """
-    store, root = _get_store(repo_root)
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
+    if not db_path.is_file():
+        return _not_ready(
+            "missing_graph",
+            "No graph database found. Build the graph before requesting context.",
+        )
+
+    store, root = _get_store(str(root))
     try:
         # 1. Quick stats
         stats = store.get_stats()
+        if stats.total_nodes == 0:
+            return _not_ready(
+                "empty_graph",
+                "The graph database contains no nodes. Build the graph before requesting context.",
+            )
+
+        provenance = graph_provenance(str(root))
+        if provenance and provenance.get("head_matches_build") is False:
+            return _not_ready(
+                "stale_graph",
+                "The graph was built at a different Git commit. "
+                "Update it before requesting context.",
+            )
 
         # 2. Risk from changed files
         risk = "unknown"

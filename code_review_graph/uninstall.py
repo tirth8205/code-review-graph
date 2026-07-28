@@ -914,9 +914,12 @@ def _process_platform_configs(
     *,
     scope: str,
     dry_run: bool,
+    platforms: frozenset[str] | None = None,
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
     for platform_name, spec in skills.PLATFORMS.items():
+        if platforms is not None and platform_name not in platforms:
+            continue
         try:
             path = _absolute(spec["config_path"](repo_root))
             key = str(spec["key"])
@@ -936,25 +939,30 @@ def _process_platform_configs(
         config_scope, boundary = destination
         if config_scope != scope:
             continue
-        identity = (path, key, format_name)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        if format_name == "toml":
-            _remove_toml_entry(path, key, boundary, report, dry_run=dry_run)
-        elif format_name in {"object", "array"}:
-            _remove_mcp_entry(
-                path,
-                key=key,
-                format_name=format_name,
-                boundary=boundary,
-                report=report,
-                dry_run=dry_run,
-            )
-        else:
-            report.skipped_paths.append(
-                f"{path} ({platform_name} has unsupported config format {format_name!r})"
-            )
+        legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
+        for entry_key in (key, *legacy_keys):
+            identity = (path, entry_key, format_name)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if format_name == "toml":
+                _remove_toml_entry(
+                    path, entry_key, boundary, report, dry_run=dry_run
+                )
+            elif format_name in {"object", "array"}:
+                _remove_mcp_entry(
+                    path,
+                    key=entry_key,
+                    format_name=format_name,
+                    boundary=boundary,
+                    report=report,
+                    dry_run=dry_run,
+                )
+            else:
+                report.skipped_paths.append(
+                    f"{path} ({platform_name} has unsupported config format "
+                    f"{format_name!r})"
+                )
 
 
 def _generated_skill_slugs() -> list[str]:
@@ -992,8 +1000,17 @@ def _process_repo(
     *,
     keep_data: bool,
     dry_run: bool,
+    platforms: frozenset[str] | None = None,
 ) -> None:
-    _process_platform_configs(repo_root, home, report, scope="repo", dry_run=dry_run)
+    _process_platform_configs(
+        repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms
+    )
+    if platforms is not None:
+        # Platform-scoped unbind: remove only the MCP registration for the
+        # selected platform(s). Shared graph data, hooks, generated skills, and
+        # instruction sections are left untouched so other platforms keep
+        # working. A full ``uninstall`` (no --platform) removes everything.
+        return
     _remove_legacy_mcp_configs(
         repo_root,
         home,
@@ -1090,7 +1107,10 @@ def _process_repo(
                 relative,
                 (skills._CLAUDE_MD_SECTION_MARKER, skills._CLAUDE_MD_SECTION),
             )[1]
-            for relative in skills._PLATFORM_INSTRUCTION_FILES
+            for relative in (
+                *skills._PLATFORM_INSTRUCTION_FILES,
+                *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
+            )
         },
     }
     for relative, section in instruction_sections.items():
@@ -1113,8 +1133,14 @@ def _process_user(
     *,
     keep_data: bool,
     dry_run: bool,
+    platforms: frozenset[str] | None = None,
 ) -> None:
-    _process_platform_configs(reference_repo, home, report, scope="user", dry_run=dry_run)
+    _process_platform_configs(
+        reference_repo, home, report, scope="user", dry_run=dry_run, platforms=platforms
+    )
+    if platforms is not None:
+        # See _process_repo: platform-scoped unbind touches MCP config only.
+        return
     _remove_legacy_mcp_configs(
         reference_repo,
         home,
@@ -1223,6 +1249,24 @@ def _normalise_repo(path: Path, home: Path, report: UninstallReport) -> Path | N
     return repository_root
 
 
+def _normalise_platform_filter(platforms: Sequence[str] | None) -> frozenset[str] | None:
+    """Return the platform keys to scope an unbind to, or ``None`` for all.
+
+    ``None``, an empty selection, or an explicit ``"all"`` disables scoping and
+    restores the full uninstall. ``"claude-code"`` is accepted as an alias for
+    ``"claude"`` so the flag matches the install command's spelling.
+    """
+    if not platforms:
+        return None
+    selected: set[str] = set()
+    for name in platforms:
+        key = "claude" if name == "claude-code" else name
+        if key == "all":
+            return None
+        selected.add(key)
+    return frozenset(selected) or None
+
+
 def run(
     *,
     repo: Path | None = None,
@@ -1230,10 +1274,17 @@ def run(
     keep_data: bool = False,
     keep_user_configs: bool = False,
     dry_run: bool = False,
+    platforms: Sequence[str] | None = None,
 ) -> UninstallReport:
-    """Uninstall CRG artifacts and return a precise action report."""
+    """Uninstall CRG artifacts and return a precise action report.
+
+    When ``platforms`` names one or more specific platforms, the run is scoped
+    to *unbinding* those platforms: only their MCP server registration is
+    removed and all graph data is preserved, regardless of ``keep_data``.
+    """
     report = UninstallReport()
     home = _absolute(Path.home())
+    platform_filter = _normalise_platform_filter(platforms)
     requested = [repo if repo is not None else Path.cwd()]
     if all_repos:
         requested.extend(_registry_repo_paths(home, report))
@@ -1251,6 +1302,7 @@ def run(
             report,
             keep_data=keep_data,
             dry_run=dry_run,
+            platforms=platform_filter,
         )
 
     if not keep_user_configs:
@@ -1261,5 +1313,6 @@ def run(
             report,
             keep_data=keep_data,
             dry_run=dry_run,
+            platforms=platform_filter,
         )
     return report

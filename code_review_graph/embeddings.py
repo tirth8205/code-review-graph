@@ -369,9 +369,10 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
     from different backends (e.g. real OpenAI vs. an OpenAI-compatible
     gateway that ships different weights under the same model name).
 
-    Dimension is detected from the first response and frozen; switching the
-    ``model`` in the environment also changes ``provider.name`` and triggers
-    re-embed via the same isolation key.
+    When no dimension is explicitly requested, it is detected from the first
+    response and retained as local metadata. Switching the ``model`` in the
+    environment also changes ``provider.name`` and triggers re-embed via the
+    same isolation key.
     """
 
     _DEFAULT_BATCH_SIZE = 100
@@ -392,6 +393,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._requested_dimension = dimension
         self._dimension = dimension
         self._timeout = timeout
         self._batch_size = batch_size or self._DEFAULT_BATCH_SIZE
@@ -445,10 +447,13 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         import urllib.request
 
         body: dict[str, Any] = {"model": self._model, "input": texts}
-        # OpenAI v3 models (text-embedding-3-*) support dimension reduction;
-        # only forward the param when the user explicitly pinned one.
-        if self._dimension is not None:
-            body["dimensions"] = self._dimension
+        # Forward only a dimension explicitly requested by the user. The
+        # model name may be an Azure deployment or gateway alias, so it cannot
+        # tell us whether the endpoint accepts dimension reduction. A dimension
+        # learned from a response is local metadata and must never leak into a
+        # later request.
+        if self._requested_dimension is not None:
+            body["dimensions"] = self._requested_dimension
 
         payload = _json.dumps(body).encode("utf-8")
         req = urllib.request.Request(

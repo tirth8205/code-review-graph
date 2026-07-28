@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _QUERY_PATTERNS = {
     "callers_of": "Find all functions that call a given function",
+    "references_to": "Find all nodes that reference a given symbol",
     "callees_of": "Find all functions called by a given function",
     "imports_of": "Find all imports of a given file or module",
     "importers_of": "Find all files that import a given file or module",
@@ -234,8 +235,8 @@ def query_graph(
     """Run a predefined graph query.
 
     Args:
-        pattern: Query pattern. One of: callers_of, callees_of, imports_of,
-                 importers_of, children_of, tests_for, inheritors_of,
+        pattern: Query pattern. One of: callers_of, references_to, callees_of,
+                 imports_of, importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
                  handlers_of, endpoints_for, consumers_of, file_summary.
         target: The node name, qualified name, or file path to query about.
@@ -312,6 +313,16 @@ def query_graph(
                     if java_candidates is not None
                     else store.search_nodes(target, limit=20)
                 )
+                if pattern == "inheritors_of" and "::" not in target:
+                    exact_type_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if candidate.name == target
+                        and candidate.kind
+                        in {"Class", "Interface", "Type", "Struct", "Enum", "Trait"}
+                    ]
+                    if exact_type_candidates:
+                        candidates = exact_type_candidates
                 if len(candidates) == 1:
                     node = candidates[0]
                     target = node.qualified_name
@@ -370,7 +381,10 @@ def query_graph(
                     if node.language == "cpp"
                     else 0
                 )
-                for e in store.iter_edges_by_target_name(node.name):
+                for e in store.iter_edges_by_target_name(
+                    node.name,
+                    language=node.language or None,
+                ):
                     # A C++ overload set deliberately keeps the target bare.
                     # Its candidates support disambiguation, but do not prove
                     # that any one exact overload was called.
@@ -386,7 +400,22 @@ def query_graph(
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
                         if caller:
-                            add_result(node_to_dict(caller), e)
+                            caller_result = node_to_dict(caller)
+                            caller_result["target_resolution"] = "unresolved"
+                            add_result(caller_result, e)
+
+        elif pattern == "references_to":
+            seen_reference_sources: set[str] = set()
+            for e in store.iter_edges_by_target(qn):
+                if (
+                    e.kind != "REFERENCES"
+                    or e.source_qualified in seen_reference_sources
+                ):
+                    continue
+                source = store.get_node(e.source_qualified)
+                if source:
+                    seen_reference_sources.add(e.source_qualified)
+                    add_result(node_to_dict(source), e)
 
         elif pattern == "callees_of":
             seen_targets: set[str] = set()
@@ -526,6 +555,7 @@ def query_graph(
                 if t.qualified_name not in seen and t.is_test:
                     result = node_to_dict(t)
                     result["indirect"] = False
+                    result["inferred_by"] = "naming_convention"
                     add_result(result)
                     seen.add(t.qualified_name)
 
@@ -540,7 +570,9 @@ def query_graph(
             # (e.g. "sample.dart::Animal"). Search by plain name too. See: #87
             if total_results == 0 and node:
                 for kind in ("INHERITS", "IMPLEMENTS"):
-                    for e in store.iter_edges_by_target_name(node.name, kind=kind):
+                    for e in store.iter_edges_by_target_name(
+                        node.name, kind=kind, language=node.language or None,
+                    ):
                         child = store.get_node(e.source_qualified)
                         if child:
                             add_result(node_to_dict(child), e)

@@ -56,6 +56,16 @@ _SQL_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# dbt model dependencies: {{ ref('model') }}, {{ ref('package', 'model') }}
+# and {{ source('source_name', 'table') }}. String-literal arguments only —
+# dynamic ref() calls cannot be resolved statically.
+_DBT_REF_RE = re.compile(
+    r"\{\{-?\s*(ref|source)\s*\(\s*"
+    r"['\"]([^'\"]+)['\"]"
+    r"(?:\s*,\s*['\"]([^'\"]+)['\"])?"
+    r"\s*\)",
+)
+
 _PYTHON_STAR_CACHE_MAX = 15_000
 _PYTHON_STAR_EXPORT_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
 _PYTHON_STAR_EXPORT_CACHE_LOCK = threading.RLock()
@@ -440,6 +450,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_PARSER_LOAD_TIMEOUT_SECONDS = 5.0
 _PARSER_PROBE_RESULTS: dict[str, bool] = {}
+_PARSER_PROBE_FAILURE_DETAILS: dict[str, str] = {}
 _PARSER_PROBE_LOCK = threading.Lock()
 _EXPECTED_PARSER_LOAD_ERRORS = (ImportError, LookupError, OSError, ValueError)
 
@@ -468,17 +479,32 @@ def _run_parser_load_probe(grammar: str, timeout_seconds: float) -> bool:
     )
     try:
         completed = subprocess.run(
-            [sys.executable, "-I", "-c", code, grammar],
+            [sys.executable, "-c", code, grammar],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=timeout_seconds,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        _PARSER_PROBE_FAILURE_DETAILS[grammar] = str(exc)
         logger.debug("tree-sitter parser probe failed for %s: %s", grammar, exc)
         return False
-    return completed.returncode == 0
+    if completed.returncode == 0:
+        _PARSER_PROBE_FAILURE_DETAILS.pop(grammar, None)
+        return True
+
+    raw_stderr = getattr(completed, "stderr", b"")
+    if isinstance(raw_stderr, bytes):
+        stderr = raw_stderr.decode("utf-8", errors="replace")
+    else:
+        stderr = str(raw_stderr)
+    detail = next(
+        (line.strip() for line in reversed(stderr.splitlines()) if line.strip()),
+        f"probe exited with status {completed.returncode}",
+    )
+    _PARSER_PROBE_FAILURE_DETAILS[grammar] = detail[:500]
+    return False
 
 
 def _parser_load_probe_succeeds(
@@ -503,10 +529,18 @@ def _parser_load_probe_succeeds(
         result = _run_parser_load_probe(grammar, timeout)
         _PARSER_PROBE_RESULTS[grammar] = result
         if not result:
-            logger.warning(
-                "Skipping unavailable tree-sitter parser for %s",
-                grammar,
-            )
+            detail = _PARSER_PROBE_FAILURE_DETAILS.get(grammar)
+            if detail:
+                logger.warning(
+                    "Skipping unavailable tree-sitter parser for %s: %s",
+                    grammar,
+                    detail,
+                )
+            else:
+                logger.warning(
+                    "Skipping unavailable tree-sitter parser for %s",
+                    grammar,
+                )
         return result
 
 
@@ -520,6 +554,7 @@ def _clear_parser_probe_cache() -> None:
     """Clear process-level probe state (used by focused tests)."""
     with _PARSER_PROBE_LOCK:
         _PARSER_PROBE_RESULTS.clear()
+        _PARSER_PROBE_FAILURE_DETAILS.clear()
 
 
 def _load_tree_sitter_parser(grammar: str):
@@ -804,8 +839,19 @@ _TASK_META_KEYS: frozenset[str] = frozenset({
 _CLASS_TYPES: dict[str, list[str]] = {
     "python": ["class_definition"],
     "javascript": ["class_declaration", "class"],
-    "typescript": ["class_declaration", "class"],
-    "tsx": ["class_declaration", "class"],
+    # TS types are declarations, not just runtime classes: an interface or type
+    # alias is the thing callers depend on, so it needs a node of its own the way
+    # Java/C#/PHP interfaces do. Without them a types-only module (types.ts,
+    # *.d.ts) contributes zero symbol nodes and its blast radius collapses to
+    # whole-file IMPORTS_FROM fan-out. See: #737
+    "typescript": [
+        "class_declaration", "class",
+        "interface_declaration", "type_alias_declaration", "enum_declaration",
+    ],
+    "tsx": [
+        "class_declaration", "class",
+        "interface_declaration", "type_alias_declaration", "enum_declaration",
+    ],
     "go": ["type_declaration"],
     # impl_item is a scope for methods, not a second type definition. It is
     # dispatched separately so repeated impl blocks cannot overwrite structs.
@@ -873,6 +919,20 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # _extract_hcl_constructs.
     "hcl": [],
 }
+
+# TS/TSX heritage clauses. Classes wrap theirs in class_heritage; interfaces use
+# extends_type_clause. A type_identifier inside one is already covered by an
+# INHERITS edge, so it must not also emit REFERENCES.
+_TS_HERITAGE_CLAUSES = frozenset({
+    "extends_clause", "implements_clause", "extends_type_clause",
+})
+
+# TS/TSX declarations whose ``name`` field is a type_identifier. That occurrence
+# is the definition site, not a use of the type.
+_TS_TYPE_DECLARATIONS = frozenset({
+    "class_declaration", "abstract_class_declaration", "interface_declaration",
+    "type_alias_declaration", "enum_declaration",
+})
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
     "python": ["function_definition"],
@@ -1178,6 +1238,7 @@ _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
+_JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 _SPRING_REQUEST_MAPPINGS = {
     "DeleteMapping": ("DELETE",),
     "GetMapping": ("GET",),
@@ -2293,8 +2354,14 @@ class CodeParser:
 
     def __init__(self, repo_root: Optional[Path] = None) -> None:
         self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
+        self._dbt_model_paths_cache: dict[Path, tuple[Path, ...]] = {}
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
+        # Absolute file paths to treat as absent during import resolution.
+        # ``forget`` sets this (via :meth:`exclude_files`) so a re-parsed
+        # referrer resolves exactly as it would in a build where the forgotten
+        # files never existed on disk. See ``forget.forget_files``.
+        self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
@@ -4057,6 +4124,12 @@ class CodeParser:
 
         Data dependencies (FROM/JOIN table references) are recorded as
         IMPORTS_FROM edges so the impact-radius query can follow them.
+
+        dbt models use a dedicated extraction instead: one Class node per
+        model, named after the file stem, with IMPORTS_FROM edges from the
+        Jinja dependency calls. Within a dbt project, model membership comes
+        from ``model-paths`` in ``dbt_project.yml``; without project context,
+        a ``ref()`` / ``source()`` call remains a best-effort content signal.
         """
         text = source.decode("utf-8", errors="replace")
         file_path_str = str(path)
@@ -4074,6 +4147,19 @@ class CodeParser:
             language="sql",
             is_test=test_file,
         ))
+
+        # --- dbt model pass ---
+        # A dbt model has no DDL (dbt wraps the SELECT at build time), its
+        # dependencies live in Jinja calls the FROM/JOIN regex cannot see,
+        # and the plain-SQL passes below would only pick up CTE names as
+        # phantom IMPORTS_FROM targets. Handle it separately and skip them.
+        dbt_refs = list(_DBT_REF_RE.finditer(text))
+        dbt_model_path = self._is_dbt_model_path(path)
+        if dbt_model_path is True or (dbt_model_path is None and dbt_refs):
+            self._extract_dbt_model(
+                path, text, dbt_refs, file_path_str, test_file, nodes, edges,
+            )
+            return nodes, edges
 
         # --- tree-sitter pass ---
         parser = self._get_parser("sql")
@@ -4123,6 +4209,126 @@ class CodeParser:
                 ))
 
         return nodes, edges
+
+    def _is_dbt_model_path(self, path: Path) -> Optional[bool]:
+        """Return whether *path* belongs to a configured dbt model directory.
+
+        ``None`` means there is no enclosing dbt project in this parser's
+        repository context, so callers may use content sniffing as a fallback.
+        """
+        if self._repo_root is None:
+            return None
+
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(self._repo_root)
+        except ValueError:
+            return None
+
+        directory = resolved_path.parent
+        while True:
+            project_file = directory / "dbt_project.yml"
+            if project_file.is_file():
+                return any(
+                    resolved_path.is_relative_to(model_path)
+                    for model_path in self._dbt_model_paths(project_file)
+                )
+            if directory == self._repo_root:
+                return None
+            parent = directory.parent
+            if parent == directory or not parent.is_relative_to(self._repo_root):
+                return None
+            directory = parent
+
+    def _dbt_model_paths(self, project_file: Path) -> tuple[Path, ...]:
+        """Read and cache the model directories for one dbt project."""
+        cached = self._dbt_model_paths_cache.get(project_file)
+        if cached is not None:
+            return cached
+
+        configured_paths: object = ["models"]
+        if _yaml is not None:
+            try:
+                config = _yaml.safe_load(project_file.read_text(encoding="utf-8"))
+                if isinstance(config, dict):
+                    configured_paths = config.get("model-paths", ["models"])
+            except (OSError, _yaml.YAMLError):
+                configured_paths = ["models"]
+
+        if isinstance(configured_paths, str):
+            configured_paths = [configured_paths]
+        if not isinstance(configured_paths, list):
+            configured_paths = ["models"]
+
+        model_paths = tuple(
+            (project_file.parent / configured_path).resolve()
+            for configured_path in configured_paths
+            if isinstance(configured_path, str) and configured_path
+        )
+        self._dbt_model_paths_cache[project_file] = model_paths
+        return model_paths
+
+    def _extract_dbt_model(
+        self,
+        path: Path,
+        text: str,
+        dbt_refs: list[re.Match],
+        file_path_str: str,
+        test_file: bool,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> None:
+        """Extract a dbt model file: one Class node plus its Jinja deps.
+
+        dbt materializes each model file as a table or view named after the
+        file stem, so the stem is the node name.
+
+        - `{{ ref('m') }}` → IMPORTS_FROM target `m`
+        - `{{ ref('pkg', 'm') }}` → IMPORTS_FROM target `pkg.m`
+        - `{{ source('src', 'tbl') }}` → IMPORTS_FROM target `src.tbl`
+          (kept qualified: sources are external tables, not project models,
+          so the target must not collide with a model node of the same name)
+        """
+        model_name = path.stem
+        qualified = f"{file_path_str}::{model_name}"
+        nodes.append(NodeInfo(
+            kind="Class",
+            name=model_name,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=text.count("\n") + 1,
+            language="sql",
+            is_test=test_file,
+            extra={"sql_kind": "dbt_model"},
+        ))
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=file_path_str,
+            target=qualified,
+            file_path=file_path_str,
+            line=1,
+        ))
+
+        seen_targets: set[str] = set()
+        for m in dbt_refs:
+            func, first_arg, second_arg = m.group(1), m.group(2), m.group(3)
+            if func == "source":
+                if second_arg is None:
+                    continue  # source() requires two args; malformed call
+                target = f"{first_arg}.{second_arg}"
+            elif second_arg is not None:
+                target = f"{first_arg}.{second_arg}"
+            else:
+                target = first_arg
+            if target and target != model_name and target not in seen_targets:
+                seen_targets.add(target)
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source=file_path_str,
+                    target=target,
+                    file_path=file_path_str,
+                    line=text[: m.start()].count("\n") + 1,
+                ))
 
     def _walk_sql_tree(
         self,
@@ -4277,6 +4483,26 @@ class CodeParser:
                 continue
             receiver = edge.extra.get("receiver")
             has_receiver = bool(receiver)
+            if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
+                # JS/TS calls retain their full member expression as evidence
+                # (``app.handle``) while keeping the method name (``handle``)
+                # as the fallback target for external calls. Prefer the full
+                # expression when it identifies a same-file member-assigned
+                # function; otherwise preserve the existing bare-name
+                # resolution behavior.
+                member_call = edge.extra.get("member_call")
+                member_candidates = symbols.get(member_call, [])
+                if member_candidates:
+                    edge = EdgeInfo(
+                        kind=edge.kind,
+                        source=edge.source,
+                        target=member_candidates[0][0],
+                        file_path=edge.file_path,
+                        line=edge.line,
+                        extra=edge.extra,
+                    )
+                    resolved.append(edge)
+                    continue
             cpp_lexical_receiver = is_cpp and receiver == "this"
             if (
                 is_cpp
@@ -4549,7 +4775,7 @@ class CodeParser:
         return resolved
 
     _TYPED_CALL_LANGUAGES = frozenset({
-        "python", "kotlin", "java", "javascript", "typescript", "tsx",
+        "python", "kotlin", "java", "javascript", "typescript", "tsx", "php",
     })
     _TRANSPARENT_TYPE_WRAPPERS = frozenset({"Annotated", "Optional", "Type"})
     _NON_RECEIVER_TYPE_NAMES = frozenset({
@@ -4570,9 +4796,11 @@ class CodeParser:
         """Collect evidence-backed targets for calls on typed receivers.
 
         The result is keyed by source line, receiver, and method so the normal
-        call extractor remains the single producer of CALLS edges. Only
-        repository-local imported types and same-file classes are qualified;
-        unknown or ambiguous types keep their existing bare targets.
+        call extractor remains the single producer of CALLS edges. Statically
+        typed receivers resolve directly when their class is repository-local.
+        PHP variables assigned from ``new Type`` retain a bare parse-time target
+        plus the constructed class scope for conservative graph-wide resolution.
+        Unknown or ambiguous types keep their existing bare targets.
         """
         if language not in self._TYPED_CALL_LANGUAGES:
             return {}
@@ -4586,6 +4814,7 @@ class CodeParser:
             "javascript": {"statement_block"},
             "typescript": {"statement_block"},
             "tsx": {"statement_block"},
+            "php": {"compound_statement"},
         }.get(language, set())
         targets: dict[tuple[int, str, str], tuple[str, str, str]] = {}
 
@@ -4622,11 +4851,18 @@ class CodeParser:
                 return
 
             new_bindings = self._typed_bindings_from_node(node, language)
-            if new_bindings:
+            assigned_names = (
+                self._php_assigned_variables(node)
+                if language == "php"
+                else set()
+            )
+            if new_bindings or assigned_names:
                 # Initializers are evaluated before their declaration becomes
                 # visible, so visit children with the previous environment.
                 for child in node.children:
                     walk(child, bindings, class_fields, depth + 1)
+                for name in assigned_names:
+                    bindings.pop(name, None)
                 bindings.update(new_bindings)
                 return
 
@@ -4636,7 +4872,11 @@ class CodeParser:
                 )
                 if receiver and method:
                     type_name = bindings.get(receiver)
-                    evidence = "typed_receiver"
+                    evidence = (
+                        "constructed_receiver"
+                        if language == "php"
+                        else "typed_receiver"
+                    )
                     if type_name is None and receiver[:1].isupper():
                         if receiver in import_map or receiver in defined_names:
                             type_name = receiver
@@ -4831,7 +5071,45 @@ class CodeParser:
                 node.child_by_field_name("type"),
             )
 
+        elif language == "php" and node.type == "assignment_expression":
+            name_node = node.child_by_field_name("left")
+            value_node = node.child_by_field_name("right")
+            if (
+                name_node is not None
+                and name_node.type == "variable_name"
+                and value_node is not None
+                and value_node.type == "object_creation_expression"
+            ):
+                type_node = next(
+                    (
+                        child
+                        for child in value_node.children
+                        if child.type in ("name", "qualified_name")
+                    ),
+                    None,
+                )
+                if type_node is not None:
+                    name = name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    type_name = type_node.text.decode(
+                        "utf-8", errors="replace",
+                    ).strip("\\")
+                    if name and type_name:
+                        result[name] = type_name
+
         return result
+
+    @staticmethod
+    def _php_assigned_variables(node) -> set[str]:
+        """Return simple PHP variables invalidated by one assignment."""
+        if node.type != "assignment_expression":
+            return set()
+        name_node = node.child_by_field_name("left")
+        if name_node is None or name_node.type != "variable_name":
+            return set()
+        name = name_node.text.decode("utf-8", errors="replace")
+        return {name} if name else set()
 
     @classmethod
     def _store_typed_binding(cls, result: dict[str, str], name_node, type_node) -> None:
@@ -4884,12 +5162,21 @@ class CodeParser:
         import_map: dict[str, str],
         defined_names: set[str],
     ) -> Optional[str]:
+        if language == "php":
+            normalized = type_name.strip("\\")
+            if not normalized:
+                return None
+            local_name = normalized.rsplit("\\", 1)[-1]
+            imported = import_map.get(local_name.casefold())
+            scope = imported or normalized
+            return f"{scope}::{method}"
+
         base_type = self._base_type_name(type_name)
         if not base_type:
             return None
         if base_type in import_map:
             resolved = self._resolve_imported_symbol(
-                base_type,
+                self._js_imported_symbol_name(base_type, import_map),
                 import_map[base_type],
                 file_path,
                 language,
@@ -4919,10 +5206,19 @@ class CodeParser:
                     "receiver_type": type_name,
                     "receiver_resolution": evidence_kind,
                 })
+                resolved_target = target
+                if evidence_kind == "constructed_receiver":
+                    # Keep PHP parse-only CALLS output backward-compatible
+                    # (bare method target) while preserving the constructed
+                    # class scope for the graph-wide resolver.
+                    scope, separator, _ = target.rpartition("::")
+                    if separator and scope:
+                        extra["receiver_scope"] = scope
+                    resolved_target = edge.target
                 edge = EdgeInfo(
                     kind=edge.kind,
                     source=edge.source,
-                    target=target,
+                    target=resolved_target,
                     file_path=edge.file_path,
                     line=edge.line,
                     extra=extra,
@@ -5821,6 +6117,18 @@ class CodeParser:
             ):
                 continue
 
+            # --- JS/TS member-assigned functions (app.handle = function () {}) ---
+            if (
+                language in ("javascript", "typescript", "tsx")
+                and node_type == "expression_statement"
+                and self._extract_js_member_functions(
+                    child, source, language, file_path, nodes, edges,
+                    enclosing_class, enclosing_func,
+                    import_map, defined_names, _depth,
+                )
+            ):
+                continue
+
             # --- Functions ---
             if node_type in func_types and self._extract_functions(
                 child, source, language, file_path, nodes, edges,
@@ -5855,6 +6163,14 @@ class CodeParser:
                 and node_type in ("jsx_opening_element", "jsx_self_closing_element")
             ):
                 self._extract_jsx_component_call(
+                    child, language, file_path, edges,
+                    enclosing_class, enclosing_func,
+                    import_map, defined_names,
+                )
+
+            # --- TS type-position references ---
+            if language in ("typescript", "tsx") and node_type == "type_identifier":
+                self._extract_ts_type_reference(
                     child, language, file_path, edges,
                     enclosing_class, enclosing_func,
                     import_map, defined_names,
@@ -8128,6 +8444,148 @@ class CodeParser:
         )
         return True
 
+    def _extract_js_member_functions(
+        self,
+        child,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Handle JS/TS member-assigned functions.
+
+        Patterns handled (LHS is a ``member_expression``, RHS is a function):
+          app.handle = function handle(req, res) {}
+          Router.prototype.dispatch = (req) => {}
+          exports.render = function () {}
+
+        These prototype- and module-augmentation patterns carry the entire
+        public API of Express, Koa and many older JS modules, but were
+        previously invisible to the graph: only ``const x = fn``
+        (:func:`_extract_js_var_functions`) and class fields
+        (:func:`_extract_js_field_function`) produced Function nodes. The node
+        is qualified by its full member path (``file::app.handle``), matching
+        the ``file::Class.method`` shape used elsewhere.
+
+        Returns True if a function was extracted, so the caller can skip
+        generic recursion.
+        """
+        # ``child`` is the expression_statement wrapping the assignment.
+        assign = None
+        if child.type == "assignment_expression":
+            assign = child
+        else:
+            for sub in child.children:
+                if sub.type == "assignment_expression":
+                    assign = sub
+                    break
+        if assign is None:
+            return False
+
+        left = assign.child_by_field_name("left")
+        right = assign.child_by_field_name("right")
+        if left is None or right is None:
+            return False
+        if left.type != "member_expression":
+            return False
+        if right.type not in self._JS_FUNC_VALUE_TYPES:
+            return False
+
+        # An assignment nested in a function belongs to that function's
+        # runtime scope, not to the module-level object namespace.  Without
+        # lexical scope in the member name, identical assignments in sibling
+        # functions would both become ``file::obj.method`` and produce
+        # duplicate CONTAINS targets. Top-level lexical blocks have the same
+        # problem, so only direct program statements have a stable identity.
+        if (
+            enclosing_func
+            or child.parent is None
+            or child.parent.type != "program"
+        ):
+            return False
+
+        member_name = self._get_js_static_member_path(left)
+        if member_name is None:
+            return False
+
+        is_test = _is_test_function(member_name, file_path)
+        kind = "Test" if is_test else "Function"
+        qualified = self._qualify(member_name, file_path, enclosing_class)
+        params = self._get_params(right, language, source)
+        ret_type = self._get_return_type(right, language, source)
+
+        nodes.append(NodeInfo(
+            kind=kind,
+            name=member_name,
+            file_path=file_path,
+            line_start=child.start_point[0] + 1,
+            line_end=child.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            params=params,
+            return_type=ret_type,
+            is_test=is_test,
+        ))
+        container = (
+            self._qualify(enclosing_class, file_path, None)
+            if enclosing_class else file_path
+        )
+        edges.append(EdgeInfo(
+            kind="CONTAINS",
+            source=container,
+            target=qualified,
+            file_path=file_path,
+            line=child.start_point[0] + 1,
+        ))
+
+        # Recurse into the function body for calls, attributing them to the
+        # member function.
+        self._extract_from_tree(
+            right, source, language, file_path, nodes, edges,
+            enclosing_class=enclosing_class,
+            enclosing_func=member_name,
+            import_map=import_map,
+            defined_names=defined_names,
+            _depth=_depth + 1,
+        )
+        return True
+
+    @staticmethod
+    def _get_js_static_member_path(node) -> Optional[str]:
+        """Return a stable identifier-only JS/TS member path."""
+        if node.type != "member_expression":
+            return None
+        text = node.text.decode("utf-8", errors="replace")
+        if not text or "[" in text or "\n" in text:
+            return None
+
+        parts: list[str] = []
+        current = node
+        while current.type == "member_expression":
+            object_node = current.child_by_field_name("object")
+            property_node = current.child_by_field_name("property")
+            if (
+                object_node is None
+                or property_node is None
+                or property_node.type not in ("identifier", "property_identifier")
+            ):
+                return None
+            parts.append(
+                property_node.text.decode("utf-8", errors="replace"),
+            )
+            current = object_node
+
+        if current.type not in ("identifier", "this"):
+            return None
+        parts.append(current.text.decode("utf-8", errors="replace"))
+        return ".".join(reversed(parts))
+
     @staticmethod
     def _get_java_annotations(class_node) -> list[str]:
         """Return annotation names from the modifiers child of a Java class/method node."""
@@ -9602,6 +10060,14 @@ class CodeParser:
             decorators = tuple(deco_list)
 
         is_test = _is_test_function(name, file_path, decorators)
+        # PHPUnit's name convention is ``test*`` (not only ``test_*``).
+        if (
+            language == "php"
+            and child.type == "method_declaration"
+            and _is_test_file(file_path)
+            and name.startswith("test")
+        ):
+            is_test = True
         kind = "Test" if is_test else "Function"
 
         parent_name = enclosing_class
@@ -9962,6 +10428,10 @@ class CodeParser:
             # uses this evidence during parsing, and the Spring DI resolver
             # consumes the same metadata for Java injected fields.
             call_extra: dict = {}
+            if language in ("javascript", "typescript", "tsx"):
+                member_call = self._get_js_member_call_name(child)
+                if member_call:
+                    call_extra["member_call"] = member_call
             if (
                 language in self._TYPED_CALL_LANGUAGES
                 or language in ("cpp", "rust")
@@ -10055,6 +10525,23 @@ class CodeParser:
 
         return False
 
+    @staticmethod
+    def _get_js_member_call_name(node) -> Optional[str]:
+        """Return a static JS/TS member-call expression, if present.
+
+        ``_get_call_name`` intentionally reduces ``app.handle()`` to
+        ``handle`` for general method-call handling. Retain ``app.handle`` as
+        supplemental evidence so the same-file resolver can link it to a
+        member-assigned definition without changing unresolved external calls.
+        Computed and multiline expressions are intentionally excluded.
+        """
+        callee = node.child_by_field_name("function")
+        if callee is None and node.children:
+            callee = node.children[0]
+        if callee is None or callee.type != "member_expression":
+            return None
+        return CodeParser._get_js_static_member_path(callee)
+
     def _get_member_call_receiver_method(
         self,
         node,
@@ -10066,6 +10553,22 @@ class CodeParser:
         receiver so class-field annotations can resolve them. More complex
         receiver expressions are deliberately left unresolved.
         """
+        if language == "php" and node.type in (
+            "member_call_expression",
+            "nullsafe_member_call_expression",
+        ):
+            receiver = node.child_by_field_name("object")
+            method = node.child_by_field_name("name")
+            if method is None:
+                return None, None
+            method_name = method.text.decode("utf-8", errors="replace")
+            if receiver is None or receiver.type != "variable_name":
+                return None, method_name
+            return (
+                receiver.text.decode("utf-8", errors="replace"),
+                method_name,
+            )
+
         if language == "rust" and node.type == "call_expression":
             callee = node.child_by_field_name("function")
             while callee is not None and callee.type == "generic_function":
@@ -11050,6 +11553,75 @@ class CodeParser:
         "true", "false", "null", "undefined", "None", "True", "False",
         "self", "this", "cls", "super",
     })
+
+    def _extract_ts_type_reference(
+        self,
+        child,
+        language: str,
+        file_path: str,
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+    ) -> None:
+        """Emit a ``REFERENCES`` edge for a type used in a TS type position.
+
+        ``function summarize(items: Finding[])`` is a real dependency on
+        ``Finding``, but a type annotation is not call syntax, so neither
+        _extract_calls nor _extract_value_references sees it and callers_of on
+        an interface stays empty.
+
+        ``REFERENCES`` (0.6 in IMPACT_EDGE_WEIGHTS) rather than ``CALLS`` (1.0):
+        a type use is a weaker signal than an invocation, and folding the two
+        together would let type churn outrank call churn in impact ranking.
+        """
+        parent = child.parent
+        if parent is not None:
+            # The declaration's own name is a definition, not a use. Compare by
+            # byte span: child_by_field_name returns a fresh wrapper object, so
+            # identity/equality checks against *child* are unreliable.
+            if parent.type in _TS_TYPE_DECLARATIONS:
+                name_node = parent.child_by_field_name("name")
+                if (
+                    name_node is not None
+                    and name_node.start_byte == child.start_byte
+                    and name_node.end_byte == child.end_byte
+                ):
+                    return
+            # extends/implements are already covered by INHERITS edges. Generic
+            # bases add a ``generic_type`` wrapper, so walk up to the clause.
+            # Do not suppress a separate imported type used as a type argument:
+            # ``extends Base<Dependency>`` inherits Base but references Dependency.
+            ancestor = parent
+            inside_type_arguments = False
+            while ancestor is not None:
+                if ancestor.type == "type_arguments":
+                    inside_type_arguments = True
+                if ancestor.type in _TS_HERITAGE_CLAUSES:
+                    if not inside_type_arguments:
+                        return
+                    break
+                if ancestor.type in _TS_TYPE_DECLARATIONS:
+                    break
+                ancestor = ancestor.parent
+
+        # Attribute to the enclosing function, else the enclosing type, else the
+        # file — so `interface Wrapper { nested: Verdict }` names Wrapper as the
+        # dependent rather than collapsing to the whole module.
+        if enclosing_func:
+            caller = self._qualify(enclosing_func, file_path, enclosing_class)
+        elif enclosing_class:
+            caller = self._qualify(enclosing_class, file_path, None)
+        else:
+            caller = file_path
+
+        self._emit_reference_if_known(
+            child.text.decode("utf-8", errors="replace"),
+            language, file_path, caller, edges,
+            import_map or {}, defined_names or set(),
+            line=child.start_point[0] + 1,
+        )
 
     def _extract_value_references(
         self,
@@ -12475,6 +13047,9 @@ class CodeParser:
             if local_name:
                 import_map[local_name] = original.strip()
 
+        elif language == "php":
+            import_map.update(self._php_import_bindings(node))
+
     def _collect_js_import_names(
         self, clause_node, module: str, import_map: dict[str, str],
     ) -> None:
@@ -12492,6 +13067,8 @@ class CodeParser:
                 for spec in child.children:
                     if spec.type == "import_specifier":
                         # Could be: name or name as alias
+                        imported_node = spec.child_by_field_name("name")
+                        alias_node = spec.child_by_field_name("alias")
                         names = [
                             s.text.decode("utf-8", errors="replace")
                             for s in spec.children
@@ -12499,7 +13076,43 @@ class CodeParser:
                         ]
                         # Last identifier is the local name
                         if names:
-                            import_map[names[-1]] = module
+                            local_name = names[-1]
+                            import_map[local_name] = module
+                            imported_name = (
+                                imported_node.text.decode(
+                                    "utf-8", errors="replace",
+                                )
+                                if imported_node is not None
+                                else names[0]
+                            )
+                            if alias_node is not None and imported_name != local_name:
+                                import_map[
+                                    f"{_JS_IMPORT_ORIGINAL_PREFIX_KEY}{local_name}"
+                                ] = imported_name
+
+    @staticmethod
+    def _js_imported_symbol_name(
+        local_name: str,
+        import_map: dict[str, str],
+    ) -> str:
+        """Return the exported name behind a local JS/TS import alias."""
+        return import_map.get(
+            f"{_JS_IMPORT_ORIGINAL_PREFIX_KEY}{local_name}",
+            local_name,
+        )
+
+    def exclude_files(self, paths: set[str]) -> None:
+        """Treat these files as absent when resolving imports.
+
+        ``forget`` calls this before re-parsing the surviving referrers of a
+        forgotten file so their imports resolve exactly as they would in a
+        build where the forgotten files never existed: an import that would
+        point at a forgotten file falls back to a bare module, and the calls
+        it feeds stay bare too.
+        """
+        self._excluded_files = {str(Path(p).resolve()) for p in paths}
+        # Drop resolutions cached before the exclusions were applied.
+        self._module_file_cache.clear()
 
     def _resolve_module_to_file(
         self, module: str, file_path: str, language: str,
@@ -12507,16 +13120,20 @@ class CodeParser:
         """Resolve a module/import path to an absolute file path.
 
         Uses self._module_file_cache to avoid repeated filesystem lookups.
+        Files marked via :meth:`exclude_files` resolve to ``None`` so callers
+        fall back to the bare module string, matching a build without them.
         """
         caller_dir = str(Path(file_path).parent)
         cache_key = f"{language}:{caller_dir}:{module}"
         if cache_key in self._module_file_cache:
-            return self._module_file_cache[cache_key]
-
-        resolved = self._do_resolve_module(module, file_path, language)
-        if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
-            self._module_file_cache.clear()
-        self._module_file_cache[cache_key] = resolved
+            resolved = self._module_file_cache[cache_key]
+        else:
+            resolved = self._do_resolve_module(module, file_path, language)
+            if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
+                self._module_file_cache.clear()
+            self._module_file_cache[cache_key] = resolved
+        if resolved is not None and resolved in self._excluded_files:
+            return None
         return resolved
 
     def _do_resolve_module(
@@ -13140,7 +13757,10 @@ class CodeParser:
             if language == "julia":
                 return import_map[call_name]
             resolved = self._resolve_imported_symbol(
-                call_name, import_map[call_name], file_path, language,
+                self._js_imported_symbol_name(call_name, import_map),
+                import_map[call_name],
+                file_path,
+                language,
             )
             if resolved:
                 return resolved
@@ -14032,12 +14652,28 @@ class CodeParser:
                         if sub.type == "type_identifier":
                             bases.append(sub.text.decode("utf-8", errors="replace"))
         elif language in ("typescript", "javascript", "tsx"):
-            # extends clause
+            # Classes nest their heritage one level down, under class_heritage
+            # (`class C extends B implements I`); interfaces carry
+            # extends_type_clause as a direct child. Scanning only direct
+            # children therefore missed every class base.
+            clauses: list = []
             for child in node.children:
-                if child.type in ("extends_clause", "implements_clause"):
-                    for sub in child.children:
-                        if sub.type in ("identifier", "type_identifier", "nested_identifier"):
-                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                if child.type == "class_heritage":
+                    clauses.extend(child.children)
+                else:
+                    clauses.append(child)
+            for clause in clauses:
+                if clause.type not in _TS_HERITAGE_CLAUSES:
+                    continue
+                for sub in clause.children:
+                    if sub.type in ("identifier", "type_identifier", "nested_identifier"):
+                        bases.append(sub.text.decode("utf-8", errors="replace"))
+                    elif sub.type == "generic_type":
+                        # `extends Base<T>` — the base is the generic's head.
+                        for ident in sub.children:
+                            if ident.type in ("type_identifier", "nested_type_identifier"):
+                                bases.append(ident.text.decode("utf-8", errors="replace"))
+                                break
         elif language == "solidity":
             # contract Foo is Bar, Baz { ... }
             for child in node.children:

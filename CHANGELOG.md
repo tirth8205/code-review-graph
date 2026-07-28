@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `code-review-graph forget PATH [PATH ...]` to drop already-parsed files
+  from the graph without a full rebuild. Paths may be absolute, relative to the
+  repository root, a directory (every file underneath is dropped), or a glob
+  pattern, and `--dry-run` previews the selection. The result is equivalent to
+  rebuilding the graph without those files: surviving referrers are re-parsed so
+  no edge is left pointing at a deleted node, and flows, communities, the FTS
+  index, and embeddings are all repaired (#678).
+- Added `--platform NAME` to `code-review-graph uninstall` to unbind a single
+  platform's MCP registration while preserving the graph data and every other
+  configured integration. Without `--platform` the command still performs the
+  full uninstall (#678).
+
+### Fixed
+
+- GitHub Copilot auto-detection now requires the Copilot extension and also
+  recognizes the extension bundled with released VS Code installations.
+- Added a post-index Python import resolver using unique module suffixes, so
+  `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
+  package candidates remain explicitly unresolved (#720).
+
 ## [2.3.7] - 2026-07-18
 
 **Maintainer-reconciliation release.** This release packages the verified work

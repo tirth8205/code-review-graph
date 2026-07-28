@@ -78,6 +78,7 @@ enrichment = [
     "jedi>=0.19.2",
 ]
 dev = [
+    "mypy>=1.10,<2",
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",

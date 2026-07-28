@@ -121,7 +121,11 @@ def rename_preview(
             })
 
     # Also search by bare name for unqualified edges.
-    bare_edges = store.search_edges_by_target_name(old_name, kind="CALLS")
+    bare_edges = store.search_edges_by_target_name(
+        old_name,
+        kind="CALLS",
+        language=node.language or None,
+    )
     seen = {(e["file"], e["line"]) for e in edits}
     for edge in bare_edges:
         key = (edge.file_path, edge.line)
@@ -481,7 +485,11 @@ def find_dead_code(
         # CALLS targets may be bare ("funcName"), class-qualified
         # ("Class::method"), or workspace-qualified ("pkg/dir::funcName").
         if not any(e.kind == "CALLS" for e in incoming):
-            bare = store.search_edges_by_target_name(node.name, kind="CALLS")
+            bare = store.search_edges_by_target_name(
+                node.name,
+                kind="CALLS",
+                language=node.language or None,
+            )
             # Also search for partially-qualified targets ending with ::name
             suffix_rows = conn.execute(
                 "SELECT * FROM edges WHERE kind = 'CALLS'"
@@ -523,7 +531,11 @@ def find_dead_code(
             ]
         # Check INHERITS -- classes with subclasses are not dead.
         if node.kind == "Class" and not any(e.kind == "INHERITS" for e in incoming):
-            bare_inh = store.search_edges_by_target_name(node.name, kind="INHERITS")
+            bare_inh = store.search_edges_by_target_name(
+                node.name,
+                kind="INHERITS",
+                language=node.language or None,
+            )
             incoming = incoming + bare_inh
         has_callers = any(e.kind == "CALLS" for e in incoming)
         has_test_refs = bool(outgoing_tb)

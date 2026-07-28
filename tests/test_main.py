@@ -17,6 +17,7 @@ import pytest
 import code_review_graph.incremental as incremental_module
 import code_review_graph.tools.docs as docs_module
 from code_review_graph import main as crg_main
+from code_review_graph.http_origin_guard import LoopbackOriginGuard
 
 
 @pytest.fixture(autouse=True)
@@ -126,12 +127,17 @@ class TestServeMainTransport:
             host="127.0.0.1",
             port=5555,
         )
-        assert calls == [
-            {
-                "transport": "streamable-http",
-                "host": "127.0.0.1",
-                "port": 5555,
-            }
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["transport"] == "streamable-http"
+        assert call["host"] == "127.0.0.1"
+        assert call["port"] == 5555
+        # The loopback HTTP endpoint must be wrapped in the Host/Origin guard so it
+        # cannot be driven cross-origin (e.g. via DNS rebinding). Behaviour is
+        # covered end-to-end in tests/test_http_origin_guard.py; this only asserts
+        # the entry point wires it up.
+        assert [middleware.cls for middleware in call["middleware"]] == [
+            LoopbackOriginGuard
         ]
 
     def test_streamable_http_without_host_port_raises(self):

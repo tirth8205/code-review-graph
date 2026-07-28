@@ -1279,3 +1279,74 @@ class TestDaemonCLI:
             assert mock_print.call_count == 3
             printed_lines = [str(c.args[0]) for c in mock_print.call_args_list]
             assert printed_lines == ["line3", "line4", "line5"]
+
+
+class TestPerUserStateLocation:
+    """Daemon state must follow $CRG_HOME, not a frozen Path.home()."""
+
+    def test_defaults_live_under_crg_home(self, tmp_path, monkeypatch):
+        from code_review_graph import daemon
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "state"))
+
+        assert daemon.default_config_path() == tmp_path / "state" / "watch.toml"
+        assert daemon.default_pid_path() == tmp_path / "state" / "daemon.pid"
+        assert daemon.default_state_path() == tmp_path / "state" / "daemon-state.json"
+        assert daemon.default_log_dir() == tmp_path / "state" / "logs"
+
+    def test_defaults_are_not_frozen_at_import(self, tmp_path, monkeypatch):
+        """The original bug: a module constant captured $HOME at import time.
+
+        The autouse conftest fixture sets CRG_HOME before any test runs, so a
+        constant would already hold the wrong value and no later override
+        could move it.
+        """
+        from code_review_graph import daemon
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "first"))
+        first = daemon.default_pid_path()
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "second"))
+
+        assert daemon.default_pid_path() != first
+        assert daemon.default_pid_path() == tmp_path / "second" / "daemon.pid"
+
+    def test_legacy_constant_names_still_resolve(self, tmp_path, monkeypatch):
+        """CONFIG_PATH/PID_PATH/STATE_PATH kept working via the PEP 562 shim."""
+        from code_review_graph import daemon
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "state"))
+
+        assert daemon.CONFIG_PATH == tmp_path / "state" / "watch.toml"
+        assert daemon.PID_PATH == tmp_path / "state" / "daemon.pid"
+        assert daemon.STATE_PATH == tmp_path / "state" / "daemon-state.json"
+
+    def test_unknown_attribute_still_raises(self):
+        from code_review_graph import daemon
+
+        with pytest.raises(AttributeError, match="no attribute 'NOPE'"):
+            _ = daemon.NOPE
+
+    def test_bare_daemon_config_logs_under_crg_home(self, tmp_path, monkeypatch):
+        """DaemonConfig()'s default_factory must not point at the real home."""
+        from code_review_graph.daemon import DaemonConfig
+
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "state"))
+
+        assert DaemonConfig().log_dir == tmp_path / "state" / "logs"
+
+    def test_legacy_names_are_visible_to_dir(self):
+        """__getattr__ alone leaves the names invisible to introspection."""
+        from code_review_graph import daemon
+
+        names = dir(daemon)
+        assert "CONFIG_PATH" in names
+        assert "PID_PATH" in names
+        assert "STATE_PATH" in names
+        # The real module globals are still there too.
+        assert "WatchDaemon" in names
+
+    def test_legacy_names_work_through_from_import(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CRG_HOME", str(tmp_path / "state"))
+        from code_review_graph.daemon import CONFIG_PATH
+
+        assert CONFIG_PATH == tmp_path / "state" / "watch.toml"

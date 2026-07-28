@@ -61,7 +61,13 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
 
         # Step 1 — semantic search
         try:
-            hits = hybrid_search(store, nl_query, limit=k)
+            hits = hybrid_search(
+                store,
+                nl_query,
+                limit=k,
+                provider=config.get("_embedding_provider"),
+                model=config.get("_embedding_model"),
+            )
         except Exception as exc:  # noqa: BLE001 — benchmark must not abort the runner
             logger.warning("hybrid_search failed on %s: %s", task_id, exc)
             hits = []

@@ -963,3 +963,311 @@ def test_reporter_impact_f1_skips_error_and_co_change_rows():
     # the co-change row (different metric) must not pollute the column.
     assert "0.5" in tables
     assert "0.9" not in tables
+
+
+def test_eval_embed_bootstraps_vectors_and_returns_real_graph_results(
+    tmp_path,
+    monkeypatch,
+):
+    """The public eval path must build vectors that its semantic benchmark can use."""
+    from code_review_graph.eval import runner
+
+    repo_path = _make_repo(tmp_path)
+    helper = repo_path / "helper.py"
+    helper.write_text(
+        "# salutation_marker appears only in source text, not in graph node names\n"
+        + helper.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config = _mock_config(
+        agent_questions=["Where is salutation_marker handled?"],
+    )
+    monkeypatch.setattr(runner, "load_config", lambda _name: config)
+    monkeypatch.setattr(runner, "clone_or_update", lambda _config: repo_path)
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("CRG_HOME", str(state_dir))
+    from code_review_graph import registry as registry_module
+
+    monkeypatch.setattr(
+        registry_module,
+        "_REGISTRY_PATH",
+        state_dir / "registry.json",
+        raising=False,
+    )
+
+    class _StubProvider:
+        dimension = 2
+
+        def __init__(self, name):
+            self.name = name
+
+        @staticmethod
+        def embed(texts):
+            return [[float(len(text)), 1.0] for text in texts]
+
+        @staticmethod
+        def embed_query(_text):
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(
+        "code_review_graph.embeddings.get_provider",
+        lambda provider=None, model=None: _StubProvider(
+            f"{provider or 'local'}:{model or 'default'}",
+        ),
+    )
+
+    results = runner.run_eval(
+        repos=["mock"],
+        benchmarks=["agent_baseline"],
+        output_dir=tmp_path / "results",
+        embed=True,
+        embedding_provider="local",
+        embedding_model="eval-test",
+    )
+
+    rows = results["mock_agent_baseline"]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["graph_tokens"] > 0
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import get_db_path
+
+    store = GraphStore(get_db_path(repo_path))
+    try:
+        assert runner._embedding_count(store) > 0
+    finally:
+        store.close()
+
+
+def test_search_quality_uses_the_index_provider_and_model(monkeypatch, tmp_path):
+    """A custom eval index is useless unless benchmark queries select that identity."""
+    from code_review_graph.eval.benchmarks import search_quality
+
+    observed = {}
+
+    def _search(_store, _query, *, limit, provider=None, model=None):
+        observed.update(provider=provider, model=model, limit=limit)
+        return []
+
+    monkeypatch.setattr("code_review_graph.search.hybrid_search", _search)
+    search_quality.run(
+        tmp_path,
+        object(),
+        {
+            "name": "mock",
+            "search_queries": [{"query": "natural language", "expected": "target"}],
+            "_embedding_provider": "google",
+            "_embedding_model": "text-embedding-test",
+        },
+    )
+
+    assert observed == {
+        "provider": "google",
+        "model": "text-embedding-test",
+        "limit": 20,
+    }
+
+
+def test_multi_hop_uses_the_index_provider_and_model(monkeypatch, tmp_path):
+    from code_review_graph.eval.benchmarks import multi_hop_retrieval
+
+    observed = {}
+
+    def _search(_store, _query, *, limit, provider=None, model=None):
+        observed.update(provider=provider, model=model, limit=limit)
+        return []
+
+    monkeypatch.setattr("code_review_graph.search.hybrid_search", _search)
+    multi_hop_retrieval.run(
+        tmp_path,
+        object(),
+        {
+            "name": "mock",
+            "multi_hop_tasks": [
+                {
+                    "id": "task",
+                    "nl_query": "natural language",
+                    "anchor_qualified_suffix": "::target",
+                    "k": 7,
+                },
+            ],
+            "_embedding_provider": "minimax",
+            "_embedding_model": "embedding-01",
+        },
+    )
+
+    assert observed == {
+        "provider": "minimax",
+        "model": "embedding-01",
+        "limit": 7,
+    }
+
+
+def test_eval_closes_graph_store_when_embedding_bootstrap_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """A provider failure must not leave the evaluation database connection open."""
+    from code_review_graph.eval import runner
+    from code_review_graph.graph import GraphStore
+
+    repo_path = _make_repo(tmp_path)
+    config = _mock_config()
+    monkeypatch.setattr(runner, "load_config", lambda _name: config)
+    monkeypatch.setattr(runner, "clone_or_update", lambda _config: repo_path)
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    monkeypatch.setenv("CRG_HOME", str(tmp_path / "state"))
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("provider failed")
+
+    monkeypatch.setattr(runner, "_build_embedding_index", _boom)
+    closed = []
+    original_close = GraphStore.close
+
+    def _track_close(self):
+        closed.append(self.db_path)
+        original_close(self)
+
+    monkeypatch.setattr(GraphStore, "close", _track_close)
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        runner.run_eval(
+            repos=["mock"],
+            benchmarks=["agent_baseline"],
+            output_dir=tmp_path / "results",
+            embed=True,
+            embedding_provider="local",
+            embedding_model="eval-test",
+        )
+
+    assert closed
+
+
+# -- Semantic index guard (agent_baseline and friends) ---------------------
+
+
+def test_agent_baseline_aggregate_reports_excluded_rows():
+    """A run where the graph answered nothing must not read as 'no result'.
+
+    ``ok_rows == 0`` with ``median is None`` is ambiguous on its own: it looks
+    the same whether zero questions were asked or every query came back empty.
+    The excluded-row counts disambiguate it.
+    """
+    from code_review_graph.eval.benchmarks import agent_baseline
+
+    results = [
+        {"status": "no_graph_results", "baseline_to_graph_ratio": ""},
+        {"status": "no_graph_results", "baseline_to_graph_ratio": ""},
+        {"status": "no_baseline_match", "baseline_to_graph_ratio": ""},
+    ]
+    agg = agent_baseline.aggregate(results)
+
+    assert agg["ok_rows"] == 0
+    assert agg["median_baseline_to_graph_ratio"] is None
+    assert agg["no_graph_results_rows"] == 2
+    assert agg["no_baseline_match_rows"] == 1
+
+
+def test_agent_baseline_aggregate_counts_zero_on_a_healthy_run():
+    from code_review_graph.eval.benchmarks import agent_baseline
+
+    agg = agent_baseline.aggregate([
+        {"status": "ok", "baseline_to_graph_ratio": "10.0"},
+        {"status": "ok", "baseline_to_graph_ratio": "20.0"},
+    ])
+
+    assert agg["ok_rows"] == 2
+    assert agg["no_graph_results_rows"] == 0
+    assert agg["no_baseline_match_rows"] == 0
+    assert agg["median_baseline_to_graph_ratio"] == 15.0
+
+
+def test_warns_when_semantic_benchmark_runs_without_a_vector_index(caplog):
+    """The silent-zero path must announce itself before the benchmark runs."""
+    import logging
+
+    from code_review_graph.eval.runner import _warn_if_semantic_index_missing
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = _make_repo(tmpdir)
+        store = _build_store(repo_path)
+        try:
+            with caplog.at_level(logging.WARNING):
+                _warn_if_semantic_index_missing(store, ["agent_baseline"])
+        finally:
+            store.close()
+
+    assert "no vector index" in caplog.text
+    assert "--embed" in caplog.text
+
+
+def test_no_warning_for_benchmarks_that_do_not_use_semantic_search(caplog):
+    import logging
+
+    from code_review_graph.eval.runner import _warn_if_semantic_index_missing
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo_path = _make_repo(tmpdir)
+        store = _build_store(repo_path)
+        try:
+            with caplog.at_level(logging.WARNING):
+                _warn_if_semantic_index_missing(store, ["token_efficiency"])
+        finally:
+            store.close()
+
+    assert "no vector index" not in caplog.text
+
+
+def test_no_warning_once_the_index_is_populated(caplog, monkeypatch):
+    import logging
+
+    from code_review_graph.eval import runner
+
+    monkeypatch.setattr(runner, "_embedding_count", lambda store: 42)
+
+    with caplog.at_level(logging.WARNING):
+        runner._warn_if_semantic_index_missing(object(), ["agent_baseline"])
+
+    assert "no vector index" not in caplog.text
+
+
+def test_embedding_count_reraises_non_missing_table_errors():
+    """A lock or a corrupt database must not be reported as 'no index'.
+
+    Reclassifying it would tell the user to re-run with --embed and send
+    them after the wrong problem.
+    """
+    import sqlite3
+
+    from code_review_graph.eval.runner import _embedding_count
+
+    class _Boom:
+        class _Conn:
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                raise sqlite3.OperationalError("database is locked")
+
+        _conn = _Conn()
+
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        _embedding_count(_Boom())
+
+
+def test_embedding_count_returns_none_for_a_missing_table():
+    import sqlite3
+
+    from code_review_graph.eval.runner import _embedding_count
+
+    class _NoTable:
+        class _Conn:
+            @staticmethod
+            def execute(*_args, **_kwargs):
+                raise sqlite3.OperationalError("no such table: embeddings")
+
+        _conn = _Conn()
+
+    assert _embedding_count(_NoTable()) is None

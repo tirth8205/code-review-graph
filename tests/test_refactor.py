@@ -92,6 +92,37 @@ class TestRenamePreview:
         assert "/repo/utils.py" in files  # definition
         assert "/repo/main.py" in files   # call site + import site
 
+    def test_rename_bare_callers_use_js_family_without_crossing_to_apex(self):
+        """A JS rename includes a TSX bare caller but not an Apex name collision."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="formatValue", file_path="/repo/format.js",
+            line_start=1, line_end=5, language="javascript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="tsxCaller", file_path="/repo/caller.tsx",
+            line_start=1, line_end=5, language="tsx",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="apexCaller", file_path="/repo/Caller.cls",
+            line_start=1, line_end=5, language="apex",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/caller.tsx::tsxCaller",
+            target="formatValue", file_path="/repo/caller.tsx", line=3,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/Caller.cls::apexCaller",
+            target="formatValue", file_path="/repo/Caller.cls", line=3,
+        ))
+        self.store.commit()
+
+        result = rename_preview(self.store, "formatValue", "renderValue")
+
+        assert result is not None
+        edit_files = {edit["file"] for edit in result["edits"]}
+        assert "/repo/caller.tsx" in edit_files
+        assert "/repo/Caller.cls" not in edit_files
+
     def test_rename_not_found(self):
         """rename_preview returns None if symbol not found."""
         result = rename_preview(self.store, "nonexistent_function", "new_name")
@@ -358,6 +389,10 @@ class TestFindDeadCode:
             kind="Class", name="BaseConnector", file_path="/repo/connectors.py",
             line_start=5, line_end=50, language="python",
         ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="GarminConnector", file_path="/repo/connectors.py",
+            line_start=60, line_end=90, language="python",
+        ))
         # A subclass inherits from BaseConnector (bare-name target)
         self.store.upsert_edge(EdgeInfo(
             kind="INHERITS", source="/repo/connectors.py::GarminConnector",
@@ -367,6 +402,72 @@ class TestFindDeadCode:
         dead = find_dead_code(self.store)
         dead_names = {d["name"] for d in dead}
         assert "BaseConnector" not in dead_names
+
+    def test_find_dead_code_bare_calls_use_js_family_without_apex(self):
+        """TS callers keep JS code live; same-named Apex calls do not."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="usedFromTs", file_path="/repo/shared.js",
+            line_start=1, line_end=5, language="javascript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="apexOnlyCollision", file_path="/repo/shared.js",
+            line_start=10, line_end=15, language="javascript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="tsCaller", file_path="/repo/caller.ts",
+            line_start=1, line_end=5, language="typescript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="apexCaller", file_path="/repo/Caller.cls",
+            line_start=1, line_end=5, language="apex",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/caller.ts::tsCaller",
+            target="usedFromTs", file_path="/repo/caller.ts", line=3,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS", source="/repo/Caller.cls::apexCaller",
+            target="apexOnlyCollision", file_path="/repo/Caller.cls", line=3,
+        ))
+        self.store.commit()
+
+        dead_names = {item["name"] for item in find_dead_code(self.store)}
+
+        assert "usedFromTs" not in dead_names
+        assert "apexOnlyCollision" in dead_names
+
+    def test_find_dead_code_bare_inheritance_uses_js_family_without_apex(self):
+        """TS subclasses keep JS bases live; Apex subclasses do not."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="UsedJsBase", file_path="/repo/base.js",
+            line_start=1, line_end=8, language="javascript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="ApexOnlyBase", file_path="/repo/base.js",
+            line_start=10, line_end=18, language="javascript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="TsChild", file_path="/repo/child.ts",
+            line_start=1, line_end=8, language="typescript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Class", name="ApexChild", file_path="/repo/Child.cls",
+            line_start=1, line_end=8, language="apex",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="INHERITS", source="/repo/child.ts::TsChild",
+            target="UsedJsBase", file_path="/repo/child.ts", line=1,
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="INHERITS", source="/repo/Child.cls::ApexChild",
+            target="ApexOnlyBase", file_path="/repo/Child.cls", line=1,
+        ))
+        self.store.commit()
+
+        dead_names = {item["name"] for item in find_dead_code(self.store)}
+
+        assert "UsedJsBase" not in dead_names
+        assert "ApexOnlyBase" in dead_names
 
     def test_find_dead_code_bare_name_not_tricked_by_unrelated_caller(self):
         """Bare-name CALLS from unrelated files don't save a dead function
@@ -379,6 +480,10 @@ class TestFindDeadCode:
         self.store.upsert_node(NodeInfo(
             kind="Function", name="processor", file_path="/repo/worker/tasks.py",
             line_start=10, line_end=20, language="python",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="start", file_path="/repo/main.py",
+            line_start=1, line_end=20, language="python",
         ))
         # A bare CALLS edge from a third file that imports only routes.py
         self.store.upsert_edge(EdgeInfo(
@@ -905,6 +1010,11 @@ class TestTransitiveImportResolution:
             kind="Function", name="safeJsonParse",
             file_path="/repo/lib/utils.ts",
             line_start=10, line_end=20, language="typescript",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="processData",
+            file_path="/repo/consumer.ts",
+            line_start=1, line_end=8, language="typescript",
         ))
         # Import chain: consumer -> index -> utils
         self.store.upsert_edge(EdgeInfo(
