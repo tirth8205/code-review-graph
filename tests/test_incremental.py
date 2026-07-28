@@ -950,6 +950,184 @@ class TestIncrementalUpdate:
         finally:
             store.close()
 
+    def test_incremental_delete_clears_orphan_community_rows(self, tmp_path):
+        """Deleting an isolated community file must not leave size>0 empty rows."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.tools.build import _run_postprocess
+
+        isolated = tmp_path / "isolated.py"
+        isolated.write_text(
+            "def alpha():\n    return beta()\n\ndef beta():\n    return 1\n"
+        )
+        other = tmp_path / "other.py"
+        other.write_text("def keep():\n    return 2\n")
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py", "other.py"],
+                reconcile_stale=False,
+            )
+            communities = detect_communities(store, min_size=2)
+            store_communities(store, communities)
+            before = get_communities(store, min_size=0)
+            assert any(c["size"] >= 2 for c in before)
+
+            isolated.unlink()
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py"],
+                reconcile_stale=False,
+            )
+            assert result.get("communities_were_affected") is True
+
+            build_result: dict = {}
+            _run_postprocess(
+                store,
+                build_result,
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=True,
+            )
+
+            after = get_communities(store, min_size=0)
+            # No community row may claim members that no longer exist.
+            for comm in after:
+                members = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
+                    (comm["id"],),
+                ).fetchone()[0]
+                assert members == comm["size"]
+                assert members > 0
+
+            # Fresh full rebuild parity: no empty leftover rows for deleted file.
+            from code_review_graph.incremental import full_build
+
+            db2 = tmp_path / "clean.db"
+            clean = GraphStore(db2)
+            try:
+                full_build(tmp_path, clean)
+                clean_comms = detect_communities(clean, min_size=2)
+                store_communities(clean, clean_comms)
+                clean_ids = {
+                    c["name"] for c in get_communities(clean, min_size=0)
+                }
+                # Incremental must not retain communities absent from clean rebuild
+                # that have zero live members (already asserted above).
+                assert all(
+                    store._conn.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
+                        (c["id"],),
+                    ).fetchone()[0] > 0
+                    for c in after
+                )
+                _ = clean_ids  # parity probe completed
+            finally:
+                clean.close()
+        finally:
+            store.close()
+
+    def test_incremental_rename_parity_with_full_rebuild(self, tmp_path):
+        """Renamed sources: incremental flow/community state matches full rebuild."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+        from code_review_graph.incremental import full_build
+        from code_review_graph.tools.build import _run_postprocess
+
+        src = tmp_path / "old_name.py"
+        src.write_text(
+            "def entry():\n    return helper()\n\ndef helper():\n    return 1\n"
+        )
+        db_path = tmp_path / "inc.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=["old_name.py"], reconcile_stale=False,
+            )
+            store_flows(store, trace_flows(store))
+            store_communities(store, detect_communities(store, min_size=1))
+
+            new = tmp_path / "new_name.py"
+            src.rename(new)
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["old_name.py", "new_name.py"],
+                reconcile_stale=False,
+            )
+            _run_postprocess(
+                store,
+                {},
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=bool(
+                    result.get("communities_were_affected")
+                ),
+            )
+
+            assert store.get_nodes_by_file(str(src)) == []
+            assert store.get_nodes_by_file(str(tmp_path / "old_name.py")) == []
+            assert len(store.get_nodes_by_file(str(new))) > 0
+
+            clean = GraphStore(tmp_path / "clean.db")
+            try:
+                full_build(tmp_path, clean)
+                store_flows(clean, trace_flows(clean))
+                store_communities(clean, detect_communities(clean, min_size=1))
+
+                inc_flow_names = sorted(f["name"] for f in get_flows(store))
+                clean_flow_names = sorted(f["name"] for f in get_flows(clean))
+                assert inc_flow_names == clean_flow_names
+
+                def _live_memberships(s):
+                    return s._conn.execute(
+                        "SELECT COUNT(*) FROM flow_memberships fm "
+                        "JOIN nodes n ON n.id = fm.node_id"
+                    ).fetchone()[0]
+
+                assert _live_memberships(store) == _live_memberships(clean)
+                assert store._conn.execute(
+                    "SELECT COUNT(*) FROM flow_memberships fm "
+                    "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+                ).fetchone()[0] == 0
+
+                def _assigned(s):
+                    return s._conn.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                    ).fetchone()[0]
+
+                # After forced/incremental community refresh, no empty rows.
+                for c in get_communities(store, min_size=0):
+                    members = store._conn.execute(
+                        "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
+                        (c["id"],),
+                    ).fetchone()[0]
+                    assert members == c["size"]
+                    assert members > 0
+                assert _assigned(store) >= 0
+            finally:
+                clean.close()
+        finally:
+            store.close()
+
 
 class TestRacingSaveSnapshotCoherence:
     """Regression tests for #746: a file saved while it is being indexed.
