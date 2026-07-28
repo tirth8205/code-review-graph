@@ -1607,7 +1607,10 @@ def main() -> None:
         _handle_data_dir_option(args, repo_root)
 
     db_path = get_db_path(repo_root)
-    if args.command in ("dead-code", "forget") and not db_path.exists():
+    # Read-only commands must not materialise the database as a side effect of
+    # opening the store. A 0-node graph reads as "built" to every later command
+    # while actually holding nothing (#777).
+    if args.command in ("dead-code", "forget", "status") and not db_path.exists():
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,

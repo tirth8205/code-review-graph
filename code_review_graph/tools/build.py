@@ -475,7 +475,9 @@ def build_or_update_graph(
 
     Args:
         full_rebuild: If True, re-parse every file. If False (default),
-                      only re-parse files changed since ``base``.
+                      only re-parse files changed since ``base`` — except on an
+                      empty graph, which is rebuilt in full so a missing or
+                      previously emptied database repairs itself.
         repo_root: Path to the repository root. Auto-detected if omitted.
         base: Git ref for the incremental diff. When None (default), the base
               is resolved automatically to the commit the graph was last built
@@ -507,10 +509,17 @@ def build_or_update_graph(
         # a full rebuild rather than a wrong HEAD~1 diff that could report the
         # graph as up to date while it is actually stale.
         base_resolved: str | None = base
-        if not full_rebuild and base is None:
-            base_resolved = resolve_incremental_base(root, store)
-            if base_resolved is None:
+        if not full_rebuild:
+            # An empty graph has nothing to update incrementally: the diff only
+            # covers files touched since the base, so everything else stays
+            # missing — and the resulting graph then anchors every later
+            # update, so it stays missing forever (#777).
+            if store.get_stats().total_nodes == 0:
                 full_rebuild = True
+            elif base is None:
+                base_resolved = resolve_incremental_base(root, store)
+                if base_resolved is None:
+                    full_rebuild = True
 
         if full_rebuild:
             result = full_build(root, store, recurse_submodules)

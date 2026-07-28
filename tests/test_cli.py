@@ -6,6 +6,8 @@ import sys
 from importlib.metadata import PackageNotFoundError
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_review_graph import cli
 
 
@@ -580,3 +582,121 @@ class TestGraphToolExplicitRepoResolution:
                 cli.main()
 
         assert mock_run.call_args.args[1] == module.resolve()
+
+
+class TestMissingGraph:
+    """Issue #777: on a repo with no graph, ``status`` and ``update`` left
+    behind a 0-node graph.db that read as "built" to every later command.
+
+    ``status`` now behaves like the other read-only commands (``query``,
+    ``search``, ``dead-code``) and ``update`` falls back to a full build.
+    """
+
+    @staticmethod
+    def _git(repo, *args):
+        import subprocess
+
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.email=t@example.com",
+             "-c", "user.name=Test", "-c", "commit.gpgsign=false", *args],
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+
+    def _make_repo(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "app.py").write_text(
+            "def greet(name):\n"
+            "    return 'hi ' + name\n",
+            encoding="utf-8",
+        )
+        self._git(repo, "init", "-q")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-q", "-m", "initial")
+        return repo
+
+    @staticmethod
+    def _node_count(db_path):
+        from code_review_graph.graph import GraphStore
+
+        store = GraphStore(db_path)
+        try:
+            return store.get_stats().total_nodes
+        finally:
+            store.close()
+
+    def test_status_without_graph_exits_without_creating_db(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        repo = self._make_repo(tmp_path, monkeypatch)
+        db_path = repo / ".code-review-graph" / "graph.db"
+
+        argv = ["code-review-graph", "status", "--repo", str(repo)]
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main()
+
+        assert exc_info.value.code == 1
+        assert not db_path.exists()
+        assert "No graph found" in capsys.readouterr().err
+
+    def test_update_without_graph_runs_a_full_build(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        repo = self._make_repo(tmp_path, monkeypatch)
+        db_path = repo / ".code-review-graph" / "graph.db"
+
+        argv = ["code-review-graph", "update", "--repo", str(repo)]
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+        assert "Full rebuild" in capsys.readouterr().out
+        assert db_path.exists()
+        assert self._node_count(db_path) > 0
+
+    def test_update_repairs_an_already_emptied_graph(
+        self, tmp_path, monkeypatch,
+    ):
+        """The 0-node database left by an older version must not persist."""
+        from code_review_graph.graph import GraphStore
+
+        repo = self._make_repo(tmp_path, monkeypatch)
+        db_path = repo / ".code-review-graph" / "graph.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        GraphStore(db_path).close()
+        assert self._node_count(db_path) == 0
+
+        argv = ["code-review-graph", "update", "--repo", str(repo)]
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+        assert self._node_count(db_path) > 0
+
+    def test_status_with_existing_graph_reports_stats(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build, get_db_path
+
+        repo = self._make_repo(tmp_path, monkeypatch)
+        store = GraphStore(get_db_path(repo))
+        try:
+            full_build(repo, store)
+        finally:
+            store.close()
+
+        argv = ["code-review-graph", "status", "--repo", str(repo)]
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+        out = capsys.readouterr().out
+        assert "Nodes: " in out
+        assert "Edges: " in out
+        assert "Files: " in out
