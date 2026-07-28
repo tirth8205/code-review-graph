@@ -748,3 +748,61 @@ class TestFlows:
         assert orphan_members == []
         # Exactly one handler flow — no duplicate stale+new pair.
         assert len(handler_flows) == 1
+
+    def test_incremental_trace_flows_relative_without_repo_root(self, tmp_path):
+        """Relative changed_files must match absolute paths without repo_root (#569)."""
+        abs_b = str((tmp_path / "b.py").resolve())
+        self._add_func("new_entry", path=abs_b)
+        self._add_func("new_callee", path=abs_b)
+        self._add_call(f"{abs_b}::new_entry", f"{abs_b}::new_callee", abs_b)
+
+        # Maintainer reproduction: relative only, no repo_root.
+        count = incremental_trace_flows(self.store, ["b.py"])
+        assert count >= 1
+        assert any(f["name"] == "new_entry" for f in get_flows(self.store))
+
+    def test_expand_changed_paths_literal_like_wildcards(self, tmp_path):
+        """Filenames containing _ or % must not fuzzy-match siblings (#569)."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        abs_literal = str((tmp_path / "a_b.py").resolve())
+        abs_other = str((tmp_path / "acb.py").resolve())
+        abs_pct = str((tmp_path / "a%z.py").resolve())
+        abs_pct_other = str((tmp_path / "axz.py").resolve())
+        self._add_func("literal", path=abs_literal)
+        self._add_func("other", path=abs_other)
+        self._add_func("pct", path=abs_pct)
+        self._add_func("pct_other", path=abs_pct_other)
+
+        matched_us = expand_changed_file_paths(self.store, ["a_b.py"])
+        assert abs_literal in matched_us
+        assert abs_other not in matched_us
+
+        matched_pct = expand_changed_file_paths(self.store, ["a%z.py"])
+        assert abs_pct in matched_pct
+        assert abs_pct_other not in matched_pct
+
+        assert abs_other not in self.store.get_files_matching("a_b.py")
+        assert abs_literal in self.store.get_files_matching("a_b.py")
+        assert abs_pct_other not in self.store.get_files_matching("a%z.py")
+        assert abs_pct in self.store.get_files_matching("a%z.py")
+
+    def test_expand_ignores_suffix_collision_across_directories(self, tmp_path):
+        """Shared basenames in different dirs must not cross-wire flows."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        left = tmp_path / "left"
+        right = tmp_path / "right"
+        left.mkdir()
+        right.mkdir()
+        abs_left = str((left / "util.py").resolve())
+        abs_right = str((right / "util.py").resolve())
+        self._add_func("left_fn", path=abs_left)
+        self._add_func("right_fn", path=abs_right)
+
+        # With repo_root + relative path, only the intended file expands.
+        matched = expand_changed_file_paths(
+            self.store, ["left/util.py"], repo_root=tmp_path,
+        )
+        assert abs_left in matched
+        assert abs_right not in matched
