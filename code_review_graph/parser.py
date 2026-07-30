@@ -4169,10 +4169,106 @@ class CodeParser:
         "when", "begin", "declare", "exception", "return", "raise", "is",
         "as", "procedure", "function", "trigger", "package", "cursor",
         "type", "record", "table", "pragma", "and", "or", "not", "in",
-        "exists", "between", "varchar2", "nvarchar2", "number", "char",
-        "nchar", "date", "timestamp", "raw", "boolean", "clob", "blob",
-        "long", "float", "integer", "pls_integer", "binary_integer",
+        "exists", "between", "into",
+        # Scalar/collection type names — precede `(` in declarations
+        # (`v_x VARCHAR2(50);`), not calls.
+        "varchar", "varchar2", "nvarchar2", "number", "char", "nchar",
+        "date", "timestamp", "raw", "boolean", "clob", "blob", "long",
+        "float", "integer", "int", "smallint", "decimal", "numeric",
+        "double", "real", "pls_integer", "binary_integer", "urowid",
+        "rowid", "bfile", "xmltype", "sys_refcursor", "interval",
     })
+    # Common built-in SQL/PL-SQL functions — real calls, but not to
+    # user-defined code, and the reviewer on PR #785 flagged these as noise
+    # in the CALLS graph. Aggregates, conversions, null-handling, string,
+    # and numeric builtins.
+    _PLSQL_BUILTIN_FUNCS: frozenset[str] = frozenset({
+        "count", "sum", "avg", "max", "min", "greatest", "least",
+        "to_char", "to_date", "to_number", "to_timestamp", "cast",
+        "nvl", "nvl2", "coalesce", "nullif", "decode",
+        "substr", "substrb", "instr", "trim", "ltrim", "rtrim",
+        "upper", "lower", "initcap", "length", "lengthb", "replace",
+        "lpad", "rpad", "concat",
+        "round", "trunc", "mod", "abs", "ceil", "floor", "power", "sqrt",
+        "extract", "sysdate", "systimestamp", "raise_application_error",
+    })
+    # Built-in Oracle package namespaces (DBMS_*, UTL_*) — calls into these
+    # are noise for impact analysis, not user code.
+    _PLSQL_BUILTIN_PACKAGE_PREFIXES = ("dbms_", "utl_")
+
+    # Oracle-specific file extensions that are unambiguously PL/SQL
+    # regardless of content.
+    _ORACLE_EXTENSIONS = frozenset({
+        ".pls", ".plb", ".pks", ".pkb", ".pck", ".prc", ".fnc", ".trg",
+    })
+    # Content signals that only appear in Oracle PL/SQL, never in plain
+    # ANSI SQL, T-SQL, or MySQL: `%TYPE`/`%ROWTYPE` anchored attribute
+    # types, VARCHAR2/PLS_INTEGER/etc. scalar types, DBMS_OUTPUT, packages,
+    # and `:NEW.`/`:OLD.` trigger correlation names (T-SQL uses
+    # `inserted`/`deleted`; MySQL uses unprefixed `NEW.`/`OLD.`).
+    _ORACLE_SIGNAL_RE = re.compile(
+        r"%TYPE\b|%ROWTYPE\b|\bVARCHAR2\b|\bPLS_INTEGER\b|\bBINARY_INTEGER\b|"
+        r"\bSYS_REFCURSOR\b|\bDBMS_OUTPUT\b|:(?:NEW|OLD)\.|"
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_plsql_dialect(cls, path: Path, text: str) -> bool:
+        """True if this `.sql`-family file is Oracle PL/SQL, as opposed to
+        plain ANSI SQL, T-SQL, or MySQL.
+
+        Gates every PL/SQL-specific pass (body-span computation and CALLS
+        extraction for packages/triggers/PL/SQL-style functions) so a
+        non-Oracle `CREATE PROCEDURE` with no `END;` terminator (T-SQL uses
+        `GO`, MySQL uses a custom `DELIMITER`) doesn't have its span
+        computed at all — see PR #785 review, where unconditionally
+        computing a body span caused it to fall back to end-of-file and
+        pick up false CALLS edges spanning unrelated code.
+        """
+        if path.suffix.lower() in cls._ORACLE_EXTENSIONS:
+            return True
+        return bool(cls._ORACLE_SIGNAL_RE.search(text))
+
+    # Any top-level CREATE statement this parser recognizes — used to bound
+    # a block-end search that finds no END at all, so a malformed/unusual
+    # body doesn't swallow the rest of the file.
+    _SQL_NEXT_STMT_RE = re.compile(
+        r"CREATE\s+(?:OR\s+REPLACE\s+)?"
+        r"(?:PROCEDURE|FUNCTION|TRIGGER|PACKAGE|TABLE|VIEW)\b",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _plsql_is_forward_decl(text: str, start: int) -> bool:
+        """True if a PROCEDURE/FUNCTION member at `start` (just after the
+        name) is a forward declaration — `PROCEDURE x(...);` — rather than
+        a real definition — `PROCEDURE x(...) IS ... END;` (or
+        `... RETURN t IS ...` for functions).
+
+        Forward declarations in a PACKAGE BODY (used for mutual recursion)
+        have no body of their own; treating one as a real member makes its
+        block-end search land on the *next* member's END, producing a
+        phantom node with a bogus line span and false CALLS edges — see
+        PR #785 review.
+        """
+        depth = 0
+        i, n = start, len(text)
+        while i < n:
+            c = text[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif depth <= 0:
+                if c == ";":
+                    return True
+                if c.isalpha():
+                    m = re.match(r"(IS|AS)\b", text[i:], re.IGNORECASE)
+                    if m:
+                        return False
+            i += 1
+        return True
 
     def _parse_sql(
         self, path: Path, source: bytes,
@@ -4186,16 +4282,24 @@ class CodeParser:
         - Functions (CREATE FUNCTION) → Function nodes with extra["sql_kind"]="function"
         - Procedures (CREATE PROCEDURE, regex fallback) → Function nodes with
           extra["sql_kind"]="procedure"
+
+        The following are Oracle-only and only extracted when
+        ``_is_plsql_dialect`` confirms the file is PL/SQL (via an Oracle
+        extension or a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`) —
+        never for plain ANSI/T-SQL/MySQL `.sql` files:
         - Packages (CREATE PACKAGE) → Class nodes with extra["sql_kind"]="package"
         - Package bodies (CREATE PACKAGE BODY) → Class nodes with
-          extra["sql_kind"]="package_body", containing nested PROCEDURE/FUNCTION
-          members as Function nodes qualified as ``pkg_name.member_name``
+          extra["sql_kind"]="package_body", qualified as ``pkg_name$body``
+          (distinct from the spec's ``pkg_name``, since they're separate
+          Oracle objects), containing nested PROCEDURE/FUNCTION members as
+          Function nodes qualified as ``pkg_name$body.member_name``
         - Triggers (CREATE TRIGGER) → Function nodes with extra["sql_kind"]="trigger"
 
-        Procedure/function/trigger/package-member bodies are scanned for
-        `identifier(` call sites to produce CALLS edges (regex-based: no
-        PL/SQL grammar is available, so this is a best-effort heuristic that
-        skips known PL/SQL keywords and scalar type names).
+        For confirmed-PL/SQL files, procedure/function/trigger/package-member
+        bodies are also scanned for `identifier(` call sites to produce
+        CALLS edges (regex-based: no PL/SQL grammar is available, so this is
+        a best-effort heuristic that skips known PL/SQL keywords, scalar
+        type names, common builtins, and INSERT INTO table targets).
 
         Data dependencies (FROM/JOIN table references) are recorded as
         IMPORTS_FROM edges so the impact-radius query can follow them.
@@ -4244,6 +4348,13 @@ class CodeParser:
                 tree.root_node, source, file_path_str, nodes, edges,
             )
 
+        # Whether the PL/SQL-specific passes below (body-span computation
+        # and CALLS extraction) should run at all. Plain ANSI/T-SQL/MySQL
+        # `.sql` files skip them entirely — computing a body span for a
+        # dialect that doesn't use `END;` terminators is what caused the
+        # false CALLS edges flagged in the PR #785 review.
+        is_plsql = self._is_plsql_dialect(path, text)
+
         # Names already captured by the tree-sitter pass, so the Oracle-style
         # FUNCTION regex fallback below doesn't double-count ANSI-style
         # `CREATE FUNCTION ... LANGUAGE sql` definitions the grammar already
@@ -4254,18 +4365,25 @@ class CodeParser:
         }
 
         # --- regex fallback for CREATE PROCEDURE ---
+        # Body-span computation and CALLS extraction only run for confirmed
+        # Oracle PL/SQL; a plain ANSI/T-SQL/MySQL procedure still gets a
+        # Function node (as before this file supported PL/SQL at all), just
+        # without a computed body span.
         for m in self._SQL_PROC_RE.finditer(text):
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]  # strip schema prefix
             line = text[: m.start()].count("\n") + 1
             qualified = f"{file_path_str}::{name}"
-            body_end = self._plsql_block_end(text, m.end(), name)
+            line_end = line
+            if is_plsql:
+                body_end = self._plsql_block_end(text, m.end(), name)
+                line_end = text[:body_end].count("\n") + 1
             nodes.append(NodeInfo(
                 kind="Function",
                 name=name,
                 file_path=file_path_str,
                 line_start=line,
-                line_end=text[:body_end].count("\n") + 1,
+                line_end=line_end,
                 language="sql",
                 extra={"sql_kind": "procedure"},
             ))
@@ -4276,15 +4394,16 @@ class CodeParser:
                 file_path=file_path_str,
                 line=line,
             ))
-            self._extract_plsql_calls(
-                text, m.end(), body_end, qualified, file_path_str, edges,
-            )
+            if is_plsql:
+                self._extract_plsql_calls(
+                    text, m.end(), body_end, qualified, file_path_str, edges,
+                )
 
         # --- regex fallback for Oracle-style CREATE FUNCTION ---
         # (PL/SQL `IS|AS ... BEGIN ... END` bodies with no RETURNS/LANGUAGE
         # clause; the ANSI grammar above only catches `RETURNS ... AS $$ ...`
-        # style definitions.)
-        for m in self._SQL_PLSQL_FUNC_RE.finditer(text):
+        # style definitions.) Oracle-only: skip entirely for non-PL/SQL files.
+        for m in self._SQL_PLSQL_FUNC_RE.finditer(text) if is_plsql else ():
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]
             if name in existing_function_names:
@@ -4313,7 +4432,10 @@ class CodeParser:
             )
 
         # --- regex fallback for CREATE TRIGGER ---
-        for m in self._SQL_TRIGGER_RE.finditer(text):
+        # Oracle-only (T-SQL/MySQL also have CREATE TRIGGER with different
+        # body syntax, so this must not run unless the file is confirmed
+        # PL/SQL, or their triggers would get an incorrect body span too).
+        for m in self._SQL_TRIGGER_RE.finditer(text) if is_plsql else ():
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]
             line = text[: m.start()].count("\n") + 1
@@ -4340,7 +4462,7 @@ class CodeParser:
             )
 
         # --- regex fallback for CREATE PACKAGE (specification) ---
-        for m in self._SQL_PACKAGE_RE.finditer(text):
+        for m in self._SQL_PACKAGE_RE.finditer(text) if is_plsql else ():
             raw_name = m.group(1)
             name = raw_name.split(".")[-1]
             line = text[: m.start()].count("\n") + 1
@@ -4364,11 +4486,16 @@ class CodeParser:
             ))
 
         # --- regex fallback for CREATE PACKAGE BODY (+ nested members) ---
-        for m in self._SQL_PACKAGE_BODY_RE.finditer(text):
+        # The body's qualified name gets a `$body` suffix, distinct from the
+        # spec's `file::pkg_name` — spec and body are separate Oracle
+        # objects, and sharing one qualified name collided on the graph
+        # store's `nodes.qualified_name UNIQUE` constraint, silently
+        # dropping whichever was inserted second (PR #785 review).
+        for m in self._SQL_PACKAGE_BODY_RE.finditer(text) if is_plsql else ():
             raw_name = m.group(1)
             pkg_name = raw_name.split(".")[-1]
             line = text[: m.start()].count("\n") + 1
-            pkg_qualified = f"{file_path_str}::{pkg_name}"
+            body_qualified = f"{file_path_str}::{pkg_name}$body"
             body_start = m.end()
             body_end = self._plsql_block_end(text, body_start, pkg_name)
             nodes.append(NodeInfo(
@@ -4383,21 +4510,25 @@ class CodeParser:
             edges.append(EdgeInfo(
                 kind="CONTAINS",
                 source=file_path_str,
-                target=pkg_qualified,
+                target=body_qualified,
                 file_path=file_path_str,
                 line=line,
             ))
 
             body_text = text[body_start:body_end]
             for mm in self._SQL_PACKAGE_MEMBER_RE.finditer(body_text):
+                member_start = body_start + mm.end()
+                if self._plsql_is_forward_decl(text, member_start):
+                    # `PROCEDURE x(...);` with no body — the real
+                    # definition is matched separately later in this loop.
+                    continue
                 member_kind = mm.group(1).lower()
                 member_name = mm.group(2)
-                member_start = body_start + mm.end()
                 member_line = text[: body_start + mm.start()].count("\n") + 1
                 member_body_end = self._plsql_block_end(
                     text, member_start, member_name,
                 )
-                member_qualified = f"{pkg_qualified}.{member_name}"
+                member_qualified = f"{body_qualified}.{member_name}"
                 nodes.append(NodeInfo(
                     kind="Function",
                     name=member_name,
@@ -4415,7 +4546,7 @@ class CodeParser:
                 ))
                 edges.append(EdgeInfo(
                     kind="CONTAINS",
-                    source=pkg_qualified,
+                    source=body_qualified,
                     target=member_qualified,
                     file_path=file_path_str,
                     line=member_line,
@@ -4574,7 +4705,10 @@ class CodeParser:
         bare, unnamed ``END;``. Falls back to the first bare ``END;`` if no
         named terminator exists (this can under-shoot for unnamed bodies
         with nested blocks — an inherent limitation of regex-based PL/SQL
-        parsing, since no PL/SQL grammar is available).
+        parsing, since no PL/SQL grammar is available). If no ``END`` at all
+        is found (a malformed/incomplete block), the search is bounded by
+        the next top-level ``CREATE`` statement rather than end-of-file, so
+        one broken block can't swallow the rest of the file.
         """
         named = re.search(
             rf"\bEND\s*{re.escape(name)}\s*;", text[start:], re.IGNORECASE,
@@ -4584,6 +4718,9 @@ class CodeParser:
         bare = re.search(r"\bEND\s*;", text[start:], re.IGNORECASE)
         if bare:
             return start + bare.end()
+        next_stmt = CodeParser._SQL_NEXT_STMT_RE.search(text, start)
+        if next_stmt:
+            return next_stmt.start()
         return len(text)
 
     def _extract_plsql_calls(
@@ -4599,19 +4736,29 @@ class CodeParser:
         ``body_start`` and ``body_end``.
 
         Regex-based (no PL/SQL grammar is available): matches
-        ``identifier(`` / ``pkg.proc(``, skipping PL/SQL/SQL keywords and
+        ``identifier(`` / ``pkg.proc(``, skipping PL/SQL/SQL keywords,
         scalar type names that also precede ``(`` (e.g. ``VARCHAR2(50)``
-        in a variable declaration).
+        in a variable declaration), the target of ``INSERT INTO t (cols)``,
+        and common builtin functions/packages (``COUNT``, ``NVL``,
+        ``TO_CHAR``, ``DBMS_OUTPUT.PUT_LINE``, ...) which are calls but not
+        to user code.
         """
         body_text = text[body_start:body_end]
         seen: set[str] = set()
         for m in self._PLSQL_CALL_RE.finditer(body_text):
             target = m.group(1)
+            first = target.split(".", 1)[0]
             last = target.rsplit(".", 1)[-1]
             if last.lower() in self._PLSQL_CALL_KEYWORDS:
                 continue
             if last.upper() in _SQL_KEYWORDS:
                 continue
+            if last.lower() in self._PLSQL_BUILTIN_FUNCS:
+                continue
+            if first.lower().startswith(self._PLSQL_BUILTIN_PACKAGE_PREFIXES):
+                continue
+            if re.search(r"\bINTO\s*$", body_text[:m.start()], re.IGNORECASE):
+                continue  # INSERT INTO t (cols) — t is a table, not a call
             if target in seen:
                 continue
             seen.add(target)

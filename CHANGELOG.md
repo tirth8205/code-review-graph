@@ -17,9 +17,14 @@
   full uninstall (#678).
 - Added Oracle PL/SQL structural parsing: packages, package bodies, triggers,
   and PL/SQL-style functions/procedures (`.sql`, `.pls`, `.plb`, `.pks`,
-  `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`), with nested package members
-  qualified as `pkg_name.member_name` and regex-based CALLS edges between
-  procedures/functions/triggers/package members.
+  `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`), with package bodies qualified
+  distinctly from their spec (`pkg_name$body`) and nested members qualified
+  as `pkg_name$body.member_name`, plus regex-based CALLS edges between
+  procedures/functions/triggers/package members. The PL/SQL-specific passes
+  (body-span computation, CALLS extraction, packages, triggers) only run for
+  files an Oracle-dialect check confirms are PL/SQL (an Oracle extension, or
+  a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`) — plain ANSI/T-SQL/MySQL
+  `.sql` files are unaffected.
 
 ### Fixed
 

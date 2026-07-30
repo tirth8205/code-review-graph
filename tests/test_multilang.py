@@ -3229,12 +3229,21 @@ class TestPLSQLParsing:
         kinds = {m.extra.get("sql_kind") for m in members}
         assert kinds == {"function", "procedure"}
 
+    def test_package_spec_and_body_have_distinct_qualified_names(self):
+        # Spec and body are separate Oracle objects; sharing one qualified
+        # name collided on the graph store's UNIQUE(qualified_name), so the
+        # body gets a `$body` suffix.
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        targets = {e.target for e in contains if e.source == str(self.fixture)}
+        assert f"{self.fixture}::payroll_pkg" in targets
+        assert f"{self.fixture}::payroll_pkg$body" in targets
+
     def test_package_body_contains_members(self):
         contains = [e for e in self.edges if e.kind == "CONTAINS"]
-        pkg_qualified = f"{self.fixture}::payroll_pkg"
-        member_sources = {e.target.split("::")[-1] for e in contains if e.source == pkg_qualified}
-        assert "payroll_pkg.calculate_bonus" in member_sources
-        assert "payroll_pkg.process_payroll" in member_sources
+        body_qualified = f"{self.fixture}::payroll_pkg$body"
+        member_sources = {e.target.split("::")[-1] for e in contains if e.source == body_qualified}
+        assert "payroll_pkg$body.calculate_bonus" in member_sources
+        assert "payroll_pkg$body.process_payroll" in member_sources
 
     def test_procedure_call_edge(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
@@ -3251,9 +3260,9 @@ class TestPLSQLParsing:
         by_source = {}
         for e in calls:
             by_source.setdefault(e.source.split("::")[-1], set()).add(e.target)
-        assert "get_salary" in by_source.get("payroll_pkg.calculate_bonus", set())
+        assert "get_salary" in by_source.get("payroll_pkg$body.calculate_bonus", set())
         assert {"calculate_bonus", "give_raise"} <= by_source.get(
-            "payroll_pkg.process_payroll", set(),
+            "payroll_pkg$body.process_payroll", set(),
         )
 
     def test_variable_declarations_are_not_calls(self):
@@ -3262,6 +3271,94 @@ class TestPLSQLParsing:
         targets = {e.target.upper() for e in calls}
         assert "NUMBER" not in targets
         assert "VARCHAR2" not in targets
+
+    def test_bare_end_member(self):
+        # A package-body member closed by a bare `END;` (no repeated name)
+        # must still get the correct span, not swallow the next member.
+        src = """
+CREATE OR REPLACE PACKAGE BODY util_pkg IS
+    PROCEDURE do_first IS
+    BEGIN
+        NULL;
+    END;
+
+    PROCEDURE do_second IS
+    BEGIN
+        first_helper();
+    END do_second;
+END util_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_bare_end.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "util_pkg"]
+        names = {m.name for m in members}
+        assert names == {"do_first", "do_second"}
+        do_second = next(m for m in members if m.name == "do_second")
+        assert do_second.line_start < do_second.line_end < 12
+        calls = [e for e in edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "first_helper" in targets
+        assert "do_second" not in targets
+
+    def test_forward_declaration_no_phantom(self):
+        src = """
+CREATE OR REPLACE PACKAGE BODY log_pkg IS
+    PROCEDURE log_event(p_msg VARCHAR2);
+
+    FUNCTION total_orders RETURN NUMBER IS
+    BEGIN
+        RETURN 42;
+    END total_orders;
+
+    PROCEDURE log_event(p_msg VARCHAR2) IS
+    BEGIN
+        NULL;
+    END log_event;
+END log_pkg;
+/
+"""
+        fixture = FIXTURES / "sample_plsql_forward_decl.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.parent_name == "log_pkg" and n.name == "log_event"]
+        assert len(members) == 1
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert not any(e.target == "log_event" for e in calls)
+
+    def test_tsql_procedure_without_end_is_not_treated_as_plsql(self):
+        # No Oracle signal anywhere: two back-to-back T-SQL procedures with
+        # no BEGIN/END must not have their spans computed at all, let alone
+        # bleed into each other.
+        src = """
+CREATE PROCEDURE dbo.GetTotal
+AS
+SELECT SUM(total) FROM orders;
+GO
+
+CREATE PROCEDURE dbo.GetCount
+AS
+SELECT COUNT(*) FROM customers;
+GO
+"""
+        fixture = FIXTURES / "sample_tsql.sql"
+        fixture.write_text(src)
+        try:
+            nodes, edges = self.parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = {n.name: n for n in nodes if n.kind == "Function"}
+        assert set(procs) == {"GetTotal", "GetCount"}
+        # Single-line span (pre-PL/SQL-support behavior) — no body computed.
+        assert procs["GetTotal"].line_start == procs["GetTotal"].line_end
+        assert not [e for e in edges if e.kind == "CALLS"]
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()
