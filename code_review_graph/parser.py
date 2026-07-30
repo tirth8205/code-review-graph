@@ -20,7 +20,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, NamedTuple, Optional
 
 try:
@@ -647,6 +647,23 @@ def _read_php_composer_psr4(
 # ---------------------------------------------------------------------------
 
 
+def normalize_file_path(path: "str | PurePath") -> str:
+    """Return *path* as a forward-slash (POSIX) string for graph identity.
+
+    ``file_path`` values and the path component of qualified names are graph
+    identity: they must be separator-stable across operating systems so a
+    graph built on Windows produces the same identifiers as one built on
+    Linux/macOS, and so consumers that reconstruct identifiers from ``Path``
+    objects always agree with the parser. See issue #774.
+
+    Only apply this to file *paths* — never to symbol names: PHP namespace
+    identifiers (``App\\Domain\\Job``) legitimately contain backslashes.
+    """
+    if isinstance(path, PurePath):
+        return path.as_posix()
+    return str(path).replace("\\", "/")
+
+
 @dataclass
 class NodeInfo:
     kind: str  # File, Class, Function, Type, Test
@@ -663,6 +680,13 @@ class NodeInfo:
     extra: dict = field(default_factory=dict)
     identity_name: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        # Identity invariant (#774): file paths always use POSIX separators.
+        # File nodes carry their path in ``name`` as well.
+        self.file_path = normalize_file_path(self.file_path)
+        if self.kind == "File":
+            self.name = normalize_file_path(self.name)
+
 
 @dataclass
 class EdgeInfo:
@@ -674,6 +698,12 @@ class EdgeInfo:
     file_path: str
     line: int = 0
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Identity invariant (#774): file paths always use POSIX separators.
+        # ``source``/``target`` are left alone — they may contain qualified
+        # names whose symbol part legitimately embeds backslashes (PHP FQNs).
+        self.file_path = normalize_file_path(self.file_path)
 
 
 # ---------------------------------------------------------------------------
@@ -762,6 +792,35 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+}
+
+# ``.h`` is shared by C and C++. Keep C as the extension default, then promote
+# a header only when the C++ grammar finds syntax that C cannot express. Weak
+# compatibility markers such as ``__cplusplus`` and ``extern "C"`` are
+# deliberately excluded because they are common in otherwise-C headers.
+_CPP_HEADER_EVIDENCE_TYPES = frozenset({
+    "access_specifier",
+    "alias_declaration",
+    "base_class_clause",
+    "class_specifier",
+    "concept_definition",
+    "lambda_expression",
+    "namespace_definition",
+    "noexcept",
+    "template_declaration",
+    "trailing_return_type",
+    "using_declaration",
+})
+
+_CPP_HEADER_EVIDENCE_QUALIFIERS = frozenset({b"consteval", b"constinit"})
+
+_CPP_QT_STRUCTURAL_MACRO_REPLACEMENTS = {
+    b"QT_BEGIN_NAMESPACE": b" " * len(b"QT_BEGIN_NAMESPACE"),
+    b"QT_END_NAMESPACE": b" " * len(b"QT_END_NAMESPACE"),
+    b"Q_OBJECT": b" " * len(b"Q_OBJECT"),
+    b"Q_SIGNALS": b"public" + b" " * (len(b"Q_SIGNALS") - len(b"public")),
+    b"Q_SLOTS": b" " * len(b"Q_SLOTS"),
+    b"Q_EMIT": b" " * len(b"Q_EMIT"),
 }
 
 # Shebang interpreter → language mapping for extension-less Unix scripts.
@@ -956,13 +1015,22 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "rust": ["function_item", "function_signature_item"],
     "java": ["method_declaration", "constructor_declaration"],
     "c": ["function_definition"],
-    "cpp": ["function_definition"],
+    "cpp": ["function_definition", "declaration", "field_declaration"],
     "csharp": ["method_declaration", "constructor_declaration"],
     "ruby": ["method", "singleton_method"],
     "r": ["function_definition"],
     "perl": ["subroutine_declaration_statement", "method_declaration_statement"],
     "kotlin": ["function_declaration"],
-    "swift": ["function_declaration"],
+    # Swift: initializers, deinitializers and subscripts are separate node
+    # types, not `function_declaration`s, so they need listing alongside it —
+    # the same way java/csharp list `constructor_declaration`. Their names come
+    # from the `_get_name` Swift branch (the grammar has no usable name field).
+    "swift": [
+        "function_declaration",
+        "init_declaration",
+        "deinit_declaration",
+        "subscript_declaration",
+    ],
     "php": ["function_definition", "method_declaration"],
     "scala": ["function_definition", "function_declaration"],
     # Solidity: events and modifiers use kind="Function" because the graph
@@ -2429,7 +2497,7 @@ class CodeParser:
             self._parsers[language] = parser
         return self._parsers[language]
 
-    def detect_language(self, path: Path) -> Optional[str]:
+    def detect_language(self, path: Path, source: Optional[bytes] = None) -> Optional[str]:
         """Map a file path to its language name.
 
         Extension-based lookup is tried first.  For extension-less files
@@ -2438,6 +2506,12 @@ class CodeParser:
         already have a known extension are never re-read — shebang probing
         only runs when the extension lookup returns ``None`` **and** the path
         has no suffix at all.  See issue #237.
+
+        When *source* is provided, the shebang is sniffed from those bytes
+        instead of re-reading the file.  Callers that hash-and-parse one byte
+        snapshot MUST pass it: a separate disk read can race a concurrent
+        save, mis-detect the language, and store a wrong parse under the
+        snapshot's hash (issue #746).
         """
         if path.name.lower().endswith(".blade.php"):
             return "blade"
@@ -2455,12 +2529,20 @@ class CodeParser:
         # and other extension-less text files also fall here, but the probe is a
         # cheap 256-byte read that returns None when no shebang is found.
         if suffix == "":
-            return self._detect_language_from_shebang(path)
+            head = source[:_SHEBANG_PROBE_BYTES] if source is not None else None
+            return self._detect_language_from_shebang(path, head)
         return None
 
     @staticmethod
-    def _detect_language_from_shebang(path: Path) -> Optional[str]:
+    def _detect_language_from_shebang(
+        path: Path,
+        head: Optional[bytes] = None,
+    ) -> Optional[str]:
         """Inspect the first line of ``path`` for a shebang interpreter.
+
+        When *head* is given it is used as the first bytes of the file and
+        the file is not read from disk (TOCTOU-safe for callers that already
+        hold the byte snapshot being parsed, see issue #746).
 
         Returns the mapped language name or ``None`` if the file has no
         shebang, is unreadable, or names an interpreter we don't map.
@@ -2477,11 +2559,12 @@ class CodeParser:
         endings are handled.  Binary files read as garbage bytes simply
         fail the ``#!`` prefix check and return ``None``.
         """
-        try:
-            with path.open("rb") as fh:
-                head = fh.read(_SHEBANG_PROBE_BYTES)
-        except (OSError, PermissionError):
-            return None
+        if head is None:
+            try:
+                with path.open("rb") as fh:
+                    head = fh.read(_SHEBANG_PROBE_BYTES)
+            except (OSError, PermissionError):
+                return None
         if not head.startswith(b"#!"):
             return None
 
@@ -2533,11 +2616,30 @@ class CodeParser:
         """Parse pre-read bytes and return extracted nodes and edges.
 
         This avoids re-reading the file from disk, eliminating TOCTOU gaps
-        when the caller has already read the bytes (e.g. for hashing).
+        when the caller has already read the bytes (e.g. for hashing): every
+        parse decision, including shebang language detection, derives from
+        *source* so the stored file hash always describes the bytes that were
+        actually parsed (issue #746).
         """
-        language = self.detect_language(path)
+        language = self.detect_language(path, source)
         if not language:
             return [], []
+
+        parser = None
+        tree = None
+        parse_source = source
+        if language == "c" and path.suffix.lower() == ".h":
+            cpp_parser = self._get_parser("cpp")
+            if cpp_parser is not None:
+                cpp_source = self._mask_cpp_qt_macros(source)
+                cpp_tree = cpp_parser.parse(cpp_source)
+                if self._has_cpp_header_evidence(cpp_tree.root_node):
+                    language = "cpp"
+                    parser = cpp_parser
+                    tree = cpp_tree
+                    parse_source = cpp_source
+        elif language == "cpp":
+            parse_source = self._mask_cpp_qt_macros(source)
 
         if language == "blade":
             return self._parse_blade(path, source)
@@ -2609,14 +2711,16 @@ class CodeParser:
         if language == "yaml":
             return [], []
 
-        parser = self._get_parser(language)
+        if parser is None:
+            parser = self._get_parser(language)
         if not parser:
             return [], []
 
-        tree = parser.parse(source)
+        if tree is None:
+            tree = parser.parse(parse_source)
         nodes: list[NodeInfo] = []
         edges: list[EdgeInfo] = []
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
 
         # File node
         test_file = _is_test_file(file_path_str)
@@ -2675,7 +2779,7 @@ class CodeParser:
                 file_path_str,
             )
 
-        edges = self._apply_typed_call_targets(edges, typed_call_targets)
+        edges = self._apply_typed_call_targets(edges, typed_call_targets, language)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -2701,6 +2805,140 @@ class CodeParser:
 
         return nodes, edges
 
+    @staticmethod
+    def _has_cpp_header_evidence(root) -> bool:
+        """Return whether a parsed ``.h`` tree contains C++-only syntax."""
+        pending = [root]
+        while pending:
+            node = pending.pop()
+            if node.type == "ERROR" or _is_in_static_dead_guard(node):
+                continue
+
+            previous = node.prev_named_sibling
+            recovered_after_error = (
+                previous is not None
+                and previous.type == "ERROR"
+                and previous.end_byte == node.start_byte
+            )
+            if recovered_after_error:
+                continue
+
+            if node.type in _CPP_HEADER_EVIDENCE_TYPES:
+                return True
+            if (
+                node.type == "enum_specifier"
+                and any(child.type in ("class", "struct") for child in node.children)
+            ):
+                return True
+            if (
+                node.type == "type_qualifier"
+                and node.text in _CPP_HEADER_EVIDENCE_QUALIFIERS
+            ):
+                return True
+            pending.extend(node.named_children)
+        return False
+
+    @staticmethod
+    def _mask_cpp_qt_macros(source: bytes) -> bytes:
+        """Shield structural Qt macros without changing byte or line offsets."""
+        masked = bytearray(source)
+        length = len(source)
+        index = 0
+        line_has_code = False
+
+        def skip_quoted(start: int, quote: int) -> int:
+            cursor = start + 1
+            while cursor < length:
+                if source[cursor] == ord("\\"):
+                    cursor += 2
+                elif source[cursor] == quote:
+                    return cursor + 1
+                else:
+                    cursor += 1
+            return length
+
+        def raw_string_end(start: int) -> Optional[int]:
+            for prefix in (b'u8R"', b'LR"', b'UR"', b'uR"', b'R"'):
+                if not source.startswith(prefix, start):
+                    continue
+                delimiter_start = start + len(prefix)
+                opening = source.find(b"(", delimiter_start, delimiter_start + 17)
+                if opening == -1:
+                    return None
+                delimiter = source[delimiter_start:opening]
+                if any(byte in b" ()\\\t\r\n" for byte in delimiter):
+                    return None
+                closing = source.find(b")" + delimiter + b'"', opening + 1)
+                return length if closing == -1 else closing + len(delimiter) + 2
+            return None
+
+        while index < length:
+            byte = source[index]
+            if byte == ord("\n"):
+                line_has_code = False
+                index += 1
+                continue
+
+            if source.startswith(b"//", index):
+                newline = source.find(b"\n", index + 2)
+                index = length if newline == -1 else newline
+                continue
+            if source.startswith(b"/*", index):
+                closing = source.find(b"*/", index + 2)
+                comment_end = length if closing == -1 else closing + 2
+                if b"\n" in source[index:comment_end]:
+                    line_has_code = False
+                index = comment_end
+                continue
+
+            if byte == ord("#") and not line_has_code:
+                cursor = index
+                while cursor < length:
+                    newline = source.find(b"\n", cursor)
+                    if newline == -1:
+                        cursor = length
+                        break
+                    previous = newline - 1
+                    if previous >= cursor and source[previous] == ord("\r"):
+                        previous -= 1
+                    if previous < cursor or source[previous] != ord("\\"):
+                        cursor = newline
+                        break
+                    cursor = newline + 1
+                index = cursor
+                continue
+
+            raw_end = raw_string_end(index)
+            if raw_end is not None:
+                line_has_code = True
+                index = raw_end
+                continue
+            if byte in (ord('"'), ord("'")):
+                line_has_code = True
+                index = skip_quoted(index, byte)
+                continue
+
+            if byte == ord("_") or chr(byte).isalpha():
+                end = index + 1
+                while end < length:
+                    candidate = source[end]
+                    if candidate != ord("_") and not chr(candidate).isalnum():
+                        break
+                    end += 1
+                token = source[index:end]
+                replacement = _CPP_QT_STRUCTURAL_MACRO_REPLACEMENTS.get(token)
+                if replacement is not None:
+                    masked[index:end] = replacement
+                line_has_code = True
+                index = end
+                continue
+
+            if byte not in b" \t\v\f\r":
+                line_has_code = True
+            index += 1
+
+        return bytes(masked)
+
     @classmethod
     def _mask_blade_comments(cls, text: str) -> str:
         """Mask Blade comments while preserving offsets and line numbers."""
@@ -2720,7 +2958,7 @@ class CodeParser:
         """Parse static Blade template references without a Tree-sitter grammar."""
         text = source.decode("utf-8", errors="replace")
         masked = self._mask_blade_comments(text)
-        file_path = str(path)
+        file_path = normalize_file_path(path)
         nodes = [
             NodeInfo(
                 kind="File",
@@ -2755,7 +2993,7 @@ class CodeParser:
             return [], []
 
         tree = vue_parser.parse(source)
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         test_file = _is_test_file(file_path_str)
 
         all_nodes: list[NodeInfo] = [NodeInfo(
@@ -2877,7 +3115,7 @@ class CodeParser:
             return [], []
 
         tree = svelte_parser.parse(source)
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         test_file = _is_test_file(file_path_str)
 
         all_nodes: list[NodeInfo] = [NodeInfo(
@@ -3058,7 +3296,7 @@ class CodeParser:
             cells.append(CellInfo(cell_index=cell_idx, language=cell_lang, source=cell_source))
 
         if not cells:
-            file_path_str = str(path)
+            file_path_str = normalize_file_path(path)
             return [NodeInfo(
                 kind="File",
                 name=file_path_str,
@@ -3084,7 +3322,7 @@ class CodeParser:
             cells: List of CellInfo with index, language, and source.
             default_language: Default language for the File node.
         """
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         test_file = _is_test_file(file_path_str)
 
         # Group cells by language
@@ -3281,7 +3519,7 @@ class CodeParser:
             ))
 
         if not cells:
-            file_path_str = str(path)
+            file_path_str = normalize_file_path(path)
             file_node = NodeInfo(
                 kind="File",
                 name=file_path_str,
@@ -3320,7 +3558,7 @@ class CodeParser:
         text = source.decode("utf-8", errors="replace")
         cleaned = _strip_vbnet_noise(text)
         statements = _vbnet_logical_lines(cleaned)
-        file_path = str(path)
+        file_path = normalize_file_path(path)
         line_count = text.count("\n") + 1
         test_file = _is_test_file(file_path)
 
@@ -3742,7 +3980,7 @@ class CodeParser:
         extraction since signatures have no call sites.
         """
         text = source.decode("utf-8", errors="replace")
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         test_file = _is_test_file(file_path_str)
         is_interface = path.suffix.lower() == ".resi"
 
@@ -4311,7 +4549,7 @@ class CodeParser:
         a ``ref()`` / ``source()`` call remains a best-effort content signal.
         """
         text = source.decode("utf-8", errors="replace")
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         test_file = _is_test_file(file_path_str)
 
         nodes: list[NodeInfo] = []
@@ -5228,6 +5466,7 @@ class CodeParser:
 
     _TYPED_CALL_LANGUAGES = frozenset({
         "python", "kotlin", "java", "javascript", "typescript", "tsx", "php",
+        "csharp",
     })
     _TRANSPARENT_TYPE_WRAPPERS = frozenset({"Annotated", "Optional", "Type"})
     _NON_RECEIVER_TYPE_NAMES = frozenset({
@@ -5267,6 +5506,7 @@ class CodeParser:
             "typescript": {"statement_block"},
             "tsx": {"statement_block"},
             "php": {"compound_statement"},
+            "csharp": {"block"},
         }.get(language, set())
         targets: dict[tuple[int, str, str], tuple[str, str, str]] = {}
 
@@ -5330,7 +5570,15 @@ class CodeParser:
                         else "typed_receiver"
                     )
                     if type_name is None and receiver[:1].isupper():
-                        if receiver in import_map or receiver in defined_names:
+                        # C# receivers keep their class-name evidence even
+                        # when the class is not visible in this file: the
+                        # graph-wide scoped resolver validates it against
+                        # actual Class nodes plus namespace evidence (#612).
+                        if (
+                            receiver in import_map
+                            or receiver in defined_names
+                            or language == "csharp"
+                        ):
                             type_name = receiver
                             evidence = "class_receiver"
                     if type_name:
@@ -5394,6 +5642,7 @@ class CodeParser:
             "javascript": {"required_parameter", "optional_parameter"},
             "typescript": {"required_parameter", "optional_parameter"},
             "tsx": {"required_parameter", "optional_parameter"},
+            "csharp": {"parameter"},
         }.get(language, set())
 
         def visit(node, depth: int = 0) -> None:
@@ -5523,6 +5772,38 @@ class CodeParser:
                 node.child_by_field_name("type"),
             )
 
+        elif language == "csharp" and node.type == "variable_declaration":
+            type_node = node.child_by_field_name("type")
+            if type_node is not None and type_node.type == "implicit_type":
+                type_node = None
+            for child in node.children:
+                if child.type != "variable_declarator":
+                    continue
+                declared_type = type_node
+                if declared_type is None:
+                    # ``var x = new Service();`` — use the constructed type.
+                    creation = next(
+                        (
+                            sub for sub in child.children
+                            if sub.type == "object_creation_expression"
+                        ),
+                        None,
+                    )
+                    if creation is not None:
+                        declared_type = creation.child_by_field_name("type")
+                self._store_typed_binding(
+                    result,
+                    child.child_by_field_name("name"),
+                    declared_type,
+                )
+
+        elif language == "csharp" and node.type == "parameter":
+            self._store_typed_binding(
+                result,
+                node.child_by_field_name("name"),
+                node.child_by_field_name("type"),
+            )
+
         elif language == "php" and node.type == "assignment_expression":
             name_node = node.child_by_field_name("left")
             value_node = node.child_by_field_name("right")
@@ -5623,6 +5904,16 @@ class CodeParser:
             scope = imported or normalized
             return f"{scope}::{method}"
 
+        if language == "csharp":
+            # C# ``using`` directives import namespaces, not files, so a
+            # class receiver cannot be resolved to its defining file during
+            # a single-file parse. Emit the receiver class as a scope target
+            # for the graph-wide scoped resolver (#612).
+            base_type = self._base_type_name(type_name)
+            if not base_type:
+                return None
+            return f"{base_type}::{method}"
+
         base_type = self._base_type_name(type_name)
         if not base_type:
             return None
@@ -5643,6 +5934,7 @@ class CodeParser:
     def _apply_typed_call_targets(
         edges: list[EdgeInfo],
         targets: dict[tuple[int, str, str], tuple[str, str, str]],
+        language: str,
     ) -> list[EdgeInfo]:
         if not targets:
             return edges
@@ -5659,9 +5951,9 @@ class CodeParser:
                     "receiver_resolution": evidence_kind,
                 })
                 resolved_target = target
-                if evidence_kind == "constructed_receiver":
-                    # Keep PHP parse-only CALLS output backward-compatible
-                    # (bare method target) while preserving the constructed
+                if evidence_kind == "constructed_receiver" or language == "csharp":
+                    # Keep PHP/C# parse-only CALLS output backward-compatible
+                    # (bare method target) while preserving the receiver
                     # class scope for the graph-wide resolver.
                     scope, separator, _ = target.rpartition("::")
                     if separator and scope:
@@ -5701,7 +5993,7 @@ class CodeParser:
 
     @staticmethod
     def _spring_config_file_node(path: Path, source: bytes, language: str) -> NodeInfo:
-        file_path = str(path)
+        file_path = normalize_file_path(path)
         return NodeInfo(
             kind="File",
             name=file_path,
@@ -5737,7 +6029,7 @@ class CodeParser:
         if self._is_non_spring_yaml(documents):
             return [], []
 
-        file_path = str(path)
+        file_path = normalize_file_path(path)
         nodes = [self._spring_config_file_node(path, source, "yaml")]
         emitted: set[str] = set()
 
@@ -5871,7 +6163,7 @@ class CodeParser:
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Index Spring .properties keys without retaining their values."""
         text = source.decode("utf-8", errors="replace")
-        file_path = str(path)
+        file_path = normalize_file_path(path)
         nodes = [self._spring_config_file_node(path, source, "properties")]
         emitted: set[str] = set()
         for line_number, line in self._spring_property_logical_lines(text):
@@ -5917,7 +6209,7 @@ class CodeParser:
         if root is None:
             return [], []
 
-        file_path_str = str(path)
+        file_path_str = normalize_file_path(path)
         line_count = source.count(b"\n") + 1
         nodes: list[NodeInfo] = [NodeInfo(
             kind="File",
@@ -11065,6 +11357,11 @@ class CodeParser:
             method = method_node.text.decode("utf-8", errors="replace")
             return receiver, method
 
+        if language == "csharp":
+            if node.type != "invocation_expression":
+                return None, None
+            return self._get_csharp_receiver_method(node)
+
         callee = node.child_by_field_name("function")
         if callee is None and node.children:
             callee = node.children[0]
@@ -11129,6 +11426,77 @@ class CodeParser:
                 )
 
         return None, method
+
+    @staticmethod
+    def _get_csharp_receiver_method(node) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(receiver, method)`` for a C# invocation expression.
+
+        Handles ``obj.Method()`` / ``Class.Method()`` (member access),
+        ``this.field.Method()`` (class-field receiver), and
+        ``obj?.Method()`` (conditional access via a member binding).
+        Chained or computed receivers keep the method name but no receiver.
+        """
+        callee = node.child_by_field_name("function")
+        if callee is None and node.children:
+            callee = node.children[0]
+        if callee is None:
+            return None, None
+
+        if callee.type == "member_access_expression":
+            name_node = callee.child_by_field_name("name")
+            if name_node is None:
+                return None, None
+            method = name_node.text.decode("utf-8", errors="replace")
+            receiver_node = callee.child_by_field_name("expression")
+            if receiver_node is None:
+                return None, method
+            if receiver_node.type in ("identifier", "this", "this_expression"):
+                return (
+                    receiver_node.text.decode("utf-8", errors="replace"),
+                    method,
+                )
+            # ``this.field.Save()``: the class field is the receiver.
+            if receiver_node.type == "member_access_expression":
+                root = receiver_node.child_by_field_name("expression")
+                field_node = receiver_node.child_by_field_name("name")
+                if (
+                    root is not None
+                    and field_node is not None
+                    and root.type in ("this", "this_expression")
+                ):
+                    return (
+                        field_node.text.decode("utf-8", errors="replace"),
+                        method,
+                    )
+            return None, method
+
+        if callee.type == "conditional_access_expression":
+            bindings = [
+                child for child in callee.children
+                if child.type == "member_binding_expression"
+            ]
+            if not bindings:
+                return None, None
+            name_node = bindings[-1].child_by_field_name("name")
+            if name_node is None:
+                return None, None
+            method = name_node.text.decode("utf-8", errors="replace")
+            receiver_node = callee.child_by_field_name("condition")
+            named_children = [
+                child for child in callee.children if child.is_named
+            ]
+            if (
+                receiver_node is not None
+                and receiver_node.type == "identifier"
+                and len(named_children) == 2
+            ):
+                return (
+                    receiver_node.text.decode("utf-8", errors="replace"),
+                    method,
+                )
+            return None, method
+
+        return None, None
 
     # ------------------------------------------------------------------
     # PHP / Laravel semantic constructs
@@ -13121,7 +13489,7 @@ class CodeParser:
             file_stat = module_path.stat()
         except (OSError, ValueError):
             return {}
-        resolved_module = str(module_path)
+        resolved_module = normalize_file_path(module_path)
         if resolved_module in resolving:
             return {}
 
@@ -13153,7 +13521,7 @@ class CodeParser:
         resolving: frozenset[str],
     ) -> dict[str, str]:
         """Read and parse one Python module for star-export discovery."""
-        resolved_module = str(module_path)
+        resolved_module = normalize_file_path(module_path)
         try:
             source = module_path.read_bytes()
         except (OSError, PermissionError):
@@ -13278,7 +13646,7 @@ class CodeParser:
                 if not self._path_is_within(resolved, boundary):
                     continue
                 if resolved.is_file():
-                    return str(resolved)
+                    return normalize_file_path(resolved)
         return None
 
     def _collect_js_exported_local_names(
@@ -13562,7 +13930,7 @@ class CodeParser:
         point at a forgotten file falls back to a bare module, and the calls
         it feeds stay bare too.
         """
-        self._excluded_files = {str(Path(p).resolve()) for p in paths}
+        self._excluded_files = {normalize_file_path(Path(p).resolve()) for p in paths}
         # Drop resolutions cached before the exclusions were applied.
         self._module_file_cache.clear()
 
@@ -13581,6 +13949,10 @@ class CodeParser:
             resolved = self._module_file_cache[cache_key]
         else:
             resolved = self._do_resolve_module(module, file_path, language)
+            if resolved is not None:
+                # Resolution walks the real filesystem, so on Windows the
+                # raw result uses backslashes; identity must not (#774).
+                resolved = normalize_file_path(resolved)
             if len(self._module_file_cache) >= self._MODULE_CACHE_MAX:
                 self._module_file_cache.clear()
             self._module_file_cache[cache_key] = resolved
@@ -14030,7 +14402,7 @@ class CodeParser:
             return None
         if not _path_is_within(resolved, boundary):
             return None
-        return str(resolved)
+        return normalize_file_path(resolved)
 
     def _resolve_php_composer_module(
         self,
@@ -14235,7 +14607,7 @@ class CodeParser:
             boundary = self._python_repo_boundary(file_path)
             if not self._path_is_within(candidate, boundary) or not candidate.is_file():
                 return None
-            resolved = str(candidate)
+            resolved = normalize_file_path(candidate)
         else:
             resolved = self._resolve_module_to_file(module, file_path, language)
         if not resolved:
@@ -14352,7 +14724,14 @@ class CodeParser:
         return None
 
     def _qualify(self, name: str, file_path: str, enclosing_class: Optional[str]) -> str:
-        """Create a qualified name: file_path::ClassName.name or file_path::name."""
+        """Create a qualified name: file_path::ClassName.name or file_path::name.
+
+        The path component is normalized to POSIX separators so identities
+        are stable across operating systems (#774). ``name`` and
+        ``enclosing_class`` are never touched — PHP namespace identifiers
+        legitimately contain backslashes.
+        """
+        file_path = normalize_file_path(file_path)
         if enclosing_class:
             return f"{file_path}::{enclosing_class}.{name}"
         return f"{file_path}::{name}"
@@ -14503,9 +14882,26 @@ class CodeParser:
                 if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
             return None
+        # C#: unlike Java there is no type_identifier — a non-generic return
+        # type such as ``Task`` is itself an ``identifier``, so the generic
+        # loop below would return it instead of the method name. Read the
+        # ``name`` field; unusual shapes still fall through.
+        if language == "csharp" and kind == "function" and node.type in (
+            "method_declaration", "constructor_declaration",
+        ):
+            name_node = node.child_by_field_name("name")
+            if name_node is not None:
+                return name_node.text.decode("utf-8", errors="replace")
 
         if language == "cpp" and kind == "function":
             declarator = node.child_by_field_name("declarator")
+            if node.type in ("declaration", "field_declaration"):
+                if (
+                    not self._cpp_declaration_has_callable_scope(node)
+                    or not self._cpp_is_callable_declaration(declarator)
+                ):
+                    return None
+                return self._cpp_callable_name(declarator)
             cpp_name = self._cpp_callable_name(declarator)
             if cpp_name:
                 return cpp_name
@@ -14599,6 +14995,18 @@ class CodeParser:
             for child in node.children:
                 if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
+        # Swift init/deinit/subscript: the grammar gives none of them a usable
+        # name. `init_declaration`'s name field is the `init` keyword itself,
+        # `deinit_declaration` has no name field at all (so the generic loop
+        # returns None and the node is dropped), and `subscript_declaration`'s
+        # name field is the *return type* (`subscript(i: Int) -> String` would
+        # be named "String"). Name each after its Swift declaration keyword.
+        if language == "swift" and node.type in (
+            "init_declaration",
+            "deinit_declaration",
+            "subscript_declaration",
+        ):
+            return node.type.removesuffix("_declaration")
         # Swift extensions: name is inside user_type > type_identifier
         # (e.g. `extension MyClass: Protocol { ... }`)
         if language == "swift" and node.type == "class_declaration":
@@ -14868,6 +15276,11 @@ class CodeParser:
         if declarator is None:
             return None
         if declarator.type in ("function_declarator", "abstract_function_declarator"):
+            nested = self._cpp_find_function_declarator(
+                declarator.child_by_field_name("declarator"),
+            )
+            if nested is not None:
+                return nested
             return declarator
         for child in declarator.named_children:
             if child.type in ("parameter_list", "template_argument_list"):
@@ -14876,6 +15289,44 @@ class CodeParser:
             if found is not None:
                 return found
         return None
+
+    def _cpp_is_callable_declaration(self, declarator) -> bool:
+        """Return whether a declaration names a function, not a function pointer."""
+        function_declarator = self._cpp_find_function_declarator(declarator)
+        if function_declarator is None:
+            return False
+
+        callable_declarator = function_declarator.child_by_field_name("declarator")
+        if (
+            callable_declarator is None
+            or callable_declarator.type != "parenthesized_declarator"
+        ):
+            return True
+
+        # ``void (*callback)(int)`` has no nested function declarator inside
+        # the parentheses.  A real function returning a function pointer,
+        # such as ``void (*factory())(int)``, does.
+        return self._cpp_find_function_declarator(callable_declarator) is not None
+
+    @staticmethod
+    def _cpp_declaration_has_callable_scope(declaration) -> bool:
+        """Limit callable declarations to file, namespace, and class scopes."""
+        scope = declaration.parent
+        while scope is not None:
+            if scope.type in (
+                "translation_unit",
+                "namespace_definition",
+                "field_declaration_list",
+            ):
+                return not _is_in_static_dead_guard(declaration)
+            if scope.type in (
+                "compound_statement",
+                "function_definition",
+                "lambda_expression",
+            ):
+                return False
+            scope = scope.parent
+        return False
 
     def _cpp_find_qualified_identifier(self, declarator):
         """Find the callable's qualified identifier outside its parameters."""

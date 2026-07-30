@@ -11,6 +11,7 @@ from typing import Any
 
 from ..graph import GraphStore
 from ..incremental import find_project_root, get_db_path
+from ..parser import normalize_file_path
 
 _PROVENANCE_READ_TIMEOUT_SECONDS = 0.05
 _PROVENANCE_GIT_TIMEOUT_SECONDS = 1.0
@@ -242,7 +243,7 @@ def _resolve_graph_file_paths(
             except ValueError:
                 pass
         else:
-            candidates.append(str(root / path))
+            candidates.append(normalize_file_path(root / path))
 
         for candidate in candidates:
             if store.get_nodes_by_file(candidate):

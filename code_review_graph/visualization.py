@@ -8,21 +8,91 @@ Supports multiple rendering modes for large graphs:
 - ``full``  — render every node (default, current behavior)
 - ``community`` — aggregate by community; double-click to drill down
 - ``file``  — aggregate by file; each file is a node
-- ``auto``  — choose community mode when node count exceeds threshold
+- ``auto``  — choose an aggregated mode when the rendered node count or
+  edge count exceeds its threshold (community when community data exists,
+  file otherwise)
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import asdict
+from importlib import resources
 from pathlib import Path
 
 from .graph import GraphStore, edge_to_dict, node_to_dict
 
 logger = logging.getLogger(__name__)
+
+# Pinned D3 build vendored with the package (issue #475). The generated HTML
+# loads this same-origin copy first so `visualize --serve` works on offline or
+# filtered networks, and only falls back to the CDN — still SRI-pinned — when
+# the local copy is unavailable. Both references carry the same integrity hash.
+D3_LOCAL_FILENAME = "d3.v7.min.js"
+D3_CDN_URL = "https://d3js.org/d3.v7.min.js"
+D3_SRI_HASH = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+
+
+def _d3_script_tags() -> str:
+    """Build the D3 loader tags: same-origin script plus SRI-pinned CDN fallback.
+
+    The fallback uses ``document.write`` so it loads *synchronously* during
+    parsing — the rest of the page's inline scripts use ``d3`` immediately.
+    """
+    local_tag = f'<script src="{D3_LOCAL_FILENAME}" integrity="{D3_SRI_HASH}"></script>'
+    cdn_tag = (
+        f'<script src="{D3_CDN_URL}" integrity="{D3_SRI_HASH}" crossorigin="anonymous">'
+        "<\\/script>"
+    )
+    fallback_tag = f"<script>window.d3 || document.write('{cdn_tag}');</script>"
+    return local_tag + "\n" + fallback_tag
+
+
+def _write_d3_asset(directory: Path) -> Path | None:
+    """Copy the vendored D3 build next to the generated HTML.
+
+    The copy is verified against the pinned SRI hash before writing. Returns
+    the written path, or ``None`` if the bundled asset is missing, corrupt, or
+    unwritable — the generated page then loads D3 via the SRI-pinned CDN
+    fallback tag instead.
+    """
+    dest = directory / D3_LOCAL_FILENAME
+    try:
+        asset = resources.files("code_review_graph") / "assets" / D3_LOCAL_FILENAME
+        data = asset.read_bytes()
+    except OSError as exc:
+        logger.warning("Bundled D3 asset unavailable (%s); page will use the CDN fallback.", exc)
+        return None
+    digest = base64.b64encode(hashlib.sha384(data).digest()).decode()
+    if f"sha384-{digest}" != D3_SRI_HASH:
+        logger.error(
+            "Bundled D3 asset does not match the pinned SRI hash; refusing to write %s. "
+            "The page will use the CDN fallback.",
+            dest,
+        )
+        return None
+    try:
+        dest.write_bytes(data)
+    except OSError as exc:
+        logger.warning("Could not write %s (%s); page will use the CDN fallback.", dest, exc)
+        return None
+    return dest
+
+# Auto-mode thresholds for the full D3 force layout. Rendering cost scales
+# with both counts: every simulation tick runs an O(E) link force on top of
+# the O(N log N) many-body force, and the SVG DOM holds one element per node
+# *and* one per edge. The long-standing 3000-node cap implicitly tolerated
+# the ~3 edges per node typical of graphs at that size (~9000 rendered SVG
+# edge elements), so the edge cap is derived from the same rendering budget:
+# 3x the node cap. Issue #609 (2792 nodes / 17488 edges) stalled because
+# only nodes were checked.
+DEFAULT_MAX_FULL_NODES = 3000
+DEFAULT_MAX_FULL_EDGES = 3 * DEFAULT_MAX_FULL_NODES
 
 
 def _build_name_index(
@@ -357,11 +427,40 @@ def _aggregate_file(data: dict) -> dict:
     }
 
 
+def _has_community_data(data: dict) -> bool:
+    """Return True if the exported graph carries any community assignment."""
+    if data.get("communities"):
+        return True
+    return any(n.get("community_id") is not None for n in data["nodes"])
+
+
+def _resolve_auto_mode(
+    node_count: int,
+    edge_count: int,
+    max_full_nodes: int,
+    max_full_edges: int,
+    has_communities: bool,
+) -> str:
+    """Pick the effective rendering mode for ``mode="auto"``.
+
+    The full force layout is only viable while *both* rendered counts stay
+    within budget (see DEFAULT_MAX_FULL_NODES / DEFAULT_MAX_FULL_EDGES).
+    When aggregation is needed, prefer community mode; fall back to file
+    aggregation when no community data is available (otherwise every node
+    would collapse into a single "Uncategorized" super-node whose drill-down
+    re-renders the entire graph).
+    """
+    if node_count <= max_full_nodes and edge_count <= max_full_edges:
+        return "full"
+    return "community" if has_communities else "file"
+
+
 def generate_html(
     store: GraphStore,
     output_path: str | Path,
     mode: str = "auto",
-    max_full_nodes: int = 3000,
+    max_full_nodes: int = DEFAULT_MAX_FULL_NODES,
+    max_full_edges: int = DEFAULT_MAX_FULL_EDGES,
 ) -> Path:
     """Generate a self-contained interactive HTML visualization.
 
@@ -369,9 +468,12 @@ def generate_html(
         store: The GraphStore to read graph data from.
         output_path: Path for the output HTML file.
         mode: Rendering mode — ``"auto"``, ``"full"``, ``"community"``,
-              or ``"file"``.  ``"auto"`` switches to ``"community"`` when
-              the node count exceeds *max_full_nodes*.
-        max_full_nodes: Threshold for auto-switching to community mode.
+              or ``"file"``.  ``"auto"`` switches to an aggregated mode
+              (community, or file when no community data exists) when the
+              rendered node count exceeds *max_full_nodes* or the rendered
+              edge count exceeds *max_full_edges*.
+        max_full_nodes: Rendered-node threshold for auto-switching.
+        max_full_edges: Rendered-edge threshold for auto-switching.
 
     Writes the HTML file to *output_path* and returns the resolved Path.
     """
@@ -387,26 +489,45 @@ def generate_html(
     # Determine effective mode
     effective_mode = mode
     if effective_mode == "auto":
-        effective_mode = (
-            "community" if stats.total_nodes > max_full_nodes else "full"
+        effective_mode = _resolve_auto_mode(
+            node_count=len(data["nodes"]),
+            edge_count=len(data["edges"]),
+            max_full_nodes=max_full_nodes,
+            max_full_edges=max_full_edges,
+            has_communities=_has_community_data(data),
         )
+        if effective_mode != "full":
+            logger.info(
+                "auto mode: %d nodes / %d edges exceeds full-render budget "
+                "(%d nodes / %d edges) — using %s aggregation",
+                len(data["nodes"]), len(data["edges"]),
+                max_full_nodes, max_full_edges, effective_mode,
+            )
 
     if effective_mode == "community":
         # Keep full data available for drill-down; aggregate for top-level
         agg = _aggregate_community(data)
         # Escape </script> inside JSON to prevent premature tag closure
         data_json = json.dumps(agg, default=str).replace("</", "<\\/")
-        html = _AGGREGATED_HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
+        template = _AGGREGATED_HTML_TEMPLATE
     elif effective_mode == "file":
         agg = _aggregate_file(data)
         data_json = json.dumps(agg, default=str).replace("</", "<\\/")
-        html = _AGGREGATED_HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
+        template = _AGGREGATED_HTML_TEMPLATE
     else:
         # full mode — original behavior
         data_json = json.dumps(data, default=str).replace("</", "<\\/")
-        html = _HTML_TEMPLATE.replace("__GRAPH_DATA__", data_json)
+        template = _HTML_TEMPLATE
 
+    # Substitute the script tags into the trusted template BEFORE the graph
+    # data: graph content is repo-derived, and running a replace over it would
+    # let a node literally named __D3_SCRIPTS__ inject markup into the page.
+    html = template.replace("__D3_SCRIPTS__", _d3_script_tags())
+    html = html.replace("__GRAPH_DATA__", data_json)
     output_path.write_text(html, encoding="utf-8")
+    # Ship the vendored D3 build alongside the HTML so the same-origin script
+    # reference resolves both under `visualize --serve` and file:// opens.
+    _write_d3_asset(output_path.parent)
     return output_path
 
 
@@ -424,7 +545,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Code Review Graph</title>
-<script src="https://d3js.org/d3.v7.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+__D3_SCRIPTS__
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -1457,7 +1578,7 @@ _AGGREGATED_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Code Review Graph (Aggregated)</title>
-<script src="https://d3js.org/d3.v7.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+__D3_SCRIPTS__
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; }

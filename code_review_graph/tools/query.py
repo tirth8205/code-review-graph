@@ -13,6 +13,7 @@ from ..embeddings import EmbeddingStore
 from ..graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
+from ..parser import normalize_file_path
 from ..search import hybrid_search
 from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
 
@@ -304,7 +305,7 @@ def query_graph(
         if pattern != "file_summary" and not raw_config_target:
             node = store.get_node(target)
             if not node:
-                abs_target = str(root / target)
+                abs_target = normalize_file_path(root / target)
                 node = store.get_node(abs_target)
             if not node:
                 java_candidates = _java_fqn_candidates(store, target)

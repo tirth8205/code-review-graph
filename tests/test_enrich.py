@@ -72,19 +72,21 @@ class TestEnrichSearch:
         self.store.close()
 
     def _seed_data(self):
+        # POSIX spelling matches graph identity on every platform (#774).
+        posix_dir = Path(self.tmpdir).as_posix()
         nodes = [
             NodeInfo(
-                kind="Function", name="parse_file", file_path=f"{self.tmpdir}/parser.py",
+                kind="Function", name="parse_file", file_path=f"{posix_dir}/parser.py",
                 line_start=10, line_end=50, language="python",
                 params="(path: str)", return_type="list[Node]",
             ),
             NodeInfo(
-                kind="Function", name="full_build", file_path=f"{self.tmpdir}/build.py",
+                kind="Function", name="full_build", file_path=f"{posix_dir}/build.py",
                 line_start=1, line_end=30, language="python",
             ),
             NodeInfo(
                 kind="Test", name="test_parse_file",
-                file_path=f"{self.tmpdir}/test_parser.py",
+                file_path=f"{posix_dir}/test_parser.py",
                 line_start=1, line_end=20, language="python",
                 is_test=True,
             ),
@@ -94,17 +96,17 @@ class TestEnrichSearch:
         edges = [
             EdgeInfo(
                 kind="CALLS",
-                source=f"{self.tmpdir}/build.py::full_build",
-                target=f"{self.tmpdir}/parser.py::parse_file",
-                file_path=f"{self.tmpdir}/build.py", line=15,
+                source=f"{posix_dir}/build.py::full_build",
+                target=f"{posix_dir}/parser.py::parse_file",
+                file_path=f"{posix_dir}/build.py", line=15,
             ),
             EdgeInfo(
                 # TESTED_BY edges are stored as source=production, target=test
                 # by the parser. See: #515
                 kind="TESTED_BY",
-                source=f"{self.tmpdir}/parser.py::parse_file",
-                target=f"{self.tmpdir}/test_parser.py::test_parse_file",
-                file_path=f"{self.tmpdir}/test_parser.py", line=1,
+                source=f"{posix_dir}/parser.py::parse_file",
+                target=f"{posix_dir}/test_parser.py::test_parse_file",
+                file_path=f"{posix_dir}/test_parser.py", line=1,
             ),
         ]
         for e in edges:
@@ -153,7 +155,8 @@ class TestEnrichFileRead:
         self.store.close()
 
     def _seed_data(self):
-        self.file_path = f"{self.tmpdir}/parser.py"
+        # POSIX spelling matches graph identity on every platform (#774).
+        self.file_path = (Path(self.tmpdir) / "parser.py").as_posix()
         nodes = [
             NodeInfo(
                 kind="File", name="parser.py", file_path=self.file_path,

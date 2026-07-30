@@ -63,7 +63,7 @@ class TestComposerPsr4:
             "App\\Models\\User",
         )
 
-        assert resolved == str(target.resolve())
+        assert resolved == target.resolve().as_posix()
 
     def test_composer_uses_longest_matching_prefix(self, tmp_path):
         repo = tmp_path / "repo"
@@ -87,7 +87,7 @@ class TestComposerPsr4:
             "App\\Domain\\Thing",
         )
 
-        assert resolved == str(target.resolve())
+        assert resolved == target.resolve().as_posix()
 
     def test_composer_checks_every_directory_for_prefix(self, tmp_path):
         repo = tmp_path / "repo"
@@ -103,7 +103,7 @@ class TestComposerPsr4:
             "App\\Thing",
         )
 
-        assert resolved == str(target.resolve())
+        assert resolved == target.resolve().as_posix()
 
     def test_composer_merges_autoload_and_autoload_dev_directories(self, tmp_path):
         repo = tmp_path / "repo"
@@ -122,7 +122,7 @@ class TestComposerPsr4:
             "App\\Tests\\Factory",
         )
 
-        assert resolved == str(target.resolve())
+        assert resolved == target.resolve().as_posix()
 
     @pytest.mark.parametrize(
         "data",
@@ -300,7 +300,7 @@ class TestComposerPsr4:
             "App\\Domain\\Thing",
         )
 
-        assert resolved == str(target.resolve())
+        assert resolved == target.resolve().as_posix()
 
 
 class TestComposerCache:
@@ -342,7 +342,7 @@ class TestComposerCache:
             "App\\User", str(caller), "php",
         )
 
-        assert first == second == str(target.resolve())
+        assert first == second == target.resolve().as_posix()
         assert composer_reads == 1
 
     def test_composer_cache_reloads_after_stat_change(self, tmp_path):
@@ -370,7 +370,7 @@ class TestComposerCache:
         )
 
         assert first != second
-        assert second == str(updated.resolve())
+        assert second == updated.resolve().as_posix()
 
     def test_composer_cache_isolated_between_repositories(self, tmp_path):
         first_repo = tmp_path / "first"
@@ -395,8 +395,8 @@ class TestComposerCache:
             "App\\User", str(second_caller), "php",
         )
 
-        assert first == str(first_target.resolve())
-        assert second == str(second_target.resolve())
+        assert first == first_target.resolve().as_posix()
+        assert second == second_target.resolve().as_posix()
 
 
 class TestBladeParsing:
@@ -416,8 +416,8 @@ class TestBladeParsing:
         assert parser.detect_language(template) == "blade"
         assert len(nodes) == 1
         assert nodes[0].kind == "File"
-        assert nodes[0].name == str(template)
-        assert nodes[0].file_path == str(template)
+        assert nodes[0].name == template.as_posix()
+        assert nodes[0].file_path == template.as_posix()
         assert nodes[0].language == "blade"
         assert nodes[0].line_end == 7
 
@@ -543,7 +543,7 @@ Router::get('/users', [Users::class, 'index']);
 
         semantic = _laravel_edges(edges, "CALLS")
         assert [(edge.target, edge.extra["laravel_kind"]) for edge in semantic] == [
-            (f"{controller.resolve()}::UserController.index", "route"),
+            (f"{controller.resolve().as_posix()}::UserController.index", "route"),
         ]
         assert len([
             edge for edge in edges
@@ -569,7 +569,7 @@ Router::get('/users', [Users::class, 'index']);
 
         semantic = _laravel_edges(edges, "CALLS")
         assert [edge.target for edge in semantic] == [
-            f"{controller.resolve()}::UserController.store",
+            f"{controller.resolve().as_posix()}::UserController.store",
         ]
         assert len([
             edge for edge in edges
@@ -600,7 +600,7 @@ class User extends BaseModel {
 
         semantic = _laravel_edges(edges, "REFERENCES")
         assert [(edge.target, edge.extra["relationship"]) for edge in semantic] == [
-            (f"{post.resolve()}::Post", "hasMany"),
+            (f"{post.resolve().as_posix()}::Post", "hasMany"),
         ]
         assert len([
             edge for edge in edges
@@ -624,7 +624,7 @@ class User extends \Illuminate\Database\Eloquent\Model {
 
         semantic = _laravel_edges(edges, "REFERENCES")
         assert [edge.target for edge in semantic] == [
-            f"{post.resolve()}::Post",
+            f"{post.resolve().as_posix()}::Post",
         ]
         assert semantic[0].extra["relationship"] == "belongsTo"
 
@@ -651,7 +651,7 @@ namespace App\Bad {
 
         semantic = _laravel_edges(edges, "REFERENCES")
         assert [edge.target for edge in semantic] == [
-            f"{post.resolve()}::Post",
+            f"{post.resolve().as_posix()}::Post",
         ]
         assert semantic[0].source.endswith("::User.posts")
 

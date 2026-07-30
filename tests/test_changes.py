@@ -564,8 +564,8 @@ class TestAnalyzeChangesInternalParseRemap:
         return _spy
 
     def test_internal_parse_remaps_relative_keys_to_absolute(self, tmp_path):
-        """Forward-slash relative diff keys become absolute native paths."""
-        abs_path = str(tmp_path / "src" / "app.py")
+        """Forward-slash relative diff keys become absolute POSIX paths."""
+        abs_path = (tmp_path / "src" / "app.py").as_posix()
         self._add_func_at(abs_path)
 
         captured: dict = {}
@@ -593,7 +593,7 @@ class TestAnalyzeChangesInternalParseRemap:
 
     def test_internal_parse_preserves_already_absolute_keys(self, tmp_path):
         """Keys that are already absolute are not double-joined."""
-        abs_path = str(tmp_path / "src" / "app.py")
+        abs_path = (tmp_path / "src" / "app.py").as_posix()
         self._add_func_at(abs_path)
 
         captured: dict = {}

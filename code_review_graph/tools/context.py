@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..incremental import get_db_path
+from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def get_minimal_context(
                 if not files:
                     files = _get_changed(root, base)
                 if files:
-                    abs_files = [str(root / f) for f in files]
+                    abs_files = [normalize_file_path(root / f) for f in files]
                     analysis = analyze_changes(
                         store, abs_files, repo_root=str(root), base=base,
                     )

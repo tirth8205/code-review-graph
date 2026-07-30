@@ -28,8 +28,54 @@
 
 ### Fixed
 
+- C# receiver calls (`Service.StaticCall()`, `obj.Method()`, `obj?.Method()`)
+  now resolve to canonical method nodes using receiver-type and namespace
+  evidence recorded at parse time, so `callers_of`, `get_impact_radius`, and
+  `tests_for` return real results for C# codebases instead of bare unresolved
+  names (#612).
+- C# namespace-targeted `IMPORTS_FROM` edges now resolve in `get_impact_radius`,
+  `tests_for`, and the `detect_changes` test-gap classification, not just
+  `importers_of` — well-covered C# code is no longer reported as untested
+  (#310, #792).
+- The path alias resolver now reads `jsconfig.json` (with `tsconfig.json`
+  taking precedence), so plain-JS Vue/Nuxt/Vite projects resolve `@/...`
+  imports instead of silently dropping most of the import graph (#776).
+- Qualified names and `file_path` values now always use POSIX forward-slash
+  separators, making graphs separator-stable across operating systems and
+  fixing 15 Windows test failures; `GraphStore.get_node` bridges native-spelling
+  lookups. Graphs built on Windows by earlier versions need a rebuild (#774).
+- A file saved while it is being indexed no longer stays permanently
+  under-indexed: language detection and parsing now use the same byte snapshot
+  that produced the stored `file_hash` (#746).
+- `status` no longer reports stale or phantom languages: the language list is
+  derived from the live indexed-file inventory, and Java-specific resolvers
+  rerun when Java files leave the graph (#474).
+- `visualize` auto mode now also switches to an aggregated view when the
+  rendered edge count exceeds its budget (previously node-count-only, which
+  stalled the D3 force layout on edge-heavy graphs), and falls back to file
+  aggregation when no community data exists (#609).
+- `visualize --serve` now works on offline and filtered networks: the pinned
+  D3 build ships with the package and is loaded same-origin with its SRI hash
+  verified, keeping an SRI-pinned CDN fallback. Placeholder substitution is
+  ordered so repo-derived graph content can never be expanded as template
+  markup (#475).
+- Refreshed `uv.lock` within existing constraints, clearing all disclosed
+  advisories from #665 (mcp 1.29.0, python-multipart 0.0.32, authlib 1.7.2,
+  pyjwt 2.13.0, starlette 1.3.1, cryptography 49.0.0).
+- Swift initializers, deinitializers and subscripts now emit `Function` nodes
+  (#786). `init_declaration`, `deinit_declaration` and `subscript_declaration`
+  are node types distinct from `function_declaration`, so the walker skipped
+  them and attributed the calls in their bodies to the enclosing *File* node —
+  a change inside one initializer read as file-wide blast radius, and
+  `get_impact_radius` on a callee could not trace back to the initializer that
+  calls it. Each is named after its declaration keyword, since the grammar
+  gives none of the three a usable name field (`subscript`'s would be its
+  return type, `deinit`'s is absent).
 - GitHub Copilot auto-detection now requires the Copilot extension and also
   recognizes the extension bundled with released VS Code installations.
+- C# methods with a non-generic return type are no longer named after that
+  type: `public async Task Foo()` indexed as `Task`, collapsing every such
+  method in a class onto one qualified name (#791).
 - Added a post-index Python import resolver using unique module suffixes, so
   `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
   package candidates remain explicitly unresolved (#720).

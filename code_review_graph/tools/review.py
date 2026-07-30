@@ -12,6 +12,7 @@ from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_staged_and_unstaged
+from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
@@ -323,8 +324,9 @@ def get_affected_flows_func(
                 "total": 0,
             }
 
-        # Convert to absolute paths for graph lookup
-        abs_files = [str(root / f) for f in changed_files]
+        # Convert to absolute paths for graph lookup. Graph identity uses
+        # POSIX separators (#774), so normalize the joined paths.
+        abs_files = [normalize_file_path(root / f) for f in changed_files]
         result = _get_affected_flows(store, abs_files)
 
         total = result["total"]
@@ -405,15 +407,16 @@ def detect_changes_func(
 
         original_tokens = estimate_file_tokens(root, changed_files)
 
-        # Convert to absolute paths for graph lookup.
-        abs_files = [str(root / f) for f in changed_files]
+        # Convert to absolute paths for graph lookup. Graph identity uses
+        # POSIX separators (#774), so normalize the joined paths.
+        abs_files = [normalize_file_path(root / f) for f in changed_files]
 
         # Parse diff ranges for line-level mapping.
         diff_ranges = parse_diff_ranges(str(root), base)
         # Remap to absolute paths so they match graph file_paths.
         abs_ranges: dict[str, list[tuple[int, int]]] = {}
         for rel_path, ranges in diff_ranges.items():
-            abs_path = str(root / rel_path)
+            abs_path = normalize_file_path(root / rel_path)
             abs_ranges[abs_path] = ranges
 
         analysis = analyze_changes(

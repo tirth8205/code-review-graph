@@ -14,6 +14,24 @@ struct User {
 class InMemoryRepo: UserRepository {
     private var users: [Int: User] = [:]
 
+    init(seed: [User]) {
+        for user in seed {
+            save(user)
+        }
+    }
+
+    convenience init() {
+        self.init(seed: [])
+    }
+
+    deinit {
+        users.removeAll()
+    }
+
+    subscript(id: Int) -> User? {
+        return findById(id)
+    }
+
     func findById(_ id: Int) -> User? {
         return users[id]
     }

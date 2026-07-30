@@ -16,6 +16,7 @@ from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
+from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,9 @@ def incremental_trace_flows(
     if not changed_files:
         return 0
 
+    # Graph identity uses POSIX separators (#774); bridge native-separator
+    # caller paths before matching against stored file_path values.
+    changed_files = [normalize_file_path(p) for p in changed_files]
     conn = store._conn
     changed_file_set = set(changed_files)
 

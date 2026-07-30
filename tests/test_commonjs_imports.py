@@ -26,8 +26,8 @@ def test_static_require_resolves_relative_file_and_deduplicates(tmp_path):
 
     imports = _imports(edges)
     assert len(imports) == 1
-    assert imports[0].source == str(path)
-    assert imports[0].target == str(dependency.resolve())
+    assert imports[0].source == path.as_posix()
+    assert imports[0].target == dependency.resolve().as_posix()
 
 
 def test_destructured_require_populates_import_map_for_call_resolution(tmp_path):
@@ -40,7 +40,7 @@ def test_destructured_require_populates_import_map_for_call_resolution(tmp_path)
     )
 
     calls = [edge for edge in edges if edge.kind == "CALLS"]
-    assert any(edge.target == f"{dependency.resolve()}::run" for edge in calls)
+    assert any(edge.target == f"{dependency.resolve().as_posix()}::run" for edge in calls)
 
 
 def test_static_dynamic_import_is_recorded(tmp_path):
@@ -51,7 +51,7 @@ def test_static_dynamic_import_is_recorded(tmp_path):
         "async function load() { return import('./dependency'); }\n",
     )
 
-    assert [edge.target for edge in _imports(edges)] == [str(dependency.resolve())]
+    assert [edge.target for edge in _imports(edges)] == [dependency.resolve().as_posix()]
 
 
 def test_package_require_remains_an_unresolved_package_edge(tmp_path):

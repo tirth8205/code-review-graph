@@ -234,7 +234,7 @@ class TestJavaImportResolution:
         _, edges = parser.parse_file(svc / "App.java")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
-        assert imports[0].target == str((auth / "User.java").resolve())
+        assert imports[0].target == (auth / "User.java").resolve().as_posix()
 
     def test_jdk_import_stays_unresolved(self):
         """JDK imports have no local file and remain as raw strings."""
@@ -267,7 +267,7 @@ class TestJavaImportResolution:
         _, edges = parser.parse_file(app_dir / "App.java")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
-        assert imports[0].target == str((pkg / "Helper.java").resolve())
+        assert imports[0].target == (pkg / "Helper.java").resolve().as_posix()
 
     def test_wildcard_import_stays_unresolved(self, tmp_path):
         """Wildcard imports cannot resolve to a single file."""
@@ -460,6 +460,42 @@ class TestCSharpParsing:
 @pytest.mark.skipif(
     not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
 )
+class TestCSharpMethodNames:
+    """Regression tests for #791: a non-generic C# return type is itself an
+    ``identifier``, so ``async Task Foo()`` was named ``Task`` and every such
+    method in a class merged onto one ``qualified_name``.
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.cs"
+        p.write_text(source, encoding="utf-8")
+        return CodeParser().parse_file(p)
+
+    def test_non_generic_return_type_is_not_the_name(self, tmp_path):
+        nodes, _ = self._parse(
+            "public class Suite {\n"
+            "    public async Task Should_do_thing() { }\n"
+            "    public async Task Should_do_other_thing() { }\n"
+            "    public async Task<int> Returns_generic() { return 1; }\n"
+            "    public void PlainVoid() { }\n"
+            "    public Suite() { }\n"
+            "}\n",
+            tmp_path,
+        )
+        funcs = [n for n in nodes if n.kind == "Function"]
+        assert {f.name for f in funcs} == {
+            "Should_do_thing",
+            "Should_do_other_thing",
+            "Returns_generic",
+            "PlainVoid",
+            "Suite",
+        }
+        assert len(funcs) == 5
+
+
+@pytest.mark.skipif(
+    not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
+)
 class TestCSharpAttributes:
     """Regression tests for #295 (C# half): C# attributes use
     ``attribute_list`` nodes, not ``modifiers > annotation``, so they need
@@ -566,8 +602,8 @@ class TestCSharpNamespaceResolution:
         result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
         assert result.get("status") == "ok"
         importers = {r["file"] for r in result.get("results", [])}
-        assert str(app) in importers
-        assert str(unrelated) not in importers
+        assert app.as_posix() in importers
+        assert unrelated.as_posix() not in importers
 
     def test_importers_of_resolves_nested_block_namespace(self, tmp_path):
         from code_review_graph.graph import GraphStore
@@ -606,7 +642,7 @@ class TestCSharpNamespaceResolution:
         result = query_graph("importers_of", str(core), repo_root=str(tmp_path))
         assert result.get("status") == "ok"
         importers = {r["file"] for r in result.get("results", [])}
-        assert str(app) in importers
+        assert app.as_posix() in importers
 
     def test_deep_ast_preserves_nested_namespace_metadata(self, tmp_path):
         """Namespace discovery must not recurse through the whole C# AST."""
@@ -635,6 +671,396 @@ class TestCSharpNamespaceResolution:
             "Acme",
             "Acme.Core",
         ]
+
+
+@pytest.mark.skipif(
+    not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
+)
+class TestCSharpReceiverCallResolution:
+    """Regression tests for #612: C# receiver calls (``Service.StaticCall()``,
+    ``obj.InstanceCall()``, ``obj?.ConditionalCall()``) were extracted but every
+    call target stayed a bare unresolved name, so ``callers_of`` marked callers
+    unresolved and ``get_impact_radius`` reported zero impacted nodes/files for
+    the callee's file. These tests run the full build pipeline (``full_build``
+    plus ``run_post_processing``) on a multi-file fixture and assert on
+    built-graph query results, not parse-time output.
+    """
+
+    SERVICE = (
+        "namespace Acme.Services;\n"
+        "\n"
+        "public class Service\n"
+        "{\n"
+        "    public static void StaticCall() { }\n"
+        "    public void InstanceCall() { }\n"
+        "    public void ConditionalCall() { }\n"
+        "}\n"
+    )
+    CONSUMER = (
+        "using Acme.Services;\n"
+        "\n"
+        "namespace Acme.App;\n"
+        "\n"
+        "public class Consumer\n"
+        "{\n"
+        "    public void Run()\n"
+        "    {\n"
+        "        Service.StaticCall();\n"
+        "        var obj = new Service();\n"
+        "        obj.InstanceCall();\n"
+        "        Service typed = obj;\n"
+        "        typed.InstanceCall();\n"
+        "        obj?.ConditionalCall();\n"
+        "    }\n"
+        "}\n"
+    )
+    # Same-file resolution: two classes in one file, one calling the other.
+    SINGLE = (
+        "namespace Acme.Single;\n"
+        "\n"
+        "public class Widget\n"
+        "{\n"
+        "    public static void Spin() { }\n"
+        "}\n"
+        "\n"
+        "public class Runner\n"
+        "{\n"
+        "    public void Go()\n"
+        "    {\n"
+        "        Widget.Spin();\n"
+        "    }\n"
+        "}\n"
+    )
+    # Decoy classes with identical class/method names in an unrelated
+    # namespace: resolution must use receiver + namespace evidence, not
+    # graph-wide name uniqueness.
+    DECOY = (
+        "namespace Other.Zone;\n"
+        "\n"
+        "public class Widget\n"
+        "{\n"
+        "    public static void Spin() { }\n"
+        "}\n"
+        "\n"
+        "public class Service\n"
+        "{\n"
+        "    public static void StaticCall() { }\n"
+        "    public void InstanceCall() { }\n"
+        "    public void ConditionalCall() { }\n"
+        "}\n"
+    )
+    TESTS = (
+        "using Acme.Services;\n"
+        "\n"
+        "namespace Acme.Tests;\n"
+        "\n"
+        "public class ServiceTests\n"
+        "{\n"
+        "    public void TestStaticDispatch()\n"
+        "    {\n"
+        "        Service.StaticCall();\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def _build(self, tmp_path):
+        from unittest.mock import patch
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.postprocessing import run_post_processing
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        files = {
+            "Service.cs": self.SERVICE,
+            "Consumer.cs": self.CONSUMER,
+            "Single.cs": self.SINGLE,
+            "Decoy.cs": self.DECOY,
+            "ServiceTests.cs": self.TESTS,
+        }
+        for name, content in files.items():
+            (tmp_path / name).write_text(content, encoding="utf-8")
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=sorted(files),
+        ):
+            full_build(tmp_path, store)
+        run_post_processing(store)
+        store.close()
+
+    def _call_targets_of(self, tmp_path, caller_suffix):
+        from code_review_graph.graph import GraphStore
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        try:
+            rows = store._conn.execute(
+                "SELECT target_qualified FROM edges "
+                "WHERE kind = 'CALLS' AND source_qualified LIKE ?",
+                (f"%::{caller_suffix}",),
+            ).fetchall()
+            return {row["target_qualified"] for row in rows}
+        finally:
+            store.close()
+
+    def test_full_build_resolves_receiver_calls_to_canonical_methods(
+        self, tmp_path,
+    ):
+        self._build(tmp_path)
+        service = str(tmp_path / "Service.cs")
+        targets = self._call_targets_of(tmp_path, "Consumer.Run")
+        assert f"{service}::Service.StaticCall" in targets
+        assert f"{service}::Service.InstanceCall" in targets
+        assert f"{service}::Service.ConditionalCall" in targets
+        decoy = str(tmp_path / "Decoy.cs")
+        assert not any(t.startswith(f"{decoy}::") for t in targets)
+
+    def test_full_build_resolves_same_file_receiver_call(self, tmp_path):
+        self._build(tmp_path)
+        single = str(tmp_path / "Single.cs")
+        targets = self._call_targets_of(tmp_path, "Runner.Go")
+        assert f"{single}::Widget.Spin" in targets
+
+    def test_callers_of_returns_resolved_caller_after_full_build(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        self._build(tmp_path)
+        service = str(tmp_path / "Service.cs")
+        for method in ("StaticCall", "InstanceCall", "ConditionalCall"):
+            result = query_graph(
+                "callers_of",
+                f"{service}::Service.{method}",
+                repo_root=str(tmp_path),
+            )
+            assert result.get("status") == "ok"
+            run_callers = [
+                r for r in result.get("results", [])
+                if r.get("name") == "Run"
+            ]
+            assert run_callers, f"callers_of({method}) missed Consumer.Run"
+            assert all(
+                r.get("target_resolution") != "unresolved"
+                for r in run_callers
+            ), f"callers_of({method}) still marks Consumer.Run unresolved"
+
+    def test_impact_radius_of_service_file_reaches_consumer(self, tmp_path):
+        from code_review_graph.tools.query import get_impact_radius
+
+        self._build(tmp_path)
+        result = get_impact_radius(
+            changed_files=["Service.cs"], repo_root=str(tmp_path),
+        )
+        assert result.get("status") == "ok"
+        impacted_names = {
+            n["name"] for n in result.get("impacted_nodes", [])
+        }
+        assert "Run" in impacted_names
+        assert str(tmp_path / "Consumer.cs") in set(
+            result.get("impacted_files", []),
+        )
+
+    def test_impact_radius_of_decoy_file_does_not_reach_consumer(
+        self, tmp_path,
+    ):
+        from code_review_graph.tools.query import get_impact_radius
+
+        self._build(tmp_path)
+        result = get_impact_radius(
+            changed_files=["Decoy.cs"], repo_root=str(tmp_path),
+        )
+        assert result.get("status") == "ok"
+        impacted_names = {
+            n["name"] for n in result.get("impacted_nodes", [])
+        }
+        assert "Run" not in impacted_names
+
+    def test_tests_for_finds_test_through_resolved_receiver_call(
+        self, tmp_path,
+    ):
+        from code_review_graph.tools.query import query_graph
+
+        self._build(tmp_path)
+        service = str(tmp_path / "Service.cs")
+        result = query_graph(
+            "tests_for",
+            f"{service}::Service.StaticCall",
+            repo_root=str(tmp_path),
+        )
+        assert result.get("status") == "ok"
+        test_names = {r.get("name") for r in result.get("results", [])}
+        assert "TestStaticDispatch" in test_names
+
+
+@pytest.mark.skipif(
+    not _has_csharp_parser(), reason="csharp tree-sitter grammar not installed",
+)
+class TestCSharpNamespaceImpactAndCoverage:
+    """End-to-end regression tests for #310 / #792.
+
+    C# ``using X.Y;`` directives produce IMPORTS_FROM edges targeting the
+    raw namespace string, never a file path. PR #353 added a namespace
+    fallback for ``importers_of`` only, leaving:
+
+    - ``get_impact_radius`` returning 0 impacted files/nodes for changed
+      .cs files (the impact traversal had no namespace expansion), and
+    - ``tests_for`` / the ``detect_changes`` test-gap detector reporting
+      covered C# code as untested (``_resolve_bare_endpoints`` only accepts
+      file-path import evidence C# never emits).
+    """
+
+    def _build(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        core = tmp_path / "Core.cs"
+        core.write_text(
+            "namespace ACME.Core;\n"
+            "public class TaskBoard {\n"
+            "    public int CountTasks() { return 0; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        app = tmp_path / "App.cs"
+        app.write_text(
+            "using ACME.Core;\n"
+            "namespace ACME.App;\n"
+            "public class App {\n"
+            "    public void Run() {\n"
+            "        var b = new TaskBoard();\n"
+            "        b.CountTasks();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        # NUnit-style test whose name does NOT match any naming convention
+        # (no Test prefix on the method), so coverage must come from the
+        # resolved TESTED_BY edge rather than the name-based fallback.
+        tests = tmp_path / "TaskBoardTests.cs"
+        tests.write_text(
+            "using NUnit.Framework;\n"
+            "using ACME.Core;\n"
+            "namespace ACME.Core.Tests;\n"
+            "[TestFixture]\n"
+            "public class TaskBoardTests {\n"
+            "    [Test]\n"
+            "    public void CountTasks_ReturnsZero() {\n"
+            "        var board = new TaskBoard();\n"
+            "        var n = board.CountTasks();\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        unrelated = tmp_path / "Unrelated.cs"
+        unrelated.write_text(
+            "using System.Linq;\n"
+            "namespace ACME.Other;\n"
+            "public class Other {}\n",
+            encoding="utf-8",
+        )
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser()
+        for path in (core, app, tests, unrelated):
+            nodes, edges = parser.parse_file(path)
+            for n in nodes:
+                store.upsert_node(n)
+            for e in edges:
+                store.upsert_edge(e)
+        store.commit()
+        # Same bare-endpoint resolution the build/postprocess pipeline runs.
+        store.resolve_bare_call_targets()
+        store.resolve_bare_tested_by_sources()
+        return store, core, app, tests, unrelated
+
+    def test_impact_radius_sql_reaches_csharp_importers(self, tmp_path):
+        store, core, app, tests, unrelated = self._build(tmp_path)
+        try:
+            impact = store.get_impact_radius_sql([str(core)])
+            assert str(app) in impact["impacted_files"]
+            assert str(tests) in impact["impacted_files"]
+            assert str(unrelated) not in impact["impacted_files"]
+            assert impact["total_impacted"] > 0
+            # The namespace string itself must never surface as a node.
+            impacted_qns = {n.qualified_name for n in impact["impacted_nodes"]}
+            assert "ACME.Core" not in impacted_qns
+        finally:
+            store.close()
+
+    def test_impact_radius_networkx_reaches_csharp_importers(self, tmp_path):
+        store, core, app, tests, unrelated = self._build(tmp_path)
+        try:
+            impact = store._get_impact_radius_networkx([str(core)])
+            assert str(app) in impact["impacted_files"]
+            assert str(tests) in impact["impacted_files"]
+            assert str(unrelated) not in impact["impacted_files"]
+            impacted_qns = {n.qualified_name for n in impact["impacted_nodes"]}
+            assert "ACME.Core" not in impacted_qns
+        finally:
+            store.close()
+
+    def test_importer_appears_in_both_importers_of_and_impact(self, tmp_path):
+        """Owner acceptance for #310: the same importer must appear in both
+        ``importers_of`` and the public ``get_impact_radius`` results."""
+        from code_review_graph.tools.query import query_graph
+
+        store, core, app, _tests, _unrelated = self._build(tmp_path)
+        try:
+            result = query_graph(
+                "importers_of", str(core), repo_root=str(tmp_path),
+            )
+            assert result.get("status") == "ok"
+            importers = {r["file"] for r in result.get("results", [])}
+            assert str(app) in importers
+
+            impact = store.get_impact_radius([str(core)])
+            assert str(app) in impact["impacted_files"]
+        finally:
+            store.close()
+
+    def test_bare_tested_by_source_resolves_via_namespace_evidence(self, tmp_path):
+        store, core, _app, tests, _unrelated = self._build(tmp_path)
+        try:
+            method_qn = f"{core}::TaskBoard.CountTasks"
+            test_qn = f"{tests}::TaskBoardTests.CountTasks_ReturnsZero"
+            tested_by = [
+                e for e in store.get_edges_by_source(method_qn)
+                if e.kind == "TESTED_BY"
+            ]
+            assert [e.target_qualified for e in tested_by] == [test_qn]
+        finally:
+            store.close()
+
+    def test_tests_for_finds_csharp_test_via_edge(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        store, core, _app, tests, _unrelated = self._build(tmp_path)
+        store.close()
+        result = query_graph(
+            "tests_for",
+            f"{core}::TaskBoard.CountTasks",
+            repo_root=str(tmp_path),
+        )
+        assert result.get("status") == "ok"
+        found = {
+            r["qualified_name"]: r for r in result.get("results", [])
+        }
+        test_qn = f"{tests}::TaskBoardTests.CountTasks_ReturnsZero"
+        assert test_qn in found
+        # Must come from the resolved TESTED_BY edge, not name matching.
+        assert found[test_qn].get("inferred_by") != "naming_convention"
+
+    def test_detect_changes_does_not_report_covered_method_untested(self, tmp_path):
+        from code_review_graph.changes import analyze_changes
+
+        store, core, _app, _tests, _unrelated = self._build(tmp_path)
+        try:
+            result = analyze_changes(store, [str(core)])
+            gap_names = {g["name"] for g in result["test_gaps"]}
+            assert "CountTasks" not in gap_names
+        finally:
+            store.close()
 
 
 class TestRubyParsing:
@@ -946,7 +1372,7 @@ class TestPHPImportResolution:
         _, edges = parser.parse_file(svc / "MatchService.php")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
-        assert imports[0].target == str((entity / "Job.php").resolve())
+        assert imports[0].target == (entity / "Job.php").resolve().as_posix()
 
     def test_vendor_import_stays_unresolved(self, tmp_path):
         """A class with no local file stays as the bare FQN, not a raw
@@ -983,7 +1409,7 @@ class TestPHPImportResolution:
         _, edges = parser.parse_file(job / "Job.php")
         imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
-        assert imports[0].target == str((contact / "Contact.php").resolve())
+        assert imports[0].target == (contact / "Contact.php").resolve().as_posix()
 
     def test_grouped_use_expands_to_multiple_imports(self, tmp_path):
         """``use App\\Domain\\{Entity\\Job, Model\\Status}`` -> two imports,
@@ -1007,8 +1433,8 @@ class TestPHPImportResolution:
         parser = CodeParser(tmp_path)
         _, edges = parser.parse_file(consumer / "C.php")
         targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
-        assert str((base / "Entity/Job.php").resolve()) in targets
-        assert str((base / "Model/Status.php").resolve()) in targets
+        assert (base / "Entity/Job.php").resolve().as_posix() in targets
+        assert (base / "Model/Status.php").resolve().as_posix() in targets
         assert len(targets) == 2
 
 
@@ -1157,6 +1583,38 @@ class TestSwiftParsing:
         assert "String" in targets
         # extension InMemoryRepo: CustomStringConvertible
         assert "CustomStringConvertible" in targets
+
+    def test_finds_initializers(self):
+        """`init` / `convenience init` are Function nodes on their own type."""
+        inits = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.name == "init" and n.parent_name == "InMemoryRepo"
+        ]
+        assert len(inits) == 2
+
+    def test_finds_deinitializer(self):
+        funcs = {(n.name, n.parent_name) for n in self.nodes if n.kind == "Function"}
+        assert ("deinit", "InMemoryRepo") in funcs
+
+    def test_finds_subscript(self):
+        """`subscript` is named after its keyword, not its return type."""
+        funcs = {(n.name, n.parent_name) for n in self.nodes if n.kind == "Function"}
+        assert ("subscript", "InMemoryRepo") in funcs
+        assert not any(n.name == "User" for n in self.nodes if n.kind == "Function")
+
+    def test_initializer_body_calls_attributed_to_declaration(self):
+        """Calls inside init/deinit/subscript belong to that declaration, not the file."""
+        calls = {
+            (e.source.rsplit("::", 1)[-1], e.target.rsplit("::", 1)[-1])
+            for e in self.edges if e.kind == "CALLS"
+        }
+        # init(seed:) calls save(user); convenience init() delegates to self.init
+        assert ("InMemoryRepo.init", "InMemoryRepo.save") in calls
+        assert ("InMemoryRepo.init", "InMemoryRepo.init") in calls
+        assert ("InMemoryRepo.deinit", "removeAll") in calls
+        assert ("InMemoryRepo.subscript", "InMemoryRepo.findById") in calls
+        # Previously these landed on the File node, making blast radius file-wide.
+        assert not any(src.endswith("sample.swift") for src, _ in calls)
 
 
 class TestScalaParsing:
@@ -2636,7 +3094,7 @@ class TestNixParsing:
         assert any("foo.nix" in t for t in targets)
 
     def test_contains_edges_wire_file_to_top_level_bindings(self):
-        file_path = str(self.flake_path)
+        file_path = self.flake_path.as_posix()
         contains_targets = {
             e.target for e in self.flake_edges
             if e.kind == "CONTAINS" and e.source == file_path

@@ -109,8 +109,8 @@ def test_endpoint_queries_follow_addressable_handles_edges(tmp_path: Path) -> No
         and node.extra["handler"] == "items"
         and node.extra["route"] == "/api/items"
     )
-    endpoint_qn = f"{path}::CatalogController.{endpoint.name}"
-    handler_qn = f"{path}::CatalogController.items"
+    endpoint_qn = f"{path.as_posix()}::CatalogController.{endpoint.name}"
+    handler_qn = f"{path.as_posix()}::CatalogController.items"
 
     handlers = query_graph("handlers_of", endpoint_qn, repo_root=str(tmp_path))
     assert handlers["status"] == "ok"
