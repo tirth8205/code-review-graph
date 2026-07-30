@@ -15,6 +15,11 @@
   platform's MCP registration while preserving the graph data and every other
   configured integration. Without `--platform` the command still performs the
   full uninstall (#678).
+- Added Oracle PL/SQL structural parsing: packages, package bodies, triggers,
+  and PL/SQL-style functions/procedures (`.sql`, `.pls`, `.plb`, `.pks`,
+  `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`), with nested package members
+  qualified as `pkg_name.member_name` and regex-based CALLS edges between
+  procedures/functions/triggers/package members.
 
 ### Fixed
 

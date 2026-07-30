@@ -3177,6 +3177,91 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+class TestPLSQLParsing:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.fixture = FIXTURES / "sample_plsql.sql"
+        self.nodes, self.edges = self.parser.parse_file(self.fixture)
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("package.pkb")) == "sql"
+        assert self.parser.detect_language(Path("trigger.trg")) == "sql"
+        assert self.parser.detect_language(Path("proc.prc")) == "sql"
+
+    def test_finds_table(self):
+        tables = [n for n in self.nodes if n.kind == "Class" and n.extra.get("sql_kind") == "table"]
+        assert "employees" in {t.name for t in tables}
+
+    def test_finds_procedure(self):
+        procs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "procedure"
+            and n.parent_name is None
+        ]
+        assert "give_raise" in {p.name for p in procs}
+
+    def test_finds_oracle_style_function(self):
+        # CREATE FUNCTION ... RETURN ... IS ... BEGIN ... END — no RETURNS/
+        # LANGUAGE clause, so the ANSI tree-sitter grammar can't parse this
+        # and it must come from the regex fallback.
+        funcs = [
+            n for n in self.nodes
+            if n.kind == "Function" and n.extra.get("sql_kind") == "function"
+            and n.parent_name is None
+        ]
+        assert "get_salary" in {f.name for f in funcs}
+
+    def test_finds_trigger(self):
+        triggers = [n for n in self.nodes if n.extra.get("sql_kind") == "trigger"]
+        assert "trg_employees_audit" in {t.name for t in triggers}
+
+    def test_finds_package_spec_and_body(self):
+        packages = [n for n in self.nodes if n.extra.get("sql_kind") == "package"]
+        bodies = [n for n in self.nodes if n.extra.get("sql_kind") == "package_body"]
+        assert "payroll_pkg" in {p.name for p in packages}
+        assert "payroll_pkg" in {b.name for b in bodies}
+
+    def test_finds_nested_package_members(self):
+        members = [n for n in self.nodes if n.parent_name == "payroll_pkg"]
+        names = {m.name for m in members}
+        assert "calculate_bonus" in names
+        assert "process_payroll" in names
+        kinds = {m.extra.get("sql_kind") for m in members}
+        assert kinds == {"function", "procedure"}
+
+    def test_package_body_contains_members(self):
+        contains = [e for e in self.edges if e.kind == "CONTAINS"]
+        pkg_qualified = f"{self.fixture}::payroll_pkg"
+        member_sources = {e.target.split("::")[-1] for e in contains if e.source == pkg_qualified}
+        assert "payroll_pkg.calculate_bonus" in member_sources
+        assert "payroll_pkg.process_payroll" in member_sources
+
+    def test_procedure_call_edge(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "log_salary_change" in targets
+
+    def test_trigger_call_edge(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target for e in calls}
+        assert "audit_pkg.log_change" in targets
+
+    def test_package_member_call_edges(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        by_source = {}
+        for e in calls:
+            by_source.setdefault(e.source.split("::")[-1], set()).add(e.target)
+        assert "get_salary" in by_source.get("payroll_pkg.calculate_bonus", set())
+        assert {"calculate_bonus", "give_raise"} <= by_source.get(
+            "payroll_pkg.process_payroll", set(),
+        )
+
+    def test_variable_declarations_are_not_calls(self):
+        # `v_bonus NUMBER(10, 2);` must not produce a CALLS edge to NUMBER.
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target.upper() for e in calls}
+        assert "NUMBER" not in targets
+        assert "VARCHAR2" not in targets
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()
