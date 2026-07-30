@@ -4491,16 +4491,27 @@ class CodeParser:
         # objects, and sharing one qualified name collided on the graph
         # store's `nodes.qualified_name UNIQUE` constraint, silently
         # dropping whichever was inserted second (PR #785 review).
+        #
+        # GraphStore.upsert_node computes each node's *real* qualified_name
+        # itself, via `identity_name or name` + `parent_name` — it does not
+        # read back whatever string this method uses for edge targets. So
+        # the `$body` suffix has to be threaded through `identity_name`
+        # (for the body's own node) and `parent_name` (for its members),
+        # not just baked into the local `body_qualified`/`member_qualified`
+        # strings below — otherwise the edges above would point at a
+        # qualified name the stored node never actually has.
         for m in self._SQL_PACKAGE_BODY_RE.finditer(text) if is_plsql else ():
             raw_name = m.group(1)
             pkg_name = raw_name.split(".")[-1]
+            body_identity = f"{pkg_name}$body"
             line = text[: m.start()].count("\n") + 1
-            body_qualified = f"{file_path_str}::{pkg_name}$body"
+            body_qualified = f"{file_path_str}::{body_identity}"
             body_start = m.end()
             body_end = self._plsql_block_end(text, body_start, pkg_name)
             nodes.append(NodeInfo(
                 kind="Class",
                 name=pkg_name,
+                identity_name=body_identity,
                 file_path=file_path_str,
                 line_start=line,
                 line_end=text[:body_end].count("\n") + 1,
@@ -4536,7 +4547,7 @@ class CodeParser:
                     line_start=member_line,
                     line_end=text[:member_body_end].count("\n") + 1,
                     language="sql",
-                    parent_name=pkg_name,
+                    parent_name=body_identity,
                     extra={
                         "sql_kind": (
                             "procedure" if member_kind == "procedure"

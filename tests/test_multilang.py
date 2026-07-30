@@ -3222,7 +3222,7 @@ class TestPLSQLParsing:
         assert "payroll_pkg" in {b.name for b in bodies}
 
     def test_finds_nested_package_members(self):
-        members = [n for n in self.nodes if n.parent_name == "payroll_pkg"]
+        members = [n for n in self.nodes if n.parent_name == "payroll_pkg$body"]
         names = {m.name for m in members}
         assert "calculate_bonus" in names
         assert "process_payroll" in names
@@ -3295,7 +3295,7 @@ END util_pkg;
             nodes, edges = self.parser.parse_file(fixture)
         finally:
             fixture.unlink()
-        members = [n for n in nodes if n.parent_name == "util_pkg"]
+        members = [n for n in nodes if n.parent_name == "util_pkg$body"]
         names = {m.name for m in members}
         assert names == {"do_first", "do_second"}
         do_second = next(m for m in members if m.name == "do_second")
@@ -3328,7 +3328,7 @@ END log_pkg;
             nodes, edges = self.parser.parse_file(fixture)
         finally:
             fixture.unlink()
-        members = [n for n in nodes if n.parent_name == "log_pkg" and n.name == "log_event"]
+        members = [n for n in nodes if n.parent_name == "log_pkg$body" and n.name == "log_event"]
         assert len(members) == 1
         calls = [e for e in edges if e.kind == "CALLS"]
         assert not any(e.target == "log_event" for e in calls)
@@ -3359,6 +3359,35 @@ GO
         # Single-line span (pre-PL/SQL-support behavior) — no body computed.
         assert procs["GetTotal"].line_start == procs["GetTotal"].line_end
         assert not [e for e in edges if e.kind == "CALLS"]
+
+    def test_package_spec_and_body_survive_graph_store(self, tmp_path):
+        # GraphStore.upsert_node computes each node's real qualified_name
+        # from identity_name/parent_name — it does not read the local
+        # `body_qualified`/`member_qualified` strings this parser builds
+        # for edge targets. A node whose real qualified_name doesn't match
+        # what the CONTAINS/CALLS edges point at is a silent bug the
+        # parser-only tests above can't catch (regression: spec and body
+        # collided on nodes.qualified_name UNIQUE and one was dropped).
+        from code_review_graph.graph import GraphStore
+
+        graph_dir = tmp_path / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.store_file_nodes_edges(str(self.fixture), self.nodes, self.edges)
+            stored = store.get_nodes_by_file(str(self.fixture))
+            spec = next(n for n in stored if n.extra.get("sql_kind") == "package")
+            body = next(n for n in stored if n.extra.get("sql_kind") == "package_body")
+            assert spec.qualified_name != body.qualified_name
+
+            stored_qualified = {n.qualified_name for n in stored}
+            contains_targets = {
+                e.target for e in self.edges if e.kind == "CONTAINS"
+            }
+            missing = contains_targets - stored_qualified
+            assert not missing, f"CONTAINS edges point at nodes that don't exist: {missing}"
+        finally:
+            store.close()
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()
