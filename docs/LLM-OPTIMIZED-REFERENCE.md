@@ -45,8 +45,8 @@ Or use PostToolUse (Write|Edit|Bash) hooks for automatic background updates.
 Optional: pip install "code-review-graph[embeddings]"
 Then call embed_graph_tool to compute vectors.
 semantic_search_nodes_tool auto-uses vectors when available, falls back to keyword + FTS5.
-Providers: local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, and MiniMax.
-Configure via provider/model parameters, CRG_EMBEDDING_MODEL for local, or CRG_OPENAI_* for OpenAI-compatible endpoints.
+Providers: local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax, and Voyage.
+Configure via provider/model parameters, CRG_EMBEDDING_MODEL for local, CRG_OPENAI_* for OpenAI-compatible endpoints, or VOYAGE_API_KEY plus optional CRG_VOYAGE_MODEL for Voyage.
 </section>
 
 <section name="languages">

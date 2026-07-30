@@ -332,9 +332,9 @@ def semantic_search_nodes_tool(
 
     Uses vector embeddings for semantic search when available (run embed_graph_tool
     first, with a provider of your choice: "local" needs sentence-transformers,
-    "openai" / "google" / "minimax" need their respective env vars). Falls back
-    to FTS5 / keyword matching when no matching embeddings exist for the given
-    provider.
+    "openai" / "google" / "minimax" / "voyage" need their respective env vars).
+    Falls back to FTS5 / keyword matching when no matching embeddings exist for
+    the given provider.
 
     Args:
         query: Search string to match against node names.
@@ -343,9 +343,10 @@ def semantic_search_nodes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
                during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var
-               (local) or CRG_OPENAI_MODEL (openai).
+               (local), CRG_OPENAI_MODEL (openai), or CRG_VOYAGE_MODEL (voyage).
         provider: Embedding provider: "local" (default), "openai", "google",
-                  or "minimax". Must match the provider used during embed_graph.
+                  "minimax", or "voyage". Must match the provider used during
+                  embed_graph.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
@@ -367,7 +368,7 @@ async def embed_graph_tool(
     cloud providers use stdlib urllib).
     Default provider: local. Default model: all-MiniLM-L6-v2.
     Override provider via `provider` param, model via `model` param or
-    CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL env vars.
+    CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL / CRG_VOYAGE_MODEL env vars.
     Changing the model or provider re-embeds all nodes automatically.
 
     After running this, semantic_search_nodes_tool will use vector similarity
@@ -382,12 +383,15 @@ async def embed_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model. For local: HuggingFace ID/path; for openai:
                model ID (e.g. "text-embedding-3-small"); for google: Gemini
-               model ID. Falls back to CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL
-               env vars as appropriate.
-        provider: "local" (default), "openai", "google", or "minimax".
+               model ID; for voyage: Voyage model ID (e.g. "voyage-code-3").
+               Falls back to CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL /
+               CRG_VOYAGE_MODEL env vars as appropriate.
+        provider: "local" (default), "openai", "google", "minimax", or "voyage".
                   "openai" requires CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY +
                   CRG_OPENAI_MODEL env vars and accepts any OpenAI-compatible
                   endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, etc.).
+                  "voyage" requires VOYAGE_API_KEY and defaults to voyage-code-3
+                  unless a model arg or CRG_VOYAGE_MODEL is supplied.
     """
     root = _resolve_repo_root(repo_root)
 

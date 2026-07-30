@@ -549,6 +549,13 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_TOOLS` | Comma-separated allowlist of MCP tools to expose when serving | - |
 | `GOOGLE_API_KEY` | API key for Google Gemini embeddings | - |
 | `MINIMAX_API_KEY` | API key for MiniMax embeddings | - |
+| `VOYAGE_API_KEY` | API key for Voyage embeddings | - |
+| `CRG_VOYAGE_MODEL` | Model name for Voyage embeddings | `voyage-code-3` |
+| `CRG_VOYAGE_OUTPUT_DIMENSION` | Output dimension for Voyage embeddings | `1024` |
+| `CRG_VOYAGE_OUTPUT_DTYPE` | Output dtype for Voyage embeddings | `float` |
+| `CRG_VOYAGE_BASE_URL` | Voyage embeddings endpoint | `https://api.voyageai.com/v1` |
+| `CRG_VOYAGE_BATCH_SIZE` | Batch size for Voyage embedding requests | `100` |
+| `CRG_VOYAGE_MIN_INTERVAL_SEC` | Minimum delay between Voyage requests | `0` |
 | `CRG_OPENAI_BASE_URL` | OpenAI-compatible embeddings endpoint | - |
 | `CRG_OPENAI_API_KEY` | API key for OpenAI-compatible embeddings | - |
 | `CRG_OPENAI_MODEL` | Model name for OpenAI-compatible embeddings | - |
@@ -572,6 +579,15 @@ export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways wit
 
 The cloud-egress warning is auto-skipped when the base URL points to localhost
 (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
+
+Voyage embeddings need no extra install. Set `VOYAGE_API_KEY` and pass
+`provider="voyage"` to `embed_graph`; the default model is `voyage-code-3`:
+
+```bash
+export VOYAGE_API_KEY=pa-...
+export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
+code-review-graph embed --provider voyage --model voyage-code-3
+```
 
 > **Model selection tip.** Avoid `-preview` / `-beta` / `-exp` model IDs
 > (e.g. `google/gemini-embedding-2-preview`) for anything you plan to keep

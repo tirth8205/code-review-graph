@@ -430,7 +430,7 @@ def _add_embedding_refresh_args(command) -> None:
     """Add explicit, provider-scoped refresh options to a CLI command."""
     command.add_argument(
         "--embedding-provider",
-        choices=["local", "openai", "google", "minimax"],
+        choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
         help=(
             "Explicitly refresh an existing embedding index with this provider; "
@@ -821,7 +821,7 @@ def main() -> None:
     embed_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     embed_cmd.add_argument(
         "--provider",
-        choices=["local", "openai", "google", "minimax"],
+        choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
         help="Embedding provider (default: local, needs code-review-graph[embeddings])",
     )
@@ -829,7 +829,7 @@ def main() -> None:
         "--model",
         default=None,
         help="Embedding model. For local: HuggingFace ID (default all-MiniLM-L6-v2); "
-             "for openai/google/minimax: provider-specific model ID.",
+             "for openai/google/minimax/voyage: provider-specific model ID.",
     )
     embed_cmd.add_argument(
         "--data-dir",
@@ -968,7 +968,7 @@ def main() -> None:
     )
     eval_cmd.add_argument(
         "--embed-provider",
-        choices=["local", "openai", "google", "minimax"],
+        choices=["local", "openai", "google", "minimax", "voyage"],
         default=None,
         help="Provider for --embed (default: local, needs "
              "code-review-graph[embeddings])",

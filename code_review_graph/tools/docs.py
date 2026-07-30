@@ -25,9 +25,11 @@ def embed_graph(
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
     Requires: ``pip install code-review-graph[embeddings]`` (local provider only;
-    cloud providers like ``openai`` / ``google`` / ``minimax`` use stdlib ``urllib``).
+    cloud providers like ``openai`` / ``google`` / ``minimax`` / ``voyage`` use
+    stdlib ``urllib``).
     Default model: all-MiniLM-L6-v2. Override via ``model`` param or
-    CRG_EMBEDDING_MODEL env var.
+    provider-specific env vars such as CRG_EMBEDDING_MODEL, CRG_OPENAI_MODEL, or
+    CRG_VOYAGE_MODEL.
     Changing the model or provider re-embeds all nodes automatically.
 
     Only embeds nodes that don't already have up-to-date embeddings.
@@ -36,13 +38,17 @@ def embed_graph(
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model name. For local: HuggingFace ID or path;
                for openai: model ID (e.g. ``text-embedding-3-small``);
-               for google: Gemini model ID. Falls back to
-               CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL env vars as appropriate.
+               for google: Gemini model ID; for voyage: Voyage model ID
+               (e.g. ``voyage-code-3``). Falls back to CRG_EMBEDDING_MODEL /
+               CRG_OPENAI_MODEL / CRG_VOYAGE_MODEL env vars as appropriate.
         provider: Provider name: ``local`` (default), ``openai``, ``google``,
-                  or ``minimax``. ``openai`` requires CRG_OPENAI_BASE_URL +
+                  ``minimax``, or ``voyage``. ``openai`` requires CRG_OPENAI_BASE_URL +
                   CRG_OPENAI_API_KEY + CRG_OPENAI_MODEL env vars and accepts
                   any OpenAI-compatible endpoint (real OpenAI, Azure, new-api,
                   LiteLLM, vLLM, LocalAI, Ollama openai-mode, etc.).
+                  ``voyage`` requires VOYAGE_API_KEY and defaults to
+                  voyage-code-3 unless a model arg or CRG_VOYAGE_MODEL is
+                  supplied.
 
     Returns:
         Number of nodes embedded and total embedding count.
@@ -59,7 +65,7 @@ def embed_graph(
             return {"status": "error", "error": str(exc)}
         try:
             if not emb_store.available:
-                if provider in ("openai", "google", "minimax"):
+                if provider in ("openai", "google", "minimax", "voyage"):
                     err = (
                         f"The '{provider}' embedding provider is not available. "
                         "Check the required environment variables "
@@ -70,7 +76,8 @@ def embed_graph(
                     err = (
                         "The local embedding provider needs sentence-transformers. "
                         "Install with: pip install code-review-graph[embeddings] — "
-                        "or switch provider to 'openai' / 'google' / 'minimax'."
+                        "or switch provider to 'openai' / 'google' / 'minimax' "
+                        "/ 'voyage'."
                     )
                 return {"status": "error", "error": err}
 

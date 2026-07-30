@@ -87,7 +87,7 @@ pip install "code-review-graph[embeddings]"
 ```
 Then use `embed_graph_tool` to compute vectors. `semantic_search_nodes_tool` automatically uses vector similarity when matching embeddings are available and falls back to keyword/FTS search otherwise.
 
-Embedding providers are local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, and MiniMax. Local embeddings use `CRG_EMBEDDING_MODEL`; OpenAI-compatible providers use `CRG_OPENAI_BASE_URL`, `CRG_OPENAI_API_KEY`, and `CRG_OPENAI_MODEL`. Cloud providers are opt-in and print an egress warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set.
+Embedding providers are local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax, and Voyage. Local embeddings use `CRG_EMBEDDING_MODEL`; OpenAI-compatible providers use `CRG_OPENAI_BASE_URL`, `CRG_OPENAI_API_KEY`, and `CRG_OPENAI_MODEL`; Voyage uses `VOYAGE_API_KEY` and optionally `CRG_VOYAGE_MODEL`. Cloud providers are opt-in and print an egress warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set.
 
 Function/class documentation summaries are included in embedding text. For a
 graph created by an older release, run a full build once before re-embedding so
