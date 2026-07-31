@@ -787,6 +787,32 @@ class TestFlows:
         assert abs_pct_other not in self.store.get_files_matching("a%z.py")
         assert abs_pct in self.store.get_files_matching("a%z.py")
 
+    def test_expand_rejects_basename_suffix_collision(self, tmp_path):
+        """b.py must not match ab.py / data_utils.py-style suffix collisions."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        abs_b = str((tmp_path / "b.py").resolve())
+        abs_ab = str((tmp_path / "ab.py").resolve())
+        abs_utils = str((tmp_path / "utils.py").resolve())
+        abs_data_utils = str((tmp_path / "data_utils.py").resolve())
+        self._add_func("b_fn", path=abs_b)
+        self._add_func("ab_fn", path=abs_ab)
+        self._add_func("utils_fn", path=abs_utils)
+        self._add_func("data_utils_fn", path=abs_data_utils)
+
+        for repo_root in (None, tmp_path):
+            matched_b = expand_changed_file_paths(
+                self.store, ["b.py"], repo_root=repo_root,
+            )
+            assert abs_b in matched_b
+            assert abs_ab not in matched_b
+
+            matched_utils = expand_changed_file_paths(
+                self.store, ["utils.py"], repo_root=repo_root,
+            )
+            assert abs_utils in matched_utils
+            assert abs_data_utils not in matched_utils
+
     def test_expand_ignores_suffix_collision_across_directories(self, tmp_path):
         """Shared basenames in different dirs must not cross-wire flows."""
         from code_review_graph.flows import expand_changed_file_paths
