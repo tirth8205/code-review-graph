@@ -14,7 +14,7 @@
 │  ├── Codex                └── incremental update             │
 │  ├── Claude Code, CodeBuddy Code                             │
 │  ├── Cursor, Windsurf, Zed, Continue                         │
-│  └── Gemini CLI, Qwen, Qoder, Copilot, OpenCode              │
+│  └── Gemini CLI, Qwen, Qoder, IBM Bob, Copilot, OpenCode     │
 │          │                        │                          │
 │          ▼                        ▼                          │
 │  ┌────────────────────────────────────────────┐              │
