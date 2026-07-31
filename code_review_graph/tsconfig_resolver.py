@@ -1,8 +1,10 @@
-"""TypeScript tsconfig.json path alias resolver.
+"""TypeScript tsconfig.json / jsconfig.json path alias resolver.
 
 Resolves TypeScript path aliases (e.g., ``@/ -> src/``) declared in
 ``compilerOptions.paths`` so that ``IMPORTS_FROM`` edges can point to
-real file paths instead of raw alias strings.
+real file paths instead of raw alias strings. Plain-JS projects (Vue,
+Nuxt, Vite) declare the same aliases in ``jsconfig.json``, which shares
+the ``compilerOptions`` schema, so it is handled by the same parser.
 """
 
 from __future__ import annotations
@@ -18,8 +20,15 @@ logger = logging.getLogger(__name__)
 # Extensions probed when resolving an alias target
 _PROBE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".vue"]
 
-# Tsconfig filenames to look for when walking up the directory tree
-_TSCONFIG_NAMES = ["tsconfig.json", "tsconfig.app.json"]
+# Config filenames to look for when walking up the directory tree.
+# Order defines precedence within a directory: tsconfig.json wins over
+# tsconfig.app.json, and both win over jsconfig.json (issue #776).
+# jsconfig.json is a tsconfig.json with JS-oriented compiler defaults;
+# none of those implicit defaults affect baseUrl/paths resolution, so
+# the same parser (JSONC + relative "extends" chains) covers it.
+# The nearest directory containing any of these names still wins over
+# configs higher up the tree, matching editor/bundler behavior.
+_TSCONFIG_NAMES = ["tsconfig.json", "tsconfig.app.json", "jsconfig.json"]
 
 
 class TsconfigResolver:

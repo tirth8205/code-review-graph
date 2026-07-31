@@ -94,12 +94,12 @@ End Namespace
         store = GraphStore(":memory:")
         store.store_file_nodes_edges(str(path), nodes, edges)
 
-        repository_qn = f"{path}::Acme.Repository"
-        base_qn = f"{path}::Acme.BaseRepository"
-        interface_qn = f"{path}::Acme.IRepository"
-        helper_qn = f"{path}::Acme.Repository.Helper"
-        property_qn = f"{path}::Acme.Repository.Current"
-        save_qn = f"{path}::Acme.Repository.Save"
+        repository_qn = f"{path.as_posix()}::Acme.Repository"
+        base_qn = f"{path.as_posix()}::Acme.BaseRepository"
+        interface_qn = f"{path.as_posix()}::Acme.IRepository"
+        helper_qn = f"{path.as_posix()}::Acme.Repository.Helper"
+        property_qn = f"{path.as_posix()}::Acme.Repository.Current"
+        save_qn = f"{path.as_posix()}::Acme.Repository.Save"
 
         assert store.get_node(repository_qn) is not None
         assert store.get_node(base_qn) is not None
@@ -146,7 +146,7 @@ End Class
 
         store = GraphStore(":memory:")
         store.store_file_nodes_edges(str(path), nodes, edges)
-        assert store.get_node(f"{path}::Writer.Save") is not None
+        assert store.get_node(f"{path.as_posix()}::Writer.Save") is not None
         store.close()
 
 
@@ -255,8 +255,8 @@ endmodule
             if edge.kind == "REFERENCES" and edge.source.endswith("::Top")
         }
         assert targets == {
-            f"{path}::Top.local_signal",
-            f"{path}::Top.bus",
+            f"{path.as_posix()}::Top.local_signal",
+            f"{path.as_posix()}::Top.bus",
         }
         assert all(not target.endswith(".member") for target in targets)
 
@@ -336,8 +336,8 @@ impl MemoryRepository {
         assert ("save", "MemoryRepository") in methods
         assert ("clear", "MemoryRepository") in methods
 
-        duplicate_qn = f"{path}::MemoryRepository.duplicate"
-        new_qn = f"{path}::MemoryRepository.new"
+        duplicate_qn = f"{path.as_posix()}::MemoryRepository.duplicate"
+        new_qn = f"{path.as_posix()}::MemoryRepository.new"
         assert any(
             edge.kind == "CALLS"
             and edge.source == duplicate_qn
@@ -347,8 +347,8 @@ impl MemoryRepository {
 
         store = GraphStore(":memory:")
         store.store_file_nodes_edges(str(path), nodes, edges)
-        concrete_qn = f"{path}::MemoryRepository"
-        trait_qn = f"{path}::Repository"
+        concrete_qn = f"{path.as_posix()}::MemoryRepository"
+        trait_qn = f"{path.as_posix()}::Repository"
         assert store.get_node(concrete_qn).line_start == 5
         assert any(
             edge.kind == "IMPLEMENTS" and edge.target_qualified == trait_qn
@@ -383,7 +383,7 @@ impl MemoryRepository {
         parser = CodeParser(repo_root=tmp_path)
         db_nodes, db_edges = parser.parse_file(db)
         lib_nodes, lib_edges = parser.parse_file(lib)
-        target = f"{db.resolve()}::Repository.new"
+        target = f"{db.resolve().as_posix()}::Repository.new"
         calls = [edge for edge in lib_edges if edge.kind == "CALLS"]
         assert [edge.target for edge in calls].count(target) == 2
         assert all("::Repo.new" not in edge.target for edge in calls)
@@ -423,9 +423,9 @@ impl MemoryRepository {
             edge.target for edge in edges if edge.kind == "IMPORTS_FROM"
         }
         assert targets == {
-            str(nested.resolve()),
-            str(parent.resolve()),
-            str(root.resolve()),
+            nested.resolve().as_posix(),
+            parent.resolve().as_posix(),
+            root.resolve().as_posix(),
         }
 
     def test_workspace_dependency_alias_resolves_from_workspace_manifest(self, tmp_path):
@@ -459,7 +459,7 @@ impl MemoryRepository {
         _, edges = CodeParser(repo_root=tmp_path).parse_file(app_main)
         imports = [edge for edge in edges if edge.kind == "IMPORTS_FROM"]
         assert len(imports) == 1
-        assert imports[0].target == str(dep_lib.resolve())
+        assert imports[0].target == dep_lib.resolve().as_posix()
 
     def test_path_dependency_without_cargo_manifest_stays_unresolved(self, tmp_path):
         (tmp_path / "Cargo.toml").write_text(
@@ -508,8 +508,8 @@ impl MemoryRepository {
             "pub fn build() { Repository::new(); }\n",
             encoding="utf-8",
         )
-        target = f"{db.resolve()}::Repository.new"
-        caller = f"{lib.resolve()}::build"
+        target = f"{db.resolve().as_posix()}::Repository.new"
+        caller = f"{lib.resolve().as_posix()}::build"
 
         store = GraphStore(":memory:")
         try:
@@ -534,7 +534,7 @@ impl MemoryRepository {
             assert any(
                 edge.kind == "CALLS" and edge.target_qualified == target
                 for edge in store.get_edges_by_source(
-                    f"{lib.resolve()}::build_again",
+                    f"{lib.resolve().as_posix()}::build_again",
                 )
             )
         finally:
@@ -568,11 +568,11 @@ class SecondService {
             edge.target
             for edge in edges
             if edge.kind == "CALLS"
-            and edge.source == f"{path}::SecondService.dispatch"
+            and edge.source == f"{path.as_posix()}::SecondService.dispatch"
         }
         assert targets == {
-            f"{path}::SecondService.run",
-            f"{path}::FirstService.run",
+            f"{path.as_posix()}::SecondService.run",
+            f"{path.as_posix()}::FirstService.run",
         }
 
     def test_import_alias_and_fully_qualified_calls_use_composer_evidence(
@@ -604,7 +604,7 @@ class SecondService {
         )
 
         _, edges = CodeParser(repo_root=tmp_path).parse_file(caller)
-        target = f"{mailer.resolve()}::Mailer.send"
+        target = f"{mailer.resolve().as_posix()}::Mailer.send"
         calls = [
             edge for edge in edges
             if edge.kind == "CALLS" and edge.source.endswith("::SignupController.register")
@@ -654,7 +654,7 @@ class SecondService {
             "function register(): void { Mailer::send(); }\n"
         )
         caller.write_text(source, encoding="utf-8")
-        target = f"{mailer.resolve()}::Mailer.send"
+        target = f"{mailer.resolve().as_posix()}::Mailer.send"
 
         store = GraphStore(":memory:")
         try:
@@ -666,7 +666,7 @@ class SecondService {
             assert result["errors"] == []
             assert any(
                 edge.kind == "CALLS" and edge.target_qualified == target
-                for edge in store.get_edges_by_source(f"{caller.resolve()}::register")
+                for edge in store.get_edges_by_source(f"{caller.resolve().as_posix()}::register")
             )
         finally:
             store.close()

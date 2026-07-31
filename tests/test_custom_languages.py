@@ -292,7 +292,7 @@ class TestParserIntegration:
         assert "point" in classes
         assert classes["point"].language == "erlang"
 
-        file_path = str(src)
+        file_path = src.as_posix()
         calls = {(e.source, e.target) for e in edges if e.kind == "CALLS"}
         # helper(A) inside add/2 resolves to the same-file definition.
         assert (f"{file_path}::add", f"{file_path}::helper") in calls

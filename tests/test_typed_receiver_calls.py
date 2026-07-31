@@ -31,8 +31,8 @@ def test_python_imported_class_and_typed_receivers_resolve(tmp_path: Path) -> No
     _, edges = CodeParser(repo_root=tmp_path).parse_file(consumer)
 
     targets = _calls_from(edges, "::run")
-    assert targets.count(f"{service.resolve()}::Service.build") == 1
-    assert targets.count(f"{service.resolve()}::Service.work") == 1
+    assert targets.count(f"{service.resolve().as_posix()}::Service.build") == 1
+    assert targets.count(f"{service.resolve().as_posix()}::Service.work") == 1
     assert "build" not in targets
     assert "work" not in targets
 
@@ -53,10 +53,10 @@ def test_python_typed_receiver_scope_does_not_leak(tmp_path: Path) -> None:
 
     _, edges = CodeParser(repo_root=tmp_path).parse_file(source)
 
-    assert f"{source.resolve()}::OuterService.work" in _calls_from(edges, "::outer")
+    assert f"{source.resolve().as_posix()}::OuterService.work" in _calls_from(edges, "::outer")
     inner_targets = _calls_from(edges, "::inner")
-    assert f"{source.resolve()}::InnerService.work" in inner_targets
-    assert f"{source.resolve()}::OuterService.work" not in inner_targets
+    assert f"{source.resolve().as_posix()}::InnerService.work" in inner_targets
+    assert f"{source.resolve().as_posix()}::OuterService.work" not in inner_targets
 
 
 def test_unimported_cross_file_class_name_is_not_guessed(tmp_path: Path) -> None:
@@ -135,9 +135,9 @@ def test_kotlin_generic_parameter_local_and_field_types_resolve(tmp_path: Path) 
     _, edges = CodeParser(repo_root=tmp_path).parse_file(consumer)
 
     targets = _calls_from(edges, "::Consumer.run")
-    assert f"{service.resolve()}::Service.work" in targets
-    assert f"{service.resolve()}::Service.done" in targets
-    assert f"{service.resolve()}::Service.save" in targets
+    assert f"{service.resolve().as_posix()}::Service.work" in targets
+    assert f"{service.resolve().as_posix()}::Service.done" in targets
+    assert f"{service.resolve().as_posix()}::Service.save" in targets
 
 
 def test_java_generic_parameter_local_and_field_types_resolve(tmp_path: Path) -> None:
@@ -174,9 +174,9 @@ def test_java_generic_parameter_local_and_field_types_resolve(tmp_path: Path) ->
     _, edges = CodeParser(repo_root=tmp_path).parse_file(consumer)
 
     targets = _calls_from(edges, "::Consumer.run")
-    assert f"{service.resolve()}::Service.work" in targets
-    assert f"{service.resolve()}::Service.done" in targets
-    assert f"{service.resolve()}::Service.save" in targets
+    assert f"{service.resolve().as_posix()}::Service.work" in targets
+    assert f"{service.resolve().as_posix()}::Service.done" in targets
+    assert f"{service.resolve().as_posix()}::Service.save" in targets
 
 
 def test_typescript_generic_parameter_local_and_field_types_resolve(
@@ -205,9 +205,9 @@ def test_typescript_generic_parameter_local_and_field_types_resolve(
     _, edges = CodeParser(repo_root=tmp_path).parse_file(consumer)
 
     targets = _calls_from(edges, "::Consumer.run")
-    assert f"{service.resolve()}::Service.work" in targets
-    assert f"{service.resolve()}::Service.done" in targets
-    assert f"{service.resolve()}::Service.save" in targets
+    assert f"{service.resolve().as_posix()}::Service.work" in targets
+    assert f"{service.resolve().as_posix()}::Service.done" in targets
+    assert f"{service.resolve().as_posix()}::Service.save" in targets
 
 
 def test_typescript_block_shadowing_restores_outer_type(tmp_path: Path) -> None:
@@ -229,8 +229,8 @@ def test_typescript_block_shadowing_restores_outer_type(tmp_path: Path) -> None:
     _, edges = CodeParser(repo_root=tmp_path).parse_file(source)
 
     targets = _calls_from(edges, "::run")
-    assert targets.count(f"{source.resolve()}::OuterService.work") == 2
-    assert targets.count(f"{source.resolve()}::InnerService.work") == 1
+    assert targets.count(f"{source.resolve().as_posix()}::OuterService.work") == 2
+    assert targets.count(f"{source.resolve().as_posix()}::InnerService.work") == 1
 
 
 def test_this_call_resolves_to_its_enclosing_class(tmp_path: Path) -> None:
@@ -243,5 +243,5 @@ def test_this_call_resolves_to_its_enclosing_class(tmp_path: Path) -> None:
     _, edges = CodeParser(repo_root=tmp_path).parse_file(source)
 
     assert _calls_from(edges, "::Second.run") == [
-        f"{source.resolve()}::Second.work",
+        f"{source.resolve().as_posix()}::Second.work",
     ]

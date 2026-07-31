@@ -46,11 +46,11 @@ def test_scheduled_annotations_create_addressable_nodes_and_edges(tmp_path: Path
         "initialDelay",
     }
     assert {edge.source for edge in triggers} == {
-        f"{path}::Tasks.{node.name}" for node in schedules
+        f"{path.as_posix()}::Tasks.{node.name}" for node in schedules
     }
     assert {edge.target for edge in triggers} == {
-        f"{path}::Tasks.sync",
-        f"{path}::Tasks.cleanup",
+        f"{path.as_posix()}::Tasks.sync",
+        f"{path.as_posix()}::Tasks.cleanup",
     }
 
 
@@ -88,7 +88,7 @@ def test_schedule_queries_follow_triggers_edges(tmp_path: Path) -> None:
         node for node in nodes
         if node.kind == "Scheduler" and node.extra["schedule_kind"] == "cron"
     )
-    cron_qn = f"{path}::Tasks.{cron.name}"
+    cron_qn = f"{path.as_posix()}::Tasks.{cron.name}"
 
     triggered = query_graph("triggers_of", cron_qn, repo_root=str(tmp_path))
     assert triggered["status"] == "ok"
@@ -99,7 +99,7 @@ def test_schedule_queries_follow_triggers_edges(tmp_path: Path) -> None:
 
     schedulers = query_graph(
         "triggered_by",
-        f"{path}::Tasks.sync",
+        f"{path.as_posix()}::Tasks.sync",
         repo_root=str(tmp_path),
         max_results=1,
     )

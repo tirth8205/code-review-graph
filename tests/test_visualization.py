@@ -1,9 +1,13 @@
 """Tests for graph visualization export."""
 
+import base64
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 from html.parser import HTMLParser
+from importlib import resources
 
 import pytest
 
@@ -216,11 +220,131 @@ def test_generate_html(store_with_data, tmp_path):
     assert output_path.exists()
     content = output_path.read_text()
     script_sources, _inline_scripts = _extract_scripts(content)
-    assert script_sources == ["https://d3js.org/d3.v7.min.js"]
+    assert script_sources == [_D3_FILENAME]
     assert "auth.py" in content
     assert "AuthService" in content
     assert "<!DOCTYPE html>" in content
     assert "</html>" in content
+
+
+# Pinned D3 contract for the visualization templates (issue #475): the page
+# must load D3 from a same-origin vendored file so `visualize --serve` works
+# on offline/filtered networks, while keeping SRI integrity verification.
+_D3_FILENAME = "d3.v7.min.js"
+_D3_CDN_URL = "https://d3js.org/d3.v7.min.js"
+_D3_SRI_HASH = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+
+
+def _sha384_sri(data: bytes) -> str:
+    return "sha384-" + base64.b64encode(hashlib.sha384(data).digest()).decode()
+
+
+@pytest.mark.parametrize("vis_mode", ["full", "community"])
+def test_generated_html_loads_d3_same_origin_with_sri(store_with_data, tmp_path, vis_mode):
+    """Regression test for #475: `visualize --serve` must not depend on the
+    d3js.org CDN being reachable. The generated page loads a vendored,
+    same-origin D3 file (with the SRI hash intact) and only falls back to
+    the CDN — still SRI-pinned with crossorigin — if the local copy fails."""
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store_with_data, output_path, mode=vis_mode)
+    content = output_path.read_text()
+
+    script_sources, inline_scripts = _extract_scripts(content)
+    # Same-origin, offline-first D3 reference — no external host required.
+    assert script_sources == [_D3_FILENAME]
+
+    # The local script tag keeps SRI integrity verification.
+    local_tag = re.search(r"<script src=\"d3\.v7\.min\.js\"[^>]*>", content)
+    assert local_tag is not None
+    assert f'integrity="{_D3_SRI_HASH}"' in local_tag.group(0)
+
+    # CDN fallback (only used when the local asset is missing) keeps the
+    # security invariant: SRI hash AND crossorigin on the d3js.org tag.
+    fallback = [s for s in inline_scripts if _D3_CDN_URL in s]
+    assert len(fallback) == 1
+    assert f'integrity="{_D3_SRI_HASH}"' in fallback[0]
+    assert 'crossorigin="anonymous"' in fallback[0]
+
+    # The vendored asset is written next to the HTML, i.e. inside the
+    # directory `visualize --serve` exposes, so GET /d3.v7.min.js succeeds.
+    asset = tmp_path / _D3_FILENAME
+    assert asset.exists()
+    assert _sha384_sri(asset.read_bytes()) == _D3_SRI_HASH
+
+
+def test_bundled_d3_asset_is_packaged_and_pinned():
+    """The pinned D3 build ships inside the Python package so generated
+    visualizations work without network access (issue #475)."""
+    asset = resources.files("code_review_graph") / "assets" / _D3_FILENAME
+    data = asset.read_bytes()
+    assert data.startswith(b"// https://d3js.org v7")
+    assert _sha384_sri(data) == _D3_SRI_HASH
+
+
+@pytest.mark.parametrize("vis_mode", ["full", "community"])
+def test_graph_data_containing_script_sentinel_is_not_expanded(tmp_path, vis_mode):
+    """Repo content must never be run through the __D3_SCRIPTS__ substitution.
+
+    The template placeholders are substituted scripts-first, data-last: a node
+    literally named __D3_SCRIPTS__ (valid in Python) would otherwise be
+    rewritten into <script> markup inside the graphData script, truncating it
+    and promoting the remaining repo-derived JSON to live HTML.
+    """
+    from code_review_graph.visualization import generate_html
+
+    store = GraphStore(tmp_path / "test.db")
+    store.upsert_node(
+        NodeInfo(
+            kind="File", name="evil.py", file_path="src/evil.py",
+            line_start=1, line_end=10, language="python", parent_name=None,
+            params=None, return_type=None, modifiers=None, is_test=False,
+            extra={},
+        )
+    )
+    store.upsert_node(
+        NodeInfo(
+            kind="Function", name="__D3_SCRIPTS__", file_path="src/evil.py",
+            line_start=2, line_end=4, language="python", parent_name=None,
+            params=None, return_type=None, modifiers=None, is_test=False,
+            extra={},
+        )
+    )
+    store.upsert_node(
+        NodeInfo(
+            kind="Function", name="<img src=x onerror=alert(1)>",
+            file_path="src/evil.py", line_start=6, line_end=8,
+            language="python", parent_name=None, params=None,
+            return_type=None, modifiers=None, is_test=False, extra={},
+        )
+    )
+
+    output_path = tmp_path / "graph.html"
+    generate_html(store, output_path, mode=vis_mode)
+    content = output_path.read_text()
+
+    script_sources, inline_scripts = _extract_scripts(content)
+    # Exactly the vendored D3 reference — no injected external script tags.
+    assert script_sources == [_D3_FILENAME]
+    data_scripts = [s for s in inline_scripts if "graphData" in s]
+    assert data_scripts, "graphData script missing — data script was truncated"
+    for script in data_scripts:
+        assert "<script" not in script
+    # The parser must not see repo-derived markup as real elements.
+    class _TagCollector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self.tags: set[str] = set()
+
+        def handle_starttag(
+            self, tag: str, attrs: list[tuple[str, str | None]]
+        ) -> None:
+            self.tags.add(tag)
+
+    collector = _TagCollector()
+    collector.feed(content)
+    assert "img" not in collector.tags
 
 
 def test_script_extraction_handles_case_insensitive_html_tags():
@@ -679,6 +803,118 @@ def test_auto_mode_switches_at_threshold(large_store, tmp_path):
     # Aggregated template has btn-back and community_details
     assert "btn-back" in content2
     assert "community_details" in content2
+
+
+def test_auto_mode_switches_on_edge_count(large_store, tmp_path):
+    """Auto mode must switch to an aggregated view when edges exceed the cap.
+
+    Regression for issue #609: node count under the limit but edge count
+    over it must not fall through to the full force-layout template.
+    """
+    from code_review_graph.visualization import generate_html
+
+    # Under both limits -> full template
+    output_full = tmp_path / "auto_under_both.html"
+    generate_html(
+        large_store, output_full, mode="auto",
+        max_full_nodes=100000, max_full_edges=100000,
+    )
+    content_full = output_full.read_text()
+    assert "btn-community" in content_full
+    assert "flow-select" in content_full
+
+    # Under the node limit but over the edge limit -> aggregated template
+    output_agg = tmp_path / "auto_over_edges.html"
+    generate_html(
+        large_store, output_agg, mode="auto",
+        max_full_nodes=100000, max_full_edges=1,
+    )
+    content_agg = output_agg.read_text()
+    assert "btn-back" in content_agg
+    assert "community_details" in content_agg
+
+
+def test_auto_mode_decision_at_issue_609_boundary():
+    """The reported 2792-node/17488-edge graph must pick an aggregated view.
+
+    Regression for issue #609 using the exact reported boundary against the
+    shipped defaults, without building a 17k-edge store.
+    """
+    from code_review_graph.visualization import (
+        DEFAULT_MAX_FULL_EDGES,
+        DEFAULT_MAX_FULL_NODES,
+        _resolve_auto_mode,
+    )
+
+    # Shipped defaults: node cap unchanged, edge cap derived from it
+    assert DEFAULT_MAX_FULL_NODES == 3000
+    assert DEFAULT_MAX_FULL_EDGES == 3 * DEFAULT_MAX_FULL_NODES
+
+    # A graph under both caps stays in full mode
+    assert _resolve_auto_mode(
+        node_count=2792, edge_count=8000,
+        max_full_nodes=DEFAULT_MAX_FULL_NODES,
+        max_full_edges=DEFAULT_MAX_FULL_EDGES,
+        has_communities=True,
+    ) == "full"
+
+    # The exact graph from issue #609: 2792 nodes (under), 17488 edges (over)
+    assert _resolve_auto_mode(
+        node_count=2792, edge_count=17488,
+        max_full_nodes=DEFAULT_MAX_FULL_NODES,
+        max_full_edges=DEFAULT_MAX_FULL_EDGES,
+        has_communities=True,
+    ) == "community"
+
+    # Node count over the cap still switches (pre-existing behavior)
+    assert _resolve_auto_mode(
+        node_count=3001, edge_count=100,
+        max_full_nodes=DEFAULT_MAX_FULL_NODES,
+        max_full_edges=DEFAULT_MAX_FULL_EDGES,
+        has_communities=True,
+    ) == "community"
+
+    # Without community data the aggregated view falls back to file mode
+    assert _resolve_auto_mode(
+        node_count=2792, edge_count=17488,
+        max_full_nodes=DEFAULT_MAX_FULL_NODES,
+        max_full_edges=DEFAULT_MAX_FULL_EDGES,
+        has_communities=False,
+    ) == "file"
+
+
+def test_generate_html_defaults_match_constants():
+    """generate_html defaults must stay wired to the documented constants."""
+    import inspect
+
+    from code_review_graph.visualization import (
+        DEFAULT_MAX_FULL_EDGES,
+        DEFAULT_MAX_FULL_NODES,
+        generate_html,
+    )
+
+    sig = inspect.signature(generate_html)
+    assert sig.parameters["max_full_nodes"].default == DEFAULT_MAX_FULL_NODES
+    assert sig.parameters["max_full_edges"].default == DEFAULT_MAX_FULL_EDGES
+
+
+def test_auto_mode_falls_back_to_file_without_communities(
+    store_with_data, tmp_path
+):
+    """Auto-switch without community data must aggregate by file, not lump
+    everything into a single 'Uncategorized' community super-node."""
+    from code_review_graph.visualization import generate_html
+
+    output_path = tmp_path / "auto_no_communities.html"
+    generate_html(
+        store_with_data, output_path, mode="auto",
+        max_full_nodes=1, max_full_edges=100000,
+    )
+    content = output_path.read_text()
+    # Aggregated template, file mode data
+    assert "btn-back" in content
+    assert '"mode": "file"' in content
+    assert '"mode": "community"' not in content
 
 
 def test_community_mode_html_generation(large_store, tmp_path):

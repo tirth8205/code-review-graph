@@ -40,11 +40,11 @@ def test_webflux_routes_link_endpoints_to_actual_typed_handlers(tmp_path: Path) 
         for node in endpoints
     } == {("GET", "/orders"), ("POST", "/orders")}
     assert {edge.source for edge in handles} == {
-        f"{path}::OrderHandler.list",
-        f"{path}::OrderHandler.create",
+        f"{path.as_posix()}::OrderHandler.list",
+        f"{path.as_posix()}::OrderHandler.create",
     }
     assert {edge.target for edge in handles} == {
-        f"{path}::Routes.{node.name}" for node in endpoints
+        f"{path.as_posix()}::Routes.{node.name}" for node in endpoints
     }
 
 
@@ -61,8 +61,8 @@ def test_webflux_endpoint_queries_use_addressable_nodes(tmp_path: Path) -> None:
         for node in nodes
         if node.kind == "Endpoint" and node.extra["http_method"] == "GET"
     )
-    endpoint_qn = f"{path}::Routes.{endpoint.name}"
-    handler_qn = f"{path}::OrderHandler.list"
+    endpoint_qn = f"{path.as_posix()}::Routes.{endpoint.name}"
+    handler_qn = f"{path.as_posix()}::OrderHandler.list"
 
     handlers = query_graph("handlers_of", endpoint_qn, repo_root=str(tmp_path))
     assert [result["qualified_name"] for result in handlers["results"]] == [

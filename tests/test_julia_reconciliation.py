@@ -468,9 +468,9 @@ def test_full_build_persists_distinct_qualified_nodes_and_callers(tmp_path):
     store = GraphStore(tmp_path / "graph.db")
     try:
         result = full_build(tmp_path, store)
-        local_qn = f"{source_path}::Demo.show"
-        base_qn = f"{source_path}::Demo.Base.show"
-        alias_qn = f"{source_path}::Demo.FloatVec"
+        local_qn = f"{source_path.as_posix()}::Demo.show"
+        base_qn = f"{source_path.as_posix()}::Demo.Base.show"
+        alias_qn = f"{source_path.as_posix()}::Demo.FloatVec"
 
         local_node = store.get_node(local_qn)
         base_node = store.get_node(base_qn)
@@ -481,8 +481,9 @@ def test_full_build_persists_distinct_qualified_nodes_and_callers(tmp_path):
         assert store.get_node(alias_qn) is not None
 
         callers = store.get_edges_by_target(base_qn)
+        invoke_qn = f"{source_path.as_posix()}::Demo.invoke"
         assert any(
-            edge.kind == "CALLS" and edge.source_qualified == f"{source_path}::Demo.invoke"
+            edge.kind == "CALLS" and edge.source_qualified == invoke_qn
             for edge in callers
         )
         assert result["errors"] == []

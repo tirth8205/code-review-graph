@@ -245,9 +245,9 @@ class TestQueryGraphCallTargetFallbacks:
         (self.root / ".git").mkdir()
         (self.root / ".code-review-graph").mkdir()
 
-        self.target_file = str(self.root / "target.m")
-        self.cross_file = str(self.root / "cross.m")
-        self.dispatch_file = str(self.root / "dispatch.m")
+        self.target_file = (self.root / "target.m").as_posix()
+        self.cross_file = (self.root / "cross.m").as_posix()
+        self.dispatch_file = (self.root / "dispatch.m").as_posix()
         self.db_path = str(self.root / ".code-review-graph" / "graph.db")
         self._seed_data()
 
@@ -352,9 +352,9 @@ class TestQueryGraphCallTargetFallbacks:
             build = full_build(self.root, store)
             assert build["errors"] == []
 
-        type_qn = f"{type_path}::Finding"
-        direct_qn = f"{use_path}::summarize"
-        alias_qn = f"{alias_path}::summarizeAlias"
+        type_qn = f"{type_path.as_posix()}::Finding"
+        direct_qn = f"{use_path.as_posix()}::summarize"
+        alias_qn = f"{alias_path.as_posix()}::summarizeAlias"
         result = query_graph(
             pattern="references_to",
             target=type_qn,
@@ -387,9 +387,9 @@ class TestQueryGraphCallTargetFallbacks:
 
     def test_callers_of_bare_fallback_uses_js_family_without_crossing_to_apex(self):
         """Regression for #708: JS-family callers match, unrelated Apex does not."""
-        js_file = str(self.root / "clone.js")
-        tsx_file = str(self.root / "caller.tsx")
-        apex_file = str(self.root / "Clone.cls")
+        js_file = (self.root / "clone.js").as_posix()
+        tsx_file = (self.root / "caller.tsx").as_posix()
+        apex_file = (self.root / "Clone.cls").as_posix()
         with GraphStore(self.db_path) as store:
             store.upsert_node(NodeInfo(
                 kind="Function", name="clone", file_path=js_file,
@@ -432,10 +432,10 @@ class TestQueryGraphCallTargetFallbacks:
 
     def test_inheritors_of_bare_fallback_uses_js_family_without_apex(self):
         """Bare INHERITS/IMPLEMENTS edges stay inside the JS language family."""
-        base_file = str(self.root / "base.js")
-        ts_file = str(self.root / "child.ts")
-        jsx_file = str(self.root / "implementer.jsx")
-        apex_file = str(self.root / "Child.cls")
+        base_file = (self.root / "base.js").as_posix()
+        ts_file = (self.root / "child.ts").as_posix()
+        jsx_file = (self.root / "implementer.jsx").as_posix()
+        apex_file = (self.root / "Child.cls").as_posix()
         with GraphStore(self.db_path) as store:
             store.upsert_node(NodeInfo(
                 kind="Class", name="BaseWidget", file_path=base_file,
@@ -1119,8 +1119,8 @@ class TestFlowTools:
         ))
 
         # CALLS edges: handle_request -> check_auth -> query_db
-        app_py = str(self.root / "app.py")
-        auth_py = str(self.root / "auth.py")
+        app_py = (self.root / "app.py").as_posix()
+        auth_py = (self.root / "auth.py").as_posix()
         self.store.upsert_edge(EdgeInfo(
             kind="CALLS",
             source=f"{app_py}::handle_request",
@@ -1130,7 +1130,7 @@ class TestFlowTools:
         self.store.upsert_edge(EdgeInfo(
             kind="CALLS",
             source=f"{auth_py}::check_auth",
-            target=f"{str(self.root / 'db.py')}::query_db",
+            target=f"{(self.root / 'db.py').as_posix()}::query_db",
             file_path=auth_py, line=10,
         ))
         self.store.commit()
@@ -1292,7 +1292,7 @@ class TestCommunityTools:
     def _seed_data(self):
         """Seed the store with two clusters of related nodes."""
         # Cluster 1: auth module
-        auth_py = str(self.root / "auth.py")
+        auth_py = (self.root / "auth.py").as_posix()
         self.store.upsert_node(NodeInfo(
             kind="File", name="auth.py",
             file_path=auth_py,
@@ -1317,7 +1317,7 @@ class TestCommunityTools:
         ))
 
         # Cluster 2: db module
-        db_py = str(self.root / "db.py")
+        db_py = (self.root / "db.py").as_posix()
         self.store.upsert_node(NodeInfo(
             kind="File", name="db.py",
             file_path=db_py,

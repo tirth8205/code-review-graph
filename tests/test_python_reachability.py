@@ -215,8 +215,8 @@ def test_graph_consumers_do_not_observe_dead_branch_call(
 
     parser = CodeParser(repo_root=tmp_path)
     parsed = [parser.parse_file(path) for path in (targets_path, caller_path)]
-    dead_qualified = f"{targets_path}::dead_target"
-    live_qualified = f"{targets_path}::live_target"
+    dead_qualified = f"{targets_path.as_posix()}::dead_target"
+    live_qualified = f"{targets_path.as_posix()}::live_target"
 
     with GraphStore(tmp_path / "graph.db") as store:
         for nodes, edges in parsed:

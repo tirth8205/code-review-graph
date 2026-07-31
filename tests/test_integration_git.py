@@ -564,6 +564,121 @@ def test_update_without_usable_anchor_falls_back_to_full_rebuild(
     assert res["base_resolved"] is None
 
 
+def test_update_missing_graph_ignores_explicit_incremental_base(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    _commit_file(repo, "beta")
+
+    res = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        base="HEAD~1",
+        postprocess="none",
+    )
+
+    assert res["build_type"] == "full"
+    assert res["base_resolved"] is None
+    assert res["files_parsed"] == 2
+    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+        assert store.get_nodes_by_file(str(repo / "a.py"))
+        assert store.get_nodes_by_file(str(repo / "beta.py"))
+
+
+def test_update_repairs_existing_empty_graph(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    graph_path = repo / ".code-review-graph" / "graph.db"
+    with GraphStore(graph_path):
+        pass
+    _commit_file(repo, "beta")
+
+    res = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        base="HEAD~1",
+        postprocess="none",
+    )
+
+    assert res["build_type"] == "full"
+    assert res["base_resolved"] is None
+    assert res["files_parsed"] == 2
+    with GraphStore(graph_path) as store:
+        assert store.get_nodes_by_file(str(repo / "a.py"))
+        assert store.get_nodes_by_file(str(repo / "beta.py"))
+
+
+def test_status_then_update_builds_complete_queryable_graph(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from code_review_graph import cli
+    from code_review_graph.tools.query import query_graph
+
+    repo = tmp_path / "queryable-repo"
+    repo.mkdir()
+    _git_ok(repo, "init", "-b", "main")
+    _git_ok(repo, "config", "user.email", "test@test.com")
+    _git_ok(repo, "config", "user.name", "Test")
+    (repo / "provider.py").write_text(
+        "def target():\n    return 1\n",
+        encoding="utf-8",
+    )
+    (repo / "stable.py").write_text(
+        "from provider import target\n\ndef stable():\n    return target()\n",
+        encoding="utf-8",
+    )
+    recent = repo / "recent.py"
+    recent.write_text(
+        "from provider import target\n\ndef recent():\n    return target()\n",
+        encoding="utf-8",
+    )
+    _git_ok(repo, "add", ".")
+    _git_ok(repo, "commit", "-m", "initial callers")
+
+    data_dir = tmp_path / "queryable-data"
+    monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["code-review-graph", "status", "--repo", str(repo)],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+    assert exc_info.value.code == 1
+    assert not data_dir.exists()
+    capsys.readouterr()
+
+    recent.write_text(
+        "from provider import target\n\ndef recent():\n    return target() + 1\n",
+        encoding="utf-8",
+    )
+    _git_ok(repo, "add", "recent.py")
+    _git_ok(repo, "commit", "-m", "change recent caller")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "code-review-graph",
+            "update",
+            "--repo",
+            str(repo),
+            "--base",
+            "HEAD~1",
+            "--skip-postprocess",
+        ],
+    )
+    cli.main()
+
+    assert "Full rebuild" in capsys.readouterr().out
+    result = query_graph("callers_of", "target", repo_root=str(repo))
+    assert result["status"] == "ok"
+    assert {item["name"] for item in result["results"]} == {"recent", "stable"}
+
+
 def test_update_explicit_base_bypasses_auto_resolution(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")

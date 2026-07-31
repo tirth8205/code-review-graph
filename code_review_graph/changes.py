@@ -16,6 +16,7 @@ from typing import Any
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
+from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +416,7 @@ def analyze_changes(
         # remaps before calling, and remapping twice would corrupt keys.
         root_path = Path(repo_root)
         changed_ranges = {
-            str(root_path / key): ranges
+            normalize_file_path(root_path / key): ranges
             for key, ranges in parse_diff_ranges(repo_root, base).items()
         }
 
@@ -448,7 +449,7 @@ def analyze_changes(
         root_path = Path(repo_root)
         for key, count in compute_file_churn(repo_root).items():
             churn_counts[key] = count
-            churn_counts[str(root_path / key)] = count
+            churn_counts[normalize_file_path(root_path / key)] = count
 
     # Compute per-node risk scores.
     node_risks: list[dict[str, Any]] = []

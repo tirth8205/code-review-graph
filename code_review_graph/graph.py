@@ -35,7 +35,7 @@ from .constants import (
     MAX_IMPACT_NODES,
 )
 from .migrations import get_schema_version, run_migrations
-from .parser import EdgeInfo, NodeInfo
+from .parser import EdgeInfo, NodeInfo, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,19 @@ def _compatible_edge_languages(language: str) -> tuple[str, ...]:
     if normalized in _JAVASCRIPT_LANGUAGE_FAMILY_SET:
         return _JAVASCRIPT_LANGUAGE_FAMILY
     return (language,)
+
+
+def _bridge_qualified_name(qualified_name: str) -> str:
+    """Return *qualified_name* with its file-path component POSIX-normalized.
+
+    Qualified names embed the file path before the first ``::`` (File nodes
+    are just the path). Stored identities always use forward slashes (#774),
+    so a Windows-native spelling must be bridged to find the POSIX-keyed row.
+    Only the path component is rewritten — the symbol part may legitimately
+    contain backslashes (PHP fully-qualified names).
+    """
+    path_part, sep, symbol_part = qualified_name.partition("::")
+    return normalize_file_path(path_part) + sep + symbol_part
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +298,7 @@ class GraphStore:
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
+        file_path = normalize_file_path(file_path)
         self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (file_path,))
         self._conn.execute("DELETE FROM edges WHERE file_path = ?", (file_path,))
         self._invalidate_cache()
@@ -295,6 +309,7 @@ class GraphStore:
 
     def remove_files_permanently(self, file_paths: list[str]) -> int:
         """Atomically remove deleted files and graph references to their nodes."""
+        file_paths = [normalize_file_path(p) for p in file_paths]
         changed = 0
         has_embeddings = self._conn.execute(
             "SELECT 1 FROM sqlite_master "
@@ -386,6 +401,10 @@ class GraphStore:
         row = self._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
+    def has_nodes(self) -> bool:
+        row = self._conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
+        return row is not None
+
     def has_nodes_for_language(self, language: str) -> bool:
         row = self._conn.execute(
             "SELECT 1 FROM nodes WHERE language = ? LIMIT 1",
@@ -406,6 +425,14 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT * FROM nodes WHERE qualified_name = ?", (qualified_name,)
         ).fetchone()
+        if row is None:
+            # Bridge Windows-native path spellings to the stored POSIX
+            # identity (#774), mirroring the file-keyed lookups above.
+            bridged = _bridge_qualified_name(qualified_name)
+            if bridged != qualified_name:
+                row = self._conn.execute(
+                    "SELECT * FROM nodes WHERE qualified_name = ?", (bridged,)
+                ).fetchone()
         return self._row_to_node(row) if row else None
 
     def get_nodes_by_file(self, file_path: str) -> list[GraphNode]:
@@ -414,7 +441,7 @@ class GraphStore:
     def iter_nodes_by_file(self, file_path: str) -> Iterator[GraphNode]:
         """Yield file nodes without first materializing the complete row set."""
         rows = self._conn.execute(
-            "SELECT * FROM nodes WHERE file_path = ?", (file_path,)
+            "SELECT * FROM nodes WHERE file_path = ?", (normalize_file_path(file_path),)
         )
         for row in rows:
             yield self._row_to_node(row)
@@ -1006,6 +1033,37 @@ class GraphStore:
                     if isinstance(candidate, str)
                 )
 
+        # C# `using X.Y;` directives store IMPORTS_FROM targets as raw
+        # namespace strings rather than file paths, so the path-keyed
+        # evidence above never matches a candidate's defining file. Map
+        # declared namespaces back to the files declaring them and add
+        # those files as import evidence. See: #310, #792
+        namespace_files: dict[str, set[str]] = {}
+        for row in conn.execute(
+            "SELECT file_path, extra FROM nodes "
+            "WHERE kind = 'File' AND extra LIKE '%\"csharp_namespaces\"%'"
+        ).fetchall():
+            try:
+                node_extra = json.loads(row["extra"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(node_extra, dict):
+                continue
+            declared = node_extra.get("csharp_namespaces")
+            if not isinstance(declared, list):
+                continue
+            for ns in declared:
+                if isinstance(ns, str) and ns:
+                    namespace_files.setdefault(ns, set()).add(
+                        row["file_path"],
+                    )
+        if namespace_files:
+            for imported in import_targets.values():
+                expanded: set[str] = set()
+                for target in imported:
+                    expanded |= namespace_files.get(target, set())
+                imported |= expanded
+
         resolved = 0
         changed = False
         for edge in bare_edges:
@@ -1235,6 +1293,27 @@ class GraphStore:
 
     # --- Impact / Graph traversal ---
 
+    def _impact_seed_qns(self, changed_files: list[str]) -> set[str]:
+        """Seed qualified names for the impact traversal.
+
+        Includes every node in the changed files plus, for changed C#
+        files, the namespaces they declare. C# ``using X.Y;`` directives
+        store IMPORTS_FROM targets as raw namespace strings rather than
+        file paths, so without these bridge seeds the traversal can never
+        reach importers of a changed .cs file. The namespace strings have
+        no node rows, so they act purely as bridges and never surface in
+        results. See: #310
+        """
+        seeds: set[str] = set()
+        for f in changed_files:
+            for n in self.get_nodes_by_file(f):
+                seeds.add(n.qualified_name)
+                if n.kind == "File" and n.language == "csharp":
+                    for ns in n.extra.get("csharp_namespaces") or []:
+                        if isinstance(ns, str) and ns:
+                            seeds.add(ns)
+        return seeds
+
     def get_impact_radius(
         self,
         changed_files: list[str],
@@ -1294,11 +1373,7 @@ class GraphStore:
             }
 
         # Seed qualified names
-        seeds: set[str] = set()
-        for f in changed_files:
-            nodes = self.get_nodes_by_file(f)
-            for n in nodes:
-                seeds.add(n.qualified_name)
+        seeds = self._impact_seed_qns(changed_files)
 
         if not seeds:
             return {
@@ -1497,11 +1572,7 @@ class GraphStore:
         max_nodes = max(0, int(max_nodes))
         nxg = self._build_networkx_graph()
 
-        seeds: set[str] = set()
-        for f in changed_files:
-            nodes = self.get_nodes_by_file(f)
-            for n in nodes:
-                seeds.add(n.qualified_name)
+        seeds = self._impact_seed_qns(changed_files)
 
         best: dict[str, float] = dict.fromkeys(seeds, 1.0)
         frontier = dict(best)
@@ -1607,9 +1678,14 @@ class GraphStore:
         for row in self._conn.execute("SELECT kind, COUNT(*) as cnt FROM edges GROUP BY kind"):
             edges_by_kind[row["kind"]] = row["cnt"]
 
+        # Derive languages from the live File inventory, not from every node
+        # row: virtual or leftover rows without a backing File node (e.g. the
+        # synthetic Spring Event nodes) must not keep a language alive in
+        # `status` after its last real file left the graph (issue #474).
         languages = [
             r["language"] for r in self._conn.execute(
-                "SELECT DISTINCT language FROM nodes WHERE language IS NOT NULL AND language != ''"
+                "SELECT DISTINCT language FROM nodes WHERE kind = 'File' "
+                "AND language IS NOT NULL AND language != '' ORDER BY language"
             )
         ]
 
@@ -1768,7 +1844,7 @@ class GraphStore:
         rows = self._conn.execute(
             "SELECT DISTINCT file_path FROM nodes "
             "WHERE file_path LIKE ?",
-            (f"%{pattern}",),
+            (f"%{normalize_file_path(pattern)}",),
         ).fetchall()
         return [r["file_path"] for r in rows]
 
@@ -1812,6 +1888,7 @@ class GraphStore:
         """Return node IDs belonging to the given file paths."""
         if not file_paths:
             return set()
+        file_paths = [normalize_file_path(p) for p in file_paths]
         result: set[int] = set()
         batch_size = 450
         for i in range(0, len(file_paths), batch_size):

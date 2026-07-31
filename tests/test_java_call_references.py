@@ -29,12 +29,12 @@ def test_java_method_references_chained_calls_and_constructors_are_calls() -> No
 
     method_reference = next(
         edge for edge in route_calls
-        if edge.target == f"{path}::Handler.handle"
+        if edge.target == f"{path.as_posix()}::Handler.handle"
     )
     assert method_reference.extra["receiver"] == "handler"
     assert method_reference.extra["call_syntax"] == "method_reference"
     assert any(edge.target == "GET" for edge in route_calls)
-    assert any(edge.target == f"{path}::Handler" for edge in route_calls)
+    assert any(edge.target == f"{path.as_posix()}::Handler" for edge in route_calls)
 
 
 @pytest.mark.parametrize(
@@ -49,8 +49,8 @@ def test_java_framework_callbacks_remain_flow_entry_points(
     tmp_path: Path,
     decorator: str,
 ) -> None:
-    callback_path = str(tmp_path / "Callback.java")
-    caller_path = str(tmp_path / "Caller.java")
+    callback_path = (tmp_path / "Callback.java").as_posix()
+    caller_path = (tmp_path / "Caller.java").as_posix()
     callback_qn = f"{callback_path}::Callback.execute"
     with GraphStore(tmp_path / "graph.db") as store:
         store.upsert_node(NodeInfo(
