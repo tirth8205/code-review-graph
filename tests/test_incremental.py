@@ -950,13 +950,27 @@ class TestIncrementalUpdate:
         finally:
             store.close()
 
+    @staticmethod
+    def _community_assignment_signature(store) -> list[tuple[tuple[str, str], ...]]:
+        """Stable community membership fingerprint (name, kind), ID-independent."""
+        from collections import defaultdict
+
+        groups: dict[int, list[tuple[str, str]]] = defaultdict(list)
+        for cid, name, kind in store._conn.execute(
+            "SELECT community_id, name, kind FROM nodes "
+            "WHERE community_id IS NOT NULL AND kind != 'File'"
+        ):
+            groups[int(cid)].append((name, kind))
+        return sorted(tuple(sorted(members)) for members in groups.values())
+
     def test_incremental_delete_clears_orphan_community_rows(self, tmp_path):
-        """Deleting an isolated community file must not leave size>0 empty rows."""
+        """Deleting an isolated community file must match a clean rebuild."""
         from code_review_graph.communities import (
             detect_communities,
             get_communities,
             store_communities,
         )
+        from code_review_graph.incremental import full_build
         from code_review_graph.tools.build import _run_postprocess
 
         isolated = tmp_path / "isolated.py"
@@ -1002,7 +1016,6 @@ class TestIncrementalUpdate:
             )
 
             after = get_communities(store, min_size=0)
-            # No community row may claim members that no longer exist.
             for comm in after:
                 members = store._conn.execute(
                     "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
@@ -1011,28 +1024,16 @@ class TestIncrementalUpdate:
                 assert members == comm["size"]
                 assert members > 0
 
-            # Fresh full rebuild parity: no empty leftover rows for deleted file.
-            from code_review_graph.incremental import full_build
-
-            db2 = tmp_path / "clean.db"
-            clean = GraphStore(db2)
+            clean = GraphStore(tmp_path / "clean.db")
             try:
                 full_build(tmp_path, clean)
-                clean_comms = detect_communities(clean, min_size=2)
-                store_communities(clean, clean_comms)
-                clean_ids = {
-                    c["name"] for c in get_communities(clean, min_size=0)
-                }
-                # Incremental must not retain communities absent from clean rebuild
-                # that have zero live members (already asserted above).
-                assert all(
-                    store._conn.execute(
-                        "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
-                        (c["id"],),
-                    ).fetchone()[0] > 0
-                    for c in after
+                store_communities(clean, detect_communities(clean, min_size=2))
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
                 )
-                _ = clean_ids  # parity probe completed
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
             finally:
                 clean.close()
         finally:
@@ -1109,20 +1110,19 @@ class TestIncrementalUpdate:
                     "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
                 ).fetchone()[0] == 0
 
-                def _assigned(s):
-                    return s._conn.execute(
-                        "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
-                    ).fetchone()[0]
-
-                # After forced/incremental community refresh, no empty rows.
-                for c in get_communities(store, min_size=0):
-                    members = store._conn.execute(
-                        "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
-                        (c["id"],),
-                    ).fetchone()[0]
-                    assert members == c["size"]
-                    assert members > 0
-                assert _assigned(store) >= 0
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
+                )
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
+                assigned_inc = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assigned_clean = clean._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assert assigned_inc == assigned_clean
             finally:
                 clean.close()
         finally:

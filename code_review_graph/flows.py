@@ -95,11 +95,17 @@ def expand_changed_file_paths(
                     matched.append(fp)
                     matched_seen.add(fp)
 
-    # Relative inputs without a repo root (or mixed stores): match exact
-    # suffixes with escaped LIKE so "_" / "%" in filenames stay literal.
+    # Relative inputs without a repo root (or mixed stores): match only at a
+    # path-separator boundary. With ESCAPE '\', a literal backslash in the
+    # pattern must itself be escaped as '\\' — otherwise "%\b.py" becomes an
+    # unanchored "%b.py" suffix match and wrongly includes "ab.py".
     for rel in relative_inputs:
         escaped = _escape_like_literal(rel)
-        patterns = (f"%/{escaped}", f"%\\{escaped}", escaped)
+        patterns = (
+            escaped,                 # exact relative path
+            f"%/{escaped}",          # POSIX separator anchor
+            f"%\\\\{escaped}",       # Windows separator anchor (literal '\')
+        )
         for pattern in patterns:
             rows = store._conn.execute(
                 "SELECT DISTINCT file_path FROM nodes "
@@ -114,25 +120,21 @@ def expand_changed_file_paths(
     return matched
 
 
-def capture_affected_flow_entry_points(
+def _flows_touching_files(
     store: GraphStore,
     file_paths: list[str],
-) -> set[str]:
-    """Return entry-point qualified names for flows touching *file_paths*.
-
-    Must run **before** node replacement: after ``remove_file_data`` the old
-    node IDs are gone and membership JOINs can no longer find those flows.
-    """
+) -> tuple[list[int], list[int], set[str]]:
+    """Return ``(node_ids, flow_ids, entry_point_qns)`` for *file_paths*."""
     if not file_paths:
-        return set()
+        return [], [], set()
 
-    node_ids = store.get_node_ids_by_files(file_paths)
+    node_ids = list(store.get_node_ids_by_files(file_paths))
     if not node_ids:
-        return set()
+        return [], [], set()
 
-    flow_ids = store.get_flow_ids_by_node_ids(node_ids)
+    flow_ids = store.get_flow_ids_by_node_ids(set(node_ids))
     if not flow_ids:
-        return set()
+        return node_ids, [], set()
 
     conn = store._conn
     entry_qns: set[str] = set()
@@ -146,6 +148,19 @@ def capture_affected_flow_entry_points(
             batch,
         ).fetchall()
         entry_qns.update(r[0] for r in rows if r[0])
+    return node_ids, flow_ids, entry_qns
+
+
+def capture_affected_flow_entry_points(
+    store: GraphStore,
+    file_paths: list[str],
+) -> set[str]:
+    """Return entry-point qualified names for flows touching *file_paths*.
+
+    Must run **before** node replacement: after ``remove_file_data`` the old
+    node IDs are gone and membership JOINs can no longer find those flows.
+    """
+    _node_ids, _flow_ids, entry_qns = _flows_touching_files(store, file_paths)
     return entry_qns
 
 
@@ -155,14 +170,14 @@ def clear_flows_for_files(store: GraphStore, file_paths: list[str]) -> set[str]:
     Returns the entry-point qualified names that should be re-traced after
     replacement (stable across node ID churn).
     """
-    entry_qns = capture_affected_flow_entry_points(store, file_paths)
     if not file_paths:
+        return set()
+
+    node_ids, flow_ids, entry_qns = _flows_touching_files(store, file_paths)
+    if not node_ids and not flow_ids:
         return entry_qns
 
     conn = store._conn
-    node_ids = list(store.get_node_ids_by_files(file_paths))
-    flow_ids = store.get_flow_ids_by_node_ids(set(node_ids)) if node_ids else []
-
     if conn.in_transaction:
         conn.commit()
     conn.execute("BEGIN IMMEDIATE")

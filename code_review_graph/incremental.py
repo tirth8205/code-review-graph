@@ -1277,34 +1277,13 @@ def incremental_update(
         purge_orphan_flow_data,
     )
 
-    lifecycle_inputs: list[str] = []
-    for rel_path in to_parse:
-        lifecycle_inputs.append(rel_path.replace("\\", "/"))
-        lifecycle_inputs.append(str(repo_root / rel_path))
-        lifecycle_inputs.append(str((repo_root / rel_path).resolve()))
-    for abs_missing in missing_paths:
-        lifecycle_inputs.append(abs_missing)
-        try:
-            missing_path = Path(abs_missing)
-            lifecycle_inputs.append(str(missing_path.resolve()))
-            lifecycle_inputs.append(
-                str(missing_path.relative_to(repo_root)).replace("\\", "/")
-            )
-        except (OSError, ValueError):
-            pass
-    for stale in stale_files:
-        lifecycle_inputs.append(stale)
-        try:
-            stale_path = Path(stale)
-            if stale_path.is_absolute():
-                lifecycle_inputs.append(
-                    str(stale_path.relative_to(repo_root)).replace("\\", "/")
-                )
-            else:
-                lifecycle_inputs.append(str(repo_root / stale_path))
-        except (OSError, ValueError):
-            pass
-
+    # Pass raw relative/absolute paths; expand_changed_file_paths owns
+    # variant generation so we do not expand twice per update.
+    lifecycle_inputs = [
+        *[rel_path.replace("\\", "/") for rel_path in to_parse],
+        *missing_paths,
+        *stale_files,
+    ]
     lifecycle_paths = expand_changed_file_paths(
         store, lifecycle_inputs, repo_root=repo_root,
     )
