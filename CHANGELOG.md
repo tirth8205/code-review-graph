@@ -4,6 +4,11 @@
 
 ### Added
 
+- Added a Voyage AI embedding provider (`--provider voyage`, key from
+  `VOYAGE_API_KEY`, opt-in request throttling via
+  `CRG_VOYAGE_MIN_INTERVAL_SEC`). Embeddings are now persisted after each
+  batch for every provider, so an interrupted cloud run keeps completed
+  batches and re-runs skip up-to-date nodes (#783).
 - Added `code-review-graph forget PATH [PATH ...]` to drop already-parsed files
   from the graph without a full rebuild. Paths may be absolute, relative to the
   repository root, a directory (every file underneath is dropped), or a glob

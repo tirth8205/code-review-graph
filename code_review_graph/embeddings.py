@@ -6,6 +6,7 @@ Supports multiple providers:
 3. MiniMax (embo-01) - High-quality 1536-dim cloud embeddings. Requires MINIMAX_API_KEY.
 4. OpenAI-compatible - Any endpoint speaking OpenAI /v1/embeddings (real OpenAI,
    Azure OpenAI, self-hosted gateways like new-api / LiteLLM / vLLM / LocalAI / Ollama).
+5. Voyage AI - Code retrieval embeddings via the Voyage embeddings API.
 """
 
 from __future__ import annotations
@@ -625,7 +626,204 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return f"openai:{self._model}@{self._host_key}"
 
 
-CLOUD_PROVIDERS = {"google", "minimax", "openai"}
+class VoyageEmbeddingProvider(EmbeddingProvider):
+    """Voyage AI embedding provider.
+
+    Uses Voyage's embeddings API with document/query input types so indexed
+    source-derived node text and search queries are embedded with the task hint
+    Voyage expects. Provider identity includes model, dimension, dtype, and
+    endpoint to avoid mixing incompatible vector spaces.
+    """
+
+    _DEFAULT_BASE_URL = "https://api.voyageai.com/v1"
+    _DEFAULT_MODEL = "voyage-code-3"
+    _DEFAULT_DIMENSION = 1024
+    _DEFAULT_OUTPUT_DTYPE = "float"
+    _DEFAULT_BATCH_SIZE = 100
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        model: str | None = None,
+        output_dimension: int | None = None,
+        output_dtype: str | None = None,
+        timeout: int = 120,
+        batch_size: int | None = None,
+        min_interval_sec: float = 0.0,
+    ) -> None:
+        self._api_key = api_key
+        self._base_url = (base_url or self._DEFAULT_BASE_URL).rstrip("/")
+        self._model = model or self._DEFAULT_MODEL
+        self._output_dimension = output_dimension or self._DEFAULT_DIMENSION
+        self._output_dtype = output_dtype or self._DEFAULT_OUTPUT_DTYPE
+        self._timeout = timeout
+        self._batch_size = batch_size or self._DEFAULT_BATCH_SIZE
+        self._min_interval_sec = max(0.0, min_interval_sec)
+        self._last_request_at = 0.0
+        self._host_key = OpenAIEmbeddingProvider._make_host_key(self._base_url)
+
+    def _wait_for_rate_limit_slot(self) -> None:
+        if self._min_interval_sec <= 0:
+            return
+        now = time.monotonic()
+        if self._last_request_at > 0:
+            wait = self._min_interval_sec - (now - self._last_request_at)
+            if wait > 0:
+                time.sleep(wait)
+                now = time.monotonic()
+        self._last_request_at = now
+
+    def _call_api(self, texts: list[str], input_type: str) -> list[list[float]]:
+        import http.client
+        import json as _json
+        import socket
+        import ssl
+        import urllib.error
+        import urllib.request
+
+        body: dict[str, Any] = {
+            "model": self._model,
+            "input": texts,
+            "input_type": input_type,
+            "output_dimension": self._output_dimension,
+            "output_dtype": self._output_dtype,
+        }
+
+        payload = _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self._base_url}/embeddings",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+                "User-Agent": _USER_AGENT,
+                "Accept": "application/json",
+            },
+        )
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                _ssl_ctx = ssl.create_default_context()
+                try:
+                    self._wait_for_rate_limit_slot()
+                    with urllib.request.urlopen(  # nosec B310
+                        req, timeout=self._timeout, context=_ssl_ctx,
+                    ) as resp:
+                        raw = resp.read().decode("utf-8")
+                except urllib.error.HTTPError as http_err:
+                    if http_err.code == 429 or 500 <= http_err.code < 600:
+                        raise
+                    try:
+                        err_body = http_err.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        err_body = ""
+                    err_msg = err_body or str(http_err)
+                    try:
+                        parsed = _json.loads(err_body)
+                        if isinstance(parsed, dict) and "error" in parsed:
+                            err_obj = parsed["error"]
+                            err_msg = (
+                                err_obj.get("message", err_msg)
+                                if isinstance(err_obj, dict) else str(err_obj)
+                            )
+                    except Exception:  # nosec B110
+                        pass
+                    raise RuntimeError(
+                        f"Voyage API HTTP {http_err.code}: {err_msg}"
+                    ) from http_err
+
+                response = _json.loads(raw)
+
+                if "error" in response:
+                    err = response["error"]
+                    msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+                    raise RuntimeError(f"Voyage API error: {msg}")
+
+                data = response.get("data", [])
+                if not data:
+                    raise RuntimeError("Voyage API returned empty data")
+
+                any_has_index = any("index" in item for item in data)
+                all_int_index = all(
+                    isinstance(item.get("index"), int) for item in data
+                )
+                if all_int_index:
+                    expected = set(range(len(texts)))
+                    indices = [int(item["index"]) for item in data]
+                    if len(set(indices)) != len(indices) or set(indices) != expected:
+                        raise RuntimeError(
+                            "Voyage API returned malformed indices "
+                            f"(got {indices}, expected permutation of "
+                            f"0..{len(texts) - 1}) — refusing to misalign vectors."
+                        )
+                    data = sorted(data, key=lambda item: int(item["index"]))
+                elif not any_has_index:
+                    if len(data) != len(texts):
+                        raise RuntimeError(
+                            f"Voyage API returned {len(data)} embeddings for "
+                            f"{len(texts)} inputs with no index field — "
+                            "refusing to misalign vectors."
+                        )
+                else:
+                    raise RuntimeError(
+                        "Voyage API returned mixed indexed/unindexed data — "
+                        "refusing to misalign vectors."
+                    )
+
+                return [item["embedding"] for item in data]
+
+            except Exception as e:
+                is_retryable = False
+                if isinstance(e, urllib.error.HTTPError):
+                    is_retryable = e.code == 429 or 500 <= e.code < 600
+                elif isinstance(e, (
+                    urllib.error.URLError,
+                    socket.timeout,
+                    TimeoutError,
+                    ConnectionError,
+                    ssl.SSLError,
+                    http.client.IncompleteRead,
+                    http.client.BadStatusLine,
+                    http.client.RemoteDisconnected,
+                )):
+                    is_retryable = True
+                if not is_retryable or attempt == max_retries - 1:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(
+                    "Voyage embeddings API error (attempt %d/%d), retrying in %ds: %s",
+                    attempt + 1, max_retries, wait, e,
+                )
+                time.sleep(wait)
+
+        return []  # unreachable
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        results: list[list[float]] = []
+        for i in range(0, len(texts), self._batch_size):
+            results.extend(self._call_api(texts[i:i + self._batch_size], "document"))
+        return results
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._call_api([text], "query")[0]
+
+    @property
+    def dimension(self) -> int:
+        return self._output_dimension
+
+    @property
+    def name(self) -> str:
+        return (
+            f"voyage:{self._model}:dim{self._output_dimension}:"
+            f"{self._output_dtype}@{self._host_key}"
+        )
+
+
+CLOUD_PROVIDERS = {"google", "minimax", "openai", "voyage"}
 
 
 def _is_localhost_url(url: str) -> bool:
@@ -668,7 +866,7 @@ def _warn_cloud_egress(provider_name: str) -> None:
     )
 
 
-_VALID_PROVIDERS = {"local", "openai", "google", "minimax"}
+_VALID_PROVIDERS = {"local", "openai", "google", "minimax", "voyage"}
 
 
 def get_provider(
@@ -678,17 +876,18 @@ def get_provider(
     """Get an embedding provider by name.
 
     Args:
-        provider: Provider name. One of "local", "google", "minimax", "openai",
-                  or None. When omitted, configured OpenAI-compatible
-                  credentials select OpenAI; otherwise the local provider is
-                  used. Names are case-insensitive and surrounding whitespace
-                  is ignored; unknown names raise ValueError instead of
-                  silently falling back to the local provider.
-                  Google requires GOOGLE_API_KEY env var and explicit opt-in.
-                  MiniMax requires MINIMAX_API_KEY env var and explicit opt-in.
-                  OpenAI requires CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL +
-                  CRG_OPENAI_MODEL env vars (or the ``model`` arg). The egress
-                  warning is skipped when the base URL points to localhost.
+        provider: Provider name. One of "local", "google", "minimax",
+                  "openai", "voyage", or None. When omitted, configured
+                  OpenAI-compatible credentials select OpenAI; otherwise the
+                  local provider is used. Names are case-insensitive and
+                  surrounding whitespace is ignored; unknown names raise
+                  ValueError instead of silently falling back to the local
+                  provider. Google requires GOOGLE_API_KEY env var and explicit
+                  opt-in. MiniMax requires MINIMAX_API_KEY env var and explicit
+                  opt-in. Voyage requires VOYAGE_API_KEY. OpenAI requires
+                  CRG_OPENAI_API_KEY + CRG_OPENAI_BASE_URL + CRG_OPENAI_MODEL
+                  env vars (or the ``model`` arg). The egress warning is
+                  skipped when the base URL points to localhost.
                   Cloud providers emit a one-time stderr warning before use
                   unless ``CRG_ACCEPT_CLOUD_EMBEDDINGS=1`` is set. See: #174
         model: Model name/path to use. For local provider this is any
@@ -696,6 +895,7 @@ def get_provider(
                CRG_EMBEDDING_MODEL env var, then to all-MiniLM-L6-v2.
                For Google provider this is a Gemini model ID.
                For OpenAI provider this overrides CRG_OPENAI_MODEL.
+               For Voyage provider this overrides CRG_VOYAGE_MODEL.
 
     Raises:
         ValueError: If the provider name is not one of the known providers,
@@ -705,7 +905,7 @@ def get_provider(
     if name and name not in _VALID_PROVIDERS:
         raise ValueError(
             f"Unknown embedding provider '{name}'. "
-            "Valid: local, openai, google, minimax"
+            "Valid: local, openai, google, minimax, voyage"
         )
 
     # When no explicit provider is given but OpenAI-compatible env vars are
@@ -758,6 +958,44 @@ def get_provider(
             )
         _warn_cloud_egress("minimax")
         return MiniMaxEmbeddingProvider(api_key=api_key)
+
+    if name == "voyage":
+        api_key = os.environ.get("VOYAGE_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "VOYAGE_API_KEY environment variable is required for "
+                "the Voyage embedding provider."
+            )
+        base_url = (
+            os.environ.get("CRG_VOYAGE_BASE_URL")
+            or VoyageEmbeddingProvider._DEFAULT_BASE_URL
+        )
+        resolved_model = (
+            model
+            or os.environ.get("CRG_VOYAGE_MODEL")
+            or VoyageEmbeddingProvider._DEFAULT_MODEL
+        )
+        dim_env = os.environ.get("CRG_VOYAGE_OUTPUT_DIMENSION")
+        output_dimension = int(dim_env) if dim_env else VoyageEmbeddingProvider._DEFAULT_DIMENSION
+        output_dtype = (
+            os.environ.get("CRG_VOYAGE_OUTPUT_DTYPE")
+            or VoyageEmbeddingProvider._DEFAULT_OUTPUT_DTYPE
+        )
+        batch_env = os.environ.get("CRG_VOYAGE_BATCH_SIZE")
+        batch_size = int(batch_env) if batch_env else None
+        min_interval_env = os.environ.get("CRG_VOYAGE_MIN_INTERVAL_SEC")
+        min_interval_sec = float(min_interval_env) if min_interval_env else 0.0
+        if not _is_localhost_url(base_url):
+            _warn_cloud_egress("voyage")
+        return VoyageEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=resolved_model,
+            output_dimension=output_dimension,
+            output_dtype=output_dtype,
+            batch_size=batch_size,
+            min_interval_sec=min_interval_sec,
+        )
 
     if name == "google":
         api_key = os.environ.get("GOOGLE_API_KEY")
@@ -984,20 +1222,27 @@ class EmbeddingStore:
         if not to_embed:
             return 0
 
-        # Encode in batches
-        texts = [t for _, t, _ in to_embed]
-        vectors = self.provider.embed(texts)
+        embedded = 0
+        for i in range(0, len(to_embed), batch_size):
+            batch = to_embed[i:i + batch_size]
+            texts = [t for _, t, _ in batch]
+            vectors = self.provider.embed(texts)
 
-        for (node, _text, text_hash), vec in zip(to_embed, vectors):
-            blob = _encode_vector(vec)
-            self._conn.execute(
-                """INSERT OR REPLACE INTO embeddings (qualified_name, vector, text_hash, provider)
-                   VALUES (?, ?, ?, ?)""",
-                (node.qualified_name, blob, text_hash, provider_name),
-            )
+            for (node, _text, text_hash), vec in zip(batch, vectors):
+                blob = _encode_vector(vec)
+                self._conn.execute(
+                    """
+                    INSERT OR REPLACE INTO embeddings
+                        (qualified_name, vector, text_hash, provider)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (node.qualified_name, blob, text_hash, provider_name),
+                )
+                embedded += 1
 
-        self._conn.commit()
-        return len(to_embed)
+            self._conn.commit()
+
+        return embedded
 
     def search(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
         """Search for nodes by semantic similarity."""

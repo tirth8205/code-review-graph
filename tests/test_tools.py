@@ -848,12 +848,12 @@ class TestEmbedGraphProviderErrors:
     def test_unknown_provider_returns_structured_error(self, tmp_path):
         (tmp_path / ".code-review-graph").mkdir()
         result = docs_module.embed_graph(
-            repo_root=str(tmp_path), provider="voyage",
+            repo_root=str(tmp_path), provider="moonbase",
         )
         assert result["status"] == "error"
         assert "Unknown embedding provider" in result["error"]
-        assert "voyage" in result["error"]
-        assert "Valid: local, openai, google, minimax" in result["error"]
+        assert "moonbase" in result["error"]
+        assert "Valid: local, openai, google, minimax, voyage" in result["error"]
 
     def test_missing_env_vars_return_structured_error(self, tmp_path, monkeypatch):
         (tmp_path / ".code-review-graph").mkdir()
@@ -872,7 +872,7 @@ class TestEmbedGraphProviderErrors:
             docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
         )
         result = docs_module.embed_graph(
-            repo_root=str(tmp_path), provider="voyage",
+            repo_root=str(tmp_path), provider="moonbase",
         )
         assert result["status"] == "error"
         store.close.assert_called_once()
