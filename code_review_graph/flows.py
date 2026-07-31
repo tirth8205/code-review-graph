@@ -51,12 +51,13 @@ def expand_changed_file_paths(
     relative_inputs: list[str] = []
 
     def _add(path: str) -> None:
-        if path and path not in seen:
-            seen.add(path)
-            variants.append(path)
+        normalized = normalize_file_path(path)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            variants.append(normalized)
 
     for raw in changed_files:
-        text = str(raw).replace("\\", "/")
+        text = normalize_file_path(raw)
         _add(text)
         path = Path(raw)
         if path.is_absolute():
@@ -65,7 +66,7 @@ def expand_changed_file_paths(
                 resolved = path.resolve()
                 _add(str(resolved))
                 if root is not None:
-                    _add(str(resolved.relative_to(root)).replace("\\", "/"))
+                    _add(str(resolved.relative_to(root)))
             except (OSError, ValueError):
                 pass
         else:
@@ -77,7 +78,7 @@ def expand_changed_file_paths(
                 except OSError:
                     pass
 
-    # Exact hits first.
+    # Exact hits first (graph identities are POSIX-normalized; see #774).
     matched: list[str] = list(variants)
     matched_seen = set(variants)
     if variants:
@@ -96,15 +97,14 @@ def expand_changed_file_paths(
                     matched_seen.add(fp)
 
     # Relative inputs without a repo root (or mixed stores): match only at a
-    # path-separator boundary. With ESCAPE '\', a literal backslash in the
-    # pattern must itself be escaped as '\\' — otherwise "%\b.py" becomes an
-    # unanchored "%b.py" suffix match and wrongly includes "ab.py".
+    # path-separator boundary. Stored paths are POSIX (#774), so anchor on '/'.
+    # Keep an escaped Windows '\' pattern for any legacy backslash rows.
     for rel in relative_inputs:
         escaped = _escape_like_literal(rel)
         patterns = (
             escaped,                 # exact relative path
             f"%/{escaped}",          # POSIX separator anchor
-            f"%\\\\{escaped}",       # Windows separator anchor (literal '\')
+            f"%\\\\{escaped}",       # legacy Windows separator anchor
         )
         for pattern in patterns:
             rows = store._conn.execute(
