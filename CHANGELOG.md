@@ -19,12 +19,23 @@
   and PL/SQL-style functions/procedures (`.sql`, `.pls`, `.plb`, `.pks`,
   `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`), with package bodies qualified
   distinctly from their spec (`pkg_name$body`) and nested members qualified
-  as `pkg_name$body.member_name`, plus regex-based CALLS edges between
-  procedures/functions/triggers/package members. The PL/SQL-specific passes
-  (body-span computation, CALLS extraction, packages, triggers) only run for
-  files an Oracle-dialect check confirms are PL/SQL (an Oracle extension, or
-  a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`) — plain ANSI/T-SQL/MySQL
-  `.sql` files are unaffected.
+  by name plus parameter signature (`pkg_name$body.member_name(params)`, so
+  overloaded package members don't collide), plus regex-based CALLS edges
+  between procedures/functions/triggers/package members. The PL/SQL-specific
+  passes (body-span computation, CALLS extraction, packages, triggers) only
+  run for files an Oracle-dialect check confirms are PL/SQL (an Oracle
+  extension, or a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`, checked
+  against comment/string-stripped text) — plain ANSI/T-SQL/MySQL `.sql`
+  files are unaffected. Comments and string-literal contents are blanked
+  before every PL/SQL regex pass runs, so a `;` or `END name;` inside a
+  trailing comment or a dynamic-SQL string literal can't be mistaken for a
+  real terminator, and Oracle's `$`/`#` identifier characters are handled
+  consistently across every pass. Every `CREATE`/`END`-anchored regex
+  requires a leading word boundary (e.g. `RECREATE PROCEDURE` no longer
+  matches as `CREATE PROCEDURE`, `ENDfoo;` no longer matches as `END foo;`),
+  and the forward-declaration/signature scanners are independently
+  comment/string-aware rather than only correct because callers happen to
+  pass pre-cleaned text.
 
 ### Fixed
 
