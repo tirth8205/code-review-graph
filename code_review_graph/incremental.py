@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable, Optional
 
 from .graph import GraphStore
-from .parser import CodeParser
+from .parser import CodeParser, normalize_file_path
 
 _MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
 
@@ -914,7 +914,9 @@ def _reconcile_stale_files(
     stored_files = set(store.get_all_files())
     current_paths: set[str]
     if current_files is not None:
-        current_paths = {str(repo_root / file_path) for file_path in current_files}
+        current_paths = {
+            normalize_file_path(repo_root / file_path) for file_path in current_files
+        }
     else:
         ignore_patterns = _load_ignore_patterns(repo_root)
         parser = CodeParser(repo_root)
@@ -1210,7 +1212,7 @@ def incremental_update(
     # Find dependent files (files that import from changed files)
     dependent_files: set[str] = set()
     for rel_path in changed_files:
-        full_path = str(repo_root / rel_path)
+        full_path = normalize_file_path(repo_root / rel_path)
         deps = find_dependents(store, full_path)
         for d in deps:
             # Convert back to relative path if needed
@@ -1234,8 +1236,8 @@ def incremental_update(
             continue
         abs_path = repo_root / rel_path
         if not abs_path.is_file():
-            if str(abs_path) not in stale_files:
-                missing_paths.add(str(abs_path))
+            if normalize_file_path(abs_path) not in stale_files:
+                missing_paths.add(normalize_file_path(abs_path))
             continue
         if parser.detect_language(abs_path) is None:
             continue
@@ -1317,7 +1319,13 @@ def incremental_update(
         _run_rescript_resolver(store) if rescript_changed else None
     )
 
-    spring_changed = any(rp.endswith(".java") for rp in all_files)
+    # Like python_changed above, include stale/missing paths so a deletion
+    # that only surfaces through reconciliation still clears derived state
+    # (e.g. virtual Spring Event nodes — issue #474).
+    spring_changed = any(
+        path.endswith(".java")
+        for path in set(all_files) | set(stale_files) | missing_paths
+    )
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     spring_event_stats = (
         _run_spring_event_resolver(store) if spring_changed else None
@@ -1325,7 +1333,7 @@ def incremental_update(
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith((".php", ".rs")) for rp in all_files)
+    scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
 
     return {
@@ -1420,7 +1428,8 @@ def _create_watch_handler(
             return str(relative)
 
         def _stored_descendants(self, relative_directory: str) -> set[str]:
-            directory = str(repo_root / relative_directory) + os.sep
+            # Stored file paths use POSIX separators (#774).
+            directory = normalize_file_path(repo_root / relative_directory) + "/"
             return {
                 str(Path(file_path).relative_to(repo_root))
                 for file_path in store.get_all_files()

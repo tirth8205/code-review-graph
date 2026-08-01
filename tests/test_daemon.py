@@ -311,13 +311,21 @@ class TestPIDManagement:
         assert is_daemon_running(pid_path) is True
         mock_kill.assert_called_once_with(1234, 0)
 
-    @patch("os.kill", side_effect=ProcessLookupError)
-    def test_is_daemon_running_dead(self, mock_kill, pid_path):
-        """ProcessLookupError clears stale PID and returns False."""
+    @patch("code_review_graph.daemon.pid_alive", return_value=False)
+    def test_is_daemon_running_dead(self, mock_alive, pid_path):
+        """A dead PID clears the stale PID file and returns False.
+
+        pid_alive is patched at the module seam rather than os.kill: on
+        Windows the liveness check goes through OpenProcess, so an os.kill
+        mock is bypassed and the test would probe the runner's real PID
+        space, where small PIDs like 9999 are routinely reused (flaked in
+        CI). The os.kill mapping itself is covered by TestPidAlive.
+        """
         write_pid(9999, pid_path)
         assert is_daemon_running(pid_path) is False
         # Stale PID file should be cleaned up
         assert not pid_path.exists()
+        mock_alive.assert_called_once_with(9999)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX os.kill branch")
     @patch("os.kill", side_effect=OSError(87, "The parameter is incorrect"))

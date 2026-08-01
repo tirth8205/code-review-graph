@@ -76,7 +76,7 @@ class TestOrphanCleanup:
                 "SELECT qualified_name FROM embeddings ORDER BY qualified_name",
             ).fetchall()
             assert [row["qualified_name"] for row in remaining] == [
-                f"{tmp_path / 'module.py'}::keep",
+                f"{(tmp_path / 'module.py').as_posix()}::keep",
             ]
         finally:
             embeddings.close()
@@ -205,7 +205,7 @@ class TestExplicitRefresh:
         graph._conn.execute(
             "INSERT INTO embeddings (qualified_name, vector, text_hash) "
             "VALUES (?, ?, ?)",
-            (f"{tmp_path / 'module.py'}::keep", b"\x00" * 8, "old"),
+            (f"{(tmp_path / 'module.py').as_posix()}::keep", b"\x00" * 8, "old"),
         )
         graph.commit()
 
@@ -323,7 +323,7 @@ class TestRefreshWiring:
             "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
             "VALUES (?, ?, ?, ?)",
             (
-                f"{tmp_path / 'module.py'}::keep",
+                f"{(tmp_path / 'module.py').as_posix()}::keep",
                 b"\x00" * 8,
                 "old",
                 "openai:test-model@https://api.example.test/v1",

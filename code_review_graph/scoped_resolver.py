@@ -1,4 +1,4 @@
-"""Post-build resolver for PHP/Rust scoped calls and constructed PHP receivers.
+"""Post-build resolver for PHP/Rust/C# scoped calls and receiver-typed calls.
 
 Tree-sitter extraction records a scoped/static call such as ``Mailer::send($x)``
 (PHP) or ``Mailer::send(x)`` / ``Self::new()`` (Rust) as a ``CALLS`` edge whose
@@ -12,6 +12,17 @@ PHP instance calls keep their historical bare method target during parsing.
 When a local receiver was directly constructed (``$x = new Type(); $x->run()``),
 the parser stores the class as ``extra.receiver_scope`` and this pass uses that
 evidence to resolve the call without changing parse-only output (GitHub #745).
+
+C# receiver calls (``Service.StaticCall()``, ``obj.InstanceCall()``,
+``obj?.ConditionalCall()``) follow the same pattern: ``using`` directives import
+namespaces rather than files, so a single-file parse cannot know which file
+defines the receiver's class. The parser keeps the bare method target and
+records the receiver class in ``extra.receiver_scope`` (from the static class
+receiver itself, or from a declared/constructed local variable type); this pass
+resolves it against Class/method nodes in the graph, disambiguating multiple
+same-named candidates by call-site file and by namespace visibility
+(``using`` directives plus the caller file's own declared namespaces)
+(GitHub #612).
 
 This module runs after the graph is built and rewrites the resolvable
 ``Class::method`` targets to the canonical qualified name of the defined
@@ -58,7 +69,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Languages whose scoped/static calls dangle as ``Class::method`` targets.
-_SCOPED_LANGUAGES = ("php", "rust")
+_SCOPED_LANGUAGES = ("php", "rust", "csharp")
+
+# Languages whose parsers keep a bare method target and record the receiver
+# class in ``extra.receiver_scope`` for this pass to resolve.
+_RECEIVER_SCOPE_LANGUAGES = ("php", "csharp")
 
 # Node kinds that can be a scoped-call target (methods live under a class).
 _METHOD_KINDS = ("Function", "Test", "Method")
@@ -218,6 +233,16 @@ def _scope_and_method(
             return None
         return scope, method, False
 
+    if language == "csharp":
+        scope, _, method = target.partition("::")
+        if not scope or not method or "::" in method:
+            return None
+        # Strip any namespace qualifier: ``Acme.Services.Service`` → ``Service``.
+        class_name = scope.rsplit(".", 1)[-1]
+        if not class_name:
+            return None
+        return class_name, method, False
+
     return None
 
 
@@ -278,6 +303,63 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         imports_by_file.setdefault(row["file_path"], set()).add(
             row["target_qualified"]
         )
+
+    # ------------------------------------------------------------------
+    # csharp_namespaces_by_file: .cs file → namespaces it declares. C#
+    # ``using`` directives store the raw namespace string as their
+    # IMPORTS_FROM target, so namespace visibility is the disambiguation
+    # evidence between same-named C# classes (see #310, #612).
+    # ------------------------------------------------------------------
+    csharp_namespaces_by_file: dict[str, set[str]] = {}
+    if "csharp" in file_language.values():
+        for row in conn.execute(
+            "SELECT file_path, extra FROM nodes "
+            "WHERE kind = 'File' AND language = 'csharp'"
+        ).fetchall():
+            try:
+                node_extra = json.loads(row["extra"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(node_extra, dict):
+                continue
+            declared = node_extra.get("csharp_namespaces")
+            if isinstance(declared, list):
+                csharp_namespaces_by_file[row["file_path"]] = {
+                    ns for ns in declared if isinstance(ns, str)
+                }
+
+    def csharp_disambiguate(
+        candidates: list[str], caller_file: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Pick the single candidate the C# call site can actually see.
+
+        Same-file definitions win outright; otherwise a candidate must be
+        the only one whose defining file declares a namespace visible to
+        the caller (via a ``using`` directive or the caller's own declared
+        namespaces).
+        """
+        same_file = [
+            candidate
+            for candidate in candidates
+            if file_of.get(candidate) == caller_file
+        ]
+        if len(same_file) == 1:
+            return same_file[0], "same_file"
+        visible_ns = {
+            target
+            for target in imports_by_file.get(caller_file, set())
+            if "/" not in target and "\\" not in target
+        }
+        visible_ns |= csharp_namespaces_by_file.get(caller_file, set())
+        visible = [
+            candidate
+            for candidate in candidates
+            if csharp_namespaces_by_file.get(file_of.get(candidate, ""), set())
+            & visible_ns
+        ]
+        if len(visible) == 1:
+            return visible[0], "namespace"
+        return None, None
 
     def disambiguate(
         candidates: list[str], caller_file: str, class_name: str, language: str
@@ -347,7 +429,7 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         resolution_target = target
         receiver_scope = extra.get("receiver_scope")
         if (
-            language == "php"
+            language in _RECEIVER_SCOPE_LANGUAGES
             and "::" not in target
             and isinstance(receiver_scope, str)
             and receiver_scope
@@ -377,6 +459,10 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         if len(candidates) == 1:
             new_target = candidates[0]
             via = "single_match"
+        elif language == "csharp":
+            new_target, via = csharp_disambiguate(candidates, row["file_path"])
+            if new_target is None:
+                continue
         else:
             new_target = disambiguate(
                 candidates, row["file_path"], class_name, language

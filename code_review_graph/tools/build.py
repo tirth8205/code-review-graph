@@ -502,6 +502,9 @@ def build_or_update_graph(
     """
     store, root = _get_store(repo_root)
     try:
+        if not full_rebuild and not store.has_nodes():
+            full_rebuild = True
+
         # An automatic (base is None) incremental update resolves its diff base
         # to the last-synced commit. When no usable anchor exists, fall back to
         # a full rebuild rather than a wrong HEAD~1 diff that could report the

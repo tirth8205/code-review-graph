@@ -133,7 +133,7 @@ def test_java_config_annotations_emit_key_only_dependencies(tmp_path: Path) -> N
         "config:payment.gateway.url",
         "config:payment.apiToken",
     }
-    assert {edge.source for edge in config_edges} == {f"{path}::KafkaSettings"}
+    assert {edge.source for edge in config_edges} == {f"{path.as_posix()}::KafkaSettings"}
     serialized_metadata = json.dumps([edge.extra for edge in config_edges])
     assert "do-not-store-this-default" not in serialized_metadata
 

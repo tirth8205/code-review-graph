@@ -1,6 +1,9 @@
 """Tests for the incremental graph update module."""
 
+import hashlib
+import io
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
 import pytest
@@ -845,6 +848,130 @@ class TestIncrementalUpdate:
             # File should have been removed from graph
             nodes = store.get_nodes_by_file(str(tmp_path / "old.py"))
             assert len(nodes) == 0
+        finally:
+            store.close()
+
+
+class TestRacingSaveSnapshotCoherence:
+    """Regression tests for #746: a file saved while it is being indexed.
+
+    Every parse-and-store path must be a pure function of one byte snapshot:
+    the stored ``file_hash`` is the hash of the bytes that were actually
+    parsed, and no parse decision may come from a second read of the file.
+    Otherwise a save racing the indexer can persist a partial (or empty)
+    parse under the final file hash, and the file is silently under-indexed
+    until it changes again.
+    """
+
+    def test_save_racing_parse_probe_does_not_wipe_extensionless_script(
+        self, tmp_path, monkeypatch,
+    ):
+        """A save racing the parse-stage shebang probe must not wipe an
+        extension-less script from the graph.
+
+        Timeline being simulated: the user edits ``tool`` (v1 -> v2); the
+        watcher hands the file to ``incremental_update``; the change filter
+        still sees the intact file, but by the time ``parse_bytes`` runs its
+        shebang probe an editor save (truncate+rewrite) has momentarily
+        emptied the file on disk; the save then completes with the same v2
+        bytes. Before the fix, the parse-stage probe re-read the empty disk
+        file, detected no language, and a complete v2 snapshot parsed to zero
+        nodes — leaving the graph silently missing the file while ``status``
+        reports it up to date.
+        """
+        script = tmp_path / "tool"
+        v1 = b"#!/usr/bin/env python3\n\ndef damaged():\n    return 0\n"
+        v2 = b"#!/usr/bin/env python3\n\ndef damaged_v2():\n    return 1\n"
+        script.write_bytes(v1)
+
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=["tool"], reconcile_stale=False,
+            )
+            names = {
+                n.name
+                for n in store.get_nodes_by_file(str(script))
+                if n.kind == "Function"
+            }
+            assert "damaged" in names
+
+            script.write_bytes(v2)  # the user's edit
+
+            # First probe (the change filter) sees the intact file; every
+            # later on-disk probe hits the mid-save empty window.
+            real_open = Path.open
+            probes = {"count": 0}
+
+            def racing_open(path_self, *args, **kwargs):
+                if path_self == script and args[:1] == ("rb",):
+                    probes["count"] += 1
+                    if probes["count"] >= 2:
+                        return io.BytesIO(b"")
+                return real_open(path_self, *args, **kwargs)
+
+            monkeypatch.setattr(Path, "open", racing_open)
+            incremental_update(
+                tmp_path, store, changed_files=["tool"], reconcile_stale=False,
+            )
+            monkeypatch.undo()
+
+            nodes = store.get_nodes_by_file(str(script))
+            names = {n.name for n in nodes if n.kind == "Function"}
+            assert "damaged_v2" in names, (
+                "a save racing the parse-stage shebang probe wiped the "
+                "script from the graph"
+            )
+            # The stored hash is the hash of the bytes actually parsed,
+            # which here equal the final on-disk content.
+            assert nodes[0].file_hash == hashlib.sha256(v2).hexdigest()
+        finally:
+            store.close()
+
+    def test_mid_save_read_stores_hash_of_parsed_snapshot(
+        self, tmp_path, monkeypatch,
+    ):
+        """The serial incremental path must store the hash of the bytes it
+        actually parsed. When the parse-stage read races a save and captures a
+        partial file, the stored hash is the partial content's hash, so the
+        file still looks stale against the final on-disk bytes and the next
+        update repairs it.
+        """
+        py = tmp_path / "mod.py"
+        prefix = b"def full_one():\n    return 1\n"
+        final = prefix + b"\n\ndef full_two():\n    return 2\n"
+        py.write_bytes(final)
+
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            reads = {"count": 0}
+            real_read_bytes = Path.read_bytes
+
+            def mid_save_read(path_self):
+                if path_self == py:
+                    reads["count"] += 1
+                    if reads["count"] == 2:  # the parse-stage read
+                        return prefix
+                return real_read_bytes(path_self)
+
+            monkeypatch.setattr(Path, "read_bytes", mid_save_read)
+            incremental_update(tmp_path, store, changed_files=["mod.py"])
+            monkeypatch.undo()
+
+            nodes = store.get_nodes_by_file(str(py))
+            assert nodes, "racing read must not wipe the file from the graph"
+            names = {n.name for n in nodes if n.kind == "Function"}
+            assert names == {"full_one"}
+            stored_hash = nodes[0].file_hash
+            assert stored_hash == hashlib.sha256(prefix).hexdigest()
+            assert stored_hash != hashlib.sha256(final).hexdigest()
+
+            # The stale hash makes the next update re-index the file.
+            incremental_update(tmp_path, store, changed_files=["mod.py"])
+            nodes = store.get_nodes_by_file(str(py))
+            names = {n.name for n in nodes if n.kind == "Function"}
+            assert names == {"full_one", "full_two"}
+            assert nodes[0].file_hash == hashlib.sha256(final).hexdigest()
         finally:
             store.close()
 

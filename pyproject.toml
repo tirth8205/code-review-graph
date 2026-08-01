@@ -25,7 +25,7 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "mcp>=1.0.0,<2",
+    "mcp>=1.0.0,<3",
     # fastmcp >=3.2.4 is required for Message-based prompts and includes the
     # CVE-2025-62800/62801/66416 fixes; <4 prevents the next major release
     # from breaking the server the way fastmcp 3.0 did. See: #488
@@ -78,7 +78,7 @@ enrichment = [
     "jedi>=0.19.2",
 ]
 dev = [
-    "mypy>=1.10,<2",
+    "mypy>=1.10,<3",
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",

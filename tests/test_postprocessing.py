@@ -331,12 +331,12 @@ class TestToolBuildUsesSharedPipeline:
                 for row in store._conn.execute(
                     "SELECT target_qualified FROM edges "
                     "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
-                    (str(test_file),),
+                    (test_file.as_posix(),),
                 ).fetchall()
-            } == {str(runner)}
+            } == {runner.as_posix()}
 
             run_post_processing(store)
-            production = f"{runner}::render_thing"
+            production = f"{runner.as_posix()}::render_thing"
             tests = store.get_transitive_tests(production, max_depth=0)
             assert {test["name"] for test in tests} == {
                 "test_render_thing_basic",
@@ -355,7 +355,7 @@ class TestToolBuildUsesSharedPipeline:
             imported = store._conn.execute(
                 "SELECT target_qualified, extra FROM edges "
                 "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
-                (str(test_file),),
+                (test_file.as_posix(),),
             ).fetchone()
             assert imported["target_qualified"] == "mypkg.runner"
             assert '"import_resolution": "ambiguous"' in imported["extra"]
@@ -373,9 +373,9 @@ class TestToolBuildUsesSharedPipeline:
             imported = store._conn.execute(
                 "SELECT target_qualified FROM edges "
                 "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
-                (str(test_file),),
+                (test_file.as_posix(),),
             ).fetchone()
-            assert imported["target_qualified"] == str(runner)
+            assert imported["target_qualified"] == runner.as_posix()
 
             run_post_processing(store)
             tests = store.get_transitive_tests(production, max_depth=0)
@@ -418,7 +418,7 @@ class TestToolBuildUsesSharedPipeline:
         graph_dir = tmp_path / ".code-review-graph"
         graph_dir.mkdir()
         tracked = [
-            *(str(path.relative_to(tmp_path)) for path in production_files),
+            *(path.relative_to(tmp_path).as_posix() for path in production_files),
             "tests/test_runner.py",
         ]
 
@@ -435,7 +435,7 @@ class TestToolBuildUsesSharedPipeline:
             import_edge = store._conn.execute(
                 "SELECT target_qualified, extra FROM edges "
                 "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
-                (str(test_file),),
+                (test_file.as_posix(),),
             ).fetchone()
             assert import_edge["target_qualified"] == "mypkg.runner"
             assert '"import_resolution": "ambiguous"' in import_edge["extra"]
@@ -443,7 +443,7 @@ class TestToolBuildUsesSharedPipeline:
             endpoint_edges = store._conn.execute(
                 "SELECT kind, extra FROM edges "
                 "WHERE kind IN ('CALLS', 'TESTED_BY') AND file_path = ?",
-                (str(test_file),),
+                (test_file.as_posix(),),
             ).fetchall()
             assert {row["kind"] for row in endpoint_edges} == {
                 "CALLS",
@@ -457,7 +457,7 @@ class TestToolBuildUsesSharedPipeline:
             for runner in production_files:
                 callers = query_graph(
                     pattern="callers_of",
-                    target=f"{runner}::render_thing",
+                    target=f"{runner.as_posix()}::render_thing",
                     repo_root=str(tmp_path),
                 )
                 assert callers["results"] == []
@@ -541,11 +541,11 @@ class TestWatchCallbackIntegration:
             imported = store._conn.execute(
                 "SELECT target_qualified FROM edges "
                 "WHERE kind = 'IMPORTS_FROM' AND file_path = ?",
-                (str(test_file),),
+                (test_file.as_posix(),),
             ).fetchone()
-            assert imported["target_qualified"] == str(runner)
+            assert imported["target_qualified"] == runner.as_posix()
             tests = store.get_transitive_tests(
-                f"{runner}::render_thing",
+                f"{runner.as_posix()}::render_thing",
                 max_depth=0,
             )
             assert {test["name"] for test in tests} == {"test_render_thing"}

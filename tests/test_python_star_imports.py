@@ -31,7 +31,7 @@ def test_star_import_resolves_public_function_from_direct_module(tmp_path: Path)
 
     targets = _call_targets(tmp_path, caller)
 
-    assert f"{helper}::public_helper" in targets
+    assert f"{helper.as_posix()}::public_helper" in targets
     assert "_private_helper" in targets
 
 
@@ -57,7 +57,7 @@ def test_star_import_honors_explicit_dunder_all(tmp_path: Path) -> None:
     targets = _call_targets(tmp_path, caller)
 
     assert "public_helper" in targets
-    assert f"{helper}::_selected_helper" in targets
+    assert f"{helper.as_posix()}::_selected_helper" in targets
 
 
 def test_star_import_resolves_transitive_relative_export(tmp_path: Path) -> None:
@@ -84,7 +84,7 @@ def test_star_import_resolves_transitive_relative_export(tmp_path: Path) -> None
 
     targets = _call_targets(tmp_path, caller)
 
-    assert f"{leaf}::transitive_helper" in targets
+    assert f"{leaf.as_posix()}::transitive_helper" in targets
 
 
 def test_star_import_does_not_follow_symlink_outside_repository(
@@ -210,7 +210,7 @@ def test_concurrent_parsers_compute_star_exports_once(
         )
 
     assert helper_reads == 1
-    assert all(f"{helper}::concurrent_helper" in result for result in targets)
+    assert all(f"{helper.as_posix()}::concurrent_helper" in result for result in targets)
 
 
 def test_star_export_parse_error_leaves_caller_parseable(
@@ -290,4 +290,4 @@ def test_notebook_star_import_resolves_repository_module(tmp_path: Path) -> None
 
     targets = _call_targets(tmp_path, notebook)
 
-    assert f"{helper}::notebook_helper" in targets
+    assert f"{helper.as_posix()}::notebook_helper" in targets

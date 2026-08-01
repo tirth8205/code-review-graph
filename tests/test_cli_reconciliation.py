@@ -131,6 +131,142 @@ def test_status_quiet_prints_nothing(capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_status_missing_graph_exits_without_creating_data_tree(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    data_dir = tmp_path / "missing-data"
+    monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
+    argv = ["code-review-graph", "status", "--repo", str(repo)]
+
+    with patch.object(sys, "argv", argv):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert not data_dir.exists()
+
+
+def test_status_preserves_legacy_graph_migration(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    legacy_db = repo / ".code-review-graph.db"
+    with code_review_graph.graph.GraphStore(legacy_db):
+        pass
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    argv = ["code-review-graph", "status", "--repo", str(repo)]
+
+    with patch(
+        "code_review_graph.registry.default_registry_path",
+        return_value=tmp_path / "missing-registry.json",
+    ):
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+    assert "Nodes: 0" in capsys.readouterr().out
+    assert not legacy_db.exists()
+    assert (repo / ".code-review-graph" / "graph.db").exists()
+
+
+def test_status_external_data_dir_does_not_migrate_unrelated_legacy_graph(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    legacy_db = repo / ".code-review-graph.db"
+    with code_review_graph.graph.GraphStore(legacy_db):
+        pass
+    data_dir = tmp_path / "external-data"
+    monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
+    argv = ["code-review-graph", "status", "--repo", str(repo)]
+
+    with patch.object(sys, "argv", argv):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert legacy_db.exists()
+    assert not data_dir.exists()
+
+
+def test_status_data_dir_option_is_read_only(tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    data_dir = tmp_path / "explicit-data"
+    registry_path = tmp_path / "registry" / "registry.json"
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    argv = [
+        "code-review-graph",
+        "status",
+        "--repo",
+        str(repo),
+        "--data-dir",
+        str(data_dir),
+    ]
+
+    with patch(
+        "code_review_graph.registry.default_registry_path",
+        return_value=registry_path,
+    ):
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert not data_dir.exists()
+    assert not registry_path.exists()
+
+    with code_review_graph.graph.GraphStore(data_dir / "graph.db"):
+        pass
+    with patch(
+        "code_review_graph.registry.default_registry_path",
+        return_value=registry_path,
+    ):
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+    assert "Nodes: 0" in capsys.readouterr().out
+    assert not registry_path.exists()
+
+
+def test_status_default_data_dir_override_does_not_migrate_legacy_graph(
+    tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    legacy_db = repo / ".code-review-graph.db"
+    with code_review_graph.graph.GraphStore(legacy_db):
+        pass
+    data_dir = repo / ".code-review-graph"
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    argv = [
+        "code-review-graph",
+        "status",
+        "--repo",
+        str(repo),
+        "--data-dir",
+        str(data_dir),
+    ]
+
+    with patch.object(sys, "argv", argv):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert legacy_db.exists()
+    assert not data_dir.exists()
+
+
 def test_enrich_command_reads_stdin_and_respects_external_data_dir(
     tmp_path, monkeypatch, capsys,
 ):

@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any, Optional
 
 from .graph import GraphStore, _sanitize_name
+from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -390,7 +391,10 @@ def hybrid_search(
 
     # ------ Phase 3+4: Batch-fetch nodes, apply boosting and kind filter ------
     kind_boosts = detect_query_kind_boost(query)
-    context_set = set(context_files) if context_files else set()
+    # Stored file paths use POSIX separators (#774); bridge native spellings.
+    context_set = (
+        {normalize_file_path(p) for p in context_files} if context_files else set()
+    )
 
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]

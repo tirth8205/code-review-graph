@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .parser import CodeParser, EdgeInfo
+from .parser import CodeParser, EdgeInfo, normalize_file_path
 from .parser import _is_test_file as _parser_is_test_file
 
 logger = logging.getLogger(__name__)
@@ -163,7 +163,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
                 continue
 
             # Build qualified target: file_path::Class.method or file_path::func
-            target_file = str(module_path)
+            target_file = normalize_file_path(module_path)
             parent = name.parent()
             if parent and parent.type == "class":
                 target = f"{target_file}::{parent.name}.{name.name}"
