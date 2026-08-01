@@ -180,6 +180,18 @@ class TestGenerateHints:
         assert "detect_changes_tool" in suggested_tools
         assert "get_affected_flows_tool" in suggested_tools
 
+    def test_refactor_hints_include_related_symbol_search(self):
+        """refactor_tool should suggest searching related symbols to rename."""
+        session = SessionState()
+        result = {
+            "status": "ok",
+            "previewed": True,
+            "changes": [],
+        }
+        hints = generate_hints("refactor_tool", result, session)
+        suggested_tools = {step["tool"] for step in hints["next_steps"]}
+        assert "semantic_search_nodes_tool" in suggested_tools
+
 
 class TestGlobalSession:
     def test_get_session_returns_singleton(self):

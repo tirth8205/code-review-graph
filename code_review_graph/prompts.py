@@ -152,8 +152,11 @@ def pre_merge_check_prompt(base: str = "HEAD~1") -> list[Message]:
         "for up to 3 functions.\n"
         '5. Call `refactor_tool(mode="dead_code", '
         'detail_level="minimal")` to check for newly dead code.\n'
-        "6. Only call `find_large_functions_tool` or `get_impact_radius_tool` "
+        "6. If you are planning a rename, also call "
+        "`semantic_search_nodes_tool(detail_level=\"minimal\")` to find "
+        "related symbols to also rename.\n"
+        "7. Only call `find_large_functions_tool` or `get_impact_radius_tool` "
         "if risk > 0.7.\n"
-        "7. Output: GO/NO-GO recommendation with 1-sentence "
+        "8. Output: GO/NO-GO recommendation with 1-sentence "
         "justification + list of required follow-ups."
     )

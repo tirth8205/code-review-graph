@@ -158,11 +158,19 @@ class TestPreMergeCheckPrompt:
         result = pre_merge_check_prompt()
         assert "risk" in _text(result[0]).lower()
 
+    def test_mentions_related_symbol_search(self):
+        result = pre_merge_check_prompt()
+        assert "semantic_search_nodes_tool" in _text(result[0])
+
     def test_mentions_test_gaps(self):
         result = pre_merge_check_prompt()
         assert "query_graph_tool" in _text(result[0])
 
-    def test_mentions_dead_code(self):
+    def test_mentions_dead_code_mode(self):
+        result = pre_merge_check_prompt()
+        assert 'refactor_tool(mode="dead_code"' in _text(result[0])
+
+    def test_mentions_large_functions_tool(self):
         result = pre_merge_check_prompt()
         assert "find_large_functions_tool" in _text(result[0])
 

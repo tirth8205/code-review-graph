@@ -142,12 +142,12 @@ _WORKFLOW: dict[str, list[dict[str, str]]] = {
             "suggestion": "Apply a reviewed rename preview",
         },
         {
-            "tool": "query_graph_tool",
-            "suggestion": "Verify call sites before applying a rename",
+            "tool": "semantic_search_nodes_tool",
+            "suggestion": "Find related symbols to also rename",
         },
         {
-            "tool": "detect_changes_tool",
-            "suggestion": "Check risk of the refactored code",
+            "tool": "query_graph_tool",
+            "suggestion": "Verify call sites before applying a rename",
         },
     ],
     "apply_refactor_tool": [
