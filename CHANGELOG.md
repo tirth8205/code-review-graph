@@ -23,6 +23,11 @@
 
 ### Fixed
 
+- Grammar-load probes reuse the parent process's `tree_sitter_language_pack`
+  import path (via `PYTHONPATH`) and print installable recovery guidance when a
+  probe fails, so `pip install --user` / non-standard site layouts no longer
+  skip C, C++, Bash, Python, and other bundled grammars with opaque
+  "unavailable" warnings (#807; builds on #760).
 - C# receiver calls (`Service.StaticCall()`, `obj.Method()`, `obj?.Method()`)
   now resolve to canonical method nodes using receiver-type and namespace
   evidence recorded at parse time, so `callers_of`, `get_impact_radius`, and
