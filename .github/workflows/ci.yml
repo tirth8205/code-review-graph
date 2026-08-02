@@ -115,5 +115,6 @@ jobs:
           tests/test_search.py
           tests/test_tools.py
           tests/test_wiki.py
+          tests/test_skills.py::TestGenerateCodexHooksConfig
           tests/test_skills.py::TestInstallCodexHooks
           tests/test_skills.py::TestInstallCursorHooks
