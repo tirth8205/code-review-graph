@@ -1,6 +1,6 @@
 # Features
 
-## v2.3.6 (Current)
+## v2.3.7 (Current)
 - **Framework-aware PHP parsing**: traits, enums, object creation, and base clauses are indexed; Composer PSR-4 resolution is longest-prefix, multi-directory, cached, and repository-bounded; Blade references ignore comments/escaped directives; Laravel Route and Eloquent edges require explicit framework/import/receiver evidence.
 - **Custom languages without forking**: drop a `.code-review-graph/languages.toml` into your repo to index any grammar shipped by tree-sitter-language-pack — extension map plus node-type lists, validated and capped, with built-in languages always winning. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
 - **GitHub Action for risk-scored PR reviews**: composite `action.yml` builds/restores the graph from CI cache, runs `detect-changes` against the PR base, and upserts a sticky comment with risk table, affected flows, test gaps, and the Token Savings line. Optional `fail-on-risk` merge gate. Dogfooded on this repo via `.github/workflows/pr-review.yml`. See [GITHUB_ACTION.md](GITHUB_ACTION.md).

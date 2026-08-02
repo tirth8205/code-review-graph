@@ -1,4 +1,4 @@
-# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.3.6
+# LLM-OPTIMIZED REFERENCE -- code-review-graph v2.3.7
 
 AI coding agents: Read ONLY the exact `<section>` you need. Never load the whole file.
 

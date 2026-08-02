@@ -3,6 +3,11 @@
 import re
 from pathlib import Path
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    import tomli as tomllib
+
 ROOT = Path(__file__).parents[1]
 README_FILES = (
     "README.md",
@@ -26,6 +31,19 @@ USER_DOC_FILES = README_FILES + (
     "docs/LLM-OPTIMIZED-REFERENCE.md",
     "docs/TROUBLESHOOTING.md",
 )
+RELEASE_VERSION_DOC_FILES = (
+    "README.md",
+    "docs/FEATURES.md",
+    "docs/GITHUB_ACTION.md",
+    "docs/LLM-OPTIMIZED-REFERENCE.md",
+    "docs/ROADMAP.md",
+    "docs/USAGE.md",
+)
+
+
+def current_project_version() -> str:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    return pyproject["project"]["version"]
 
 
 def test_pip_extra_examples_use_cross_shell_double_quotes():
@@ -61,6 +79,18 @@ def test_github_action_references_use_current_supported_majors():
                     f"{path.relative_to(ROOT)} uses actions/{action}@v{actual}; "
                     f"expected v{expected}"
                 )
+
+
+def test_release_facing_docs_match_project_version():
+    version = current_project_version()
+    previous_minor = re.escape("2.3.6")
+
+    for doc_name in RELEASE_VERSION_DOC_FILES:
+        content = (ROOT / doc_name).read_text(encoding="utf-8")
+        assert version in content, f"{doc_name} does not mention current version {version}"
+        assert re.search(rf"\bv{previous_minor}\b|\b{previous_minor}\b", content) is None, (
+            f"{doc_name} still references previous release version 2.3.6"
+        )
 
 
 def test_codebuddy_install_docs_cover_project_artifacts():

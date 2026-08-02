@@ -2,7 +2,7 @@
 
 ## Shipped
 
-### v2.3.6
+### v2.3.7
 - **Custom languages without forking**: `.code-review-graph/languages.toml` maps extensions and node types to any tree-sitter-language-pack grammar (`docs/CUSTOM_LANGUAGES.md`)
 - **GitHub Action** for risk-scored PR review comments: graph built/restored on the CI runner, sticky comment upserted per push, optional `fail-on-risk` merge gate; dogfooded via `.github/workflows/pr-review.yml` (`docs/GITHUB_ACTION.md`)
 - **`agent_baseline` benchmark**: graph queries vs a realistic grep-and-read-top-k agent baseline, wired into all six pinned eval configs
