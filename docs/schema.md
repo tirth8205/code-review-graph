@@ -68,6 +68,24 @@ A synthesised node representing a scheduled invocation, emitted for `@Scheduled`
 ### ConfigProperty
 An externalised configuration key parsed out of Spring `application.properties` / `application.yml` files. Values are deliberately discarded — only the key is stored. Linked to the code that binds it by a `DEPENDS_ON_CONFIG` edge.
 
+### YamlPath
+A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
+
+The persisted `extra` JSON is the internal source of truth. Query, search, and change-analysis responses expose its safe public subset under one nested `yaml` object:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| schema_path | string | Aggregated structural path, such as `$.services[*].metadata.tier` |
+| example_path | string | One concrete occurrence used as a navigation example |
+| value_type / value_types | string / string[] | Structural or scalar YAML tag types; never scalar values |
+| document_index | int | Zero-based YAML document index |
+| occurrence_count | int | Number of occurrences represented by this node |
+| line_samples | int[] | Bounded occurrence-line samples |
+| duplicate_key / duplicate_group_count | bool / int | Mapping-scoped duplicate-key diagnostics |
+| is_alias / anchor_definition / yaml_merge | bool | Alias, anchor, and merge relationship metadata |
+
+`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
+
 ## Edge Types
 
 ### CALLS
@@ -168,6 +186,12 @@ Nodes are uniquely identified by qualified names:
 
 # Nested class method
 /absolute/path/to/file.py::OuterClass.InnerClass.method_name
+
+# Aggregated YAML path in document 0
+/absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier
+
+# Alias or anchor identities add a source-stable identity segment
+/absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12
 ```
 
 ## SQLite Tables
