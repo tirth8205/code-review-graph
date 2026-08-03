@@ -789,6 +789,7 @@ __D3_SCRIPTS__
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,5 -6,5" fill="#3fb950"/></svg> Function</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><polygon points="0,-6 6,0 0,6 -6,0" fill="#d2a8ff"/></svg> Test</div>
     <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><path d="M-2,-6v4h-4v4h4v4h4v-4h4v-4h-4v-4z" fill="#8b949e"/></svg> Type</div>
+    <div class="legend-item"><svg width="16" height="16" viewBox="-8 -8 16 16" aria-hidden="true"><circle r="5" fill="#39c5cf"/></svg> YAML Path</div>
   </div>
   <h3>Edges</h3>
   <div class="legend-section">
@@ -799,6 +800,7 @@ __D3_SCRIPTS__
     <button class="legend-item legend-edge" data-edge-kind="IMPLEMENTS" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #f9e2af"></span> Implements</button>
     <button class="legend-item legend-edge" data-edge-kind="TESTED_BY" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #f38ba8"></span> Tested By</button>
     <button class="legend-item legend-edge" data-edge-kind="DEPENDS_ON" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #fab387"></span> Depends On</button>
+    <button class="legend-item legend-edge" data-edge-kind="REFERENCES" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #39c5cf"></span> References</button>
   </div>
 </nav>
 <div id="filter-panel">
@@ -808,6 +810,7 @@ __D3_SCRIPTS__
   <label class="filter-item"><input type="checkbox" data-kind="Function" checked> Function</label>
   <label class="filter-item"><input type="checkbox" data-kind="Test" checked> Test</label>
   <label class="filter-item"><input type="checkbox" data-kind="Type" checked> Type</label>
+  <label class="filter-item"><input type="checkbox" data-kind="YamlPath" checked> YAML Path</label>
 </div>
 <div id="controls">
   <input id="search" type="text" placeholder="Search nodes&#8230;" autocomplete="off" spellcheck="false" aria-label="Search graph nodes by name" aria-controls="search-results" aria-expanded="false">
@@ -863,11 +866,11 @@ __D3_SCRIPTS__
 <script>
 "use strict";
 var graphData = __GRAPH_DATA__;
-var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e" };
-var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
-var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
-var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387" };
+var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#d2a8ff", Type:"#8b949e", YamlPath:"#39c5cf" };
+var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5, YamlPath:5 };
+var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79, YamlPath:79 };
+var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross, YamlPath:d3.symbolWye };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", REFERENCES:"#39c5cf" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -1760,12 +1763,13 @@ function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;")
 
 var KIND_COLOR = {
   Community: "#1f6feb", File: "#58a6ff", Class: "#f0883e",
-  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e"
+  Function: "#3fb950", Test: "#d2a8ff", Type: "#8b949e", YamlPath: "#39c5cf"
 };
 var EDGE_COLOR = {
   CROSS_COMMUNITY: "#58a6ff", DEPENDS_ON: "#f0883e",
   CALLS: "#3fb950", IMPORTS_FROM: "#f0883e",
-  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)"
+  INHERITS: "#d2a8ff", CONTAINS: "rgba(139,148,158,0.15)",
+  REFERENCES: "#39c5cf"
 };
 var EDGE_CFG = {
   CROSS_COMMUNITY: { dash: null, width: 2, opacity: 0.6, marker: "" },
@@ -1774,6 +1778,7 @@ var EDGE_CFG = {
   CALLS:           { dash: null, width: 1.5, opacity: 0.7, marker: "url(#arrow-calls)" },
   IMPORTS_FROM:    { dash: "6,3", width: 1.5, opacity: 0.65, marker: "url(#arrow-imports)" },
   INHERITS:        { dash: "3,4", width: 2, opacity: 0.7, marker: "url(#arrow-inherits)" },
+  REFERENCES:      { dash: "2,3", width: 1.5, opacity: 0.7, marker: "" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || { dash: null, width: 1, opacity: 0.3, marker: "" }; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }
