@@ -4,6 +4,17 @@
 
 ### Added
 
+- Added plain-HTML parsing (`.html`/`.htm`): inline `<script>` blocks are
+  delegated to the JavaScript grammar with line numbers offset to the
+  containing file, mirroring the Vue/Svelte SFC path. `<script src=…>`
+  references and non-JS payloads (`application/json`, `importmap`,
+  `text/x-template`, …) are skipped; unquoted and case-varied attributes
+  are handled; relative imports in `type="module"` blocks resolve from the
+  HTML file's directory. Id-anchored `div`/`section`/`article` elements are
+  emitted as `DocSection` nodes with `CONTAINS` edges from the file, giving
+  anchor lookup (not prose-content search); on duplicate ids the first
+  occurrence wins. Closes the blind spot where single-file HTML apps
+  produced only a bare `File` node (#521).
 - Added a Voyage AI embedding provider (`--provider voyage`, key from
   `VOYAGE_API_KEY`, opt-in request throttling via
   `CRG_VOYAGE_MIN_INTERVAL_SEC`). Embeddings are now persisted after each

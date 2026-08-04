@@ -1894,6 +1894,102 @@ class TestVueParsing:
         assert len(calls) >= 1
 
 
+class TestHtmlEmbeddedScripts:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(
+            FIXTURES / "sample_embedded.html",
+        )
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("index.html")) == "html"
+        assert self.parser.detect_language(Path("page.htm")) == "html"
+
+    def test_finds_functions_in_head_and_nested_body_scripts(self):
+        names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "initTheme" in names          # <head> classic script
+        assert "loadStoredTheme" in names
+        assert "renderDashboard" in names    # deeply nested <script type="module">
+
+    def test_unquoted_type_attribute_is_parsed(self):
+        names = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "unquotedTypeFn" in names     # <script type=module> (no quotes)
+
+    def test_src_and_non_js_scripts_are_skipped(self):
+        # <script src=…>, application/json and text/x-template bodies must
+        # produce no code nodes: only File + the real functions remain.
+        names = {n.name for n in self.nodes}
+        assert "notCode" not in names
+        assert not any("config" in n for n in names)
+
+    def test_line_numbers_map_to_html_file(self):
+        by_name = {n.name: n for n in self.nodes if n.kind == "Function"}
+        # Fixture layout: initTheme is declared on line 9 of the .html file.
+        assert by_name["initTheme"].line_start == 9
+        assert by_name["renderDashboard"].line_start == 24
+        # Single-line block: function starts on the <script> tag's own line.
+        assert by_name["unquotedTypeFn"].line_start == 31
+
+    def test_nodes_have_html_language(self):
+        for node in self.nodes:
+            assert node.language == "html"
+
+    def test_finds_calls_across_blocks(self):
+        calls = [e for e in self.edges if e.kind == "CALLS"]
+        targets = {e.target.rsplit("::", 1)[-1] for e in calls}
+        assert "initTheme" in targets        # renderDashboard() -> initTheme()
+
+    def test_module_import_edge_extracted(self):
+        imports = [e for e in self.edges if e.kind == "IMPORTS_FROM"]
+        assert any("./lib/format.js" in e.target for e in imports)
+
+    def test_empty_script_produces_no_nodes(self):
+        # <script></script> has no raw_text child and must be skipped.
+        assert all(n.name for n in self.nodes)
+
+    def test_doc_sections_emitted_for_id_anchored_elements(self):
+        sections = {n.name: n for n in self.nodes if n.kind == "DocSection"}
+        assert "cover" in sections
+        assert "s1" in sections
+        assert sections["cover"].extra["html_id"] == "cover"
+        # Section spans its full element range, not just the open tag.
+        assert sections["cover"].line_end > sections["cover"].line_start
+
+    def test_case_varied_tag_and_attribute(self):
+        # <SECTION ID="upper"> — tag and attribute names are
+        # case-insensitive per the HTML spec.
+        sections = {n.name for n in self.nodes if n.kind == "DocSection"}
+        assert "upper" in sections
+
+    def test_element_without_id_excluded(self):
+        # <div class="plain"> has no id → no DocSection.
+        sections = {n.name for n in self.nodes if n.kind == "DocSection"}
+        assert "plain" not in sections
+        assert "no id, no DocSection" not in sections
+
+    def test_duplicate_id_first_occurrence_wins(self):
+        # id="s1" appears on a <div> (line 35) and later an <article>;
+        # getElementById semantics keep the first.
+        s1_nodes = [
+            n for n in self.nodes if n.kind == "DocSection" and n.name == "s1"
+        ]
+        assert len(s1_nodes) == 1
+        assert s1_nodes[0].line_start == 35
+
+    def test_doc_sections_have_contains_edge_from_file(self):
+        contains = {
+            e.target for e in self.edges
+            if e.kind == "CONTAINS" and e.source.endswith(".html")
+        }
+        assert any(t.endswith("::cover") for t in contains)
+        assert any(t.endswith("::s1") for t in contains)
+
+    def test_malformed_html_does_not_crash(self):
+        # The fixture ends with an unclosed <div id="tail">; parsing must
+        # still succeed and well-formed sections must still be extracted.
+        assert any(n.kind == "DocSection" and n.name == "cover" for n in self.nodes)
+
+
 class TestRParsing:
     def setup_method(self):
         self.parser = CodeParser()

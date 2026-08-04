@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Embedded script sample</title>
+  <script src="external/app.js"></script>
+  <script type="application/json">{"config": {"theme": "dark"}}</script>
+  <script>
+    function initTheme() {
+      document.body.dataset.theme = loadStoredTheme();
+    }
+
+    function loadStoredTheme() {
+      return localStorage.getItem("theme") || "light";
+    }
+  </script>
+</head>
+<body>
+  <main>
+    <div class="app">
+      <script type="module">
+        import { format } from "./lib/format.js";
+
+        function renderDashboard() {
+          initTheme();
+          return format("ready");
+        }
+      </script>
+    </div>
+  </main>
+  <script type=module>function unquotedTypeFn() { return 1; }</script>
+  <script type="text/x-template"><div>{{ notCode }}</div></script>
+  <section id="cover">
+    <h1>Sample document</h1>
+    <div id="s1">
+      <p>Section one body.</p>
+    </div>
+    <div class="plain">no id, no DocSection</div>
+    <SECTION ID="upper">case-varied tag and attribute</SECTION>
+    <article id="s1">duplicate id: first occurrence wins</article>
+  </section>
+  <script></script>
+  <div id="tail">malformed: this div is never closed
+</body>
+</html>
