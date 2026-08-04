@@ -34,7 +34,7 @@ code-review-graph install --platform mimo
 | **Zed** | `~/Library/Application Support/Zed/settings.json` (macOS) or `~/.config/zed/settings.json` |
 | **Continue** | `~/.continue/config.json` |
 | **OpenCode** | `opencode.jsonc` (preferred) or `opencode.json` |
-| **MiMo Code** | `.mimocode/mimocode.json` |
+| **MiMo Code** | `.mimocode/mimocode.jsonc` (when present), otherwise `.mimocode/mimocode.json` |
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
 | **Gemini CLI** | `.gemini/settings.json` |
 | **Qwen Code** | `~/.qwen/settings.json` |
@@ -52,7 +52,8 @@ runtime so committed settings do not contain one developer's checkout path.
 
 MiMo Code uses a project-local configuration. The installer adds a local MCP
 server command under its top-level `mcp` object without modifying other servers
-or settings.
+or settings. When a project already has `.mimocode/mimocode.jsonc`, it updates
+that file in preference to `.mimocode/mimocode.json`.
 
 ## Core Workflow
 

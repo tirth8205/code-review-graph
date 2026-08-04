@@ -127,6 +127,16 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
+def _mimo_config_path(repo_root: Path) -> Path:
+    """Return MiMo's existing project config, preferring JSONC."""
+    config_dir = repo_root / ".mimocode"
+    for name in ("mimocode.jsonc", "mimocode.json"):
+        path = config_dir / name
+        if path.exists():
+            return path
+    return config_dir / "mimocode.json"
+
+
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
@@ -186,7 +196,7 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "mimo": {
         "name": "MiMo Code",
-        "config_path": lambda root: root / ".mimocode" / "mimocode.json",
+        "config_path": _mimo_config_path,
         "key": "mcp",
         "detect": lambda: bool(shutil.which("mimo"))
         or (Path.home() / ".config" / "mimocode").exists(),

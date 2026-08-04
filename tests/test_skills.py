@@ -1190,6 +1190,35 @@ class TestInstallPlatformConfigs:
             "command": [command, *args, "--repo", str(tmp_path)],
         }
 
+    def test_install_mimo_prefers_existing_jsonc_and_is_idempotent(self, tmp_path):
+        config_path = tmp_path / ".mimocode" / "mimocode.jsonc"
+        config_path.parent.mkdir()
+        config_path.write_text(
+            '{\n  // keep these MiMo settings\n  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+            '  "theme": "dark",\n  "mcp": {\n'
+            '    "other": {"type": "local", "command": ["other", "serve"]},\n'
+            "  },\n}\n",
+            encoding="utf-8",
+        )
+        json_config = config_path.with_suffix(".json")
+        json_config.write_text('{"theme": "light"}\n', encoding="utf-8")
+
+        configured = install_platform_configs(tmp_path, target="mimo")
+        first_install = config_path.read_bytes()
+        install_platform_configs(tmp_path, target="mimo")
+
+        assert configured == ["MiMo Code"]
+        assert config_path.read_bytes() == first_install
+        assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["$schema"] == "https://mimo.xiaomi.com/mimocode/config.json"
+        assert data["theme"] == "dark"
+        assert data["mcp"]["other"] == {
+            "type": "local",
+            "command": ["other", "serve"],
+        }
+        assert "code-review-graph" in data["mcp"]
+
     def test_install_mimo_is_idempotent_and_dry_run_does_not_write(self, tmp_path):
         mimo_config = tmp_path / ".mimocode" / "mimocode.json"
         with patch.dict(
