@@ -170,13 +170,50 @@ class TestGenerateSkills:
         assert len(list(result.iterdir())) == 4
 
     def test_skill_content_includes_get_minimal_context(self, tmp_path):
-        """Every skill template must reference get_minimal_context."""
+        """Every skill template must reference get_minimal_context_tool."""
         skills_dir = generate_skills(tmp_path)
         for subdir in skills_dir.iterdir():
             content = (subdir / "SKILL.md").read_text()
-            assert "get_minimal_context" in content, (
-                f"{subdir.name} missing get_minimal_context reference"
+            assert "get_minimal_context_tool" in content, (
+                f"{subdir.name} missing get_minimal_context_tool reference"
             )
+
+    def test_skill_templates_use_exported_tool_names(self, tmp_path):
+        generated = generate_skills(tmp_path)
+        bundled = Path(__file__).parents[1] / "skills"
+
+        expected_tools = {
+            "explore-codebase": [
+                "get_minimal_context_tool",
+                "list_graph_stats_tool",
+                "get_community_tool",
+                "list_flows_tool",
+                "get_flow_tool",
+                "find_large_functions_tool",
+            ],
+            "review-changes": ["get_minimal_context_tool", "get_affected_flows_tool"],
+            "debug-issue": ["get_minimal_context_tool", "get_flow_tool"],
+            "refactor-safely": ["get_minimal_context_tool", "find_large_functions_tool"],
+        }
+        legacy_tools = [
+            "get_minimal_context",
+            "list_graph_stats",
+            "get_community",
+            "list_flows",
+            "get_flow",
+            "find_large_functions",
+        ]
+
+        for skill_name, tool_names in expected_tools.items():
+            for skill_file in (
+                generated / skill_name / "SKILL.md",
+                bundled / skill_name / "SKILL.md",
+            ):
+                content = skill_file.read_text(encoding="utf-8")
+                for tool_name in tool_names:
+                    assert tool_name in content, skill_file
+                for legacy_tool in legacy_tools:
+                    assert f"`{legacy_tool}`" not in content, skill_file
 
     def test_skill_content_includes_detail_level(self, tmp_path):
         """Every skill template must reference detail_level."""

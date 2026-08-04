@@ -73,7 +73,7 @@ def list_flows(
             "flows": flows,
         }
         result["_hints"] = generate_hints(
-            "list_flows", result, get_session()
+            "list_flows_tool", result, get_session()
         )
         return result
     except Exception as exc:
@@ -167,7 +167,7 @@ def get_flow(
             "flow": flow,
         }
         result["_hints"] = generate_hints(
-            "get_flow", result, get_session()
+            "get_flow_tool", result, get_session()
         )
         return result
     except Exception as exc:
