@@ -24,6 +24,8 @@ import statistics
 import subprocess
 from pathlib import Path
 
+from ...parser import normalize_file_path
+
 logger = logging.getLogger(__name__)
 
 MODE_GRAPH_DERIVED = "graph-derived (circular — upper bound)"
@@ -72,8 +74,14 @@ def _graph_neighbor_files(store, files: list[str]) -> set[str]:
             for edge in store.get_edges_by_target(node.qualified_name):
                 if edge.kind in ("CALLS", "IMPORTS_FROM"):
                     src_qual = edge.source_qualified
-                    src_file = src_qual.split("::")[0] if "::" in src_qual else ""
-                    if src_file:
+                    src_file = src_qual.split("::")[0]
+                    # Accept only real file paths. ``split("::")[0]`` yields a
+                    # path for both function-scoped sources (``dir/f.py::f``)
+                    # and module/File-node sources (``dir/f.py``); bare
+                    # identifiers (``print``, dangling ``make_client``) and
+                    # ``config:`` keys carry no path and must not count as a
+                    # neighbour file.
+                    if "/" in src_file:
                         out.add(src_file)
     return out
 
@@ -128,16 +136,32 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
 
     results = []
     repo = config["name"]
+    # Join against the root exactly as handed to full_build: the runner
+    # resolves the clone path once and builds the graph against it, so any
+    # resolution done here must match the stored node paths. Forcing a
+    # resolve() here would break graphs built from a non-canonical root
+    # (e.g. macOS /var vs /private/var symlinks).
+    root = Path(repo_path)
     for tc in config.get("test_commits", []):
         sha = tc["sha"]
         changed = _get_changed_files(repo_path, sha)
         if not changed:
             continue
 
+        # ``git diff --name-only`` returns repo-root-relative paths, but the
+        # graph stores absolute native paths. Normalize once so every lookup
+        # below (analyze_changes, _graph_neighbor_files, get_affected_flows)
+        # and both scoring sets use the same form. Previously the relative
+        # paths never matched a node, so co-change predictions were always
+        # empty and the graph-derived ground truth never included real
+        # neighbours (recall pinned at 1.0 by construction, not by intent).
+        changed_abs = {str(normalize_file_path(root / f)) for f in changed}
+
         # --- Mode 1: graph-derived ground truth (circular — upper bound) ---
         try:
             analysis = analyze_changes(
-                store, changed, repo_root=str(repo_path), base=sha + "~1",
+                store, sorted(changed_abs), repo_root=str(repo_path),
+                base=sha + "~1",
             )
         except Exception as exc:
             # Old behaviour set predicted = set(changed) here, which
@@ -147,19 +171,20 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
             analysis = None
 
         if analysis is not None:
-            predicted = set(changed) | _files_from_analysis(analysis)
-            actual = set(changed) | _graph_neighbor_files(store, changed)
+            predicted = changed_abs | _files_from_analysis(analysis)
+            actual = changed_abs | _graph_neighbor_files(store, sorted(changed_abs))
             results.append(
                 _scored_row(repo, sha, MODE_GRAPH_DERIVED, "", predicted, actual)
             )
 
         # --- Mode 2: co-change ground truth (honest) ---
         # Seed the predictor with a single changed file and grade against
-        # the other files the author touched in the same commit. Note the
-        # seed analysis deliberately gets no repo_root/diff: it must only
-        # see the seed file, never the full commit diff.
-        seed = sorted(changed)[0]
-        co_actual = set(changed) - {seed}
+        # the other files the author touched in the same commit. The seed
+        # analysis deliberately gets no repo_root/diff: it must only see the
+        # seed file, never the full commit diff. The seed path is passed in
+        # the stored absolute form so the fallback node lookup matches.
+        seed = sorted(changed_abs)[0]
+        co_actual = changed_abs - {seed}
         if not co_actual:
             row = _base_row(repo, sha, MODE_CO_CHANGE, seed)
             row["status"] = "skipped"
