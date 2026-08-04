@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -45,6 +46,9 @@ logger = logging.getLogger(__name__)
 # ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name.
 _JAVASCRIPT_LANGUAGE_FAMILY = ("javascript", "typescript", "tsx")
 _JAVASCRIPT_LANGUAGE_FAMILY_SET = frozenset(_JAVASCRIPT_LANGUAGE_FAMILY)
+_COLLISION_SUFFIX_RE = re.compile(
+    r"^[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$",
+)
 
 
 def _compatible_edge_languages(language: str) -> tuple[str, ...]:
@@ -290,7 +294,7 @@ class GraphStore:
         candidates = [
             row for row in rows
             if row["qualified_name"] == base
-            or row["qualified_name"].startswith(f"{base}:S")
+            or self._is_collision_identity(base, row["qualified_name"])
         ]
         for row in candidates:
             if row["line_start"] == node.line_start:
@@ -346,6 +350,18 @@ class GraphStore:
             bool(row["is_test"]),
         )
 
+    @staticmethod
+    def _is_collision_identity(base: str, qualified_name: str) -> bool:
+        """Return whether *qualified_name* has this store's exact suffix shape.
+
+        Checking the full generated suffix avoids treating colon-bearing symbol
+        names, such as Objective-C selectors, as collision identities.
+        """
+        prefix = f"{base}:S"
+        if not qualified_name.startswith(prefix):
+            return False
+        return _COLLISION_SUFFIX_RE.fullmatch(qualified_name[len(prefix):]) is not None
+
     def _plan_file_identities(
         self, file_path: str, nodes: list[NodeInfo],
     ) -> list[str]:
@@ -370,7 +386,7 @@ class GraphStore:
                 row
                 for row in old_rows
                 if row["qualified_name"] == base
-                or row["qualified_name"].startswith(f"{base}:S")
+                or self._is_collision_identity(base, row["qualified_name"])
             ]
 
         planned: list[str | None] = [None] * len(nodes)
@@ -378,6 +394,14 @@ class GraphStore:
         assigned: set[str] = set()
         for base, indices in new_by_base.items():
             candidates = old_by_base[base]
+            used_old_ids: set[int] = set()
+            if len(indices) == 1 and len(candidates) == 1:
+                index = indices[0]
+                row = candidates[0]
+                planned[index] = row["qualified_name"]
+                assigned.add(row["qualified_name"])
+                used_old_ids.add(row["id"])
+
             pairs: list[tuple[int, int, int, sqlite3.Row]] = []
             for index in indices:
                 signature = self._semantic_signature(nodes[index])
@@ -387,7 +411,6 @@ class GraphStore:
                     distance = abs(nodes[index].line_start - row["line_start"])
                     pairs.append((distance, index, row["id"], row))
 
-            used_old_ids: set[int] = set()
             for _, index, row_id, row in sorted(pairs):
                 if planned[index] is not None or row_id in used_old_ids:
                     continue
@@ -468,14 +491,24 @@ class GraphStore:
         """Resolve a bare edge endpoint to one lone historical suffix."""
         if self.get_node(qualified_name) is not None:
             return qualified_name
-        prefix = f"{qualified_name}:S"
+        lower = f"{qualified_name}:S"
+        upper = f"{qualified_name}:T"
         rows = self._conn.execute(
             "SELECT qualified_name FROM nodes "
-            "WHERE substr(qualified_name, 1, ?) = ? LIMIT 2",
-            (len(prefix), prefix),
-        ).fetchall()
-        if len(rows) == 1:
-            return rows[0]["qualified_name"]
+            "WHERE qualified_name >= ? AND qualified_name < ? "
+            "ORDER BY qualified_name",
+            (lower, upper),
+        )
+        matches = []
+        for row in rows:
+            candidate = row["qualified_name"]
+            if not self._is_collision_identity(qualified_name, candidate):
+                continue
+            matches.append(candidate)
+            if len(matches) == 2:
+                break
+        if len(matches) == 1:
+            return matches[0]
         return qualified_name
 
     def remove_file_data(self, file_path: str) -> None:
