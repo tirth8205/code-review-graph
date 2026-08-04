@@ -74,6 +74,11 @@
 - Added a post-index Python import resolver using unique module suffixes, so
   `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
   package candidates remain explicitly unresolved (#720).
+- Added MiMo Code as an MCP install target. `code-review-graph install
+  --platform mimo` writes the project-local `.mimocode/mimocode.json` (or an
+  existing `.mimocode/mimocode.jsonc`) using MiMo's local command-array schema,
+  preserves existing configuration, and is removed by the symmetric uninstall
+  workflow.
 
 ## [2.3.7] - 2026-07-18
 

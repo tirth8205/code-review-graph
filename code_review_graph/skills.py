@@ -127,6 +127,16 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
+def _mimo_config_path(repo_root: Path) -> Path:
+    """Return MiMo's existing project config, preferring JSONC."""
+    config_dir = repo_root / ".mimocode"
+    for name in ("mimocode.jsonc", "mimocode.json"):
+        path = config_dir / name
+        if path.exists():
+            return path
+    return config_dir / "mimocode.json"
+
+
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
@@ -181,6 +191,15 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "config_path": _opencode_config_path,
         "key": "mcp",
         "detect": lambda: True,
+        "format": "object",
+        "needs_type": False,
+    },
+    "mimo": {
+        "name": "MiMo Code",
+        "config_path": _mimo_config_path,
+        "key": "mcp",
+        "detect": lambda: bool(shutil.which("mimo"))
+        or (Path.home() / ".config" / "mimocode").exists(),
         "format": "object",
         "needs_type": False,
     },
@@ -343,11 +362,11 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
-    if key == "opencode":
-        opencode_command = [command, *args]
+    if key in ("opencode", "mimo"):
+        local_command = [command, *args]
         if repo_root is not None:
-            opencode_command.extend(("--repo", str(repo_root)))
-        return {"type": "local", "command": opencode_command}
+            local_command.extend(("--repo", str(repo_root)))
+        return {"type": "local", "command": local_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database

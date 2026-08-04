@@ -95,6 +95,37 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert data["theme"] == "dark"
 
 
+def test_uninstall_mimo_jsonc_removes_only_crg_entry(
+    fake_repo: Path, fake_home: Path
+) -> None:
+    config = fake_repo / ".mimocode" / "mimocode.jsonc"
+    _write(
+        config,
+        '{\n'
+        '  // preserve MiMo settings\n'
+        '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",\n'
+        '  "theme": "dark",\n'
+        '  "mcp": {\n'
+        '    "code-review-graph": {"type": "local", "command": ["crg"]},\n'
+        '    "other": {"type": "local", "command": ["other"]}\n'
+        '  }\n'
+        '}\n',
+    )
+    json_config = config.with_suffix(".json")
+    _write(json_config, '{"theme": "light"}\n')
+
+    report = uninstall.run(repo=fake_repo, keep_data=True, platforms=["mimo"])
+
+    assert report.errors == []
+    assert "preserve MiMo settings" in config.read_text(encoding="utf-8")
+    assert _read_jsonc(config) == {
+        "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+        "theme": "dark",
+        "mcp": {"other": {"type": "local", "command": ["other"]}},
+    }
+    assert json_config.read_text(encoding="utf-8") == '{"theme": "light"}\n'
+
+
 def test_platform_inventory_is_derived_not_hard_coded(
     fake_repo: Path,
     fake_home: Path,
