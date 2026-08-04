@@ -734,6 +734,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".scala": "scala",
     ".sol": "solidity",
     ".vue": "vue",
+    ".html": "html",
+    ".htm": "html",
     ".dart": "dart",
     ".r": "r",  # .lower() in detect_language handles .R → .r
     ".mjs": "javascript",
@@ -2635,6 +2637,10 @@ class CodeParser:
         if language == "svelte":
             return self._parse_svelte(path, source)
 
+        # Plain HTML: extract inline <script> blocks and delegate to JS
+        if language == "html":
+            return self._parse_html(path, source)
+
         # Jupyter notebooks: extract code cells and parse as Python
         if language == "notebook":
             return self._parse_notebook(path, source)
@@ -3207,6 +3213,202 @@ class CodeParser:
                     ))
 
         return all_nodes, all_edges
+
+    # <script type="..."> values whose body is executable JavaScript. An
+    # absent or empty type attribute means JavaScript per the HTML spec.
+    _HTML_JS_SCRIPT_TYPES = frozenset({
+        "",
+        "module",
+        "text/javascript",
+        "application/javascript",
+        "application/ecmascript",
+        "text/ecmascript",
+    })
+
+    def _parse_html(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a plain HTML file by extracting inline ``<script>`` blocks.
+
+        Same delegation approach as Vue/Svelte SFCs, with two differences:
+        script elements sit at arbitrary depth (head/body/nested markup)
+        rather than at the document root, and the ``src``/``type``
+        attributes decide whether a block holds inline JavaScript —
+        ``<script src=…>`` references and non-JS payloads such as
+        ``application/json``, ``importmap`` or ``text/x-template`` are
+        skipped.
+
+        Id-anchored ``<div>``/``<section>``/``<article>`` elements are
+        additionally emitted as ``DocSection`` nodes with a ``CONTAINS``
+        edge from the file, so anchor lookups ("where is #cover") resolve
+        through the graph (#521). Only the ``id`` is indexed — this is an
+        anchor primitive, not prose-content search. On duplicate ids the
+        first occurrence wins, matching ``getElementById`` semantics.
+        """
+        html_parser = self._get_parser("html")
+        if not html_parser:
+            return [], []
+
+        tree = html_parser.parse(source)
+        file_path_str = normalize_file_path(path)
+        test_file = _is_test_file(file_path_str)
+
+        all_nodes: list[NodeInfo] = [NodeInfo(
+            kind="File",
+            name=file_path_str,
+            file_path=file_path_str,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="html",
+            is_test=test_file,
+        )]
+        all_edges: list[EdgeInfo] = []
+
+        # script_element and section elements appear at arbitrary depth;
+        # walk iteratively so pathologically nested documents cannot hit
+        # the recursion limit.
+        script_elements = []
+        section_elements = []  # (element, id_value) for div/section/article
+        stack = [tree.root_node]
+        while stack:
+            node = stack.pop()
+            if node.type == "script_element":
+                script_elements.append(node)
+                continue  # script bodies are raw text; they never nest
+            if node.type == "element":
+                tag, attrs = self._html_tag_and_attrs(node)
+                if tag in ("div", "section", "article"):
+                    element_id = attrs.get("id", "").strip()
+                    if element_id:
+                        section_elements.append((node, element_id))
+            stack.extend(reversed(node.children))
+
+        for element in script_elements:
+            raw_text_node = None
+            for sub in element.children:
+                if sub.type == "raw_text":
+                    raw_text_node = sub
+            _tag, attrs = self._html_tag_and_attrs(element)
+            script_type = attrs.get("type", "").strip().lower()
+
+            if "src" in attrs or raw_text_node is None:
+                continue
+            if script_type not in self._HTML_JS_SCRIPT_TYPES:
+                continue
+
+            script_source = raw_text_node.text
+            line_offset = raw_text_node.start_point[0]  # 0-based start line
+
+            script_parser = self._get_parser("javascript")
+            if not script_parser:
+                continue
+
+            script_tree = script_parser.parse(script_source)
+            import_map, defined_names = self._collect_file_scope(
+                script_tree.root_node, "javascript", script_source,
+            )
+
+            nodes: list[NodeInfo] = []
+            edges: list[EdgeInfo] = []
+            self._extract_from_tree(
+                script_tree.root_node, script_source, "javascript",
+                file_path_str, nodes, edges,
+                import_map=import_map, defined_names=defined_names,
+            )
+
+            # Adjust line numbers to the block's position in the .html file
+            for node in nodes:
+                node.line_start += line_offset
+                node.line_end += line_offset
+                node.language = "html"
+            for edge in edges:
+                edge.line += line_offset
+
+            all_nodes.extend(nodes)
+            all_edges.extend(edges)
+
+        # Id-anchored div/section/article → DocSection nodes. First
+        # occurrence wins on duplicate ids (getElementById semantics);
+        # the CONTAINS edge makes sections reachable from the File node.
+        seen_ids: set[str] = set()
+        for element, element_id in section_elements:
+            if element_id in seen_ids:
+                continue
+            seen_ids.add(element_id)
+            all_nodes.append(NodeInfo(
+                kind="DocSection",
+                name=element_id,
+                file_path=file_path_str,
+                line_start=element.start_point[0] + 1,
+                line_end=element.end_point[0] + 1,
+                language="html",
+                is_test=test_file,
+                extra={"html_id": element_id},
+            ))
+            all_edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path_str,
+                target=self._qualify(element_id, file_path_str, None),
+                file_path=file_path_str,
+                line=element.start_point[0] + 1,
+            ))
+
+        # Generate TESTED_BY edges
+        if test_file:
+            test_qnames = set()
+            for n in all_nodes:
+                if n.is_test:
+                    qn = self._qualify(n.name, n.file_path, n.parent_name)
+                    test_qnames.add(qn)
+            for edge in list(all_edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    all_edges.append(EdgeInfo(
+                        kind="TESTED_BY",
+                        source=edge.target,
+                        target=edge.source,
+                        file_path=edge.file_path,
+                        line=edge.line,
+                    ))
+
+        return all_nodes, all_edges
+
+    def _html_tag_and_attrs(self, element) -> tuple[str, dict[str, str]]:
+        """Return (lowercased tag name, {lowercased attr: value}) for an
+        HTML ``element`` or ``script_element`` node.
+
+        Handles quoted and unquoted attribute values; tag and attribute
+        names are case-insensitive per the HTML spec. Value-less
+        attributes map to ``""``.
+        """
+        tag = ""
+        attrs: dict[str, str] = {}
+        for sub in element.children:
+            if sub.type != "start_tag":
+                continue
+            for child in sub.children:
+                if child.type == "tag_name":
+                    tag = child.text.decode("utf-8", errors="replace").lower()
+                elif child.type == "attribute":
+                    attr_name = None
+                    attr_value = ""
+                    for a in child.children:
+                        if a.type == "attribute_name":
+                            attr_name = a.text.decode(
+                                "utf-8", errors="replace",
+                            ).lower()
+                        elif a.type == "attribute_value":
+                            # Unquoted value: <script type=module>
+                            attr_value = a.text.decode("utf-8", errors="replace")
+                        elif a.type == "quoted_attribute_value":
+                            for v in a.children:
+                                if v.type == "attribute_value":
+                                    attr_value = v.text.decode(
+                                        "utf-8", errors="replace",
+                                    )
+                    if attr_name is not None:
+                        attrs[attr_name] = attr_value
+            break
+        return tag, attrs
 
     def _parse_notebook(
         self, path: Path, source: bytes,
@@ -13565,7 +13767,7 @@ class CodeParser:
                     break
                 current = current.parent
 
-        elif language in ("javascript", "typescript", "tsx", "vue"):
+        elif language in ("javascript", "typescript", "tsx", "vue", "html"):
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
