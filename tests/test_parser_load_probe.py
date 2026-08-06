@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import subprocess
 import sys
@@ -128,6 +129,56 @@ def test_nonzero_probe_logs_the_subprocess_failure_reason(monkeypatch, caplog):
         "ModuleNotFoundError: No module named 'tree_sitter_language_pack'"
         in caplog.text
     )
+    assert "pip install 'tree-sitter-language-pack>=0.3.0,<1'" in caplog.text
+
+
+def test_install_hint_for_missing_language_pack():
+    hint = parser_module._install_hint_for_probe_failure(
+        "ModuleNotFoundError: No module named 'tree_sitter_language_pack'"
+    )
+    assert hint is not None
+    assert "pip install" in hint
+    assert "tree-sitter-language-pack" in hint
+
+
+def test_install_hint_for_missing_grammar_library():
+    hint = parser_module._install_hint_for_probe_failure(
+        "LookupError: Could not find language library for c"
+    )
+    assert hint is not None
+    assert "upgrade" in hint.lower() or "tree-sitter-language-pack" in hint
+
+
+def test_parser_probe_env_includes_parent_language_pack_path(tmp_path, monkeypatch):
+    """Probe env must surface the pack the parent process can import."""
+    pack_root = tmp_path / "custom_site"
+    package_dir = pack_root / "tree_sitter_language_pack"
+    package_dir.mkdir(parents=True)
+    (package_dir / "__init__.py").write_text(
+        "def get_parser(grammar):\n    return object()\n",
+        encoding="utf-8",
+    )
+
+    real_module = sys.modules.get("tree_sitter_language_pack")
+    monkeypatch.syspath_prepend(str(pack_root))
+    monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    try:
+        env = parser_module._parser_probe_env()
+        assert str(pack_root.resolve()) in env.get("PYTHONPATH", "").split(
+            os.pathsep
+        )
+    finally:
+        # Restore the real install so later tests (and the package import) work.
+        monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
+        if real_module is not None:
+            sys.modules["tree_sitter_language_pack"] = real_module
+        else:
+            try:
+                importlib.import_module("tree_sitter_language_pack")
+            except ImportError:
+                pass
 
 
 def test_probe_can_load_language_pack_from_user_site(tmp_path, monkeypatch):
@@ -161,10 +212,44 @@ def test_probe_can_load_language_pack_from_user_site(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
+    real_module = sys.modules.get("tree_sitter_language_pack")
     monkeypatch.setenv("PYTHONUSERBASE", env["PYTHONUSERBASE"])
+    # Parent must resolve the user-site pack (not a preinstalled venv copy)
+    # so _parser_probe_env injects that path for the child.
+    monkeypatch.syspath_prepend(str(user_site_path))
+    monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
     monkeypatch.setattr(parser_module.sys, "executable", base_executable)
 
-    assert parser_module._run_parser_load_probe("user-site-only", 5.0)
+    try:
+        assert parser_module._run_parser_load_probe("user-site-only", 5.0)
+    finally:
+        monkeypatch.delitem(sys.modules, "tree_sitter_language_pack", raising=False)
+        if real_module is not None:
+            sys.modules["tree_sitter_language_pack"] = real_module
+        else:
+            try:
+                importlib.import_module("tree_sitter_language_pack")
+            except ImportError:
+                pass
+
+
+def test_probe_passes_env_with_language_pack_path(monkeypatch):
+    """Child probe must receive the env that includes the pack path."""
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return _completed()
+
+    monkeypatch.setattr(parser_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        parser_module,
+        "_parser_probe_env",
+        lambda: {"PYTHONPATH": "/fake/site", "PATH": "/bin"},
+    )
+
+    assert parser_module._run_parser_load_probe("python", 5.0)
+    assert captured["env"] == {"PYTHONPATH": "/fake/site", "PATH": "/bin"}
 
 
 def test_expected_parent_load_failure_is_cached(monkeypatch):

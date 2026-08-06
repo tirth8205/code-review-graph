@@ -470,6 +470,60 @@ def _parser_load_timeout_seconds() -> float:
     return timeout
 
 
+def _parser_probe_env() -> dict[str, str]:
+    """Build the environment for a disposable grammar-load probe.
+
+    The probe runs in a child interpreter so a hanging or crashing native
+    grammar cannot take down the parent. The child must still be able to
+    import the same ``tree_sitter_language_pack`` the parent can see
+    (venv site-packages, ``pip install --user``, or a non-standard
+    ``sys.path`` entry). Isolated mode (``python -I``) is intentionally
+    avoided for this reason (#760, #807).
+    """
+    env = os.environ.copy()
+    try:
+        module = importlib.import_module("tree_sitter_language_pack")
+    except ImportError:
+        return env
+    module_file = getattr(module, "__file__", None)
+    if not module_file:
+        return env
+    pack_parent = str(Path(module_file).resolve().parent.parent)
+    existing = env.get("PYTHONPATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if pack_parent not in parts:
+        env["PYTHONPATH"] = (
+            os.pathsep.join([pack_parent, *parts]) if parts else pack_parent
+        )
+    return env
+
+
+def _install_hint_for_probe_failure(detail: str) -> str | None:
+    """Return installable guidance for common probe failure modes."""
+    lowered = detail.lower()
+    if "tree_sitter_language_pack" in lowered and (
+        "modulenotfounderror" in lowered
+        or "no module named" in lowered
+        or "import error" in lowered
+        or "importerror" in lowered
+    ):
+        return (
+            "Install tree-sitter-language-pack for the same Python that runs "
+            "code-review-graph: pip install 'tree-sitter-language-pack>=0.3.0,<1'"
+        )
+    if (
+        "could not find language library" in lowered
+        or "lookuperror" in lowered
+    ):
+        return (
+            "This grammar may be missing from the installed "
+            "tree-sitter-language-pack; upgrade it "
+            "(pip install -U 'tree-sitter-language-pack>=0.3.0,<1') "
+            "or rebuild its native extensions"
+        )
+    return None
+
+
 def _run_parser_load_probe(grammar: str, timeout_seconds: float) -> bool:
     """Probe one native grammar in a disposable interpreter process."""
     code = (
@@ -485,6 +539,7 @@ def _run_parser_load_probe(grammar: str, timeout_seconds: float) -> bool:
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
             check=False,
+            env=_parser_probe_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _PARSER_PROBE_FAILURE_DETAILS[grammar] = str(exc)
@@ -531,11 +586,20 @@ def _parser_load_probe_succeeds(
         if not result:
             detail = _PARSER_PROBE_FAILURE_DETAILS.get(grammar)
             if detail:
-                logger.warning(
-                    "Skipping unavailable tree-sitter parser for %s: %s",
-                    grammar,
-                    detail,
-                )
+                hint = _install_hint_for_probe_failure(detail)
+                if hint:
+                    logger.warning(
+                        "Skipping unavailable tree-sitter parser for %s: %s. %s",
+                        grammar,
+                        detail,
+                        hint,
+                    )
+                else:
+                    logger.warning(
+                        "Skipping unavailable tree-sitter parser for %s: %s",
+                        grammar,
+                        detail,
+                    )
             else:
                 logger.warning(
                     "Skipping unavailable tree-sitter parser for %s",
