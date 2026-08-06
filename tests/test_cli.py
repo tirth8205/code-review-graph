@@ -112,13 +112,17 @@ def test_visualize_json_uses_local_export(tmp_path, capsys):
         "json",
     ]
     data_dir = tmp_path / ".code-review-graph"
+    data_dir.mkdir()
+    # visualize is read-only for missing graphs (#803); the path must exist.
+    db_path = data_dir / "graph.db"
+    db_path.touch()
     store = MagicMock()
 
     with patch.object(sys, "argv", argv):
         with patch("code_review_graph.graph.GraphStore", return_value=store):
             with patch(
                 "code_review_graph.incremental.get_db_path",
-                return_value=data_dir / "graph.db",
+                return_value=db_path,
             ):
                 with patch(
                     "code_review_graph.incremental.get_data_dir",

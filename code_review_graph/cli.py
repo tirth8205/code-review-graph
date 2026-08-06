@@ -1603,21 +1603,31 @@ def main() -> None:
         "wiki",
         "dead-code",
     )
-    status_data_dir = (
-        args.command == "status" and bool(getattr(args, "data_dir", None))
+    # Read-only consumers must not create graph.db / data dirs / registry
+    # entries when the graph is missing (follow-up to #777 / #782; see #803).
+    _read_only_db_cmds = frozenset({
+        "status",
+        "detect-changes",
+        "visualize",
+        "wiki",
+        "watch",
+    })
+    explicit_data_dir = bool(getattr(args, "data_dir", None))
+    read_only_explicit_data_dir = (
+        args.command in _read_only_db_cmds and explicit_data_dir
     )
-    if args.command in _data_dir_cmds and not status_data_dir:
+    if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command == "status":
-        if status_data_dir:
+    if args.command in _read_only_db_cmds:
+        if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
             db_path = get_db_path(repo_root, read_only=True)
         legacy_db = repo_root / ".code-review-graph.db"
         default_db = repo_root / ".code-review-graph" / "graph.db"
         if (
-            not status_data_dir
+            not read_only_explicit_data_dir
             and not db_path.exists()
             and db_path.resolve() == default_db.resolve()
             and legacy_db.exists()
@@ -1627,7 +1637,10 @@ def main() -> None:
             db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
-    if args.command in ("dead-code", "forget", "status") and not db_path.exists():
+    if (
+        args.command in ("dead-code", "forget", *_read_only_db_cmds)
+        and not db_path.exists()
+    ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
@@ -1896,7 +1909,13 @@ def main() -> None:
         elif args.command == "visualize":
             from .incremental import get_data_dir
 
-            data_dir = get_data_dir(repo_root)
+            # Prefer an explicit --data-dir so read-only resolution still
+            # writes exports next to the graph without registry side-effects.
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
             if fmt == "json":
@@ -1960,7 +1979,12 @@ def main() -> None:
             from .incremental import get_data_dir
             from .wiki import generate_wiki
 
-            wiki_dir = get_data_dir(repo_root) / "wiki"
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
+            wiki_dir = data_dir / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(
