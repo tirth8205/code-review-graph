@@ -1,5 +1,6 @@
 """Tests for CLI helpers and MCP serve command wiring."""
 
+import io
 import json
 import logging
 import sys
@@ -7,6 +8,26 @@ from importlib.metadata import PackageNotFoundError
 from unittest.mock import MagicMock, patch
 
 from code_review_graph import cli
+
+
+def test_main_handles_legacy_stdio_encoding(monkeypatch):
+    """Unicode CLI output must not crash when stdio starts as cp1252."""
+    raw_stdout = io.BytesIO()
+    legacy_stdout = io.TextIOWrapper(raw_stdout, encoding="cp1252")
+    raw_stderr = io.BytesIO()
+    legacy_stderr = io.TextIOWrapper(raw_stderr, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", legacy_stdout)
+    monkeypatch.setattr(sys, "stderr", legacy_stderr)
+    monkeypatch.setattr(sys, "argv", ["code-review-graph"])
+
+    cli.main()
+
+    legacy_stdout.flush()
+    output = raw_stdout.getvalue().decode(legacy_stdout.encoding)
+    assert legacy_stdout.encoding == "utf-8"
+    assert legacy_stderr.encoding == "utf-8"
+    assert "code-review-graph" in output
+    assert "Commands:" in output
 
 
 def test_get_version_falls_back_to_package_attr_when_metadata_missing(

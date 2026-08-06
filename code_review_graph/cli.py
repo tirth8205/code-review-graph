@@ -98,6 +98,21 @@ def _supports_color() -> bool:
     return sys.stdout.isatty()
 
 
+def _configure_utf8_stdio() -> None:
+    """Allow Unicode CLI decoration on streams using a legacy encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding or encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
 def _print_banner() -> None:
     """Print the startup banner with graph art and available commands."""
     color = _supports_color()
@@ -602,6 +617,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
 
 def main() -> None:
     """Main CLI entry point."""
+    _configure_utf8_stdio()
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
