@@ -211,6 +211,42 @@ class TestJavaParsing:
         assert len(calls) >= 3
 
 
+class TestJavaMethodNames:
+    """Regression tests for #804: Java method/constructor names come from the
+    grammar ``name`` field (same approach as C# after #794), not the first
+    ``identifier`` child walk.
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.java"
+        p.write_text(source, encoding="utf-8")
+        return CodeParser().parse_file(p)
+
+    def test_methods_and_constructors_use_name_field(self, tmp_path):
+        nodes, _ = self._parse(
+            "public class Suite {\n"
+            "    public Suite() { }\n"
+            "    public String getLabel() { return \"\"; }\n"
+            "    public User createUser() { return null; }\n"
+            "    public void plainVoid() { }\n"
+            "    public List<String> genericReturn() { return null; }\n"
+            "}\n",
+            tmp_path,
+        )
+        funcs = [n for n in nodes if n.kind == "Function"]
+        assert {f.name for f in funcs} == {
+            "Suite",
+            "getLabel",
+            "createUser",
+            "plainVoid",
+            "genericReturn",
+        }
+        assert len(funcs) == 5
+        assert "String" not in {f.name for f in funcs}
+        assert "User" not in {f.name for f in funcs}
+        assert "List" not in {f.name for f in funcs}
+
+
 class TestJavaImportResolution:
     """Test that Java imports are resolved to absolute file paths."""
 

@@ -14420,21 +14420,13 @@ class CodeParser:
                     return child.text.decode("utf-8", errors="replace")
                 if child.type == "package" and child.text != b"package":
                     return child.text.decode("utf-8", errors="replace")
-        # Java: method_declaration has return type_identifier before the method
-        # identifier — skip straight to the first plain identifier child to
-        # avoid returning the return type as the function name.
-        if language == "java" and kind == "function" and node.type in (
-            "method_declaration", "constructor_declaration",
-        ):
-            for child in node.children:
-                if child.type == "identifier":
-                    return child.text.decode("utf-8", errors="replace")
-            return None
-        # C#: unlike Java there is no type_identifier — a non-generic return
-        # type such as ``Task`` is itself an ``identifier``, so the generic
-        # loop below would return it instead of the method name. Read the
-        # ``name`` field; unusual shapes still fall through.
-        if language == "csharp" and kind == "function" and node.type in (
+        # Java / C#: read the grammar ``name`` field for methods and
+        # constructors. Java return types are usually ``type_identifier``, but
+        # walking for the first ``identifier`` is the same fragile pattern that
+        # misnamed C# methods when a non-generic return type is itself an
+        # ``identifier`` (e.g. ``Task``). Prefer the name field; unusual shapes
+        # still fall through.
+        if language in ("java", "csharp") and kind == "function" and node.type in (
             "method_declaration", "constructor_declaration",
         ):
             name_node = node.child_by_field_name("name")
@@ -14532,16 +14524,6 @@ class CodeParser:
         if language == "go" and node.type == "method_declaration":
             for child in node.children:
                 if child.type == "field_identifier":
-                    return child.text.decode("utf-8", errors="replace")
-        # Java methods: tree-sitter-java puts type_identifier or generic_type
-        # (return type) before identifier (method name).  Must run before
-        # the generic loop, which would match the return type's
-        # type_identifier (e.g. "String", "ConfigBean").
-        # Constructors are fine — they have no return type node.
-        # Kotlin is unaffected: its syntax places the name before the type.
-        if language == "java" and node.type == "method_declaration":
-            for child in node.children:
-                if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
         # Swift init/deinit/subscript: the grammar gives none of them a usable
         # name. `init_declaration`'s name field is the `init` keyword itself,

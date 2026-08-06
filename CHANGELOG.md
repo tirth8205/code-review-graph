@@ -71,6 +71,8 @@
 - C# methods with a non-generic return type are no longer named after that
   type: `public async Task Foo()` indexed as `Task`, collapsing every such
   method in a class onto one qualified name (#791).
+- Java method and constructor names now use the grammar `name` field (same
+  approach as C#), instead of walking for the first `identifier` child (#804).
 - Added a post-index Python import resolver using unique module suffixes, so
   `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
   package candidates remain explicitly unresolved (#720).
