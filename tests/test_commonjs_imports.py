@@ -82,3 +82,63 @@ def test_empty_and_argumentless_require_are_ignored(tmp_path):
         "const empty = require('');\nconst missing = require();\n",
     )
     assert _imports(edges) == []
+
+
+def test_dotted_stem_relative_import_resolves_to_the_dotted_file_not_a_decoy(
+    tmp_path,
+):
+    # ``./outlet.entity`` must resolve to ``outlet.entity.ts``, not to a
+    # same-directory ``outlet.ts``. Dotted stems (*.entity.ts, *.service.ts,
+    # *.controller.ts, *.module.ts) are the dominant NestJS naming
+    # convention, and appending the candidate extension instead of replacing
+    # the stem's own suffix is what tells the two apart.
+    decoy = tmp_path / "outlet.ts"
+    decoy.write_text("export class Outlet {}\n", encoding="utf-8")
+    entity = tmp_path / "outlet.entity.ts"
+    entity.write_text("export class Outlet {}\n", encoding="utf-8")
+
+    _path, (_nodes, edges) = _parse(
+        tmp_path,
+        "const { Outlet } = require('./outlet.entity');\n",
+    )
+
+    assert [edge.target for edge in _imports(edges)] == [entity.resolve().as_posix()]
+
+
+def test_dotted_stem_relative_import_resolves_without_a_decoy_present(tmp_path):
+    entity = tmp_path / "outlet.entity.ts"
+    entity.write_text("export class Outlet {}\n", encoding="utf-8")
+
+    _path, (_nodes, edges) = _parse(
+        tmp_path,
+        "const { Outlet } = require('./outlet.entity');\n",
+    )
+
+    assert [edge.target for edge in _imports(edges)] == [entity.resolve().as_posix()]
+
+
+def test_esm_js_extension_relative_import_still_resolves_to_the_ts_source(tmp_path):
+    # NodeNext/ESM output writes ``./helper.js`` for a module that is
+    # ``helper.ts`` on disk. This is the one case where the extension
+    # genuinely replaces the stem's suffix rather than appending to it.
+    helper = tmp_path / "helper.ts"
+    helper.write_text("export function run() {}\n", encoding="utf-8")
+
+    _path, (_nodes, edges) = _parse(
+        tmp_path,
+        "const { run } = require('./helper.js');\n",
+    )
+
+    assert [edge.target for edge in _imports(edges)] == [helper.resolve().as_posix()]
+
+
+def test_plain_single_word_stem_relative_import_still_resolves(tmp_path):
+    dependency = tmp_path / "dependency.ts"
+    dependency.write_text("export function run() {}\n", encoding="utf-8")
+
+    _path, (_nodes, edges) = _parse(
+        tmp_path,
+        "const { run } = require('./dependency');\n",
+    )
+
+    assert [edge.target for edge in _imports(edges)] == [dependency.resolve().as_posix()]
