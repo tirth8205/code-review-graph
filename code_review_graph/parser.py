@@ -13573,11 +13573,27 @@ class CodeParser:
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
-                # Try with extensions
+                # Try with extensions. Append, never `with_suffix` — that
+                # REPLACES the final suffix, so an extensionless dotted stem
+                # like `./outlet.entity` would probe `outlet.ts` instead of
+                # `outlet.entity.ts`. Dotted stems are the dominant NestJS
+                # naming convention (*.entity.ts, *.service.ts,
+                # *.controller.ts, *.module.ts), so the replace form silently
+                # failed to resolve relative imports between them. Mirrors
+                # `_probe_path` in tsconfig_resolver.py, which already
+                # appends rather than replaces for alias imports.
                 for ext in extensions:
-                    target = base.with_suffix(ext)
+                    target = Path(str(base) + ext)
                     if target.is_file():
                         return str(target.resolve())
+                # ESM/NodeNext output writes `./foo.js` for a module that is
+                # `foo.ts` on disk — the one case where replacing the suffix
+                # is the correct move rather than appending to it.
+                if base.suffix in (".js", ".jsx", ".mjs", ".cjs"):
+                    for ext in (".ts", ".tsx"):
+                        target = base.with_suffix(ext)
+                        if target.is_file():
+                            return str(target.resolve())
                 # Try index file in directory
                 if base.is_dir():
                     for ext in extensions:
