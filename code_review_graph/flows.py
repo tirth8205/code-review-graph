@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections import deque
+from pathlib import Path
 from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
@@ -478,19 +480,35 @@ def incremental_trace_flows(
 
     # Graph identity uses POSIX separators (#774); bridge native-separator
     # caller paths before matching against stored file_path values.
-    changed_files = [normalize_file_path(p) for p in changed_files]
+    # Bridge relative vs absolute path representation mismatches (#569).
+    expanded_set: set[str] = set()
+    for p in changed_files:
+        norm_p = normalize_file_path(p)
+        expanded_set.add(norm_p)
+        try:
+            abs_p = normalize_file_path(os.path.abspath(p))
+            expanded_set.add(abs_p)
+        except Exception:
+            pass
+        try:
+            res_p = normalize_file_path(Path(p).resolve())
+            expanded_set.add(res_p)
+        except Exception:
+            pass
+
+    query_changed_files = list(expanded_set)
+    changed_file_set = expanded_set
     conn = store._conn
-    changed_file_set = set(changed_files)
 
     # ------------------------------------------------------------------
     # 1. Find affected flow IDs
     # ------------------------------------------------------------------
-    placeholders = ",".join("?" * len(changed_files))
+    placeholders = ",".join("?" * len(query_changed_files))
     affected_rows = conn.execute(
         f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
         f"JOIN nodes n ON n.id = fm.node_id "
         f"WHERE n.file_path IN ({placeholders})",
-        changed_files,
+        query_changed_files,
     ).fetchall()
     affected_ids = [r[0] for r in affected_rows]
 
@@ -530,10 +548,26 @@ def incremental_trace_flows(
     # ------------------------------------------------------------------
     # 4. Re-detect entry points and filter to relevant ones
     # ------------------------------------------------------------------
+    def _matches_changed_files(ep_path: str) -> bool:
+        norm_ep = normalize_file_path(ep_path)
+        if norm_ep in changed_file_set:
+            return True
+        try:
+            if normalize_file_path(os.path.abspath(ep_path)) in changed_file_set:
+                return True
+        except Exception:
+            pass
+        try:
+            if normalize_file_path(Path(ep_path).resolve()) in changed_file_set:
+                return True
+        except Exception:
+            pass
+        return False
+
     entry_points = detect_entry_points(store)
     relevant_eps = [
         ep for ep in entry_points
-        if ep.file_path in changed_file_set or ep.id in entry_point_ids
+        if _matches_changed_files(ep.file_path) or ep.id in entry_point_ids
     ]
 
     # ------------------------------------------------------------------

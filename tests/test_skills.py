@@ -275,6 +275,22 @@ class TestGenerateHooksConfig:
                         " is not shareable across collaborators"
                     )
 
+    def test_install_hooks_reinstall_does_not_duplicate(self, tmp_path):
+        """Regression test for #558: re-running install_hooks must not duplicate entries."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        install_hooks(repo, platform="claude")
+        settings_file = repo / ".claude" / "settings.json"
+        data_first = json.loads(settings_file.read_text(encoding="utf-8"))
+        post_count_first = len(data_first["hooks"]["PostToolUse"])
+
+        # Re-install hooks
+        install_hooks(repo, platform="claude")
+        data_second = json.loads(settings_file.read_text(encoding="utf-8"))
+        post_count_second = len(data_second["hooks"]["PostToolUse"])
+
+        assert post_count_first == post_count_second == 1
+
     def test_post_tool_use_matcher_excludes_bash(self):
         """Regression test for #549: Bash matcher fires on every shell command."""
         config = generate_hooks_config(Path("/repo"))
