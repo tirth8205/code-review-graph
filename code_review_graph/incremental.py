@@ -74,6 +74,8 @@ logger = logging.getLogger(__name__)
 
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+GO_TYPE_MODEL_VERSION = "1"
+_GO_TYPE_MODEL_METADATA_KEY = "go_type_model_version"
 
 
 def _run_python_resolver(store: GraphStore) -> Optional[dict]:
@@ -1131,6 +1133,7 @@ def full_build(
     store.set_metadata("last_build_type", "full")
     if not cpp_errors:
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+    store.set_metadata(_GO_TYPE_MODEL_METADATA_KEY, GO_TYPE_MODEL_VERSION)
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
@@ -1172,9 +1175,12 @@ def incremental_update(
     if (
         store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
         and store.has_nodes_for_language("cpp")
+    ) or (
+        store.get_metadata(_GO_TYPE_MODEL_METADATA_KEY) != GO_TYPE_MODEL_VERSION
+        and store.has_nodes_for_language("go")
     ):
         logger.info(
-            "C++ identity format changed; rebuilding the graph before incremental update",
+            "Stored language model changed; rebuilding before incremental update",
         )
         rebuilt = full_build(repo_root, store)
         return {
@@ -1302,6 +1308,7 @@ def incremental_update(
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+        store.set_metadata(_GO_TYPE_MODEL_METADATA_KEY, GO_TYPE_MODEL_VERSION)
         _store_vcs_metadata(repo_root, store)
         store.commit()
 

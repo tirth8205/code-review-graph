@@ -911,7 +911,10 @@ _CLASS_TYPES: dict[str, list[str]] = {
         "class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
-    "go": ["type_declaration"],
+    # A declaration may group multiple specs (``type (A ...; B ...)``), so the
+    # spec -- not its wrapper -- is the graph entity. Aliases are separate AST
+    # nodes in tree-sitter-go and are addressable types too.
+    "go": ["type_spec", "type_alias"],
     # impl_item is a scope for methods, not a second type definition. It is
     # dispatched separately so repeated impl blocks cannot overwrite structs.
     "rust": ["struct_item", "enum_item", "trait_item"],
@@ -1305,6 +1308,7 @@ _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
+_GO_PACKAGE_KEY = "__crg_go_package__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 _SPRING_REQUEST_MAPPINGS = {
@@ -10063,6 +10067,14 @@ class CodeParser:
     def _preceding_doc_comment(self, node, language: str) -> Optional[str]:
         """Return documentation directly attached above a definition."""
         anchor = node
+        if (
+            language == "go"
+            and node.type in ("type_spec", "type_alias")
+            and node.parent is not None
+            and node.parent.type == "type_declaration"
+            and not any(child.type == "(" for child in node.parent.children)
+        ):
+            anchor = node.parent
         while (
             anchor.parent is not None
             and anchor.parent.type in _DOC_COMMENT_WRAPPER_TYPES
@@ -10140,6 +10152,28 @@ class CodeParser:
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
         # protocol uses its own protocol_declaration node type.
         extra: dict = {}
+        if language == "go":
+            type_node = child.child_by_field_name("type")
+            if type_node is not None:
+                if type_node.type == "interface_type":
+                    extra["go_type_kind"] = "interface"
+                elif type_node.type == "struct_type":
+                    extra["go_type_kind"] = "struct"
+                else:
+                    extra["go_type_kind"] = (
+                        "alias" if child.type == "type_alias" else "defined"
+                    )
+                    underlying = self._go_named_type(type_node)
+                    if underlying:
+                        extra["go_underlying_type"] = underlying
+                        prefix, separator, _ = underlying.partition(".")
+                        if separator and import_map is not None:
+                            imported = import_map.get(prefix)
+                            if imported:
+                                extra["go_underlying_import"] = imported
+            package_name = (import_map or {}).get(_GO_PACKAGE_KEY)
+            if package_name:
+                extra["go_package"] = package_name
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -10234,6 +10268,17 @@ class CodeParser:
         # Inheritance edges
         bases = self._get_bases(child, language, source)
         for base in bases:
+            edge_extra: dict = {}
+            if language == "go":
+                edge_extra = {
+                    "go_embedding_target": base,
+                    "go_embedding_context": extra.get("go_type_kind"),
+                }
+                prefix, separator, _ = base.partition(".")
+                if separator and import_map is not None:
+                    imported = import_map.get(prefix)
+                    if imported:
+                        edge_extra["go_import_path"] = imported
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
@@ -10242,6 +10287,7 @@ class CodeParser:
                 target=base,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=edge_extra,
             ))
 
         # Spring DI: emit INJECTS edges for injected dependencies
@@ -12888,6 +12934,28 @@ class CodeParser:
         for child in root.children:
             node_type = child.type
 
+            if language == "go" and node_type == "package_clause":
+                package_name = next(
+                    (
+                        part.text.decode("utf-8", errors="replace")
+                        for part in child.children
+                        if part.type == "package_identifier"
+                    ),
+                    None,
+                )
+                if package_name:
+                    import_map[_GO_PACKAGE_KEY] = package_name
+                continue
+
+            if language == "go" and node_type == "type_declaration":
+                for spec in child.named_children:
+                    if spec.type not in ("type_spec", "type_alias"):
+                        continue
+                    name = self._get_name(spec, language, "class")
+                    if name:
+                        defined_names.add(name)
+                continue
+
             if language == "java" and node_type == "package_declaration":
                 package = child.text.decode("utf-8", errors="replace").strip()
                 package = package.removeprefix("package ").removesuffix(";").strip()
@@ -13345,6 +13413,47 @@ class CodeParser:
                 for child in node.children:
                     if child.type == "import_clause":
                         self._collect_js_import_names(child, module, import_map)
+
+        elif language == "go":
+            specs = (
+                [node]
+                if node.type == "import_spec"
+                else [
+                    spec
+                    for child in node.children
+                    for spec in (
+                        [child]
+                        if child.type == "import_spec"
+                        else child.children
+                        if child.type == "import_spec_list"
+                        else []
+                    )
+                    if spec.type == "import_spec"
+                ]
+            )
+            for spec in specs:
+                path_node = next(
+                    (
+                        child for child in spec.children
+                        if child.type == "interpreted_string_literal"
+                    ),
+                    None,
+                )
+                if path_node is None:
+                    continue
+                module = path_node.text.decode(
+                    "utf-8", errors="replace",
+                ).strip('"')
+                alias = next(
+                    (
+                        child.text.decode("utf-8", errors="replace")
+                        for child in spec.children
+                        if child.type == "package_identifier"
+                    ),
+                    module.rsplit("/", 1)[-1],
+                )
+                if alias not in ("_", "."):
+                    import_map[alias] = module
 
         elif language == "rust":
             for local_name, original_path in self._parse_rust_use_node(node):
@@ -14686,11 +14795,6 @@ class CodeParser:
                 "simple_identifier", "constant", "field_identifier",
             ):
                 return child.text.decode("utf-8", errors="replace")
-        # For Go type declarations, look for type_spec
-        if language == "go" and node.type == "type_declaration":
-            for child in node.children:
-                if child.type == "type_spec":
-                    return self._get_name(child, language, kind)
         return None
 
     def _get_go_receiver_type(self, node) -> Optional[str]:
@@ -15018,6 +15122,15 @@ class CodeParser:
                     return node.children[i + 1].text.decode("utf-8", errors="replace")
         return None
 
+    @staticmethod
+    def _go_named_type(node) -> Optional[str]:
+        """Return the named head of a Go type expression, when it has one."""
+        if node.type == "generic_type":
+            node = node.child_by_field_name("type")
+        if node is not None and node.type in ("type_identifier", "qualified_type"):
+            return node.text.decode("utf-8", errors="replace")
+        return None
+
     def _get_bases(self, node, language: str, source: bytes) -> list[str]:
         """Extract base classes / implemented interfaces."""
         bases = []
@@ -15136,15 +15249,40 @@ class CodeParser:
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language == "go":
             # Embedded structs / interface composition
-            for child in node.children:
-                if child.type == "type_spec":
-                    for sub in child.children:
-                        if sub.type in ("struct_type", "interface_type"):
-                            for field_node in sub.children:
-                                if field_node.type == "field_declaration_list":
-                                    for f in field_node.children:
-                                        if f.type == "type_identifier":
-                                            bases.append(f.text.decode("utf-8", errors="replace"))
+            type_body = node.child_by_field_name("type")
+            if type_body is None:
+                return bases
+
+            embedded_types = []
+            if type_body.type == "struct_type":
+                for child in type_body.children:
+                    if child.type != "field_declaration_list":
+                        continue
+                    for field in child.named_children:
+                        if (
+                            field.type == "field_declaration"
+                            and field.child_by_field_name("name") is None
+                        ):
+                            embedded_types.append(
+                                field.child_by_field_name("type"),
+                            )
+            else:
+                for element in type_body.named_children:
+                    if (
+                        element.type == "type_elem"
+                        and len(element.named_children) == 1
+                        and element.named_children[0].type in (
+                            "type_identifier", "qualified_type", "generic_type",
+                        )
+                    ):
+                        embedded_types.append(element.named_children[0])
+
+            for embedded in embedded_types:
+                if embedded is None:
+                    continue
+                named_type = self._go_named_type(embedded)
+                if named_type:
+                    bases.append(named_type)
         elif language == "dart":
             # class Foo extends Bar with Mixin implements Iface { ... }
             # AST: superclass contains type_identifier (base) and mixins (with clause);

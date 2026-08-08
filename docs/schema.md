@@ -127,7 +127,7 @@ A function is tested by a test function.
 General dependency relationship (used for non-specific dependencies).
 
 ### REFERENCES
-A value-level reference to another symbol, often used for function-as-value patterns such as callback maps, arrays, or assignment.
+A dependency on another symbol that is not a stronger relationship such as `CALLS` or `INHERITS`. Examples include function-as-value patterns (callback maps, arrays, or assignments), type-position references, and Go interface type-set terms that do not resolve to an interface.
 
 ### INJECTS
 A dependency-injection relationship, currently used by Java/Spring enrichment for injected fields and constructor parameters.

@@ -44,6 +44,231 @@ class TestGoParsing:
         contains = [e for e in self.edges if e.kind == "CONTAINS"]
         assert len(contains) >= 3
 
+    def test_finds_embedded_types(self):
+        source = b"""
+package sample
+
+import pkg "example.com/pkg"
+
+type Local struct{}
+type Generic[T any] struct{}
+type LocalInterface interface { Method() }
+type GenericInterface[T any] interface { Method(T) }
+
+type EmbeddedStruct struct {
+    Local
+    *pkg.Remote
+    Generic[int]
+    pkg.Generic[string]
+    Named Local
+}
+
+type EmbeddedInterface interface {
+    LocalInterface
+    pkg.RemoteInterface
+    GenericInterface[int]
+    ~int | string
+    OwnMethod()
+}
+"""
+        _, edges = self.parser.parse_bytes(Path("sample.go"), source)
+
+        inherits = {
+            (edge.source.rsplit("::", 1)[-1], edge.target)
+            for edge in edges
+            if edge.kind == "INHERITS"
+        }
+        assert inherits == {
+            ("EmbeddedStruct", "Local"),
+            ("EmbeddedStruct", "pkg.Remote"),
+            ("EmbeddedStruct", "Generic"),
+            ("EmbeddedStruct", "pkg.Generic"),
+            ("EmbeddedInterface", "LocalInterface"),
+            ("EmbeddedInterface", "pkg.RemoteInterface"),
+            ("EmbeddedInterface", "GenericInterface"),
+        }
+        qualified = next(
+            edge for edge in edges
+            if edge.kind == "INHERITS" and edge.target == "pkg.Remote"
+        )
+        assert qualified.extra["go_import_path"] == "example.com/pkg"
+
+    def test_grouped_type_declarations_preserve_every_spec(self):
+        source = b"""
+package sample
+
+type (
+    Base interface { Method() }
+    Child interface { Base }
+    Alias = Base
+    Count int
+)
+"""
+        nodes, edges = self.parser.parse_bytes(Path("sample.go"), source)
+
+        classes = {node.name: node for node in nodes if node.kind == "Class"}
+        assert set(classes) == {"Base", "Child", "Alias", "Count"}
+        assert classes["Base"].extra["go_type_kind"] == "interface"
+        assert classes["Alias"].extra == {
+            "go_type_kind": "alias",
+            "go_underlying_type": "Base",
+            "go_package": "sample",
+        }
+        assert any(
+            edge.kind == "INHERITS"
+            and edge.source.endswith("::Child")
+            and edge.target == "Base"
+            for edge in edges
+        )
+
+    def test_postprocessing_resolves_and_classifies_embeddings(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.postprocessing import run_post_processing
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / "base").mkdir()
+        (tmp_path / "consumer").mkdir()
+        (tmp_path / "strange-path").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        (tmp_path / "go.mod").write_text(
+            "module example.com/project\n\ngo 1.24\n",
+            encoding="utf-8",
+        )
+        base_file = tmp_path / "base" / "types.go"
+        base_file.write_text(
+            "package graph\n"
+            "type Vertex interface { ID() }\n"
+            "type Concrete struct{}\n"
+            "type Alias = Vertex\n",
+            encoding="utf-8",
+        )
+        external_test_file = tmp_path / "base" / "shadow_test.go"
+        external_test_file.write_text(
+            "package graph_test\n"
+            "type Vertex interface { Fake() }\n",
+            encoding="utf-8",
+        )
+        strange_file = tmp_path / "strange-path" / "types.go"
+        strange_file.write_text(
+            "package odd\n"
+            "type Strange interface { Method() }\n",
+            encoding="utf-8",
+        )
+        consumer_file = tmp_path / "consumer" / "types.go"
+        consumer_file.write_text(
+            "package consumer\n"
+            "import (\n"
+            '    dag "example.com/project/base"\n'
+            '    "example.com/project/strange-path"\n'
+            ")\n"
+            "type (\n"
+            "    StructEmbedding struct { dag.Vertex }\n"
+            "    InterfaceEmbedding interface { dag.Vertex }\n"
+            "    AliasEmbedding interface { dag.Alias }\n"
+            "    PackageNameEmbedding interface { odd.Strange }\n"
+            "    Constraint interface { dag.Concrete; int }\n"
+            ")\n",
+            encoding="utf-8",
+        )
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        try:
+            parser = CodeParser(tmp_path)
+            for path in (
+                base_file, external_test_file, strange_file, consumer_file,
+            ):
+                nodes, edges = parser.parse_file(path)
+                store.store_file_nodes_edges(str(path), nodes, edges)
+
+            result = run_post_processing(store)
+            assert result["go_embeddings_resolved"] == 6
+            assert store.resolve_go_embedding_targets() == 0
+
+            rows = store._conn.execute(
+                "SELECT kind, source_qualified, target_qualified FROM edges "
+                "WHERE source_qualified LIKE ? "
+                "AND kind IN ('INHERITS', 'REFERENCES')",
+                (f"{consumer_file}::%",),
+            ).fetchall()
+            relations = {
+                (
+                    row["kind"],
+                    row["source_qualified"].rsplit("::", 1)[-1],
+                    row["target_qualified"],
+                )
+                for row in rows
+            }
+            assert (
+                "INHERITS", "StructEmbedding", f"{base_file}::Vertex",
+            ) in relations
+            assert (
+                "INHERITS", "InterfaceEmbedding", f"{base_file}::Vertex",
+            ) in relations
+            assert not any(
+                target == f"{external_test_file}::Vertex"
+                for _, _, target in relations
+            )
+            assert (
+                "INHERITS", "AliasEmbedding", f"{base_file}::Alias",
+            ) in relations
+            assert (
+                "INHERITS", "PackageNameEmbedding", f"{strange_file}::Strange",
+            ) in relations
+            assert (
+                "REFERENCES", "Constraint", f"{base_file}::Concrete",
+            ) in relations
+            assert ("REFERENCES", "Constraint", "int") in relations
+
+            query = query_graph(
+                "inheritors_of",
+                f"{base_file}::Vertex",
+                repo_root=str(tmp_path),
+            )
+            assert {item["name"] for item in query["results"]} == {
+                "StructEmbedding", "InterfaceEmbedding",
+            }
+        finally:
+            store.close()
+
+    def test_incremental_rebuilds_the_legacy_go_type_model(
+        self, tmp_path, monkeypatch,
+    ):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build, incremental_update
+
+        (tmp_path / ".git").mkdir()
+        source_file = tmp_path / "types.go"
+        source_file.write_text(
+            "package sample\n"
+            "type (\n"
+            "    Base interface { Method() }\n"
+            "    Child interface { Base }\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "code_review_graph.incremental.get_all_tracked_files",
+            lambda *_args, **_kwargs: ["types.go"],
+        )
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            full_build(tmp_path, store)
+            store._conn.execute(
+                "DELETE FROM metadata WHERE key = 'go_type_model_version'",
+            )
+            store.commit()
+
+            result = incremental_update(tmp_path, store, changed_files=[])
+
+            assert result["identity_rebuild"] is True
+            assert store.get_metadata("go_type_model_version") == "1"
+            assert {
+                node.name for node in store.get_all_nodes()
+                if node.language == "go" and node.kind == "Class"
+            } == {"Base", "Child"}
+        finally:
+            store.close()
+
     def test_methods_attached_to_receiver(self):
         """Go methods should be attached to their receiver type (#190).
 

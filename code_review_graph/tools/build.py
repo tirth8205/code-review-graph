@@ -83,6 +83,9 @@ def _run_postprocess(
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
     try:
+        build_result["go_embeddings_resolved"] = (
+            store.resolve_go_embedding_targets()
+        )
         resolved = store.resolve_bare_call_targets()
         resolved += store.resolve_bare_tested_by_sources()
         build_result["bare_edges_resolved"] = resolved

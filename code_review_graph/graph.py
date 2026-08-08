@@ -743,6 +743,247 @@ class GraphStore:
         """
         return self._resolve_bare_endpoints("CALLS", "target_qualified")
 
+    def resolve_go_embedding_targets(self) -> int:
+        """Resolve Go embeddings and reject concrete interface type terms.
+
+        Struct fields are unambiguous embeddings. An interface ``type_elem``
+        can instead be a concrete type-set term, so it remains inheritance only
+        when its target resolves to an interface. Repository-local imports are
+        mapped through their module's ``go.mod`` to canonical graph nodes.
+        """
+        edges = self._conn.execute(
+            "SELECT e.id, e.kind, e.source_qualified, e.target_qualified, "
+            "e.file_path, e.extra "
+            "FROM edges e JOIN nodes s ON s.qualified_name = e.source_qualified "
+            "WHERE s.language = 'go' AND e.kind IN ('INHERITS', 'REFERENCES') "
+            "AND e.extra LIKE '%\"go_embedding_target\"%'",
+        ).fetchall()
+        if not edges:
+            return 0
+
+        def load_extra(raw: str | None) -> dict:
+            try:
+                value = json.loads(raw or "{}")
+            except (TypeError, json.JSONDecodeError):
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        by_qualified: dict[str, dict[str, Any]] = {}
+        by_location: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        by_directory_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        candidate_dirs: set[str] = set()
+        for row in self._conn.execute(
+            "SELECT name, qualified_name, file_path, extra FROM nodes "
+            "WHERE language = 'go' AND kind = 'Class'",
+        ).fetchall():
+            extra = load_extra(row["extra"])
+            directory = normalize_file_path(str(Path(row["file_path"]).parent.resolve()))
+            candidate = {
+                "name": row["name"],
+                "qualified_name": row["qualified_name"],
+                "file_path": row["file_path"],
+                "directory": directory,
+                "package": extra.get("go_package", ""),
+                "extra": extra,
+            }
+            by_qualified[row["qualified_name"]] = candidate
+            by_location.setdefault(
+                (directory, candidate["package"], row["name"]), [],
+            ).append(candidate)
+            by_directory_name.setdefault(
+                (directory, row["name"]), [],
+            ).append(candidate)
+            candidate_dirs.add(directory)
+
+        source_files = tuple({edge["file_path"] for edge in edges})
+        imports_by_file: dict[str, list[str]] = {}
+        for start in range(0, len(source_files), 500):
+            batch = source_files[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            for row in self._conn.execute(
+                "SELECT file_path, target_qualified FROM edges "
+                f"WHERE kind = 'IMPORTS_FROM' AND file_path IN ({placeholders})",
+                batch,
+            ):
+                imports_by_file.setdefault(row["file_path"], []).append(
+                    row["target_qualified"],
+                )
+
+        import_dir_cache: dict[tuple[str, str], str | None] = {}
+
+        def import_directory(source_file: str, import_path: str) -> str | None:
+            cache_key = (source_file, import_path)
+            if cache_key in import_dir_cache:
+                return import_dir_cache[cache_key]
+            source_dir = Path(source_file).resolve().parent
+            for root in (source_dir, *source_dir.parents):
+                go_mod = root / "go.mod"
+                if not go_mod.is_file():
+                    continue
+                try:
+                    module = next(
+                        (
+                            fields[1].strip('"')
+                            for line in go_mod.read_text(
+                                encoding="utf-8", errors="replace",
+                            ).splitlines()
+                            if len(fields := line.split()) >= 2
+                            and fields[0] == "module"
+                        ),
+                        None,
+                    )
+                except OSError:
+                    continue
+                if module and (
+                    import_path == module
+                    or import_path.startswith(f"{module}/")
+                ):
+                    suffix = import_path[len(module):].lstrip("/")
+                    target = normalize_file_path(str(Path(root, suffix).resolve()))
+                    if target in candidate_dirs:
+                        import_dir_cache[cache_key] = target
+                        return target
+
+            # Keep a moved graph useful only when the import path has one
+            # unambiguous directory-suffix match.
+            if "/" not in import_path:
+                import_dir_cache[cache_key] = None
+                return None
+            segments = import_path.split("/")
+            for index in range(max(len(segments) - 1, 1)):
+                suffix = "/".join(segments[index:])
+                suffix_matches = {
+                    directory
+                    for directory in candidate_dirs
+                    if directory == suffix or directory.endswith(f"/{suffix}")
+                }
+                if len(suffix_matches) == 1:
+                    target = next(iter(suffix_matches))
+                    import_dir_cache[cache_key] = target
+                    return target
+                if suffix_matches:
+                    break
+            import_dir_cache[cache_key] = None
+            return None
+
+        def resolve_type(
+            raw_target: str,
+            source_file: str,
+            source_package: str,
+            import_path: str | None = None,
+        ) -> dict[str, Any] | None:
+            qualifier, separator, name = raw_target.partition(".")
+            if not separator:
+                directory = normalize_file_path(
+                    str(Path(source_file).parent.resolve()),
+                )
+                candidates = by_location.get(
+                    (directory, source_package, raw_target), [],
+                )
+                return candidates[0] if len(candidates) == 1 else None
+
+            matches: dict[str, dict[str, Any]] = {}
+            for imported in (
+                [import_path] if import_path else imports_by_file.get(source_file, [])
+            ):
+                imported_directory = import_directory(source_file, imported)
+                if imported_directory is None:
+                    continue
+                for candidate in by_directory_name.get(
+                    (imported_directory, name), [],
+                ):
+                    # Normal imports never expose declarations from _test.go;
+                    # including external-test packages here creates a false
+                    # ambiguity with production types of the same name.
+                    if candidate["file_path"].endswith("_test.go"):
+                        continue
+                    if import_path is None and candidate["package"] != qualifier:
+                        continue
+                    matches[candidate["qualified_name"]] = candidate
+            return next(iter(matches.values())) if len(matches) == 1 else None
+
+        interface_builtins = frozenset({"any", "comparable", "error"})
+        concrete_builtins = frozenset({
+            "bool", "byte", "complex64", "complex128", "float32", "float64",
+            "int", "int8", "int16", "int32", "int64", "rune", "string",
+            "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+        })
+
+        def interface_status(
+            candidate: dict[str, Any],
+            seen: frozenset[str] = frozenset(),
+        ) -> bool | None:
+            qualified = candidate["qualified_name"]
+            if qualified in seen:
+                return None
+            extra = candidate["extra"]
+            kind = extra.get("go_type_kind")
+            if kind == "interface":
+                return True
+            if kind == "struct":
+                return False
+            underlying = extra.get("go_underlying_type")
+            if not isinstance(underlying, str):
+                return False
+            if underlying in interface_builtins:
+                return True
+            if underlying in concrete_builtins:
+                return False
+            target = resolve_type(
+                underlying,
+                candidate["file_path"],
+                candidate["package"],
+                extra.get("go_underlying_import"),
+            )
+            if target is None:
+                return None
+            return interface_status(target, seen | {qualified})
+
+        updates: list[tuple[str, str, int]] = []
+        for edge in edges:
+            extra = load_extra(edge["extra"])
+            raw_target = extra.get("go_embedding_target")
+            if not isinstance(raw_target, str):
+                continue
+            source = by_qualified.get(edge["source_qualified"])
+            if source is None:
+                continue
+            target = resolve_type(
+                raw_target,
+                edge["file_path"],
+                source["package"],
+                extra.get("go_import_path"),
+            )
+            desired_target = (
+                target["qualified_name"] if target is not None else raw_target
+            )
+            desired_kind = "INHERITS"
+            if extra.get("go_embedding_context") == "interface":
+                status = (
+                    interface_status(target)
+                    if target is not None
+                    else raw_target in interface_builtins
+                )
+                if status is not True:
+                    desired_kind = "REFERENCES"
+            if (
+                edge["kind"] == desired_kind
+                and edge["target_qualified"] == desired_target
+            ):
+                continue
+            updates.append(
+                (desired_kind, desired_target, edge["id"]),
+            )
+
+        if updates:
+            self._conn.executemany(
+                "UPDATE edges SET kind = ?, target_qualified = ? WHERE id = ?",
+                updates,
+            )
+            self._conn.commit()
+            self._invalidate_cache()
+        return len(updates)
+
     def resolve_cpp_scoped_call_targets(self) -> int:
         """Resolve cross-file C++ ``Scope::call`` targets by stable scope identity.
 
