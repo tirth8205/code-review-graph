@@ -14697,31 +14697,25 @@ class CodeParser:
         """Extract the receiver type from a Go method_declaration.
 
         For ``func (s *T) Foo() {...}`` returns ``"T"``. For ``func (T) Foo()``
-        also returns ``"T"``. Returns None if no receiver is present.
-
-        The receiver is always the first ``parameter_list`` child of a
-        Go ``method_declaration`` and contains a single ``parameter_declaration``
-        whose type is either a ``type_identifier`` or a ``pointer_type``
-        wrapping one. See: #190
+        also returns ``"T"``. Generic receivers ``T[P]`` and ``*T[P]`` return
+        ``"T"``. Returns None if no receiver is present. See: #190, #832
         """
-        for child in node.children:
-            if child.type != "parameter_list":
-                continue
-            for param in child.children:
-                if param.type != "parameter_declaration":
-                    continue
-                for sub in param.children:
-                    if sub.type == "type_identifier":
-                        return sub.text.decode("utf-8", errors="replace")
-                    if sub.type == "pointer_type":
-                        for ptr_child in sub.children:
-                            if ptr_child.type == "type_identifier":
-                                return ptr_child.text.decode(
-                                    "utf-8", errors="replace"
-                                )
-            # First parameter_list is always the receiver; stop searching.
+        receiver = node.child_by_field_name("receiver")
+        if receiver is None:
             return None
-        return None
+        parameter = next(
+            (child for child in receiver.named_children
+             if child.type == "parameter_declaration"),
+            None,
+        )
+        receiver_type = parameter.child_by_field_name("type") if parameter else None
+        while receiver_type is not None and receiver_type.type in {
+            "generic_type", "pointer_type",
+        }:
+            receiver_type = next(iter(receiver_type.named_children), None)
+        if receiver_type is None or receiver_type.type != "type_identifier":
+            return None
+        return receiver_type.text.decode("utf-8", errors="replace")
 
     @staticmethod
     def _cpp_scope_join(
