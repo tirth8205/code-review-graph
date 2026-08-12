@@ -51,8 +51,8 @@ def _try_urllib() -> bool:
             "https://pypi.org/simple/hatchling/",
             headers={"User-Agent": "code-review-graph-diagnostic/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read(256)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            resp.read(258)
         return True
     except (urllib.error.URLError, OSError) as e:
         print(f"  urllib hatchling index -> {e!r}", file=sys.stderr)
