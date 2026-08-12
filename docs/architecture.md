@@ -63,7 +63,8 @@
 
 ### Review Context Generation
 1. Changed files identified (git diff or explicit list)
-2. `get_impact_radius()` performs BFS from changed nodes through the graph
+2. `get_impact_radius()` walks outward from the changed nodes, relaxing a weighted
+   best-path score per node (per-edge-kind weight × depth decay) rather than a plain BFS
 3. Source snippets extracted for changed areas only
 4. Review guidance generated (test coverage gaps, wide blast radius warnings)
 5. Assembled into a structured, token-efficient context for MCP clients and the CLI

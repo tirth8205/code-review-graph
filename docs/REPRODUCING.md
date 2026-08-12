@@ -180,9 +180,11 @@ PY
 ## Canonical numbers
 
 <!-- BEGIN canonical-stats -->
-Captured **2026-05-25** on macOS arm64, Python 3.11, sentence-transformers 5.5.1,
-`all-MiniLM-L6-v2`, `CRG_LEIDEN_SEED=42`. If your numbers differ by more than
-rounding, something in the chain has drifted — file an issue.
+Re-captured **2026-08-02** on macOS arm64 (Apple M4 Pro, 14 cores, 24 GB),
+Python 3.13.12, code-review-graph 2.3.7, sentence-transformers 5.6.1,
+`all-MiniLM-L6-v2`, `CRG_LEIDEN_SEED=42`, from clean clones at the pinned SHAs.
+If your numbers differ by more than rounding, something in the chain has
+drifted — file an issue.
 
 ### Standalone token benchmark (`code_review_graph/token_benchmark.py`)
 
@@ -192,19 +194,22 @@ Each row is the average of 5 sample questions (`how does authentication work`,
 
 | Repo | snapshot SHA | naive_corpus_tokens | avg graph_tokens | avg ratio |
 |---|---|---:|---:|---:|
-| fastapi | `0227991a` | 951,071 | 2,169 | **528.4×** |
-| code-review-graph | `84bde354` | 208,821 | 2,495 | **93.0×** |
-| gin | `5c00df8a` | 166,868 | 1,990 | **91.8×** |
-| flask | `a29f88ce` | 125,022 | 1,986 | **71.4×** |
-| express | `b4ab7d65` | 135,955 | 3,465 | **40.6×** |
-| httpx | `b55d4635` | 89,492 | 2,438 | **38.0×** |
+| fastapi | `22381558` | 948,793 | 2,653 | **375.6×** |
+| flask | `a29f88ce` | 143,594 | 2,196 | **71.0×** |
+| code-review-graph | `84bde354` | 208,821 | 3,190 | **68.1×** |
+| gin | `5c00df8a` | 166,868 | 2,766 | **61.9×** |
+| httpx | `b55d4635` | 142,356 | 2,661 | **60.6×** |
+| express | `b4ab7d65` | 136,052 | 3,936 | **36.0×** |
 
-Range across 6 repos: **38× – 528×**. The numbers shifted down from a
-previous capture because (a) the test repos are now wiped/re-cloned from
-scratch — no leftover build artifacts or local caches inflate the naive
-baseline; and (b) the embedding text per node became richer in this same
-release (see `embeddings._node_to_text`), so the graph response itself is
-slightly bigger. Both are correctness improvements over the prior numbers.
+Range across 6 repos: **36× – 376×**; median **~65×**.
+
+These replace the 2026-05-25 capture, and every ratio is lower. Two causes,
+both verified by re-running from clean clones: `avg graph_tokens` rose in
+every repo (the per-node embedding text grew richer, so a 5-hit search
+response carries more text), and fastapi is now measured at its current pin
+`22381558` instead of the retired `0227991a`. `naive_corpus_tokens` is
+unchanged for `code-review-graph` and `gin`, confirming the corpus side of
+the ratio is stable and the movement is on the graph-response side.
 
 ### Formal `token_efficiency` benchmark (`code_review_graph/eval/benchmarks/token_efficiency.py`)
 
@@ -233,14 +238,15 @@ a circular upper bound, not as "100% recall":
 | Metric (graph-derived mode — circular upper bound) | Value |
 |---|---|
 | Recall (mean across 13 commits) | **1.000** (upper bound on every commit) |
-| F1 (mean) | **0.714** |
+| F1 (mean) | **0.693** |
 | F1 (median) | 0.667 |
-| F1 (min / max) | 0.455 / 1.000 |
+| F1 (min / max) | 0.465 / 1.000 |
 
-Canonical co-change numbers will be added after the next full capture — we
-do not quote them before measuring. Single-file commits are recorded with
-`status=skipped` in co-change mode (there is nothing independent to grade
-against).
+Co-change mode was captured on 2026-08-02 and is **not yet usable**: every
+graded commit came back with `predicted_files = 0`, so the resulting F1 of
+0.000 measures a broken harness, not the predictor. No co-change number is
+quoted until that is fixed. Single-file commits are separately recorded with
+`status=skipped` (there is nothing independent to grade against).
 
 The blast-radius analysis over-predicts in some commits (precision ≈ 0.30 in the
 worst case, where 34 files are flagged for a 10-file change). That is
@@ -327,17 +333,62 @@ multi_hop_tasks:
 
 | Repo | Nodes | Edges | Flows | Communities | Embeddings | FTS idx rows |
 |---|---:|---:|---:|---:|---:|---:|
-| fastapi | 6,292 | 32,081 | 165 | 85 | 5,164 | 127 |
-| express | 1,912 | 18,877 | 4 | 7 | 1,771 | 47 |
-| gin | 1,589 | 17,237 | 114 | 41 | 1,491 | 29 |
-| code-review-graph | 1,418 | 8,877 | 104 | 11 | 1,326 | 38 |
-| flask | 1,415 | 8,259 | 78 | 13 | 1,329 | 35 |
-| httpx | 1,261 | 8,228 | 128 | 5 | 1,193 | 34 |
+| fastapi | 6,287 | 32,036 | — | — | 5,159 | — |
+| express | 1,990 | 19,492 | — | — | 1,849 | — |
+| gin | 1,589 | 17,237 | — | — | 1,491 | — |
+| code-review-graph | 1,446 | 9,094 | — | — | 1,354 | — |
+| flask | 1,415 | 8,259 | — | — | 1,329 | — |
+| httpx | 1,263 | 8,236 | — | — | 1,193 | — |
+
+Node and edge counts are from the same 2026-08-02 clean-room build as the
+table above. Flow, community and FTS-segment counts were not re-captured in
+that run and are left as `—` rather than carried over from the older capture.
 
 Embeddings count is lower than node count because File nodes aren't
 embedded. FTS idx rows are far lower than node count because FTS5 stores
 inverted-index segments, not one row per indexed document.
 <!-- END canonical-stats -->
+
+## Incremental update latency
+
+The README and diagram 4 quote an incremental-update time. This is how it was
+measured. Unlike the benchmarks above there is no runner for it — it is a
+stopwatch on the CLI — so the recipe is written out in full.
+
+Corpus: a shallow clone of `django/django` (2,927 `.py` files; the graph
+indexes 2,998 files, 46,683 nodes, 392,758 edges). Machine: Apple M4 Pro
+(14 cores, 24 GB), macOS 26.5.2, Python 3.13.12, code-review-graph 2.3.7.
+
+```bash
+git clone --depth 1 https://github.com/django/django.git
+cd django
+/usr/bin/time -p code-review-graph build                 # cold build
+
+/usr/bin/time -p code-review-graph update                # no-op: nothing changed
+echo "# edit" >> django/db/models/query.py
+echo "# edit" >> django/http/response.py
+/usr/bin/time -p code-review-graph update --skip-flows   # the path the hooks run
+/usr/bin/time -p code-review-graph update                # full post-processing
+```
+
+| Scenario | Wall clock | Files re-parsed |
+|---|---:|---:|
+| Cold full build | 40.3 s | 2,998 |
+| `update`, nothing changed | 1.4 s | 0 |
+| `update --skip-flows`, 2 files edited (hook path) | 2.4 – 2.9 s | 2 |
+| `update`, 2 files edited (full post-processing) | 9.8 s | 2 |
+
+Two things worth reading off this table. First, roughly 1.4 s of every figure
+is process start-up — that is what the no-op run costs — so the marginal cost
+of a two-file edit on the hook path is about 1 s. Second, only the **2 edited
+files** are re-parsed. Dependents are found through the graph's import and
+call edges, but any dependent whose SHA-256 is unchanged is skipped before
+parsing (`incremental.py`), so the re-parse count tracks what you edited, not
+the size of the dependency cascade.
+
+Earlier versions of this project quoted "under 2 seconds on a ~2,900-file
+repo". At that corpus size that holds only for the no-op case; a real edit on
+the hook path is ~2.5 s, and ~10 s if flow and community detection also run.
 
 ## Agent baseline benchmark (`code_review_graph/eval/benchmarks/agent_baseline.py`)
 
@@ -390,7 +441,7 @@ The `code_review_graph/eval/benchmarks/token_efficiency.py` numbers can be **les
 for small commits (`get_review_context` carries impact-radius metadata and
 source snippets, which outweigh a tiny changed-file set). The standalone
 benchmark numbers are **always large** because the baseline is the entire
-repo — that is why the README leads with the median (~82×) and treats 528×
+repo — that is why the README leads with the median (~65×) and treats 376×
 as the max, and why `agent_baseline` exists as the realistic middle ground.
 Pick the one that matches the scenario you're talking about.
 

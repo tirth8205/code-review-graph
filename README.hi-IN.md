@@ -1,5 +1,16 @@
 <h1 align="center">code-review-graph</h1>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329"
+     target="_blank"
+     rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/23329"
+         alt="tirth8205%2Fcode-review-graph | Trendshift"
+         width="250"
+         height="55" />
+  </a>
+</p>
+
 > **नोट:** यह अनुवाद एक पुराने रिलीज़ पर आधारित है; बेंचमार्क आंकड़े और प्लेटफ़ॉर्म सूचियाँ [अंग्रेज़ी README](README.md) से पीछे हो सकती हैं।
 
 <p align="center">
@@ -31,7 +42,7 @@
 AI कोडिंग टूल्स रिव्यू टास्क में आपके कोडबेस के बड़े हिस्से दोबारा पढ़ सकते हैं। `code-review-graph` इस समस्या को हल करता है। यह [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) से आपके कोड का स्ट्रक्चरल मैप बनाता है, बदलावों को इंक्रीमेंटली ट्रैक करता है, और [MCP](https://modelcontextprotocol.io/) के ज़रिए आपके AI असिस्टेंट को सटीक कॉन्टेक्स्ट देता है ताकि वह केवल ज़रूरी कोड ही पढ़े।
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="टोकन समस्या: 6 वास्तविक रिपॉज़िटरीज़ में औसतन 8.2 गुना टोकन कमी" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="टोकन समस्या: flask का पूरा कॉर्पस पढ़ने में 143,594 टोकन लगते हैं, ग्राफ का उत्तर 2,196 टोकन में — 71.0 गुना कम" width="85%" />
 </p>
 
 ---
@@ -93,24 +104,24 @@ Build the code review graph for this project
 
 ### इंक्रीमेंटल अपडेट < 2 सेकंड में
 
-हुक्स या watch mode सक्षम होने पर फ़ाइल सेव और समर्थित commit hooks incremental updates शुरू करते हैं। ग्राफ SHA-256 हैश चेक के ज़रिए बदली हुई फ़ाइलों और उनके डिपेंडेंट्स को ढूंढता है, और केवल बदले हुए कोड को री-पार्स करता है। 2,900 फ़ाइलों का प्रोजेक्ट 2 सेकंड से कम में री-इंडेक्स होता है।
+हुक्स या watch mode सक्षम होने पर फ़ाइल सेव और समर्थित commit hooks incremental updates शुरू करते हैं। ग्राफ बदली हुई फ़ाइलों का डिफ़ लेता है, अपने ही import और call एजेज़ के ज़रिए उनके डिपेंडेंट्स ढूंढता है, और केवल उन्हीं फ़ाइलों को री-पार्स करता है जिनका SHA-256 हैश वास्तव में बदला है। 2,900 फ़ाइलों का प्रोजेक्ट 2 सेकंड से कम में री-इंडेक्स होता है।
 
 <p align="center">
-  <img src="diagrams/diagram4_incremental_update.png" alt="इंक्रीमेंटल अपडेट फ़्लो: git कमिट ट्रिगर करता है, डिफ़ ढूंढता है, केवल 5 फ़ाइलें री-पार्स होती हैं जबकि 2,910 स्किप होती हैं" width="90%" />
+  <img src="diagrams/diagram4_incremental_update.png" alt="इंक्रीमेंटल अपडेट फ़्लो: हुक या watch अपडेट git diff चलाता है, ग्राफ एजेज़ से डिपेंडेंट्स मिलते हैं, और केवल वही फ़ाइलें री-पार्स होती हैं जिनका SHA-256 हैश बदला है" width="90%" />
 </p>
 
-### मोनोरिपो समस्या, हल
+### पूरा कोडबेस या लक्षित उत्तर?
 
-बड़े मोनोरिपो में टोकन बर्बादी सबसे ज़्यादा होती है। ग्राफ शोर को काटता है — 27,700+ फ़ाइलें रिव्यू कॉन्टेक्स्ट से बाहर, केवल ~15 फ़ाइलें वास्तव में पढ़ी गईं।
+रिपॉज़िटरी जितनी बड़ी, टोकन की बर्बादी उतनी ही ज़्यादा चुभती है। पूरा कॉर्पस मॉडल को देने के बजाय ग्राफ उसका केवल उत्तर-भर हिस्सा लौटाता है: इस रिपॉज़िटरी में 208,821 सोर्स टोकन प्रति प्रश्न लगभग 3,190 टोकन बन जाते हैं।
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js मोनोरिपो: 27,732 फ़ाइलें code-review-graph से होकर ~15 फ़ाइलों तक — 49 गुना कम टोकन" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph रिपॉज़िटरी: 208,821 सोर्स टोकन सिमटकर लगभग 3,190 टोकन के ग्राफ उत्तर बनते हैं — प्रति प्रश्न 68 गुना कम टोकन" width="80%" />
 </p>
 
 ### व्यापक भाषा सपोर्ट + Jupyter नोटबुक
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा सपोर्ट: वेब, बैकेंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, और Jupyter/Databricks नोटबुक सपोर्ट" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="श्रेणी के अनुसार भाषा सपोर्ट: वेब, बैकेंड, सिस्टम्स, मोबाइल, स्क्रिप्टिंग, शेल्स, डोमेन, अन्य, और Jupyter/Databricks नोटबुक सपोर्ट" width="90%" />
 </p>
 
 मौजूदा पार्सर जिन सतहों को सपोर्ट करता है, उनमें फ़ंक्शन, क्लासेज़, इम्पोर्ट्स, कॉल साइट्स, इनहेरिटेंस, और टेस्ट डिटेक्शन के लिए स्ट्रक्चरल एक्सट्रैक्शन मिलता है। जहाँ उपलब्ध हो वहाँ Tree-sitter इस्तेमाल होता है, और ज़रूरत पड़ने पर targeted fallback parsers इस्तेमाल होते हैं। सपोर्ट में Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, TypeScript parser से parse होने वाली Astro files, Jupyter/Databricks नोटबुक (`.ipynb`), और Perl XS फ़ाइलें (`.xs`) शामिल हैं।
@@ -120,7 +131,7 @@ Build the code review graph for this project
 ## बेंचमार्क
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="वास्तविक रिपॉज़ में बेंचमार्क: 4.9 गुना से 27.3 गुना तक कम टोकन और conservative impact analysis" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="6 वास्तविक रिपॉज़िटरीज़ पर बेंचमार्क: प्रति प्रश्न टोकन कमी का माध्य लगभग 65 गुना (अधिकतम 376 गुना), ग्राफ-आधारित ग्राउंड ट्रुथ पर औसत F1 0.71" width="85%" />
 </p>
 
 सभी आंकड़े 6 वास्तविक ओपन-सोर्स रिपॉज़िटरीज़ (कुल 13 कमिट्स) पर स्वचालित मूल्यांकन रनर से आते हैं। `code-review-graph eval --all` से पुनः प्राप्त करें। विस्तृत बेंचमार्क डेटा के लिए [अंग्रेज़ी README](README.md) देखें।

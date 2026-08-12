@@ -30,8 +30,8 @@ code-review-graph install --platform codebuddy
 | **CodeBuddy Code** | `.mcp.json` + `CODEBUDDY.md` + `.codebuddy/settings.json` + `.codebuddy/skills/<name>/SKILL.md` |
 | **Cursor** | `.cursor/mcp.json` |
 | **Windsurf** | `~/.codeium/windsurf/mcp_config.json` |
-| **Zed** | `.zed/settings.json` |
-| **Continue** | `.continue/config.json` |
+| **Zed** | `~/Library/Application Support/Zed/settings.json` (macOS) or `~/.config/zed/settings.json` |
+| **Continue** | `~/.continue/config.json` |
 | **OpenCode** | `opencode.jsonc` (preferred) or `opencode.json` |
 | **Antigravity** | `~/.gemini/antigravity/mcp_config.json` |
 | **Gemini CLI** | `.gemini/settings.json` |
@@ -60,7 +60,7 @@ Parses your entire codebase. Takes ~10s for 500 files.
 ```
 /code-review-graph:review-delta
 ```
-Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use ~82x fewer tokens per question (median; range 38x–528x) than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
+Reviews only files changed since last commit plus the graph-derived impact radius. Relevant review and impact responses include compact estimated `context_savings` metadata. Across the 6 benchmark repositories, graph queries use ~65x fewer tokens per question (median; range 36x–376x) than reading the whole corpus — see the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md) for the methodology.
 
 ### 3. Review a PR
 ```
@@ -149,8 +149,8 @@ Languages not covered yet can be added without a fork via a `.code-review-graph/
 
 ## What Gets Indexed
 
-- **Nodes**: Files, Classes, Functions/Methods, Types, Tests
-- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON
+- **Nodes**: Files, Classes, Functions/Methods, Types, Tests — plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
+- **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES — plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 
 See [schema.md](schema.md) for full details.
 

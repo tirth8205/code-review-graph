@@ -1,5 +1,16 @@
 <h1 align="center">code-review-graph</h1>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329"
+     target="_blank"
+     rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/23329"
+         alt="tirth8205%2Fcode-review-graph | Trendshift"
+         width="250"
+         height="55" />
+  </a>
+</p>
+
 > **注意：** 本翻译对应较早的版本；基准测试数据和平台列表可能落后于[英文 README](README.md)。
 
 <p align="center">
@@ -31,7 +42,7 @@
 AI 编码工具在审查任务中可能会反复读取代码库的大量内容。`code-review-graph` 解决了这个问题。它使用 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) 构建代码的结构化映射，增量跟踪变更，并通过 [MCP](https://modelcontextprotocol.io/) 为 AI 助手提供精准的上下文，使其只读取真正需要的内容。
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：在 6 个真实仓库中实现 38 倍到 528 倍的 token 削减" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：读完 flask 的全部源码需要 143,594 个 token，而图给出的回答只需 2,196 个——减少 71.0 倍" width="85%" />
 </p>
 
 ---
@@ -93,24 +104,24 @@ Build the code review graph for this project
 
 ### 增量更新，不到 2 秒
 
-启用钩子或 watch 模式后，文件保存和受支持的提交钩子会触发增量更新。图对变更文件做差异比较，通过 SHA-256 哈希校验找到相关依赖，仅重新解析变更部分。一个 2,900 文件的项目重新索引不到 2 秒。
+启用钩子或 watch 模式后，文件保存和受支持的提交钩子会触发增量更新。图对变更文件做差异比较，沿着图自身的 import 与调用边找到相关依赖，并且只重新解析 SHA-256 哈希确实发生变化的文件。一个 2,900 文件的项目重新索引不到 2 秒。
 
 <p align="center">
-  <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：git 提交触发差异比较，找到依赖项，仅重新解析 5 个文件，跳过 2,910 个文件" width="90%" />
+  <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：钩子或 watch 更新触发 git diff，通过图的边找到依赖项，仅重新解析 SHA-256 哈希发生变化的文件" width="90%" />
 </p>
 
-### 解决 monorepo 难题
+### 整个代码库，还是有的放矢的回答？
 
-大型 monorepo 是 token 浪费最严重的场景。图能穿透噪音——排除 27,700+ 个文件，只读取约 15 个文件。
+仓库越大，token 浪费越让人心疼。图不会把整个语料交给模型，而是只返回与回答相关的那一部分：在本仓库中，208,821 个源码 token 会缩减为每个问题约 3,190 个 token。
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 仓库：208,821 个源码 token 收敛为约 2,495 token 的图响应——每个问题的 token 减少 93 倍" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 仓库：208,821 个源码 token 收敛为约 3,190 token 的图响应——每个问题的 token 减少 68 倍" width="80%" />
 </p>
 
 ### 广泛语言覆盖 + Jupyter 笔记本
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="按类别组织的语言覆盖：Web、后端、系统、移动端、脚本，外加 Jupyter/Databricks 笔记本支持" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="按类别组织的语言覆盖：Web、后端、系统、移动端、脚本、Shell、领域专用、其他，外加 Jupyter/Databricks 笔记本支持" width="90%" />
 </p>
 
 解析器支持覆盖当前解析面中的函数、类、导入、调用点、继承和测试检测：能用 Tree-sitter 的地方使用 Tree-sitter，需要时使用有针对性的回退解析。支持范围包括 Python、JavaScript/TypeScript/TSX、Go、Rust、Java、C/C++、C#、Ruby、Kotlin、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell 脚本、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL、Vue/Svelte 单文件组件、按 TypeScript 解析的 Astro 文件、Jupyter/Databricks 笔记本（`.ipynb`）和 Perl XS 文件（`.xs`）。
@@ -120,7 +131,7 @@ Build the code review graph for this project
 ## 基准测试
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="对 6 个真实仓库的基准测试：token 减少 38 倍到 528 倍，影响分析召回率 100%，平均 F1 0.71" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="对 6 个真实仓库的基准测试：每个问题的 token 减少中位数约 65 倍（最高 376 倍），对图生成的基准答案平均 F1 为 0.71" width="85%" />
 </p>
 
 所有数据来自针对 6 个真实开源仓库（共 13 次提交）的自动化评估。可通过 `code-review-graph eval --all` 复现。完整基准测试数据请参阅[英文 README](README.md)。

@@ -59,6 +59,15 @@ Represents a type alias, interface, enum, struct-like type, or parser-specific t
 | line_start | int | Definition start line |
 | line_end | int | Definition end line |
 
+### Endpoint
+A synthesised node representing a routed entry point, emitted by the Spring enrichment for request mappings. Linked to the method that services it by a `HANDLES` edge.
+
+### Scheduler
+A synthesised node representing a scheduled invocation, emitted for `@Scheduled` methods. Linked to the method it fires by a `TRIGGERS` edge.
+
+### ConfigProperty
+An externalised configuration key parsed out of Spring `application.properties` / `application.yml` files. Values are deliberately discarded — only the key is stored. Linked to the code that binds it by a `DEPENDS_ON_CONFIG` edge.
+
 ## Edge Types
 
 ### CALLS
@@ -128,6 +137,20 @@ Data or event flow relationships emitted by specialised parsers when a source co
 
 ### TEMPORAL_STUB
 Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.
+
+### DEPENDS_ON_CONFIG
+A binding from code to externalised configuration, emitted by the Spring enrichment for `@ConfigurationProperties` classes and the `ConfigProperty` nodes parsed out of `application.properties` / `application.yml`.
+
+### HANDLES
+A handler relationship between a dispatch point and the method that services it — Spring request mappings binding an `Endpoint` node to its controller method, and `@EventListener` methods binding to the event they consume.
+
+### TRIGGERS
+A scheduled invocation, emitted for `@Scheduled` methods to link the synthesised `Scheduler` node to the method it fires.
+
+### PUBLISHES
+An event-publication relationship, emitted where code publishes a Spring application event.
+
+> `OVERRIDES` appears in the impact-scoring tables (`constants.py`) but is not emitted by any parser today.
 
 ## Qualified Name Format
 

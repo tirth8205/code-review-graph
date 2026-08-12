@@ -128,7 +128,7 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 
 ## Large repositories (>10k files)
 - First build may take 30-60 seconds
-- Subsequent incremental updates are fast (<2s)
+- Subsequent incremental updates are fast (~2.5s on a ~3,000-file repo, hook path)
 - Add more ignore patterns to `.code-review-graphignore`:
   ```
   generated/**

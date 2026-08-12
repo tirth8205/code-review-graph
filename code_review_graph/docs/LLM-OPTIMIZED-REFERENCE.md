@@ -57,7 +57,7 @@ Custom languages: add .code-review-graph/languages.toml (extensions + node types
 
 <section name="troubleshooting">
 DB lock: SQLite WAL mode, auto-recovers. Only one build at a time.
-Large repos: First build 30-60s. Incremental <2s. Add patterns to .code-review-graphignore.
+Large repos: first build ~40s at ~3,000 files; incremental ~2.5s on the hook path (measured, docs/REPRODUCING.md). Add patterns to .code-review-graphignore.
 Stale graph: Run /code-review-graph:build-graph manually.
 Missing nodes: Check language support + ignore patterns. Use full_rebuild=True.
 Windows/WSL: Use forward slashes in paths. Ensure uv is on PATH in WSL.

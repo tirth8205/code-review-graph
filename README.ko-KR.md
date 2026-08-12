@@ -1,5 +1,16 @@
 <h1 align="center">code-review-graph</h1>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329"
+     target="_blank"
+     rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/23329"
+         alt="tirth8205%2Fcode-review-graph | Trendshift"
+         width="250"
+         height="55" />
+  </a>
+</p>
+
 > **참고:** 이 번역은 이전 릴리스를 기준으로 합니다. 벤치마크 수치와 플랫폼 목록은 [영문 README](README.md)보다 오래되었을 수 있습니다.
 
 <p align="center">
@@ -31,7 +42,7 @@
 AI 코딩 도구는 리뷰 작업에서 코드베이스의 큰 부분을 반복해서 읽게 될 수 있습니다. `code-review-graph`는 이 문제를 해결합니다. [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)로 코드의 구조적 맵을 구축하고, 변경 사항을 점진적으로 추적하며, [MCP](https://modelcontextprotocol.io/)를 통해 AI 어시스턴트에게 정확한 컨텍스트를 제공하여 필요한 부분만 읽도록 합니다.
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="토큰 문제: 6개 실제 저장소에서 평균 8.2배 토큰 절감" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="토큰 문제: flask 코퍼스 전체를 읽으면 143,594 토큰, 그래프 응답은 2,196 토큰 — 71.0배 적음" width="85%" />
 </p>
 
 ---
@@ -93,24 +104,24 @@ Build the code review graph for this project
 
 ### 2초 미만의 점진적 업데이트
 
-훅 또는 watch 모드를 사용하면 파일 저장과 지원되는 커밋 훅에서 점진적 업데이트가 실행됩니다. 그래프는 변경된 파일을 비교하고, SHA-256 해시 검사를 통해 의존 대상을 찾으며, 변경된 부분만 다시 파싱합니다. 2,900개 파일 프로젝트의 재인덱싱이 2초 이내에 완료됩니다.
+훅 또는 watch 모드를 사용하면 파일 저장과 지원되는 커밋 훅에서 점진적 업데이트가 실행됩니다. 그래프는 변경된 파일을 비교하고, 그래프 자체의 import·호출 엣지를 따라 의존 대상을 찾으며, SHA-256 해시가 실제로 바뀐 파일만 다시 파싱합니다. 2,900개 파일 프로젝트의 재인덱싱이 2초 이내에 완료됩니다.
 
 <p align="center">
-  <img src="diagrams/diagram4_incremental_update.png" alt="점진적 업데이트 흐름: git 커밋이 diff를 트리거하고, 의존 대상을 찾고, 5개 파일만 다시 파싱하며 2,910개는 건너뜀" width="90%" />
+  <img src="diagrams/diagram4_incremental_update.png" alt="점진적 업데이트 흐름: 훅 또는 watch 업데이트가 git diff를 실행하고, 그래프 엣지로 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱" width="90%" />
 </p>
 
-### 모노레포 문제 해결
+### 코드베이스 전체인가, 겨냥한 답변인가
 
-대규모 모노레포에서 토큰 낭비가 가장 심합니다. 그래프는 불필요한 파일을 제거합니다 -- 27,700개 이상의 파일이 리뷰 컨텍스트에서 제외되고, 실제로 읽는 파일은 약 15개뿐입니다.
+저장소가 클수록 토큰 낭비는 더 뼈아픕니다. 그래프는 코퍼스 전체를 모델에 넘기는 대신 답변에 필요한 부분만 돌려줍니다. 이 저장소에서는 208,821개의 소스 토큰이 질문당 약 3,190 토큰이 됩니다.
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.js 모노레포: 27,732개 파일이 code-review-graph를 거쳐 약 15개 파일로 -- 49배 적은 토큰" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 저장소: 208,821개의 소스 토큰이 약 3,190 토큰의 그래프 응답으로 수렴 — 질문당 토큰 68배 감소" width="80%" />
 </p>
 
 ### 폭넓은 언어 지원 + Jupyter 노트북
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="카테고리별 언어 지원: 웹, 백엔드, 시스템, 모바일, 스크립팅, 그리고 Jupyter/Databricks 노트북 지원" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="카테고리별 언어 지원: 웹, 백엔드, 시스템, 모바일, 스크립팅, 셸, 도메인, 기타, 그리고 Jupyter/Databricks 노트북 지원" width="90%" />
 </p>
 
 현재 파서가 지원하는 범위에서 함수, 클래스, import, 호출 위치, 상속, 테스트 감지를 추출합니다. 가능한 경우 Tree-sitter를 사용하고 필요한 곳에서는 대상별 fallback 파서를 사용합니다. 지원 범위에는 Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFC, TypeScript 파서로 처리되는 Astro 파일, Jupyter/Databricks 노트북(`.ipynb`), Perl XS 파일(`.xs`)이 포함됩니다.
@@ -120,7 +131,7 @@ Build the code review graph for this project
 ## 벤치마크
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="실제 저장소 벤치마크: 4.9배에서 27.3배 적은 토큰과 보수적인 영향 분석" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="6개 실제 저장소 벤치마크: 질문당 토큰 감소 중앙값 약 65배(최대 376배), 그래프 기반 정답 데이터 대비 평균 F1 0.71" width="85%" />
 </p>
 
 모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 전체 재현 절차와 기준 수치는 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)에 있습니다.

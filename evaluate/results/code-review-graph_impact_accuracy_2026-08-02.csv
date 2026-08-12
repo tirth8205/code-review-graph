@@ -1,0 +1,5 @@
+repo,commit,ground_truth_mode,seed_file,predicted_files,actual_files,true_positives,precision,recall,f1,status,error
+code-review-graph,528801f841e519567ef54d6e52e9b9831d162e1b,graph-derived (circular — upper bound),,6,3,3,0.5,1.0,0.667,ok,
+code-review-graph,528801f841e519567ef54d6e52e9b9831d162e1b,"co-change (same commit, seed excluded)",code_review_graph/cli.py,0,2,0,0.0,0.0,0.0,ok,
+code-review-graph,84bde35459c52e1e0c4b25c6c4799743021e0fc7,graph-derived (circular — upper bound),,3,2,2,0.667,1.0,0.8,ok,
+code-review-graph,84bde35459c52e1e0c4b25c6c4799743021e0fc7,"co-change (same commit, seed excluded)",code_review_graph/cli.py,0,1,0,0.0,0.0,0.0,ok,

@@ -1,0 +1,5 @@
+repo,commit,ground_truth_mode,seed_file,predicted_files,actual_files,true_positives,precision,recall,f1,status,error
+fastapi,749cefdeb1428ba5c3911b03c4a72993f7eb3747,graph-derived (circular — upper bound),,46,21,21,0.457,1.0,0.627,ok,
+fastapi,749cefdeb1428ba5c3911b03c4a72993f7eb3747,"co-change (same commit, seed excluded)",docs/en/docs/advanced/stream-data.md,0,20,0,0.0,0.0,0.0,ok,
+fastapi,22381558446c5d1ac376680a6581dd63b3a04119,graph-derived (circular — upper bound),,37,23,23,0.622,1.0,0.767,ok,
+fastapi,22381558446c5d1ac376680a6581dd63b3a04119,"co-change (same commit, seed excluded)",docs/en/docs/advanced/stream-data.md,0,22,0,0.0,0.0,0.0,ok,

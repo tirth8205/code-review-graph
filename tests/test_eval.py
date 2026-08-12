@@ -1271,3 +1271,47 @@ def test_embedding_count_returns_none_for_a_missing_table():
         _conn = _Conn()
 
     assert _embedding_count(_NoTable()) is None
+
+
+@pytest.mark.skipif(not _HAS_YAML, reason="pyyaml not installed")
+def test_clone_or_update_refuses_directory_inside_another_repo(tmp_path):
+    """A target dir that is not its own repo must never be checked out.
+
+    ``evaluate/test_repos/`` lives inside this project. If a target directory
+    exists but is not a git repository in its own right, ``git -C <dir>`` walks
+    up to the *enclosing* checkout, so ``git checkout <pinned sha>`` would
+    rewrite the developer's working tree instead of the test repo.
+    """
+    from code_review_graph.eval.runner import clone_or_update
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    git = ["git", "-c", "user.email=t@example.com", "-c", "user.name=t"]
+    subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+    (outer / "tracked.txt").write_text("first")
+    subprocess.run(["git", "add", "-A"], cwd=outer, check=True)
+    subprocess.run(git + ["commit", "-qm", "first"], cwd=outer, check=True)
+    first = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=outer, capture_output=True, text=True
+    ).stdout.strip()
+    (outer / "tracked.txt").write_text("second")
+    subprocess.run(["git", "add", "-A"], cwd=outer, check=True)
+    subprocess.run(git + ["commit", "-qm", "second"], cwd=outer, check=True)
+    head_before = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=outer, capture_output=True, text=True
+    ).stdout.strip()
+
+    repos_dir = outer / "evaluate" / "test_repos"
+    (repos_dir / "victim").mkdir(parents=True)  # exists, but is not its own repo
+
+    # Pinning the *first* commit means a successful checkout would move the
+    # enclosing repo's HEAD -- exactly the data-loss case.
+    config = {"name": "victim", "url": "https://example.invalid/x.git", "commit": first}
+    with pytest.raises(RuntimeError, match="standalone git repository"):
+        clone_or_update(config, repos_dir)
+
+    head_after = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=outer, capture_output=True, text=True
+    ).stdout.strip()
+    assert head_after == head_before, "enclosing repository was checked out"
+    assert (outer / "tracked.txt").read_text() == "second"

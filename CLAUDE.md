@@ -17,7 +17,7 @@ When using code-review-graph MCP tools, follow these rules:
 - **Core Package**: `code_review_graph/` (Python 3.10+)
   - `parser.py` — Tree-sitter multi-language AST parser plus targeted fallbacks for broad source-language and notebook support
   - `custom_languages.py` — Config-driven custom language support (`.code-review-graph/languages.toml`, see docs/CUSTOM_LANGUAGES.md)
-  - `graph.py` — SQLite-backed graph store (nodes, edges, BFS impact analysis)
+  - `graph.py` — SQLite-backed graph store (nodes, edges, weighted-score impact analysis)
   - `tools/` — 30 MCP tool implementations split by domain
   - `main.py` — FastMCP server entry point, registers 30 tools + 5 prompts
   - `incremental.py` — Git-based change detection, file watching

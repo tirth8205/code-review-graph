@@ -1,5 +1,16 @@
 <h1 align="center">code-review-graph</h1>
 
+<p align="center">
+  <a href="https://trendshift.io/repositories/23329?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-23329"
+     target="_blank"
+     rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/repositories/23329"
+         alt="tirth8205%2Fcode-review-graph | Trendshift"
+         width="250"
+         height="55" />
+  </a>
+</p>
+
 > **注意:** この翻訳は古いリリースに基づいています。ベンチマーク数値や対応プラットフォームの一覧は[英語版 README](README.md)より古い場合があります。
 
 <p align="center">
@@ -31,7 +42,7 @@
 AIコーディングツールはレビュータスクでコードベースの大きな範囲を読み直しがちです。`code-review-graph` はその問題を解決します。[Tree-sitter](https://tree-sitter.github.io/tree-sitter/) でコードの構造マップを構築し、変更を差分で追跡し、[MCP](https://modelcontextprotocol.io/) を通じてAIアシスタントに必要最小限のコンテキストだけを提供します。
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="トークン問題：6つの実リポジトリで平均8.2倍のトークン削減" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="トークン問題：flaskのコーパス全体を読むと143,594トークン、グラフからの回答は2,196トークン — 71.0分の1" width="85%" />
 </p>
 
 ---
@@ -93,24 +104,24 @@ Build the code review graph for this project
 
 ### 2秒以内のインクリメンタル更新
 
-フックまたはwatchモードを有効にすると、ファイル保存や対応しているコミットフックでインクリメンタル更新が起動します。グラフは変更ファイルの差分を取り、SHA-256ハッシュで依存先を特定し、変更されたものだけを再解析します。2,900ファイルのプロジェクトでも2秒以内で再インデックスが完了します。
+フックまたはwatchモードを有効にすると、ファイル保存や対応しているコミットフックでインクリメンタル更新が起動します。グラフは変更ファイルの差分を取り、グラフ自身のインポート／呼び出しエッジから依存先を特定し、SHA-256ハッシュが実際に変化したファイルだけを再解析します。2,900ファイルのプロジェクトでも2秒以内で再インデックスが完了します。
 
 <p align="center">
-  <img src="diagrams/diagram4_incremental_update.png" alt="インクリメンタル更新フロー：gitコミットが差分をトリガー、依存先を検出、5ファイルのみ再解析、2,910ファイルはスキップ" width="90%" />
+  <img src="diagrams/diagram4_incremental_update.png" alt="インクリメンタル更新フロー：フックまたはwatch更新がgit diffを起動し、グラフのエッジから依存先を検出、SHA-256ハッシュが変化したファイルだけを再解析" width="90%" />
 </p>
 
-### モノレポ問題の解決
+### コードベース全体か、狙いを定めた回答か
 
-大規模モノレポこそトークンの無駄が最も深刻な場所です。グラフがノイズを除去し、27,700以上のファイルをレビューコンテキストから除外、実際に読むのは約15ファイルだけです。
+リポジトリが大きいほどトークンの無駄は深刻になります。グラフはコーパス全体をモデルに渡すのではなく、回答に必要な部分だけを返します。このリポジトリでは208,821のソーストークンが、質問あたり約3,190トークンになります。
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="Next.jsモノレポ：27,732ファイルをcode-review-graphで絞り込み、約15ファイルに - トークン49分の1" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graphリポジトリ：208,821のソーストークンが約3,190トークンのグラフ回答に収束 — 質問あたりのトークンは68分の1" width="80%" />
 </p>
 
 ### 幅広い言語対応 + Jupyterノートブック
 
 <p align="center">
-  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語サポート：Web、バックエンド、システム、モバイル、スクリプト、さらにJupyter/Databricksノートブック対応" width="90%" />
+  <img src="diagrams/diagram9_language_coverage.png" alt="カテゴリ別の言語サポート：Web、バックエンド、システム、モバイル、スクリプト、シェル、ドメイン、その他、さらにJupyter/Databricksノートブック対応" width="90%" />
 </p>
 
 現在のパーサーが対応する範囲で、関数、クラス、インポート、呼び出し箇所、継承、テスト検出を抽出します。利用できる場合はTree-sitterを使い、必要な箇所では専用のフォールバック解析を使います。対応範囲には Python、JavaScript/TypeScript/TSX、Go、Rust、Java、C/C++、C#、Ruby、Kotlin、Swift、PHP、Scala、Solidity、Dart、R、Perl、Lua/Luau、Objective-C、shell scripts、Elixir、Zig、PowerShell、Julia、ReScript、GDScript、Nix、Verilog/SystemVerilog、SQL、Vue/Svelte SFC、TypeScriptパーサーで扱うAstroファイル、Jupyter/Databricksノートブック（`.ipynb`）、Perl XSファイル（`.xs`）が含まれます。
@@ -120,7 +131,7 @@ Build the code review graph for this project
 ## ベンチマーク
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="実リポジトリでのベンチマーク：トークン4.9倍から27.3倍削減、保守的な影響分析" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="6つの実リポジトリでのベンチマーク：質問あたりのトークン削減率は中央値で約65倍（最大376倍）、グラフ由来の正解データに対する平均F1は0.71" width="85%" />
 </p>
 
 すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。完全な再現手順と正規の数値は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) をご覧ください。

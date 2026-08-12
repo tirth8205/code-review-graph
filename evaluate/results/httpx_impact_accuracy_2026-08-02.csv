@@ -1,0 +1,5 @@
+repo,commit,ground_truth_mode,seed_file,predicted_files,actual_files,true_positives,precision,recall,f1,status,error
+httpx,ae1b9f66238f75ced3ced5e4485408435de10768,graph-derived (circular — upper bound),,3,3,3,1.0,1.0,1.0,ok,
+httpx,ae1b9f66238f75ced3ced5e4485408435de10768,"co-change (same commit, seed excluded)",CHANGELOG.md,0,2,0,0.0,0.0,0.0,ok,
+httpx,b55d4635701d9dc22928ee647880c76b078ba3f2,graph-derived (circular — upper bound),,7,4,4,0.571,1.0,0.727,ok,
+httpx,b55d4635701d9dc22928ee647880c76b078ba3f2,"co-change (same commit, seed excluded)",requirements.txt,0,3,0,0.0,0.0,0.0,ok,

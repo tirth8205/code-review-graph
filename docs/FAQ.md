@@ -36,7 +36,7 @@ language, an LSP server is the gold standard and CRG does not try to replace it.
   across roughly 35 languages plus notebooks from one process — including cross-language
   edges that no single LSP server models.
 - **It survives sessions and commits.** The graph is updated incrementally (changed
-  files only, under 2 seconds on a ~2,900-file repo) rather than rebuilt per editor
+  files only, ~2.5 seconds on a ~3,000-file repo) rather than rebuilt per editor
   session.
 - **Review-oriented edges.** `tests_for`, execution flows, community membership,
   risk-scored change analysis — relationships LSP does not model because they are not
@@ -99,8 +99,8 @@ another round of grep + read + reasoning, and token spend compounds:
 The graph also persists: agentic search re-derives the same structure from scratch
 every session, while CRG keeps it in SQLite and updates incrementally.
 
-One honest caveat on the numbers: the whole-corpus token-reduction numbers (~82x median,
-38x–528x range) compare graph responses against reading the **whole corpus**, not
+One honest caveat on the numbers: the whole-corpus token-reduction numbers (~65x median,
+36x–376x range) compare graph responses against reading the **whole corpus**, not
 against a skilled agentic-grep session (see [REPRODUCING.md](REPRODUCING.md) for what
 each benchmark measures). For single-hop lookups in a small repo, grep is cheap and
 good. The multi-hop review workflow is where the graph earns its keep.
@@ -202,13 +202,13 @@ overhead:
   diffs the structural response can cost more tokens than it saves (the documented
   overhead regime — see [When should I not use it?](#when-should-i-not-use-it)).
 - **A few hundred to a few thousand files:** this is where the benchmarks live. The
-  six evaluation repos range from 60 to ~1,100 files and show 38x–528x reductions on
+  six evaluation repos range from 70 to ~1,100 files and show 36x–376x reductions on
   whole-corpus agent questions, with the caveat noted above about what that baseline
   measures.
 - **Multi-thousand-file repos and monorepos:** the strongest case. No agent can read
   the corpus per question (FastAPI alone is ~950k tokens of source), re-deriving
   structure by search every session is the dominant cost, and incremental updates
-  keep the graph fresh in under 2 seconds.
+  keep the graph fresh in a couple of seconds.
 
 A second axis matters as much as file count: **how often you ask multi-file
 questions**. A 300-file repo you review daily benefits more than a 3,000-file repo

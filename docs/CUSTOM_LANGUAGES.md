@@ -1,6 +1,6 @@
 # Custom Languages (Bring Your Own Language)
 
-code-review-graph ships parsers for 30+ languages, but the
+code-review-graph ships parsers for 35+ languages, but the
 [tree-sitter-language-pack](https://github.com/Goldziher/tree-sitter-language-pack)
 it depends on bundles many more grammars than the built-in list. If your repo
 uses a language the graph does not cover yet — Erlang, Haskell, OCaml,
