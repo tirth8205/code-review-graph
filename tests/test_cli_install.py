@@ -112,7 +112,12 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
         lambda repo_root, target, dry_run=False: ["Codex"],
     )
 
-    called = {"generate_skills": False, "codex_hooks": False, "git_hook": False}
+    called = {
+        "generate_skills": False,
+        "codex_skill": False,
+        "codex_hooks": False,
+        "git_hook": False,
+    }
 
     def _generate_skills(repo_root):
         called["generate_skills"] = True
@@ -122,11 +127,16 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
         called["codex_hooks"] = True
         return Path("/tmp/fake-codex-hooks.json")
 
+    def _install_codex_skill():
+        called["codex_skill"] = True
+        return tmp_path / "codex" / "skills" / "code-review-graph"
+
     def _install_git_hook(repo_root):
         called["git_hook"] = True
         return repo_root / ".git" / "hooks" / "pre-commit"
 
     monkeypatch.setattr("code_review_graph.skills.generate_skills", _generate_skills)
+    monkeypatch.setattr("code_review_graph.skills.install_codex_skill", _install_codex_skill)
     monkeypatch.setattr("code_review_graph.skills.install_codex_hooks", _install_codex_hooks)
     monkeypatch.setattr("code_review_graph.skills.install_git_hook", _install_git_hook)
 
@@ -134,9 +144,43 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert called["generate_skills"] is False
+    assert called["codex_skill"] is True
     assert called["codex_hooks"] is True
     assert called["git_hook"] is True
     assert "Installed Codex hooks" in out
+
+
+def test_handle_init_all_skips_codex_skill_when_not_detected(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: [],
+    )
+    monkeypatch.setitem(
+        skills.PLATFORMS,
+        "codex",
+        {**skills.PLATFORMS["codex"], "detect": lambda: False},
+    )
+    called = False
+
+    def _install_codex_skill():
+        nonlocal called
+        called = True
+        return tmp_path / "codex" / "skills" / "code-review-graph"
+
+    monkeypatch.setattr("code_review_graph.skills.install_codex_skill", _install_codex_skill)
+    args = _args(tmp_path, "all")
+    args.no_hooks = True
+    args.no_instructions = True
+
+    _handle_init(args)
+
+    assert called is False
 
 
 def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys):

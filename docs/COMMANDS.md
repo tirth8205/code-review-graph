@@ -300,7 +300,7 @@ base: str = "HEAD~1"
 # Setup
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
 code-review-graph install --dry-run # Preview without writing files
-code-review-graph install --platform codex  # Configure one platform
+code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
 code-review-graph uninstall                 # Remove all CRG configs, hooks, skills, and data
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data + others)
 

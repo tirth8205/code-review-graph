@@ -62,7 +62,7 @@ code-review-graph install          # auto-detects and configures all supported p
 code-review-graph build            # parse your codebase
 ```
 
-One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, installs platform-native hooks/skills where supported, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart your editor/tool after installing.
+One command sets up everything. `install` detects which AI coding tools you have, writes the correct MCP configuration for each one, installs platform-native hooks/skills where supported, and injects graph-aware instructions into your platform rules. It auto-detects whether you installed via `uvx` or `pip`/`pipx` and generates the right config. Restart or refresh your editor/tool after installing so its MCP and Skill inventory is reloaded.
 
 <p align="center">
   <img src="diagrams/diagram8_supported_platforms.png" alt="One Install, Every Platform: auto-detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI" width="85%" />
@@ -87,6 +87,14 @@ code-review-graph install --platform copilot      # configure only GitHub Copilo
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
 code-review-graph install --platform codebuddy    # configure only CodeBuddy Code
 ```
+
+For Codex, the installer also places a global `code-review-graph` Skill under
+`$CODEX_HOME/skills/code-review-graph/` (default:
+`~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
+to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
+stale graph never triggers an implicit build or update. WSL and Windows Codex
+runtimes have separate `CODEX_HOME` directories and tool inventories, so
+install and refresh the runtime that will execute the task.
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
 

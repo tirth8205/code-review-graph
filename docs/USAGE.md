@@ -10,7 +10,7 @@ code-review-graph install    # auto-detects and configures all supported platfor
 code-review-graph build      # parse your codebase
 ```
 
-`install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and installs platform-native hooks where supported. Restart your editor/tool after installing.
+`install` detects which AI coding tools you have, writes the correct MCP configuration for each one, and installs platform-native hooks/skills where supported. Restart or refresh your editor/tool after installing so its MCP and Skill inventory is reloaded.
 
 To target a specific platform instead of auto-detecting all:
 
@@ -25,7 +25,7 @@ code-review-graph install --platform codebuddy
 
 | Platform | Config file |
 |----------|-------------|
-| **Codex** | `~/.codex/config.toml` + `~/.codex/hooks.json` |
+| **Codex** | `$CODEX_HOME/config.toml` + `$CODEX_HOME/hooks.json` + `$CODEX_HOME/skills/code-review-graph/` (defaults to `~/.codex`) |
 | **Claude Code** | `.mcp.json` + `.claude/settings.json` |
 | **CodeBuddy Code** | `.mcp.json` + `CODEBUDDY.md` + `.codebuddy/settings.json` + `.codebuddy/skills/<name>/SKILL.md` |
 | **Cursor** | `.cursor/mcp.json` |
@@ -47,6 +47,13 @@ The CodeBuddy project layout follows its official documentation for
 [hooks](https://www.codebuddy.ai/docs/cli/hooks). The shared `.mcp.json` is
 merged with JSONC awareness, while hook commands resolve the repository at
 runtime so committed settings do not contain one developer's checkout path.
+
+Codex installs the CRG Skill in the active user Skill root and uses MCP first,
+with a bundled read-only CLI fallback when MCP is unavailable. The Skill checks
+graph health once per repository/task; a missing, empty, or stale graph never
+causes an implicit build or update. WSL and Windows Codex processes have
+separate `CODEX_HOME` directories and tool inventories, so install CRG in the
+runtime that will actually run the task and restart/refresh that runtime.
 
 ## Core Workflow
 

@@ -130,9 +130,10 @@ def _opencode_config_path(repo_root: Path) -> Path:
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
-        "config_path": lambda root: Path.home() / ".codex" / "config.toml",
+        "config_path": lambda root: _codex_home() / "config.toml",
         "key": "mcp_servers",
-        "detect": lambda: (Path.home() / ".codex").exists(),
+        "detect": lambda: bool(os.environ.get("CODEX_HOME", "").strip())
+        or _codex_home().exists(),
         "format": "toml",
         "needs_type": True,
     },
@@ -255,6 +256,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "needs_type": True,
     },
 }
+
+
+def _codex_home() -> Path:
+    """Return Codex's active state directory, honoring ``CODEX_HOME``."""
+
+    from .codex_skill import codex_home
+
+    return codex_home()
 
 
 def _in_poetry_project() -> bool:
@@ -881,7 +890,7 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
 
 
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
-    """Generate native Codex hooks configuration for ~/.codex/hooks.json."""
+    """Generate native Codex hooks configuration for the active Codex home."""
     return {
         "hooks": {
             "PostToolUse": [
@@ -1075,13 +1084,13 @@ def install_codebuddy_hooks(repo_root: Path) -> Path:
 
 
 def install_codex_hooks(repo_root: Path) -> Path:
-    """Write native Codex hooks config to ~/.codex/hooks.json.
+    """Write native Codex hooks config to the active Codex home.
 
     Merges code-review-graph hook entries into any existing hooks.json,
     preserving user-defined hook entries and other top-level settings.
     A backup of the original file is created before modifications.
     """
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _codex_home()
     codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
 
@@ -1130,6 +1139,14 @@ def install_codex_hooks(repo_root: Path) -> Path:
     )
     logger.info("Wrote Codex hooks config: %s", hooks_path)
     return hooks_path
+
+
+def install_codex_skill() -> Path:
+    """Install the bundled global Codex skill in the active Codex home."""
+
+    from .codex_skill import install_codex_skill as _install
+
+    return _install()
 
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"

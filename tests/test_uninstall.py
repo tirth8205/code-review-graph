@@ -852,6 +852,59 @@ def test_platform_scoped_unbind_targets_user_scope_toml(
     assert "code-review-graph" in claude_config.read_text(encoding="utf-8")
 
 
+def test_uninstall_uses_custom_codex_home_and_preserves_user_skill(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = fake_home / "wsl-codex"
+    skill_dir = codex_home / "skills" / "code-review-graph"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("generated\n", encoding="utf-8")
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+    (skill_dir / ".code-review-graph-managed.json").write_text(
+        json.dumps({"version": 1, "files": {"SKILL.md": "not-the-file-hash"}}),
+        encoding="utf-8",
+    )
+    config = codex_home / "config.toml"
+    _write_codex_config(config)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    config_text = config.read_text(encoding="utf-8")
+    assert "[mcp_servers.code-review-graph]" not in config_text
+    assert "[mcp_servers.other]" in config_text
+    assert skill_file.exists()
+    assert notes.exists()
+
+
+def test_uninstall_removes_only_managed_codex_skill_files(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_review_graph.codex_skill import install_codex_skill
+
+    codex_home = fake_home / "wsl-codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = install_codex_skill()
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert notes.read_text(encoding="utf-8") == "user\n"
+    assert not (skill_dir / "SKILL.md").exists()
+    assert not (skill_dir / "agents" / "openai.yaml").exists()
+    assert not (skill_dir / "scripts" / "crg_readonly.py").exists()
+    assert not (skill_dir / ".code-review-graph-managed.json").exists()
+
+
 def test_cli_uninstall_platform_scopes_to_one_binding(
     fake_repo: Path,
     fake_home: Path,
