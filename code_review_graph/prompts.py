@@ -52,17 +52,17 @@ def review_changes_prompt(base: str = "HEAD~1") -> list[Message]:
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         f"## Review Workflow\n"
         f'1. Call `get_minimal_context(task="review changes against '
-        f'{base}")` to get risk overview.\n'
+        f'{base}", base="{base}")` to get risk overview.\n'
         f'2. If risk is "low": call '
-        f'`detect_changes(detail_level="minimal")` → report summary '
+        f'`detect_changes(base="{base}", detail_level="minimal")` → report summary '
         f"+ any test gaps.\n"
         f'3. If risk is "medium" or "high":\n'
-        f'   a. Call `detect_changes(detail_level="standard")` for '
+        f'   a. Call `detect_changes(base="{base}", detail_level="standard")` for '
         f"full change list.\n"
         f"   b. For each high-risk function, call "
         f'`query_graph(pattern="callers_of", target=<func>, '
         f'detail_level="minimal")`.\n'
-        f'   c. Call `get_affected_flows(detail_level="minimal")` '
+        f'   c. Call `get_affected_flows(base="{base}", detail_level="minimal")` '
         f"only if >3 changed functions.\n"
         f"4. Summarize: risk level, what changed, test gaps, "
         f"specific improvements needed.\n\n"
@@ -141,11 +141,11 @@ def pre_merge_check_prompt(base: str = "HEAD~1") -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         "## Pre-Merge Check Workflow\n"
-        '1. Call `get_minimal_context(task="pre-merge check")`.\n'
-        '2. Call `detect_changes(detail_level="minimal")` for risk '
+        f'1. Call `get_minimal_context(task="pre-merge check", base="{base}")`.\n'
+        f'2. Call `detect_changes(base="{base}", detail_level="minimal")` for risk '
         "score and test gaps.\n"
         "3. If risk > 0.4: call "
-        '`get_affected_flows(detail_level="minimal")`.\n'
+        f'`get_affected_flows(base="{base}", detail_level="minimal")`.\n'
         "4. If test_gap_count > 0: call "
         '`query_graph(pattern="tests_for", '
         'target=<each untested function>, detail_level="minimal")` '

@@ -667,6 +667,64 @@ def resolve_incremental_base(repo_root: Path, store: "GraphStore") -> str | None
     return None
 
 
+def resolve_review_base(repo_root: Path, base: str) -> str:
+    """Resolve a branch-like Git review base to its common ancestor with HEAD.
+
+    ``git diff <branch>`` compares the two tips and therefore includes commits
+    made only on the base branch after the reviewed branch diverged.  GitHub's
+    "Files changed" view instead uses the merge base.  Preserve explicit
+    commit/revision inputs, but translate local and remote-tracking branch
+    refs to that common ancestor.
+
+    If ref detection or merge-base resolution fails (for example in a shallow
+    clone), return *base* unchanged so callers retain the existing diff
+    behaviour rather than silently reporting no changes.
+    """
+    if (
+        detect_vcs(repo_root) != "git"
+        or not base
+        or base.startswith("-")
+        or not _SAFE_GIT_REF.fullmatch(base)
+    ):
+        return base
+
+    try:
+        symbolic = subprocess.run(
+            ["git", "rev-parse", "--symbolic-full-name", "--verify", base],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(repo_root),
+            timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        symbolic_ref = symbolic.stdout.strip()
+        if symbolic.returncode != 0 or not symbolic_ref.startswith(
+            ("refs/heads/", "refs/remotes/")
+        ):
+            return base
+
+        result = subprocess.run(
+            ["git", "merge-base", base, "HEAD"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(repo_root),
+            timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+        resolved = result.stdout.strip()
+        if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40,64}", resolved):
+            return resolved
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    logger.debug("Could not resolve review merge base for %s; using it directly", base)
+    return base
+
+
 def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
     """Get list of changed files via git diff or svn status.
 

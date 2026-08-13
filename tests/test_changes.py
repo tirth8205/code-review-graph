@@ -484,6 +484,39 @@ class TestChanges:
             assert "review_priorities" in result
         assert getattr(self.store.close, "__func__", None) is GraphStore.close
 
+    def test_detect_changes_tool_uses_one_resolved_review_base(self):
+        """File discovery and line ranges must use the same merge base."""
+        from code_review_graph.tools import detect_changes_func
+
+        self._add_func("my_func", path="/fake/repo/app.py", line_start=1, line_end=10)
+
+        with (
+            patch("code_review_graph.tools.review._get_store") as mock_get_store,
+            patch(
+                "code_review_graph.tools.review.resolve_review_base",
+                return_value="merge-base-sha",
+            ) as resolve,
+            patch(
+                "code_review_graph.tools.review.get_changed_files",
+                return_value=["app.py"],
+            ) as get_changed,
+            patch(
+                "code_review_graph.tools.review.parse_diff_ranges",
+                return_value={"app.py": [(1, 10)]},
+            ) as parse_ranges,
+            patch.object(self.store, "close"),
+        ):
+            root = Path("/fake/repo")
+            mock_get_store.return_value = (self.store, root)
+
+            result = detect_changes_func(base="origin/main", repo_root=str(root))
+
+        assert result["status"] == "ok"
+        resolve.assert_called_once_with(root, "origin/main")
+        get_changed.assert_called_once_with(root, "merge-base-sha")
+        parse_ranges.assert_called_once_with(str(root), "merge-base-sha")
+        assert getattr(self.store.close, "__func__", None) is GraphStore.close
+
 
 class TestAnalyzeChangesFunctionCap:
     """Regression tests for O(N) slowdown when PR touches many functions."""

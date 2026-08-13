@@ -2052,6 +2052,30 @@ class TestGetMinimalContext:
         assert "summary" in result
         assert "next_tool_suggestions" in result
 
+    def test_review_base_is_shared_by_probe_discovery_and_analysis(self, monkeypatch):
+        import code_review_graph.tools.context as context_module
+
+        resolve = MagicMock(return_value="merge-base-sha")
+        has_changes = MagicMock(return_value=True)
+        get_changed = MagicMock(return_value=["app.py"])
+        analyze = MagicMock(return_value={"risk_score": 0.2, "changed_functions": []})
+        monkeypatch.setattr(context_module, "resolve_review_base", resolve)
+        monkeypatch.setattr(context_module, "_has_git_changes", has_changes)
+        monkeypatch.setattr("code_review_graph.incremental.get_changed_files", get_changed)
+        monkeypatch.setattr("code_review_graph.changes.analyze_changes", analyze)
+
+        result = context_module.get_minimal_context(
+            task="review changes",
+            repo_root=str(self.root),
+            base="origin/main",
+        )
+
+        assert result["status"] == "ok"
+        resolve.assert_called_once_with(self.root, "origin/main")
+        has_changes.assert_called_once_with(self.root, "merge-base-sha")
+        get_changed.assert_called_once_with(self.root, "merge-base-sha")
+        assert analyze.call_args.kwargs["base"] == "merge-base-sha"
+
     def test_missing_graph_returns_not_ready_without_creating_database(self, tmp_path):
         from code_review_graph.tools.context import get_minimal_context
 

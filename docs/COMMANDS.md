@@ -328,7 +328,8 @@ code-review-graph visualize --serve            # Serve graph.html on localhost:8
 
 # Analysis
 code-review-graph detect-changes               # Risk-scored change analysis
-code-review-graph detect-changes --base HEAD~3 # Custom base ref
+code-review-graph detect-changes --base HEAD~3 # Custom base revision
+code-review-graph detect-changes --base origin/main # Branch refs use merge-base semantics
 code-review-graph detect-changes --brief       # Compact panel with token-savings estimate
 code-review-graph detect-changes --brief --verify  # ...and cross-check vs tiktoken
 code-review-graph detect-changes --churn       # Add opt-in change-frequency risk

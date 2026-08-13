@@ -985,7 +985,11 @@ def main() -> None:
         help="Analyze change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
-    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument(
+        "--base",
+        default="HEAD~1",
+        help="Git diff base (branch refs use their merge base with HEAD; default: HEAD~1)",
+    )
     detect_cmd.add_argument(
         "--brief",
         action="store_true",
@@ -1977,9 +1981,9 @@ def main() -> None:
                 attach_context_savings,
                 estimate_file_tokens,
             )
-            from .incremental import get_changed_files, get_staged_and_unstaged
+            from .incremental import get_changed_files, get_staged_and_unstaged, resolve_review_base
 
-            base = args.base
+            base = resolve_review_base(repo_root, args.base)
             changed = get_changed_files(repo_root, base)
             if not changed:
                 changed = get_staged_and_unstaged(repo_root)

@@ -20,6 +20,12 @@ On each PR run the action:
 5. Optionally fails the job when the overall risk score crosses a threshold
    (`fail-on-risk`).
 
+`detect-changes` resolves local and remote branch refs to their merge base
+with `HEAD`, matching GitHub's **Files changed** scope on divergent branches
+when the common ancestor is available locally. In shallow clones where Git
+cannot resolve that ancestor, it falls back to the supplied branch ref.
+Commit IDs and revision expressions remain exact diff bases.
+
 ## Quick start (external repositories)
 
 ```yaml
