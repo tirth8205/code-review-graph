@@ -11,7 +11,11 @@ from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
-from ..incremental import get_changed_files, get_staged_and_unstaged
+from ..incremental import (
+    get_changed_files,
+    get_staged_and_unstaged,
+    resolve_review_base,
+)
 from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_graph_file_paths
 
@@ -56,6 +60,7 @@ def get_review_context(
     try:
         # Get impact radius first
         if changed_files is None:
+            base = resolve_review_base(root, base)
             changed_files = get_changed_files(root, base)
             if not changed_files:
                 changed_files = get_staged_and_unstaged(root)
@@ -312,6 +317,7 @@ def get_affected_flows_func(
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
+            base = resolve_review_base(root, base)
             changed_files = get_changed_files(root, base)
             if not changed_files:
                 changed_files = get_staged_and_unstaged(root)
@@ -388,6 +394,7 @@ def detect_changes_func(
     """
     store, root = _get_store(repo_root)
     try:
+        base = resolve_review_base(root, base)
         # Detect changed files if not provided.
         if changed_files is None:
             changed_files = get_changed_files(root, base)

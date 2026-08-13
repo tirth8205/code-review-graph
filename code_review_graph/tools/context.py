@@ -8,7 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from ..incremental import get_db_path
+from ..incremental import get_db_path, resolve_review_base
 from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
@@ -78,6 +78,7 @@ def get_minimal_context(
 
     store, root = _get_store(str(root))
     try:
+        base = resolve_review_base(root, base)
         # 1. Quick stats
         stats = store.get_stats()
         if stats.total_nodes == 0:

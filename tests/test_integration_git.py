@@ -30,6 +30,7 @@ from code_review_graph.incremental import (
     get_staged_and_unstaged,
     incremental_update,
     resolve_incremental_base,
+    resolve_review_base,
 )
 from code_review_graph.tools.build import build_or_update_graph
 from code_review_graph.wiki import get_wiki_page
@@ -210,6 +211,57 @@ def test_parse_git_diff_ranges_real_git(git_repo: Path) -> None:
     for start, end in ranges["hello.py"]:
         assert start >= 1
         assert end >= start
+
+
+def test_review_base_excludes_commits_unique_to_base_branch(tmp_path: Path) -> None:
+    """A branch review should compare from the common ancestor, not base tip."""
+    repo = _init_repo(tmp_path)
+
+    _git_ok(repo, "checkout", "-b", "feature")
+    _commit_file(repo, "feature_only")
+
+    _git_ok(repo, "checkout", "main")
+    _commit_file(repo, "base_only")
+    base_tip = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    _git_ok(repo, "update-ref", "refs/remotes/origin/main", base_tip)
+    _git_ok(repo, "tag", "base-release")
+    _git_ok(repo, "checkout", "feature")
+
+    # A two-dot diff against the current base tip wrongly attributes both
+    # sides of the divergence to the feature branch.
+    assert set(get_changed_files(repo, "main")) == {
+        "base_only.py",
+        "feature_only.py",
+    }
+
+    review_base = resolve_review_base(repo, "main")
+    assert review_base == _git_ok(repo, "merge-base", "main", "HEAD").stdout.strip()
+    assert resolve_review_base(repo, "origin/main") == review_base
+    assert get_changed_files(repo, review_base) == ["feature_only.py"]
+    assert set(parse_git_diff_ranges(str(repo), review_base)) == {"feature_only.py"}
+
+    # A caller can still request an exact two-tip comparison with a commit ID.
+    assert resolve_review_base(repo, base_tip) == base_tip
+    assert resolve_review_base(repo, "base-release") == "base-release"
+    assert resolve_review_base(repo, "HEAD~1") == "HEAD~1"
+
+
+def test_review_base_falls_back_when_merge_base_is_unavailable(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shallow or incomplete history must retain the caller's original base."""
+    real_run = subprocess.run
+
+    def fail_merge_base(*args, **kwargs):
+        command = args[0]
+        if command[:2] == ["git", "merge-base"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="no ancestor")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr("code_review_graph.incremental.subprocess.run", fail_merge_base)
+
+    branch = _git_ok(git_repo, "branch", "--show-current").stdout.strip()
+    assert resolve_review_base(git_repo, branch) == branch
 
 
 # ------------------------------------------------------------------
