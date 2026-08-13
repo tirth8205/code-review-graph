@@ -311,6 +311,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
+        install_codex_skill,
         install_cursor_hooks,
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
@@ -319,8 +320,14 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_opencode_plugin,
         install_qoder_skills,
     )
-
     if not skip_skills:
+        codex_detected = target == "codex" or (
+            target == "all" and PLATFORMS["codex"]["detect"]()
+        )
+        if codex_detected:
+            codex_skill_dir = install_codex_skill()
+            print(f"Installed Codex skill in {codex_skill_dir}")
+
         # Claude Code skills are only relevant for Claude (or full install).
         if target in ("claude", "all"):
             skills_dir = generate_skills(repo_root)

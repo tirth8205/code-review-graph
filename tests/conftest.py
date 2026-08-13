@@ -33,4 +33,7 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     """
     home = tmp_path_factory.mktemp("crg-home")
     monkeypatch.setenv("CRG_HOME", str(home))
+    # Codex's user-level installer must never write to the developer's active
+    # runtime during tests. Individual Codex tests opt in with their own value.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     return home

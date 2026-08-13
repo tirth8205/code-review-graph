@@ -16,6 +16,7 @@ else:  # pragma: no cover - Python 3.10 backport
     import tomli as tomllib
 
 from code_review_graph import skills as skills_module
+from code_review_graph.codex_skill import install_codex_skill
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
@@ -559,6 +560,63 @@ class TestInstallCodexHooks:
         assert "hooks" in data
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
+
+    def test_installs_global_skill_under_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        destination = install_codex_skill()
+
+        assert destination == codex_home / "skills" / "code-review-graph"
+        assert (destination / "SKILL.md").is_file()
+        assert (destination / "scripts" / "crg_readonly.py").is_file()
+        assert (destination / "agents" / "openai.yaml").is_file()
+        assert (destination / ".code-review-graph-managed.json").is_file()
+
+    def test_global_skill_install_is_idempotent_and_preserves_unrelated_files(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        destination = install_codex_skill()
+        custom = destination / "notes.txt"
+        custom.write_text("keep\n", encoding="utf-8")
+        first = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+
+        install_codex_skill()
+
+        second = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+        assert second == first
+        assert custom.read_text(encoding="utf-8") == "keep\n"
+
+    def test_unmarked_conflicting_skill_is_not_overwritten(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        skill = destination / "SKILL.md"
+        skill.write_text("user-owned\n", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_codex_skill()
+
+        assert skill.read_text(encoding="utf-8") == "user-owned\n"
+
+    def test_codex_platform_config_honors_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_platform_configs(tmp_path, target="codex")
+
+        assert (codex_home / "config.toml").is_file()
+        assert "[mcp_servers.code-review-graph]" in (
+            codex_home / "config.toml"
+        ).read_text(encoding="utf-8")
 
     def test_merges_with_existing(self, tmp_path, monkeypatch):
         # Path.home() ignores HOME on Windows; patch it like the cursor tests do.
@@ -2406,6 +2464,12 @@ class TestInstallSkillsRespectTargetPlatform:
 
     def test_all_target_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "all") is True
+
+    def test_codex_install_creates_global_skill(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        self._run_install(tmp_path, "codex")
+        assert (codex_home / "skills" / "code-review-graph" / "SKILL.md").is_file()
 
 
 class TestNonAsciiConfigPreservation:

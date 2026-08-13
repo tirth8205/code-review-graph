@@ -899,11 +899,19 @@ def _remove_gitignore(
         )
 
 
-def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Path] | None:
+def _scope_for_config(
+    path: Path,
+    repo_root: Path,
+    home: Path,
+    extra_user_boundaries: Sequence[Path] = (),
+) -> tuple[str, Path] | None:
     if _is_lexical_child(path, repo_root):
         return "repo", repo_root
     if _is_lexical_child(path, home):
         return "user", home
+    for boundary in extra_user_boundaries:
+        if _is_lexical_child(path, boundary):
+            return "user", boundary
     return None
 
 
@@ -917,6 +925,13 @@ def _process_platform_configs(
     platforms: frozenset[str] | None = None,
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
+    active_codex_home: Path | None = None
+    if platforms is None or "codex" in platforms:
+        from .codex_skill import codex_home
+
+        active_codex_home = codex_home()
+    else:
+        active_codex_home = None
     for platform_name, spec in skills.PLATFORMS.items():
         if platforms is not None and platform_name not in platforms:
             continue
@@ -929,7 +944,12 @@ def _process_platform_configs(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
             continue
-        destination = _scope_for_config(path, repo_root, home)
+        destination = _scope_for_config(
+            path,
+            repo_root,
+            home,
+            (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
+        )
         if destination is None:
             if path.exists():
                 report.skipped_paths.append(
@@ -1156,14 +1176,28 @@ def _process_user(
     else:
         _remove_tree(user_data, home, report, dry_run=dry_run)
 
+    from .codex_skill import codex_home, codex_skill_dir, owned_skill_files
+
+    active_codex_home = codex_home()
+    # ``_process_platform_configs`` already handles the active CODEX_HOME via
+    # the live platform registry. Keep hook/skill cleanup in the same directory
+    # and use that directory itself as the deletion boundary.
     _remove_hooks(
-        home / ".codex" / "hooks.json",
+        active_codex_home / "hooks.json",
         _commands(skills.generate_codex_hooks_config(reference_repo))
         | _legacy_codex_hook_commands(),
-        home,
+        active_codex_home,
         report,
         dry_run=dry_run,
     )
+    skill_dir = codex_skill_dir()
+    for owned_path in owned_skill_files(skill_dir):
+        _remove_skill_file(
+            owned_path,
+            active_codex_home,
+            report,
+            dry_run=dry_run,
+        )
     _remove_hooks(
         home / ".cursor" / "hooks.json",
         _commands(skills.generate_cursor_hooks_config()),
