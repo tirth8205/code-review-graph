@@ -100,6 +100,7 @@ def _run_postprocess(
     stage_started = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
+        signature_rows: list[tuple[str, int]] = []
         for row in rows:
             node_id, name, kind, params, ret = (
                 row[0],
@@ -116,8 +117,10 @@ def _run_postprocess(
                 sig = f"class {name}"
             else:
                 sig = name
-            store.update_node_signature(node_id, sig[:512])
-        store.commit()
+            signature_rows.append((sig[:512], node_id))
+        # Single transaction via executemany instead of one autocommitted
+        # UPDATE per node (issue #721).
+        store.update_node_signatures(signature_rows)
         build_result["signatures_updated"] = True
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
@@ -618,6 +621,7 @@ def run_postprocess(
 
         try:
             rows = store.get_nodes_without_signature()
+            signature_rows: list[tuple[str, int]] = []
             for row in rows:
                 node_id, name, kind, params, ret = (
                     row[0],
@@ -634,8 +638,10 @@ def run_postprocess(
                     sig = f"class {name}"
                 else:
                     sig = name
-                store.update_node_signature(node_id, sig[:512])
-            store.commit()
+                signature_rows.append((sig[:512], node_id))
+            # Single transaction via executemany instead of one autocommitted
+            # UPDATE per node (issue #721).
+            store.update_node_signatures(signature_rows)
             result["signatures_updated"] = True
         except (sqlite3.OperationalError, TypeError, KeyError) as e:
             logger.warning("Signature computation failed: %s", e)
