@@ -84,7 +84,7 @@ def refactor_func(
                 **preview,
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 
@@ -99,7 +99,7 @@ def refactor_func(
                 "total": len(dead),
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 
@@ -115,7 +115,7 @@ def refactor_func(
                 "total": len(suggestions),
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 
@@ -165,4 +165,7 @@ def apply_refactor_func(
         return {"status": "error", "error": str(exc)}
 
     result = apply_refactor(refactor_id, root, dry_run=dry_run)
+    result["_hints"] = generate_hints(
+        "apply_refactor_tool", result, get_session()
+    )
     return result

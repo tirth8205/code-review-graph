@@ -39,11 +39,11 @@ class TestReviewChangesPrompt:
 
     def test_mentions_detect_changes(self):
         result = review_changes_prompt()
-        assert "detect_changes" in _text(result[0])
+        assert "detect_changes_tool" in _text(result[0])
 
     def test_mentions_affected_flows(self):
         result = review_changes_prompt()
-        assert "affected_flows" in _text(result[0])
+        assert "get_affected_flows_tool" in _text(result[0])
 
     def test_mentions_test_gaps(self):
         result = review_changes_prompt()
@@ -96,11 +96,11 @@ class TestDebugIssuePrompt:
 
     def test_mentions_search(self):
         result = debug_issue_prompt(description="test issue")
-        assert "semantic_search_nodes" in _text(result[0])
+        assert "semantic_search_nodes_tool" in _text(result[0])
 
     def test_mentions_get_minimal_context(self):
         result = debug_issue_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])
 
 
 class TestOnboardDeveloperPrompt:
@@ -118,7 +118,7 @@ class TestOnboardDeveloperPrompt:
 
     def test_mentions_stats(self):
         result = onboard_developer_prompt()
-        assert "list_graph_stats" in _text(result[0])
+        assert "list_graph_stats_tool" in _text(result[0])
 
     def test_mentions_architecture(self):
         result = onboard_developer_prompt()
@@ -158,13 +158,21 @@ class TestPreMergeCheckPrompt:
         result = pre_merge_check_prompt()
         assert "risk" in _text(result[0]).lower()
 
+    def test_mentions_related_symbol_search(self):
+        result = pre_merge_check_prompt()
+        assert "semantic_search_nodes_tool" in _text(result[0])
+
     def test_mentions_test_gaps(self):
         result = pre_merge_check_prompt()
-        assert "tests_for" in _text(result[0])
+        assert "query_graph_tool" in _text(result[0])
 
-    def test_mentions_dead_code(self):
+    def test_mentions_dead_code_mode(self):
         result = pre_merge_check_prompt()
-        assert "dead_code" in _text(result[0])
+        assert 'refactor_tool(mode="dead_code"' in _text(result[0])
+
+    def test_mentions_large_functions_tool(self):
+        result = pre_merge_check_prompt()
+        assert "find_large_functions_tool" in _text(result[0])
 
 
 class TestTokenEfficiencyPreamble:
@@ -172,21 +180,21 @@ class TestTokenEfficiencyPreamble:
 
     def test_review_has_preamble(self):
         result = review_changes_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])
         assert "detail_level" in _text(result[0])
 
     def test_architecture_has_preamble(self):
         result = architecture_map_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])
 
     def test_debug_has_preamble(self):
         result = debug_issue_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])
 
     def test_onboard_has_preamble(self):
         result = onboard_developer_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])
 
     def test_pre_merge_has_preamble(self):
         result = pre_merge_check_prompt()
-        assert "get_minimal_context" in _text(result[0])
+        assert "get_minimal_context_tool" in _text(result[0])

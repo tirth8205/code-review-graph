@@ -680,20 +680,20 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Explore Codebase\n\n"
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
-            "1. Run `list_graph_stats` to see overall codebase metrics.\n"
+            "1. Run `list_graph_stats_tool` to see overall codebase metrics.\n"
             "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
-            "3. Use `list_communities_tool` to find major modules, then `get_community` "
+            "3. Use `list_communities_tool` to find major modules, then `get_community_tool` "
             "for details.\n"
             "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
             "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
             "`imports_of` to trace relationships.\n"
-            "6. Use `list_flows` and `get_flow` to understand execution paths.\n\n"
+            "6. Use `list_flows_tool` and `get_flow_tool` to understand execution paths.\n\n"
             "### Tips\n\n"
             "- Start broad (stats, architecture) then narrow down to specific areas.\n"
             "- Use `children_of` on a file to see all its functions and classes.\n"
-            "- Use `find_large_functions` to identify complex code.\n\n"
+            "- Use `find_large_functions_tool` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -721,7 +721,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -739,7 +739,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
             "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
-            "3. Use `get_flow` to see full execution paths through suspected areas.\n"
+            "3. Use `get_flow_tool` to see full execution paths through suspected areas.\n"
             "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
             "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
             "### Tips\n\n"
@@ -747,7 +747,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -773,9 +773,9 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Always preview before applying (rename mode gives you an edit list).\n"
             "- Check `get_impact_radius_tool` before major refactors.\n"
             "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
-            "- Run `find_large_functions` to identify decomposition targets.\n\n"
+            "- Run `find_large_functions_tool` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'

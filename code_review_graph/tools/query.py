@@ -765,7 +765,7 @@ def semantic_search_nodes(
             "results": results,
         }
         result["_hints"] = generate_hints(
-            "semantic_search_nodes", result, get_session()
+            "semantic_search_nodes_tool", result, get_session()
         )
         return result
     finally:
