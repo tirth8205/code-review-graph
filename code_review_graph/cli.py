@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
 ]
 
 
@@ -315,6 +315,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
@@ -335,6 +336,11 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target in ("codebuddy", "all"):
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
             print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+
+        # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
+        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+            hermes_skills_dir = install_hermes_skills(repo_root)
+            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.

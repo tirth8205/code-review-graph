@@ -36,6 +36,10 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
+    # conftest pins HERMES_HOME to its own temp dir so no test can reach the
+    # real config. Re-point it inside this fake home so the Hermes platform
+    # is exercised within the user-scope boundary uninstall enforces.
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
     return home
 
 
@@ -64,6 +68,16 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
             "command = \"code-review-graph\"\n\n"
             "[mcp_servers.other]\ncommand = \"other\"\n",
         )
+    elif spec["format"] == "yaml":
+        _write(
+            config_path,
+            "theme: dark\n\n"
+            f"{spec['key']}:\n"
+            "  code-review-graph:\n"
+            "    command: code-review-graph\n"
+            "  other:\n"
+            "    url: https://example.test/mcp\n",
+        )
     else:
         if spec["format"] == "array":
             container: object = [
@@ -85,6 +99,12 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
         assert 'theme = "dark"' in text
+    elif spec["format"] == "yaml":
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert set(data[spec["key"]]) == {"other"}
+        assert data["theme"] == "dark"
     else:
         data = _read_jsonc(config_path)
         container = data[spec["key"]]
