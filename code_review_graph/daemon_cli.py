@@ -23,6 +23,21 @@ import time
 logger = logging.getLogger(__name__)
 
 
+def _configure_utf8_stdio() -> None:
+    """Allow Unicode daemon output on streams using a legacy encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding or encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Subcommand handlers
 # ---------------------------------------------------------------------------
@@ -78,6 +93,12 @@ def _handle_stop(_args: argparse.Namespace) -> None:
     except PermissionError:
         print(f"Error: Permission denied sending signal to PID {pid}.")
         sys.exit(1)
+    except OSError:
+        # Windows can report WinError 87 when a PID vanishes during the
+        # terminate syscall. Treat that narrow race like ProcessLookupError.
+        clear_pid()
+        print("Daemon stopped (process already gone).")
+        return
 
     try:
         # Wait up to 5 seconds for process to die.
@@ -90,7 +111,7 @@ def _handle_stop(_args: argparse.Namespace) -> None:
             force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
             try:
                 os.kill(pid, force_signal)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
                 pass
     finally:
         clear_pid()
@@ -236,6 +257,7 @@ def _handle_remove(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the crg-daemon CLI."""
+    _configure_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     ap = argparse.ArgumentParser(

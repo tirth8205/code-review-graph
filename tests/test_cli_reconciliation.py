@@ -483,7 +483,8 @@ def test_dead_code_missing_graph_exits_nonzero(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / ".git").mkdir()
-    monkeypatch.setenv("CRG_DATA_DIR", str(tmp_path / "missing-data"))
+    data_dir = tmp_path / "missing-data"
+    monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
     argv = ["code-review-graph", "dead-code", "--repo", str(repo)]
 
     with patch.object(sys, "argv", argv):
@@ -492,3 +493,4 @@ def test_dead_code_missing_graph_exits_nonzero(tmp_path, monkeypatch, capsys):
 
     assert exc_info.value.code == 1
     assert "No graph found" in capsys.readouterr().err
+    assert not data_dir.exists()

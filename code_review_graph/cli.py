@@ -1658,7 +1658,10 @@ def main() -> None:
             # materialize graph state when neither database exists.
             db_path = get_db_path(repo_root)
     else:
-        db_path = get_db_path(repo_root)
+        db_path = get_db_path(
+            repo_root,
+            read_only=args.command in ("dead-code", "forget"),
+        )
     if (
         args.command in ("dead-code", "forget", *_read_only_db_cmds)
         and not db_path.exists()

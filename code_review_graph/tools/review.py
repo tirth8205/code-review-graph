@@ -331,6 +331,7 @@ def get_affected_flows_func(
                 "summary": "No changed files detected.",
                 "affected_flows": [],
                 "total": 0,
+                "truncated": False,
             }
 
         # Convert to absolute paths for graph lookup. Graph identity uses
