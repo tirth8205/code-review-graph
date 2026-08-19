@@ -1,6 +1,6 @@
 """SQLite-backed knowledge graph storage and query engine.
 
-Stores code structure as nodes (File, Class, Function, Type, Test) and
+Stores code structure as nodes (File, Class, Function, Type, Test, YamlPath) and
 edges (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES).
 Supports impact-radius queries and subgraph extraction.
 """
@@ -2217,7 +2217,7 @@ def _sanitize_name(s: str, max_len: int = 256) -> str:
 
 
 def node_to_dict(n: GraphNode) -> dict:
-    return {
+    result = {
         "id": n.id, "kind": n.kind, "name": _sanitize_name(n.name),
         "qualified_name": _sanitize_name(n.qualified_name), "file_path": n.file_path,
         "line_start": n.line_start, "line_end": n.line_end,
@@ -2225,6 +2225,86 @@ def node_to_dict(n: GraphNode) -> dict:
         "parent_name": _sanitize_name(n.parent_name) if n.parent_name else n.parent_name,
         "is_test": n.is_test,
     }
+    if n.kind == "YamlPath":
+        yaml_metadata: dict[str, Any] = {}
+        for key in (
+            "schema_path",
+            "example_path",
+            "value_type",
+        ):
+            value = n.extra.get(key)
+            if isinstance(value, str):
+                yaml_metadata[key] = _sanitize_name(value)
+        for key in (
+            "document_index",
+            "occurrence_count",
+            "duplicate_key_occurrence_count",
+            "duplicate_group_count",
+        ):
+            value = n.extra.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                yaml_metadata[key] = value
+        for key in (
+            "duplicate_key",
+            "duplicate_groups_truncated",
+            "is_alias",
+            "anchor_definition",
+            "yaml_merge",
+            "lines_truncated",
+        ):
+            value = n.extra.get(key)
+            if isinstance(value, bool):
+                yaml_metadata[key] = value
+        value_types = n.extra.get("value_types")
+        if isinstance(value_types, list):
+            yaml_metadata["value_types"] = [
+                _sanitize_name(value)
+                for value in value_types[:20]
+                if isinstance(value, str)
+            ]
+        line_samples = n.extra.get("line_samples")
+        if isinstance(line_samples, list):
+            yaml_metadata["line_samples"] = [
+                line for line in line_samples[:20]
+                if isinstance(line, int) and not isinstance(line, bool)
+            ]
+            occurrence_count = n.extra.get("occurrence_count", len(line_samples))
+            if isinstance(occurrence_count, int) and not isinstance(occurrence_count, bool):
+                yaml_metadata["line_samples_omitted"] = max(
+                    0,
+                    occurrence_count - len(yaml_metadata["line_samples"]),
+                )
+        result["yaml"] = yaml_metadata
+    elif n.kind == "File" and "values_indexed" in n.extra:
+        file_yaml_metadata: dict[str, Any] = {
+            "document_count": n.extra.get("yaml_document_count", 0),
+            "duplicate_key_count": n.extra.get("yaml_duplicate_key_count", 0),
+            "unsupported_key_count": n.extra.get("yaml_unsupported_key_count", 0),
+            "truncated": bool(n.extra.get("yaml_truncated")),
+            "values_indexed": False,
+        }
+        duplicate_keys = n.extra.get("yaml_duplicate_keys")
+        if isinstance(duplicate_keys, list):
+            safe_duplicate_keys: list[dict[str, Any]] = []
+            for item in duplicate_keys[:100]:
+                if not isinstance(item, dict):
+                    continue
+                item_lines = item.get("line_samples")
+                if not isinstance(item_lines, list):
+                    item_lines = []
+                safe_duplicate_keys.append({
+                    "document_index": item.get("document_index"),
+                    "path": _sanitize_name(str(item.get("path", ""))),
+                    "occurrence_count": item.get("occurrence_count"),
+                    "line_samples": [
+                        line for line in item_lines[:20]
+                        if isinstance(line, int) and not isinstance(line, bool)
+                    ],
+                    "lines_truncated": bool(item.get("lines_truncated")),
+                })
+            file_yaml_metadata["duplicate_keys"] = safe_duplicate_keys
+        result["yaml"] = file_yaml_metadata
+    return result
 
 
 def edge_to_dict(e: GraphEdge) -> dict:

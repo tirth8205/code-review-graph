@@ -158,7 +158,7 @@ The bigger the repository, the more token waste hurts. Instead of feeding a whol
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage organized by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebook support" width="90%" />
 </p>
 
-Parser support covers functions, classes, imports, call sites, inheritance, and test detection across the current parser surface, using Tree-sitter where available and targeted fallbacks where needed. Current support includes Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu structure (`.tf`; generic `.hcl` files are recognized as file nodes), Ansible playbooks/roles/tasks, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Generic YAML is not treated as source code.
+Parser support covers functions, classes, imports, call sites, inheritance, and test detection across the current parser surface, using Tree-sitter where available and targeted fallbacks where needed. Current support includes Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu structure (`.tf`; generic `.hcl` files are recognized as file nodes), Ansible playbooks/roles/tasks, value-free generic YAML structure, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
 PHP projects additionally get repository-bounded Composer PSR-4 resolution,
 Blade template references, and Laravel Route/Eloquent semantic edges when the
@@ -294,7 +294,7 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 | Feature | Details |
 |---------|---------|
 | **Incremental updates** | Re-parses only the files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
-| **Broad language + notebook support** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu structure (`.tf`; generic `.hcl` files are file-only), Ansible playbooks/roles/tasks, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks (.ipynb), and Perl XS (.xs) |
+| **Broad language + notebook support** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu structure (`.tf`; generic `.hcl` files are file-only), Ansible playbooks/roles/tasks, value-free generic YAML structure, Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks (.ipynb), and Perl XS (.xs) |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, and evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Blast-radius analysis** | Shows which functions, classes, and files are likely affected by a change |
 | **Auto-update hooks** | Hooks and watch mode can update the graph on file saves and supported commit hooks |
@@ -315,7 +315,7 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 | **Execution flows** | Trace call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
 | **Architecture overview** | Auto-generated architecture map with coupling warnings |
-| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows, and test gaps |
+| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, YAML paths, flows, and test gaps |
 | **Custom languages** | Add new languages via `.code-review-graph/languages.toml` — no fork or code changes needed |
 | **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |

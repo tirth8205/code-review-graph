@@ -93,7 +93,7 @@ repo_root: str | None
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test
+kind: str | None     # File, Class, Function, Type, Test, YamlPath
 limit: int = 20
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
@@ -117,7 +117,7 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count threshold
-kind: str | None                   # File, Class, Function, or Test
+kind: str | None                   # File, Class, Function, Test, or YamlPath
 file_path_pattern: str | None      # Filter by file path substring
 limit: int = 50                    # Max results to return
 repo_root: str | None
@@ -220,7 +220,7 @@ max_depth: int = 2
 repo_root: str | None
 detail_level: str = "standard"
 ```
-Primary tool for code review. Maps changed files to affected functions, flows, communities, and test coverage gaps. Returns risk scores and prioritized review items.
+Primary tool for code review. Maps changed files to affected functions, YAML paths, flows, communities, and test coverage gaps. Returns `changed_yaml_paths` separately from function risk/test-gap scoring, plus risk scores and prioritized code review items.
 Relevant responses may include compact estimated `context_savings` metadata.
 
 #### `refactor_tool`

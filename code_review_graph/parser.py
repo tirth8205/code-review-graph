@@ -36,9 +36,11 @@ try:
     from yaml import MappingNode as _YamlMapping
     from yaml import ScalarNode as _YamlScalar
     from yaml import SequenceNode as _YamlSequence
+    from yaml.events import AliasEvent as _YamlAliasEvent  # type: ignore[import-untyped]
 except ImportError:
     _yaml = None  # type: ignore[assignment]
     _YamlMapping = _YamlSequence = _YamlScalar = None  # type: ignore[assignment,misc]
+    _YamlAliasEvent = None  # type: ignore[assignment,misc]
 
 from .tsconfig_resolver import TsconfigResolver
 
@@ -2375,6 +2377,30 @@ def _yaml_scalar(node: object) -> Optional[str]:
     return None
 
 
+_YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+
+def _yaml_path_child(prefix: str, segment: str) -> str:
+    """Append a mapping key to a path without making dotted keys ambiguous."""
+    if _YAML_SIMPLE_PATH_SEGMENT.fullmatch(segment):
+        return f"{prefix}.{segment}" if prefix else segment
+    quoted = json.dumps(segment, ensure_ascii=False)
+    return f"{prefix}[{quoted}]" if prefix else f"[{quoted}]"
+
+
+def _yaml_value_type(node: object) -> str:
+    """Return a bounded structural/scalar type label without exposing its value."""
+    if isinstance(node, _YamlMapping):
+        return "mapping"
+    if isinstance(node, _YamlSequence):
+        return "sequence"
+    tag = str(getattr(node, "tag", ""))
+    scalar_type = tag.rsplit(":", 1)[-1]
+    if scalar_type in {"binary", "bool", "float", "int", "null", "str", "timestamp"}:
+        return scalar_type
+    return "scalar"
+
+
 def _ansible_is_play_item(item: object) -> bool:
     """True if this top-level sequence item is a definitive Ansible play or playbook import.
 
@@ -2404,6 +2430,12 @@ class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
+    _MAX_YAML_DEPTH = 100
+    _MAX_YAML_NODES = 10_000
+    _MAX_YAML_PATH_LENGTH = 512
+    _MAX_YAML_OCCURRENCE_SAMPLES = 10_000
+    _MAX_YAML_DUPLICATE_GROUP_SAMPLES = 100
+    _MAX_YAML_DUPLICATE_LINE_SAMPLES = 20
     _BLADE_COMMENT_RE = re.compile(r"\{\{--.*?(?:--\}\}|$)", re.DOTALL)
     _BLADE_DIRECTIVE_RE = re.compile(
         r"""(?<!@)@(extends|include|component|livewire)\s*\(\s*(['"])([^'"]+)\2\s*\)""",
@@ -2668,7 +2700,9 @@ class CodeParser:
         if language == "sql":
             return self._parse_sql(path, source)
 
-        # Ansible YAML: path heuristic promoted to "ansible".
+        # Ansible YAML: path heuristic promoted to "ansible". A directory
+        # name alone is not enough evidence; fall back to generic YAML so a
+        # repository's ordinary tasks/*.yml files still get structural nodes.
         if language == "ansible":
             if _yaml is None:
                 return [], []
@@ -2679,7 +2713,7 @@ class CodeParser:
             # directory names, so require Ansible content evidence there.
             if file_type in ("vars", "meta") or _is_ansible_content(source):
                 return self._parse_ansible(path, source)
-            return [], []
+            return self._parse_yaml(path, source)
 
         # Spring configuration: only conventional application files reach
         # this branch. Generic YAML and arbitrary .properties files stay out.
@@ -2688,11 +2722,18 @@ class CodeParser:
                 return [], []
             if path.suffix.lower() in (".yaml", ".yml") and _is_ansible_content(source):
                 return self._parse_ansible(path, source)
-            return self._parse_spring_config(path, source)
+            spring_nodes, spring_edges = self._parse_spring_config(path, source)
+            if spring_nodes or path.suffix.lower() == ".properties":
+                return spring_nodes, spring_edges
+            return self._parse_yaml(path, source)
 
-        # Generic YAML: no tree-sitter grammar bundled; skip.
+        # Generic YAML: index paths and structure while deliberately discarding
+        # scalar values. PyYAML is already a runtime dependency for the
+        # specialised Ansible and Spring parsers.
         if language == "yaml":
-            return [], []
+            if _yaml is None:
+                return [], []
+            return self._parse_yaml(path, source)
 
         if parser is None:
             parser = self._get_parser(language)
@@ -5536,6 +5577,553 @@ class CodeParser:
         return None
 
     # -----------------------------------------------------------------------
+    # Generic YAML parser
+    # -----------------------------------------------------------------------
+
+    def _parse_yaml(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index generic YAML structure while deliberately discarding values.
+
+        Repeated sequence shapes are aggregated under ``[*]`` paths to keep
+        large configuration repositories bounded. Nodes retain occurrence and
+        source-line samples, while duplicate keys and aliases receive explicit
+        diagnostics. Scalar values never enter node or edge metadata.
+        """
+        text = source.decode("utf-8", errors="replace")
+        try:
+            documents = list(_yaml.compose_all(text))
+            yaml_events = list(_yaml.parse(text))
+            anchor_definitions = {
+                event.start_mark.index: str(event.anchor)
+                for event in yaml_events
+                if not isinstance(event, _YamlAliasEvent)
+                and getattr(event, "anchor", None) is not None
+            }
+            alias_lines_by_anchor: dict[str, list[int]] = {}
+            for event in yaml_events:
+                if isinstance(event, _YamlAliasEvent):
+                    alias_lines_by_anchor.setdefault(str(event.anchor), []).append(
+                        event.start_mark.line + 1,
+                    )
+        except (_yaml.YAMLError, RecursionError) as exc:
+            logger.debug("YAML parse error in %s: %s", path, exc)
+            return [], []
+
+        file_path = normalize_file_path(path)
+        file_extra: dict[str, Any] = {
+            "config_format": path.suffix.lower().lstrip("."),
+            "yaml_document_count": len(documents),
+            "yaml_duplicate_key_count": 0,
+            "yaml_duplicate_keys": [],
+            "yaml_unsupported_key_count": 0,
+            "yaml_truncated": False,
+            "values_indexed": False,
+        }
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=source.count(b"\n") + 1,
+            language="yaml",
+            extra=file_extra,
+        )]
+        edges: list[EdgeInfo] = []
+        shared_targets: dict[int, str] = {}
+        shared_anchor_names: dict[int, str] = {}
+        path_nodes: dict[tuple[int, str], NodeInfo] = {}
+        path_value_types: dict[tuple[int, str], set[str]] = {}
+        path_key_tags: dict[tuple[int, str], set[str]] = {}
+        contains_edges: set[tuple[str, str]] = set()
+        duplicate_summaries: list[dict[str, Any]] = []
+        duplicate_count = 0
+        unsupported_key_count = 0
+        alias_indices: dict[str, int] = {}
+        truncated = False
+
+        def qualified(schema_path: str, document_index: int) -> str:
+            return f"{file_path}::yaml:{document_index}:{schema_path}"
+
+        def can_emit(
+            schema_path: str,
+            depth: int,
+            *source_paths: str,
+        ) -> bool:
+            nonlocal truncated
+            if (
+                len(nodes) - 1 >= self._MAX_YAML_NODES
+                or depth > self._MAX_YAML_DEPTH
+                or len(schema_path) > self._MAX_YAML_PATH_LENGTH
+                or any(
+                    len(source_path) > self._MAX_YAML_PATH_LENGTH
+                    for source_path in source_paths
+                )
+            ):
+                truncated = True
+                return False
+            return True
+
+        def add_contains(parent: str, target: str, line: int) -> None:
+            edge_key = (parent, target)
+            if edge_key in contains_edges:
+                return
+            contains_edges.add(edge_key)
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=parent,
+                target=target,
+                file_path=file_path,
+                line=line,
+            ))
+
+        def next_alias_line(value_node: object, fallback: int) -> int:
+            anchor_name = shared_anchor_names.get(id(value_node))
+            if anchor_name is None:
+                return fallback
+            lines = alias_lines_by_anchor.get(anchor_name, [])
+            alias_index = alias_indices.get(anchor_name, 0)
+            if alias_index >= len(lines):
+                return fallback
+            line = lines[alias_index]
+            alias_indices[anchor_name] = alias_index + 1
+            return line
+
+        def emit_alias(
+            value_node: object,
+            exact_path: str,
+            schema_path: str,
+            identity_path: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            line_start: int,
+            line_end: int,
+            extra: dict[str, Any],
+            yaml_merge: bool,
+            line_is_key: bool,
+        ) -> None:
+            if not can_emit(schema_path, depth, exact_path, identity_path):
+                return
+            original_target = shared_targets[id(value_node)]
+            reference_line = next_alias_line(value_node, line_start)
+            node_line_start = min(line_start, reference_line) if line_is_key else reference_line
+            node_line_end = max(node_line_start, line_end, reference_line)
+            alias_identity = f"alias:{identity_path}@{reference_line}"
+            target = qualified(alias_identity, document_index)
+            nodes.append(NodeInfo(
+                kind="YamlPath",
+                name=exact_path,
+                file_path=file_path,
+                line_start=node_line_start,
+                line_end=node_line_end,
+                language="yaml",
+                extra={
+                    "document_index": document_index,
+                    "path": exact_path,
+                    "schema_path": schema_path,
+                    "source_file": path.name,
+                    "value_type": "alias",
+                    "is_alias": True,
+                    "yaml_merge": yaml_merge,
+                    **extra,
+                },
+                identity_name=f"yaml:{document_index}:{alias_identity}",
+            ))
+            add_contains(parent_qualified, target, node_line_start)
+            edges.append(EdgeInfo(
+                kind="REFERENCES",
+                source=target,
+                target=original_target,
+                file_path=file_path,
+                line=reference_line,
+                extra={"yaml_alias": True, "yaml_merge": yaml_merge},
+            ))
+
+        def emit_node(
+            value_node: object,
+            exact_path: str,
+            schema_path: str,
+            identity_path: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            line_start: int,
+            line_end: int,
+            extra: dict[str, Any],
+            ancestors: frozenset[int],
+            yaml_merge: bool = False,
+            line_is_key: bool = False,
+        ) -> None:
+            if not can_emit(schema_path, depth, exact_path, identity_path):
+                return
+            value_id = id(value_node)
+            if value_id in shared_targets:
+                emit_alias(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    line_start,
+                    line_end,
+                    extra,
+                    yaml_merge,
+                    line_is_key,
+                )
+                return
+
+            node_mark = getattr(value_node, "start_mark", None)
+            anchor_name = anchor_definitions.get(getattr(node_mark, "index", -1))
+            if anchor_name is not None:
+                anchor_identity = (
+                    f"anchor:{getattr(node_mark, 'index', line_start)}:{identity_path}"
+                )
+                target = qualified(anchor_identity, document_index)
+                value_type = _yaml_value_type(value_node)
+                node_extra = {
+                    "document_index": document_index,
+                    "path": schema_path,
+                    "schema_path": schema_path,
+                    "example_path": exact_path,
+                    "source_file": path.name,
+                    "value_type": value_type,
+                    "value_types": [value_type],
+                    "occurrence_count": 1,
+                    "line_samples": [line_start],
+                    "range_samples": [[line_start, max(line_start, line_end)]],
+                    "lines_truncated": False,
+                    "is_alias": False,
+                    "anchor_definition": True,
+                    **extra,
+                }
+                key_tag = extra.get("key_tag")
+                if isinstance(key_tag, str):
+                    node_extra["key_tags"] = [key_tag]
+                if extra.get("duplicate_key"):
+                    node_extra["duplicate_key_occurrence_count"] = 1
+                    if extra.get("duplicate_group_start"):
+                        node_extra["duplicate_group_count"] = 1
+                        node_extra["duplicate_group_samples"] = [
+                            extra["duplicate_group"],
+                        ]
+                nodes.append(NodeInfo(
+                    kind="YamlPath",
+                    name=schema_path,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=max(line_start, line_end),
+                    language="yaml",
+                    extra=node_extra,
+                    identity_name=f"yaml:{document_index}:{anchor_identity}",
+                ))
+                add_contains(parent_qualified, target, line_start)
+                shared_targets[value_id] = target
+                shared_anchor_names[value_id] = anchor_name
+                value_ancestors = ancestors | {value_id}
+                if isinstance(value_node, _YamlMapping):
+                    visit_mapping(
+                        value_node,
+                        exact_path,
+                        schema_path,
+                        identity_path,
+                        target,
+                        document_index,
+                        depth + 1,
+                        value_ancestors,
+                    )
+                elif isinstance(value_node, _YamlSequence):
+                    visit_sequence(
+                        value_node,
+                        exact_path,
+                        schema_path,
+                        identity_path,
+                        target,
+                        document_index,
+                        depth + 1,
+                        value_ancestors,
+                        merge_context=yaml_merge or bool(extra.get("merge_key")),
+                    )
+                return
+
+            path_key = (document_index, schema_path)
+            node = path_nodes.get(path_key)
+            if node is None:
+                target = qualified(schema_path, document_index)
+                value_type = _yaml_value_type(value_node)
+                node_extra = {
+                    "document_index": document_index,
+                    "path": schema_path,
+                    "schema_path": schema_path,
+                    "example_path": exact_path,
+                    "source_file": path.name,
+                    "value_type": value_type,
+                    "value_types": [value_type],
+                    "occurrence_count": 1,
+                    "line_samples": [line_start],
+                    "range_samples": [[line_start, max(line_start, line_end)]],
+                    "lines_truncated": False,
+                    "is_alias": False,
+                    **extra,
+                }
+                node = NodeInfo(
+                    kind="YamlPath",
+                    name=schema_path,
+                    file_path=file_path,
+                    line_start=line_start,
+                    line_end=max(line_start, line_end),
+                    language="yaml",
+                    extra=node_extra,
+                    identity_name=f"yaml:{document_index}:{schema_path}",
+                )
+                nodes.append(node)
+                path_nodes[path_key] = node
+                path_value_types[path_key] = {value_type}
+                key_tag = extra.get("key_tag")
+                path_key_tags[path_key] = {key_tag} if isinstance(key_tag, str) else set()
+                add_contains(parent_qualified, target, line_start)
+            else:
+                add_contains(
+                    parent_qualified,
+                    qualified(schema_path, document_index),
+                    line_start,
+                )
+                node.line_start = min(node.line_start, line_start)
+                node.line_end = max(node.line_end, line_end)
+                node.extra["occurrence_count"] += 1
+                line_samples = node.extra["line_samples"]
+                if len(line_samples) < self._MAX_YAML_OCCURRENCE_SAMPLES:
+                    line_samples.append(line_start)
+                    node.extra["range_samples"].append([
+                        line_start,
+                        max(line_start, line_end),
+                    ])
+                else:
+                    node.extra["lines_truncated"] = True
+                value_types = path_value_types[path_key]
+                value_types.add(_yaml_value_type(value_node))
+                node.extra["value_types"] = sorted(value_types)
+                node.extra["value_type"] = (
+                    next(iter(value_types)) if len(value_types) == 1 else "mixed"
+                )
+                key_tag = extra.get("key_tag")
+                if isinstance(key_tag, str):
+                    key_tags = path_key_tags[path_key]
+                    key_tags.add(key_tag)
+                    node.extra["key_tags"] = sorted(key_tags)
+
+            if extra.get("duplicate_key"):
+                node.extra["duplicate_key"] = True
+                node.extra["duplicate_key_occurrence_count"] = (
+                    node.extra.get("duplicate_key_occurrence_count", 0) + 1
+                )
+                if extra.get("duplicate_group_start"):
+                    node.extra["duplicate_group_count"] = (
+                        node.extra.get("duplicate_group_count", 0) + 1
+                    )
+                    group_samples = node.extra.setdefault("duplicate_group_samples", [])
+                    if len(group_samples) < self._MAX_YAML_DUPLICATE_GROUP_SAMPLES:
+                        group_samples.append(extra["duplicate_group"])
+                    else:
+                        node.extra["duplicate_groups_truncated"] = True
+
+            shared_targets[value_id] = qualified(schema_path, document_index)
+            value_ancestors = ancestors | {value_id}
+            if isinstance(value_node, _YamlMapping):
+                visit_mapping(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    qualified(schema_path, document_index),
+                    document_index,
+                    depth + 1,
+                    value_ancestors,
+                )
+            elif isinstance(value_node, _YamlSequence):
+                visit_sequence(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    qualified(schema_path, document_index),
+                    document_index,
+                    depth + 1,
+                    value_ancestors,
+                    merge_context=yaml_merge or bool(extra.get("merge_key")),
+                )
+
+        def consume_skipped_aliases(
+            skipped_node: object,
+            ancestors: frozenset[int] = frozenset(),
+        ) -> None:
+            """Advance alias positions hidden below unsupported complex keys."""
+            skipped_id = id(skipped_node)
+            if skipped_id in shared_targets:
+                next_alias_line(skipped_node, _yaml_line(skipped_node))
+                return
+            if skipped_id in ancestors:
+                return
+            skipped_ancestors = ancestors | {skipped_id}
+            if isinstance(skipped_node, _YamlMapping):
+                for child_key, child_value in skipped_node.value:
+                    consume_skipped_aliases(child_key, skipped_ancestors)
+                    consume_skipped_aliases(child_value, skipped_ancestors)
+            elif isinstance(skipped_node, _YamlSequence):
+                for child in skipped_node.value:
+                    consume_skipped_aliases(child, skipped_ancestors)
+
+        def visit_mapping(
+            mapping_node: object,
+            exact_prefix: str,
+            schema_prefix: str,
+            identity_prefix: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            ancestors: frozenset[int],
+        ) -> None:
+            nonlocal duplicate_count, unsupported_key_count
+            pairs = list(mapping_node.value)  # type: ignore[attr-defined]
+            key_counts: dict[tuple[str, str], int] = {}
+            key_line_samples: dict[tuple[str, str], list[int]] = {}
+            for key_node, _ in pairs:
+                raw_key = _yaml_scalar(key_node)
+                if raw_key is None:
+                    continue
+                signature = (str(getattr(key_node, "tag", "")), raw_key)
+                key_counts[signature] = key_counts.get(signature, 0) + 1
+                samples = key_line_samples.setdefault(signature, [])
+                if len(samples) < self._MAX_YAML_DUPLICATE_LINE_SAMPLES:
+                    samples.append(_yaml_line(key_node))
+
+            occurrences: dict[tuple[str, str], int] = {}
+            identity_occurrences: dict[str, int] = {}
+            for key_node, value_node in pairs:
+                raw_key = _yaml_scalar(key_node)
+                if raw_key is None:
+                    unsupported_key_count += 1
+                    consume_skipped_aliases(key_node)
+                    consume_skipped_aliases(value_node)
+                    continue
+                key_tag = str(getattr(key_node, "tag", ""))
+                signature = (key_tag, raw_key)
+                occurrence = occurrences.get(signature, 0) + 1
+                occurrences[signature] = occurrence
+                exact_path = _yaml_path_child(exact_prefix, raw_key)
+                schema_path = _yaml_path_child(schema_prefix, raw_key)
+                base_identity = _yaml_path_child(identity_prefix, raw_key)
+                identity_occurrence = identity_occurrences.get(base_identity, 0) + 1
+                identity_occurrences[base_identity] = identity_occurrence
+                identity_path = (
+                    f"{base_identity}#{identity_occurrence}"
+                    if identity_occurrence > 1
+                    else base_identity
+                )
+                duplicate = key_counts[signature] > 1
+                bounded_exact_path = exact_path[: self._MAX_YAML_PATH_LENGTH]
+                duplicate_group = {
+                    "example_path": bounded_exact_path,
+                    "occurrence_count": key_counts[signature],
+                    "line_samples": key_line_samples[signature],
+                    "lines_truncated": (
+                        key_counts[signature] > self._MAX_YAML_DUPLICATE_LINE_SAMPLES
+                    ),
+                }
+                extra: dict[str, Any] = {
+                    "raw_key": raw_key,
+                    "key_tag": key_tag,
+                    "duplicate_key": duplicate,
+                    "key_occurrence": occurrence,
+                }
+                if duplicate:
+                    extra["duplicate_group"] = duplicate_group
+                    extra["duplicate_group_start"] = occurrence == 1
+                    if occurrence == 1:
+                        duplicate_count += 1
+                        if len(duplicate_summaries) < self._MAX_YAML_DUPLICATE_GROUP_SAMPLES:
+                            duplicate_summaries.append({
+                                "document_index": document_index,
+                                "path": bounded_exact_path,
+                                **duplicate_group,
+                            })
+                is_merge = raw_key == "<<"
+                if is_merge:
+                    extra["merge_key"] = True
+                emit_node(
+                    value_node,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    _yaml_line(key_node),
+                    _yaml_end_line(value_node),
+                    extra,
+                    ancestors,
+                    yaml_merge=is_merge,
+                    line_is_key=True,
+                )
+
+        def visit_sequence(
+            sequence_node: object,
+            exact_prefix: str,
+            schema_prefix: str,
+            identity_prefix: str,
+            parent_qualified: str,
+            document_index: int,
+            depth: int,
+            ancestors: frozenset[int],
+            merge_context: bool = False,
+        ) -> None:
+            for index, item in enumerate(sequence_node.value):  # type: ignore[attr-defined]
+                exact_path = f"{exact_prefix}[{index}]"
+                schema_path = f"{schema_prefix}[*]"
+                identity_path = f"{identity_prefix}[{index}]"
+                emit_node(
+                    item,
+                    exact_path,
+                    schema_path,
+                    identity_path,
+                    parent_qualified,
+                    document_index,
+                    depth,
+                    _yaml_line(item),
+                    _yaml_end_line(item),
+                    {"sequence_index_sample": index},
+                    ancestors,
+                    yaml_merge=merge_context,
+                )
+
+        for document_index, document in enumerate(documents):
+            if document is None:
+                continue
+            emit_node(
+                document,
+                "$",
+                "$",
+                "$",
+                file_path,
+                document_index,
+                0,
+                _yaml_line(document),
+                _yaml_end_line(document),
+                {"document_root": True},
+                frozenset(),
+            )
+
+        file_extra["yaml_duplicate_key_count"] = duplicate_count
+        file_extra["yaml_duplicate_keys"] = duplicate_summaries
+        file_extra["yaml_unsupported_key_count"] = unsupported_key_count
+        file_extra["yaml_truncated"] = truncated
+        return nodes, edges
+
+    # -----------------------------------------------------------------------
     # Spring application configuration parser
     # -----------------------------------------------------------------------
 
@@ -5570,7 +6158,7 @@ class CodeParser:
         """Flatten Spring YAML keys using PyYAML's syntax tree, never values."""
         try:
             documents = list(_yaml.compose_all(source.decode("utf-8", errors="replace")))
-        except _yaml.YAMLError as exc:
+        except (_yaml.YAMLError, RecursionError) as exc:
             logger.debug("Spring YAML parse error in %s: %s", path, exc)
             return [], []
 
@@ -5751,7 +6339,7 @@ class CodeParser:
         """
         try:
             root = _yaml.compose(source.decode("utf-8", errors="replace"))
-        except _yaml.YAMLError as exc:
+        except (_yaml.YAMLError, RecursionError) as exc:
             logger.debug("Ansible YAML parse error in %s: %s", path, exc)
             return [], []
         if root is None:
