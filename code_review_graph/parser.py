@@ -13488,7 +13488,29 @@ class CodeParser:
                         if module_name and real_name and alias:
                             import_map[alias] = f"{module_name}.{real_name}"
 
-        elif language in ("java", "kotlin"):
+        elif language == "kotlin":
+            module = None
+            alias = None
+            wildcard = False
+            for child in node.children:
+                if child.type == "identifier":
+                    module = child.text.decode("utf-8", errors="replace")
+                elif child.type == "wildcard_import":
+                    wildcard = True
+                elif child.type == "import_alias":
+                    alias = next(
+                        (
+                            part.text.decode("utf-8", errors="replace")
+                            for part in child.children
+                            if part.type == "type_identifier"
+                        ),
+                        None,
+                    )
+            if module and not wildcard:
+                local_name = alias or module.rsplit(".", 1)[-1]
+                import_map[local_name] = module
+
+        elif language == "java":
             text = node.text.decode("utf-8", errors="replace").strip()
             if not text.startswith("import "):
                 return
