@@ -14796,9 +14796,15 @@ class CodeParser:
         )
         receiver_type = parameter.child_by_field_name("type") if parameter else None
         while receiver_type is not None and receiver_type.type in {
-            "generic_type", "pointer_type",
+            "generic_type", "pointer_type", "parenthesized_type",
         }:
-            receiver_type = next(iter(receiver_type.named_children), None)
+            receiver_type = next(
+                (
+                    child for child in receiver_type.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
         if receiver_type is None or receiver_type.type != "type_identifier":
             return None
         return receiver_type.text.decode("utf-8", errors="replace")
