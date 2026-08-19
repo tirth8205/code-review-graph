@@ -525,6 +525,106 @@ def _remove_toml_entry(
     )
 
 
+def _remove_yaml_entry(
+    path: Path,
+    key: str,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Delete ``<key>.code-review-graph`` from a YAML config, text-surgically.
+
+    The rest of the document — comments, ordering, formatting — is preserved
+    byte-for-byte; the parsed document is used only to locate the entry and to
+    validate the result before writing.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    if not path.exists() or not _safe_path(path, boundary, report):
+        return
+    raw = _read_text(path, report)
+    if raw is None:
+        return
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        report.skipped_paths.append(f"{path} (YAML parse failed; left unchanged: {exc})")
+        return
+    if not isinstance(parsed, dict):
+        return
+    container = parsed.get(key)
+    if not isinstance(container, dict) or _ENTRY_NAME not in container:
+        return
+
+    lines = raw.splitlines(keepends=True)
+    bounds = skills._yaml_section_bounds(lines, key)
+    if bounds is None:
+        report.skipped_paths.append(
+            f"{path} ({key} is not a block mapping; left unchanged)"
+        )
+        return
+    header, section_end = bounds
+    child_indent = skills._yaml_block_indent(lines, header + 1, section_end)
+    entry_prefix = f"{' ' * child_indent}{_ENTRY_NAME}:"
+    start = next(
+        (
+            index
+            for index in range(header + 1, section_end)
+            if lines[index].rstrip("\n") == entry_prefix.rstrip()
+            or lines[index].startswith(entry_prefix)
+        ),
+        None,
+    )
+    if start is None:
+        report.skipped_paths.append(
+            f"{path} (could not locate {_ENTRY_NAME} block; left unchanged)"
+        )
+        return
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and (len(line) - len(line.lstrip())) <= child_indent:
+            break
+        end += 1
+    # Blank lines after the block separate it from what follows and belong to
+    # the user's formatting, not to our entry. Leave them in place.
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+
+    rewritten = "".join(lines[:start] + lines[end:])
+    try:
+        reparsed = yaml.safe_load(rewritten)
+    except yaml.YAMLError as exc:  # pragma: no cover - defensive validation
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged: {exc})")
+        return
+    if not isinstance(reparsed, dict):
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged)")
+        return
+    remaining = reparsed.get(key)
+    if _ENTRY_NAME in (remaining or {}):
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged)")
+        return
+    # Every other setting must survive the edit untouched.
+    expected = copy.deepcopy(parsed)
+    del expected[key][_ENTRY_NAME]
+    if not expected[key]:
+        # An emptied mapping is written as ``key:`` (None) rather than ``{}``.
+        expected[key] = None
+    if reparsed != expected:
+        report.skipped_paths.append(
+            f"{path} (safe YAML edit changed unrelated settings; left unchanged)"
+        )
+        return
+    _write_text(
+        path,
+        rewritten,
+        report,
+        detail=f"removed {key}.{_ENTRY_NAME}",
+        dry_run=dry_run,
+    )
+
+
 def _commands(value: Any) -> set[str]:
     found: set[str] = set()
     if isinstance(value, dict):
@@ -904,6 +1004,13 @@ def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Pat
         return "repo", repo_root
     if _is_lexical_child(path, home):
         return "user", home
+    # ``HERMES_HOME`` may relocate the Hermes Agent config outside the user's
+    # home directory. That directory is then the user-scope boundary for its
+    # own config, otherwise install would write a file uninstall refuses to
+    # clean up.
+    hermes_home = _absolute(skills._hermes_home())
+    if _is_lexical_child(path, hermes_home):
+        return "user", hermes_home
     return None
 
 
@@ -947,6 +1054,10 @@ def _process_platform_configs(
             seen.add(identity)
             if format_name == "toml":
                 _remove_toml_entry(
+                    path, entry_key, boundary, report, dry_run=dry_run
+                )
+            elif format_name == "yaml":
+                _remove_yaml_entry(
                     path, entry_key, boundary, report, dry_run=dry_run
                 )
             elif format_name in {"object", "array"}:
@@ -1184,6 +1295,15 @@ def _process_user(
         report,
         dry_run=dry_run,
     )
+
+    hermes_skills = skills._hermes_home() / "skills" / "code-review-graph"
+    for slug in _generated_skill_slugs():
+        _remove_skill_file(
+            hermes_skills / slug / "SKILL.md",
+            hermes_skills,
+            report,
+            dry_run=dry_run,
+        )
 
 
 def _registry_repo_paths(home: Path, report: UninstallReport) -> list[Path]:

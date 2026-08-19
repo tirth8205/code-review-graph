@@ -118,6 +118,28 @@ def _copilot_vscode_detected() -> bool:
     return False
 
 
+def _hermes_home() -> Path:
+    """Return the Hermes Agent home directory.
+
+    Mirrors Hermes' own resolution order: the ``HERMES_HOME`` environment
+    variable wins, otherwise the platform-native default (``%LOCALAPPDATA%\\hermes``
+    on Windows, ``~/.hermes`` elsewhere).
+    """
+    override = os.environ.get("HERMES_HOME", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if platform.system() == "Windows":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return base / "hermes"
+    return Path.home() / ".hermes"
+
+
+def _hermes_config_path() -> Path:
+    """Return the Hermes Agent config file (``config.yaml``)."""
+    return _hermes_home() / "config.yaml"
+
+
 def _opencode_config_path(repo_root: Path) -> Path:
     """Return OpenCode's existing project config, preferring JSONC."""
     for name in ("opencode.jsonc", "opencode.json"):
@@ -246,6 +268,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "server_type": "local",
         "entry_fields": {"tools": ["*"]},
     },
+    "hermes": {
+        "name": "Hermes Agent",
+        "config_path": lambda root: _hermes_config_path(),
+        "key": "mcp_servers",
+        "detect": lambda: _hermes_home().exists(),
+        "format": "yaml",
+        "needs_type": False,
+    },
     "codebuddy": {
         "name": "CodeBuddy Code",
         "config_path": lambda root: root / ".mcp.json",
@@ -350,6 +380,14 @@ def _build_server_entry(
         return {"type": "local", "command": opencode_command}
 
     entry: dict[str, Any] = {"command": command, "args": args}
+    if key == "hermes":
+        # No repo is pinned here, deliberately. Hermes Agent is a long-lived
+        # assistant that moves between projects, and its stdio schema has no
+        # ``cwd``, so a baked-in ``--repo`` would silently answer every
+        # question about whichever repo happened to be installed from. Every
+        # tool takes an explicit ``repo_root``; without a default, omitting it
+        # fails loudly instead of returning another project's graph.
+        return entry
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
@@ -423,6 +461,154 @@ def _merge_toml_mcp_server(
             prefix += "\n"
     config_path.write_text(prefix + section, encoding="utf-8")
     return True
+
+
+def _yaml_section_bounds(lines: list[str], key: str) -> tuple[int, int] | None:
+    """Return ``(header_index, end_index)`` for a top-level block mapping ``key``.
+
+    ``end_index`` is the index just past the last line belonging to the block
+    (blank lines and comments trailing the block are excluded so an insertion
+    lands inside it). Returns ``None`` when the key is absent or is not a
+    block mapping (e.g. ``key: {}`` written in flow style).
+    """
+    header = None
+    for index, line in enumerate(lines):
+        if line.startswith((" ", "\t", "#")) or not line.strip():
+            continue
+        name, sep, value = line.partition(":")
+        if sep and name.strip() == key:
+            if value.strip() and not value.strip().startswith("#"):
+                return None  # inline/flow value — refuse to edit
+            header = index
+            break
+    if header is None:
+        return None
+    end = header + 1
+    last_content = header + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.startswith((" ", "\t")):
+            break
+        if line.strip() and not line.lstrip().startswith("#"):
+            last_content = end + 1
+        end += 1
+    return header, last_content
+
+
+def _yaml_block_indent(lines: list[str], start: int, end: int) -> int:
+    """Return the child indentation used inside a block, defaulting to 2."""
+    for line in lines[start:end]:
+        stripped = line.lstrip()
+        if stripped and not stripped.startswith("#"):
+            return len(line) - len(stripped)
+    return 2
+
+
+def _merge_yaml_mcp_server(
+    config_path: Path,
+    server_key: str,
+    server_name: str,
+    server_entry: dict[str, Any],
+    dry_run: bool = False,
+) -> bool | None:
+    """Add an MCP server to a YAML config without reformatting the rest.
+
+    The file is edited as text rather than round-tripped through a YAML
+    dumper: Hermes' ``config.yaml`` is hand-edited and full of comments,
+    anchors, and deliberate ordering that a dump would destroy. The parsed
+    document is only used to decide *whether* an edit is needed, and the
+    result is re-parsed before writing so a malformed edit is never saved.
+
+    Returns True when the file was (or would be) modified, False when the
+    entry is already present, and None when the edit was refused to avoid
+    data loss (the reason is printed).
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    raw = ""
+    if config_path.exists():
+        raw = config_path.read_text(encoding="utf-8", errors="replace")
+        try:
+            parsed = yaml.safe_load(raw)
+        except yaml.YAMLError as exc:
+            print(
+                f"  {config_path} contains unparseable YAML ({exc.__class__.__name__})"
+                f" — skipping to avoid data loss. Please add the MCP config manually."
+            )
+            return None
+        if parsed is not None and not isinstance(parsed, dict):
+            print(
+                f"  {config_path} is valid YAML but not a top-level mapping "
+                f"({type(parsed).__name__}) — skipping to avoid data loss. "
+                f"Please add the MCP config manually."
+            )
+            return None
+        existing_servers = (parsed or {}).get(server_key)
+        if existing_servers is not None and not isinstance(existing_servers, dict):
+            print(
+                f"  {config_path} setting {server_key!r} is "
+                f"{type(existing_servers).__name__}; expected a mapping — "
+                f"skipping to avoid data loss."
+            )
+            return None
+        if isinstance(existing_servers, dict) and server_name in existing_servers:
+            return False
+
+    lines = raw.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+
+    bounds = _yaml_section_bounds(lines, server_key)
+    if bounds is None and raw and server_key in (yaml.safe_load(raw) or {}):
+        # The key exists but is not an editable block mapping (flow style).
+        print(
+            f"  {config_path} setting {server_key!r} is not a block mapping — "
+            f"skipping to avoid data loss. Please add the MCP config manually."
+        )
+        return None
+
+    body = yaml.safe_dump(
+        {server_name: server_entry},
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    if bounds is None:
+        indent = 2
+        prefix = "" if not lines or lines[-1].strip() == "" else "\n"
+        block = prefix + f"{server_key}:\n" + _indent_block(body, indent)
+        new_lines = lines + [block]
+    else:
+        header, insert_at = bounds
+        indent = _yaml_block_indent(lines, header + 1, insert_at)
+        new_lines = lines[:insert_at] + [_indent_block(body, indent)] + lines[insert_at:]
+
+    rewritten = "".join(new_lines)
+    try:
+        reparsed = yaml.safe_load(rewritten)
+    except yaml.YAMLError as exc:  # pragma: no cover - defensive validation
+        print(
+            f"  {config_path}: safe YAML edit failed "
+            f"({exc.__class__.__name__}) — left unchanged."
+        )
+        return None
+    if not isinstance(reparsed, dict) or server_name not in (reparsed.get(server_key) or {}):
+        print(f"  {config_path}: safe YAML edit did not take effect — left unchanged.")
+        return None
+
+    if not dry_run:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(rewritten, encoding="utf-8")
+    return True
+
+
+def _indent_block(text: str, indent: int) -> str:
+    """Indent every non-empty line of ``text`` by ``indent`` spaces."""
+    pad = " " * indent
+    return "".join(
+        f"{pad}{line}" if line.strip() else line
+        for line in text.splitlines(keepends=True)
+    )
 
 
 def _strip_jsonc(text: str) -> str:
@@ -560,13 +746,25 @@ def install_platform_configs(
         server_key = plat["key"]
         server_entry = _build_server_entry(plat, key=key, repo_root=repo_root)
 
-        if plat["format"] == "toml":
-            changed = _merge_toml_mcp_server(
-                config_path,
-                "code-review-graph",
-                server_entry,
-                dry_run=dry_run,
-            )
+        if plat["format"] in ("toml", "yaml"):
+            if plat["format"] == "toml":
+                changed = _merge_toml_mcp_server(
+                    config_path,
+                    "code-review-graph",
+                    server_entry,
+                    dry_run=dry_run,
+                )
+            else:
+                changed = _merge_yaml_mcp_server(
+                    config_path,
+                    server_key,
+                    "code-review-graph",
+                    server_entry,
+                    dry_run=dry_run,
+                )
+            if changed is None:
+                # Refused to avoid data loss; the reason was already printed.
+                continue
             if not changed:
                 print(f"  {plat['name']}: already configured in {config_path}")
                 _record_configured(key, plat)
@@ -680,20 +878,20 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Explore Codebase\n\n"
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
-            "1. Run `list_graph_stats` to see overall codebase metrics.\n"
+            "1. Run `list_graph_stats_tool` to see overall codebase metrics.\n"
             "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
-            "3. Use `list_communities_tool` to find major modules, then `get_community` "
+            "3. Use `list_communities_tool` to find major modules, then `get_community_tool` "
             "for details.\n"
             "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
             "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
             "`imports_of` to trace relationships.\n"
-            "6. Use `list_flows` and `get_flow` to understand execution paths.\n\n"
+            "6. Use `list_flows_tool` and `get_flow_tool` to understand execution paths.\n\n"
             "### Tips\n\n"
             "- Start broad (stats, architecture) then narrow down to specific areas.\n"
             "- Use `children_of` on a file to see all its functions and classes.\n"
-            "- Use `find_large_functions` to identify complex code.\n\n"
+            "- Use `find_large_functions_tool` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -721,7 +919,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -739,7 +937,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
             "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
-            "3. Use `get_flow` to see full execution paths through suspected areas.\n"
+            "3. Use `get_flow_tool` to see full execution paths through suspected areas.\n"
             "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
             "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
             "### Tips\n\n"
@@ -747,7 +945,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -773,9 +971,9 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Always preview before applying (rename mode gives you an edit list).\n"
             "- Check `get_impact_radius_tool` before major refactors.\n"
             "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
-            "- Run `find_large_functions` to identify decomposition targets.\n\n"
+            "- Run `find_large_functions_tool` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context(task="<your task>")` '
+            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
             "before any other graph tool.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
@@ -1273,7 +1471,7 @@ def inject_claude_md(repo_root: Path) -> None:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex"),
+    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
@@ -1754,6 +1952,17 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
         logger.info("Installed %d skill(s) to %s", installed_count, qoder_skills_dir)
         return qoder_skills_dir
     return None
+
+
+def install_hermes_skills(repo_root: Path) -> Path:
+    """Install skills into Hermes Agent's user-level skills directory.
+
+    Hermes discovers skills at ``<HERMES_HOME>/skills/<category>/<name>/SKILL.md``
+    and uses the same ``name``/``description`` frontmatter as Claude Code, so
+    :func:`generate_skills` writes them directly under a ``code-review-graph``
+    category.
+    """
+    return generate_skills(repo_root, skills_dir=_hermes_home() / "skills" / "code-review-graph")
 
 
 # --- OpenCode plugin ---

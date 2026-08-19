@@ -320,14 +320,14 @@ code-review-graph update --embedding-provider local --embedding-model all-MiniLM
                                                 # Explicitly refresh an existing index (default: off)
 
 # Monitor and inspect
-code-review-graph status                       # Graph statistics
-code-review-graph watch                        # Auto-update on file changes
-code-review-graph visualize                    # Generate interactive HTML graph
+code-review-graph status                       # Graph statistics (no graph → exit 1, does not create DB)
+code-review-graph watch                        # Auto-update on file changes (requires existing graph)
+code-review-graph visualize                    # Generate interactive HTML graph (requires existing graph)
 code-review-graph visualize --format graphml   # Export GraphML
 code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
 # Analysis
-code-review-graph detect-changes               # Risk-scored change analysis
+code-review-graph detect-changes               # Risk-scored change analysis (read-only; no empty DB)
 code-review-graph detect-changes --base HEAD~3 # Custom base ref
 code-review-graph detect-changes --brief       # Compact panel with token-savings estimate
 code-review-graph detect-changes --brief --verify  # ...and cross-check vs tiktoken
@@ -341,9 +341,12 @@ code-review-graph detect-changes --churn       # Add opt-in change-frequency ris
 #   runs the same analysis at the end. Use this after a rebase, a big
 #   change set, or whenever you suspect the graph is stale.
 # Both end with an identical "Token Savings" panel.
+#
+# Incomplete / empty graphs: run `code-review-graph build` (full re-parse).
+# See docs/TROUBLESHOOTING.md "Empty or incomplete graph".
 
 # Wiki
-code-review-graph wiki                         # Generate markdown wiki from communities
+code-review-graph wiki                         # Generate markdown wiki from communities (requires graph)
 
 # Multi-repo
 code-review-graph register <path> [--alias name]  # Register a repository

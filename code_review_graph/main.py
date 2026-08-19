@@ -530,6 +530,8 @@ def get_affected_flows_tool(
     changed_files: Optional[list[str]] = None,
     base: str = "HEAD~1",
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
+    max_flows: int = 50,
 ) -> dict:
     """Find execution flows affected by changed files.
 
@@ -541,10 +543,15 @@ def get_affected_flows_tool(
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full step details, "minimal" for per-flow
+            metadata only. Default: standard.
+        max_flows: Maximum flows to return; total reports the full count.
+            Default: 50. Pass 0 to disable the limit.
     """
     root = _resolve_repo_root(repo_root)
     return with_provenance(get_affected_flows_func(
         changed_files=changed_files, base=base, repo_root=root,
+        detail_level=detail_level, max_flows=max_flows,
     ), root)
 
 

@@ -1185,8 +1185,17 @@ class GraphStore:
         return resolved
 
     def get_all_files(self) -> list[str]:
+        # A partially failed file update can leave Function/Class nodes or
+        # edges behind after their File marker is gone. Reconciliation must see
+        # every represented path so those orphans can be purged, while explicit
+        # virtual nodes (such as Spring Event markers) remain outside the file
+        # inventory and are managed by their owning resolver.
         rows = self._conn.execute(
-            "SELECT DISTINCT file_path FROM nodes WHERE kind = 'File'"
+            "SELECT file_path FROM nodes "
+            "WHERE json_extract(extra, '$.virtual') IS NULL "
+            "UNION "
+            "SELECT file_path FROM edges "
+            "ORDER BY file_path"
         ).fetchall()
         return [r["file_path"] for r in rows]
 

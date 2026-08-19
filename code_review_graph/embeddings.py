@@ -188,8 +188,8 @@ class GoogleEmbeddingProvider(EmbeddingProvider):
             self._dimension: int | None = None
         except ImportError:
             raise ImportError(
-                "google-generativeai not installed. "
-                "Run: pip install code-review-graph[google-embeddings]"
+                "google-genai not installed. "
+                "Run: pip install \"code-review-graph[google-embeddings]\""
             )
 
     def embed(self, texts: list[str]) -> list[list[float]]:

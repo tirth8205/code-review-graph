@@ -55,7 +55,7 @@ embeddings = [
     "numpy>=1.26,<3",
 ]
 google-embeddings = [
-    "google-generativeai>=0.8.0,<1",
+    "google-genai>=1.0.0,<3",
 ]
 communities = [
     "igraph>=0.11.0",
@@ -69,6 +69,7 @@ wiki = [
 ]
 all = [
     "code-review-graph[embeddings]",
+    "code-review-graph[google-embeddings]",
     "code-review-graph[communities]",
     "code-review-graph[enrichment]",
     "code-review-graph[eval]",

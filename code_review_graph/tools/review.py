@@ -293,6 +293,8 @@ def get_affected_flows_func(
     changed_files: list[str] | None = None,
     base: str = "HEAD~1",
     repo_root: str | None = None,
+    detail_level: str = "standard",
+    max_flows: int = 50,
 ) -> dict[str, Any]:
     """Find execution flows affected by changed files.
 
@@ -305,9 +307,16 @@ def get_affected_flows_func(
                        Auto-detected from git diff if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full step details, "minimal" for
+            per-flow metadata only (name, criticality, depth, counts).
+            Every flow carries a full ``steps`` list in standard mode, so
+            large change sets can exceed 200k tokens without a bound (#849).
+        max_flows: Maximum flows to return (default: 50). ``total`` always
+            reports the untruncated count; 0 disables the limit.
 
     Returns:
-        Affected flows sorted by criticality, with step details.
+        Affected flows sorted by criticality; ``truncated`` is set when
+        ``max_flows`` cut the list.
     """
     store, root = _get_store(repo_root)
     try:
@@ -330,15 +339,33 @@ def get_affected_flows_func(
         result = _get_affected_flows(store, abs_files)
 
         total = result["total"]
+        flows = result["affected_flows"]
+        truncated = bool(max_flows) and max_flows > 0 and total > max_flows
+        if truncated:
+            flows = flows[:max_flows]
+        if detail_level == "minimal":
+            flows = [
+                {
+                    "id": f.get("id"),
+                    "name": f.get("name"),
+                    "criticality": f.get("criticality"),
+                    "depth": f.get("depth"),
+                    "node_count": f.get("node_count"),
+                    "file_count": f.get("file_count"),
+                }
+                for f in flows
+            ]
         out = {
             "status": "ok",
             "summary": (
                 f"{total} flow(s) affected by changes "
                 f"in {len(changed_files)} file(s)"
+                + (f", showing {len(flows)}" if truncated else "")
             ),
             "changed_files": changed_files,
-            "affected_flows": result["affected_flows"],
+            "affected_flows": flows,
             "total": total,
+            "truncated": truncated,
         }
         out["_hints"] = generate_hints(
             "get_affected_flows", out, get_session()
