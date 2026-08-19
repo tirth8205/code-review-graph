@@ -4443,6 +4443,12 @@ class CodeParser:
     # are noise for impact analysis, not user code.
     _PLSQL_BUILTIN_PACKAGE_PREFIXES = ("dbms_", "utl_")
 
+    # Fixed lookback window (chars) for the INSERT INTO check in
+    # _extract_plsql_calls. Comfortably covers "INTO" plus a few lines of
+    # unusual whitespace/newlines before the target, without re-scanning the
+    # whole preceding body on every match.
+    _INTO_LOOKBACK = 60
+
     # Oracle-specific file extensions that are unambiguously PL/SQL
     # regardless of content.
     _ORACLE_EXTENSIONS = frozenset({
@@ -5163,7 +5169,16 @@ class CodeParser:
                 continue
             if first.lower().startswith(self._PLSQL_BUILTIN_PACKAGE_PREFIXES):
                 continue
-            if re.search(r"\bINTO\s*$", body_text[:m.start()], re.IGNORECASE):
+            # Bounded lookback instead of body_text[:m.start()]: slicing and
+            # re-searching the whole preceding text on every match made this
+            # function O(n^2) on files with many call sites (~25s on large
+            # files per review). "INTO" immediately preceding the target is
+            # a local pattern — a small fixed window is enough to catch it
+            # even across a few lines of unusual whitespace/formatting.
+            lookback_start = max(0, m.start() - self._INTO_LOOKBACK)
+            if re.search(
+                r"\bINTO\s*$", body_text[lookback_start:m.start()], re.IGNORECASE,
+            ):
                 continue  # INSERT INTO t (cols) — t is a table, not a call
             if target in seen:
                 continue

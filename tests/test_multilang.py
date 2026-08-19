@@ -4162,6 +4162,45 @@ class TestPLSQLHelpers:
         start = text.index("(")
         sig = CodeParser._plsql_member_signature(text, start)
         assert sig == "p_x VARCHAR2 := '('"
+
+    def test_call_extraction_is_not_quadratic_on_many_calls(self):
+        # _extract_plsql_calls used body_text[:m.start()] (re-slicing and
+        # re-scanning the whole preceding text) for the INSERT INTO check
+        # on every match, making this O(n^2) — ~25s on large real files per
+        # review. A bounded lookback window keeps it roughly linear.
+        import time
+
+        parser = CodeParser()
+        lines = ["CREATE OR REPLACE PROCEDURE big_proc IS", "BEGIN"]
+        n = 4000
+        for i in range(n):
+            lines.append(f"    call_target_{i}(v_x, v_y);")
+        lines.append("END big_proc;")
+        lines.append("/")
+        fixture = FIXTURES / "sample_plsql_many_calls.prc"
+        fixture.write_text("\n".join(lines))
+        try:
+            start = time.perf_counter()
+            nodes, edges = parser.parse_file(fixture)
+            elapsed = time.perf_counter() - start
+        finally:
+            fixture.unlink()
+        calls = [e for e in edges if e.kind == "CALLS"]
+        assert len(calls) == n
+        # Generous ceiling: linear behavior finishes in well under a second
+        # for this size; quadratic behavior would take many seconds.
+        assert elapsed < 5, f"call extraction took {elapsed:.2f}s for {n} calls — looks quadratic"
+
+    def test_into_lookback_still_filters_insert_into_target(self):
+        # The bounded lookback must still catch INSERT INTO immediately
+        # before the match, including across a couple of formatting lines.
+        import re
+
+        text = "INSERT\n  INTO\n  audit_log (msg) VALUES ('x');"
+        m = CodeParser._PLSQL_CALL_RE.search(text, text.index("audit_log"))
+        assert m is not None
+        lookback_start = max(0, m.start() - CodeParser._INTO_LOOKBACK)
+        assert re.search(r"\bINTO\s*$", text[lookback_start:m.start()], re.IGNORECASE)
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()

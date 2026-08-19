@@ -40,7 +40,10 @@
   matches as `CREATE PROCEDURE`, `ENDfoo;` no longer matches as `END foo;`),
   and the forward-declaration/signature scanners are independently
   comment/string-aware rather than only correct because callers happen to
-  pass pre-cleaned text.
+  pass pre-cleaned text. The `INSERT INTO` filter used when extracting
+  PL/SQL call edges now checks a bounded lookback window instead of
+  re-scanning the whole preceding body on every call site, keeping call
+  extraction roughly linear instead of quadratic on files with many calls.
 
 ### Fixed
 
