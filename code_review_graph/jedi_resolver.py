@@ -39,7 +39,8 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
         logger.info("Jedi not installed, skipping Python enrichment")
         return {"skipped": True, "reason": "jedi not installed"}
 
-    repo_root = Path(repo_root).resolve()
+    repo_root_given = Path(repo_root)
+    repo_root = repo_root_given.resolve()
 
     # Get Python files from the graph — skip early if none
     all_files = store.get_all_files()
@@ -158,12 +159,18 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
             # Only emit edges for project-internal definitions
             try:
-                module_path.relative_to(repo_root)
+                rel_path = module_path.relative_to(repo_root)
             except ValueError:
                 continue
 
-            # Build qualified target: file_path::Class.method or file_path::func
-            target_file = normalize_file_path(module_path)
+            # Build the target in the same path form the graph stores nodes
+            # under. Nodes are stored relative to the repo root as handed to
+            # full_build, which may be non-canonical (e.g. macOS /var vs
+            # /private/var symlinks); rebase the resolved module path back
+            # onto that root instead of emitting a canonicalized absolute
+            # path — otherwise the edge target never matches a node
+            # qualified name and neighbor/impact lookups miss it.
+            target_file = normalize_file_path(repo_root_given / rel_path)
             parent = name.parent()
             if parent and parent.type == "class":
                 target = f"{target_file}::{parent.name}.{name.name}"

@@ -748,6 +748,56 @@ class TestFullBuild:
         finally:
             store.close()
 
+    def test_full_build_wires_jedi_enrichment(self, tmp_path):
+        # Regression guard: the [enrichment] extra (jedi) used to be dead
+        # code — enrich_jedi_calls was never invoked by any build path.
+        # full_build must call it with the store + repo root and surface
+        # its stats in the result dict.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ), patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 3, "files": 1},
+            ) as mock_enrich:
+                result = full_build(tmp_path, store)
+            assert result["jedi_enrichment"] == {"resolved": 3, "files": 1}
+            assert mock_enrich.call_count == 1
+            assert mock_enrich.call_args[0][0] is store
+            assert mock_enrich.call_args[0][1] == tmp_path
+        finally:
+            store.close()
+
+    def test_full_build_jedi_enrichment_skips_when_disabled(self, tmp_path, monkeypatch):
+        # The opt-out must skip enrichment without failing the build and
+        # report the skip in the stats.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ):
+                result = full_build(tmp_path, store)
+            assert result["jedi_enrichment"] == {
+                "skipped": True,
+                "reason": "disabled via CRG_DISABLE_ENRICHMENT",
+            }
+        finally:
+            store.close()
+
 
 class TestIncrementalUpdate:
     def test_incremental_with_no_changes(self, tmp_path):
@@ -756,6 +806,33 @@ class TestIncrementalUpdate:
         try:
             result = incremental_update(tmp_path, store, changed_files=[])
             assert result["files_updated"] == 0
+        finally:
+            store.close()
+
+    def test_incremental_update_wires_jedi_enrichment(self, tmp_path):
+        # Jedi enrichment must re-run when Python files changed, and be
+        # skipped entirely when nothing Python-related was updated.
+        py_file = tmp_path / "app.py"
+        py_file.write_text("def app():\n    pass\n")
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 1, "files": 1},
+            ) as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["app.py"]
+                )
+                assert result["jedi_enrichment"] == {"resolved": 1, "files": 1}
+                assert mock_enrich.call_count == 1
+
+                mock_enrich.reset_mock()
+                result = incremental_update(tmp_path, store, changed_files=[])
+                # No-changes path returns early without resolver stats
+                # (same convention as python_resolution et al.).
+                assert "jedi_enrichment" not in result
+                mock_enrich.assert_not_called()
         finally:
             store.close()
 

@@ -152,6 +152,26 @@ def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_jedi_enrichment(store: GraphStore, repo_root: Path) -> Optional[dict]:
+    """Run post-build Jedi call-resolution enrichment (optional extra).
+
+    Resolves ``receiver.method()`` calls on lowercase receivers that
+    tree-sitter drops, using Jedi. Best-effort like the other resolvers:
+    skipped when the ``[enrichment]`` extra (jedi) is not installed and never
+    fails a build. Can be disabled explicitly with
+    ``CRG_DISABLE_ENRICHMENT=1`` (e.g. to keep watch mode cheap on large
+    repos even when jedi is installed).
+    """
+    if os.environ.get("CRG_DISABLE_ENRICHMENT", "") == "1":
+        return {"skipped": True, "reason": "disabled via CRG_DISABLE_ENRICHMENT"}
+    try:
+        from .jedi_resolver import enrich_jedi_calls
+        return enrich_jedi_calls(store, repo_root)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Jedi enrichment failed: %s", exc)
+        return None
+
+
 # Default ignore patterns (in addition to .gitignore).
 #
 # ``**/<dir>/**`` patterns are safe-anywhere directory exclusions.  A leading
@@ -1141,6 +1161,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     scoped_stats = _run_scoped_resolver(store)
+    jedi_stats = _run_jedi_enrichment(store, repo_root)
 
     return {
         "files_parsed": len(files),
@@ -1155,6 +1176,7 @@ def full_build(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 
@@ -1335,6 +1357,7 @@ def incremental_update(
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
     scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+    jedi_stats = _run_jedi_enrichment(store, repo_root) if python_changed else None
 
     return {
         "files_updated": files_updated,
@@ -1351,6 +1374,7 @@ def incremental_update(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 
