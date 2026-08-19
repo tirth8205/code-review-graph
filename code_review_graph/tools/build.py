@@ -5,16 +5,67 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
 from ..incremental import (
+    collect_all_files,
     full_build,
+    get_all_tracked_files,
     incremental_update,
     resolve_incremental_base,
 )
+from ..parser import normalize_file_path
 from ._common import _get_store
 
 logger = logging.getLogger(__name__)
+
+_PARTIAL_GRAPH_MIN_FILES = 8
+_PARTIAL_GRAPH_MAX_COVERAGE = 0.25
+_PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE = 0.50
+
+
+def _should_rebuild_partial_graph(
+    repo_root: Path,
+    store: Any,
+    recurse_submodules: bool | None = None,
+) -> bool:
+    """Detect a non-empty graph that represents only a small slice of a repo."""
+    if store.get_metadata("intentionally_incomplete") == "1":
+        return False
+    if (
+        store.get_metadata("last_build_type") == "full"
+        and store.get_metadata("intentionally_incomplete") == "0"
+    ):
+        return False
+
+    represented_paths = {
+        normalize_file_path(path) for path in store.get_all_files()
+    }
+    tracked_files = get_all_tracked_files(repo_root, recurse_submodules)
+    if tracked_files:
+        # Keep the common path cheap: a graph already representing at least
+        # half of all tracked files cannot be severely partial. Below that,
+        # documentation- or asset-heavy repositories still need the precise
+        # parseable inventory below before forcing an expensive rebuild.
+        if (
+            len(represented_paths) >= len(tracked_files)
+            * _PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE
+        ):
+            return False
+        if len(tracked_files) < _PARTIAL_GRAPH_MIN_FILES:
+            return False
+
+    expected_files = collect_all_files(repo_root, recurse_submodules)
+    if len(expected_files) < _PARTIAL_GRAPH_MIN_FILES:
+        return False
+
+    expected_paths = {
+        normalize_file_path(repo_root / relative)
+        for relative in expected_files
+    }
+    represented_count = len(expected_paths & represented_paths)
+    return represented_count <= len(expected_paths) * _PARTIAL_GRAPH_MAX_COVERAGE
 
 
 def _run_embedding_refresh(
@@ -502,6 +553,7 @@ def build_or_update_graph(
     """
     store, root = _get_store(repo_root)
     try:
+        recovery_reason: str | None = None
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
@@ -514,6 +566,13 @@ def build_or_update_graph(
             base_resolved = resolve_incremental_base(root, store)
             if base_resolved is None:
                 full_rebuild = True
+
+        if (
+            not full_rebuild
+            and _should_rebuild_partial_graph(root, store, recurse_submodules)
+        ):
+            full_rebuild = True
+            recovery_reason = "partial_graph"
 
         if full_rebuild:
             result = full_build(root, store, recurse_submodules)
@@ -528,6 +587,8 @@ def build_or_update_graph(
                     f"{result['total_edges']} edges."
                 ),
             }
+            if recovery_reason is not None:
+                build_result["recovery_reason"] = recovery_reason
         else:
             result = incremental_update(root, store, base=base_resolved)
             if result["files_updated"] == 0:
