@@ -57,7 +57,7 @@ def _handle_start(args: argparse.Namespace) -> None:
 
 def _handle_stop(_args: argparse.Namespace) -> None:
     """Stop the running daemon process."""
-    from .daemon import clear_pid, is_daemon_running, read_pid
+    from .daemon import clear_pid, is_daemon_running, pid_alive, read_pid
 
     if not is_daemon_running():
         print("Daemon is not running.")
@@ -81,16 +81,14 @@ def _handle_stop(_args: argparse.Namespace) -> None:
 
     # Wait up to 5 seconds for process to die
     for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not pid_alive(pid):
             break
         time.sleep(0.1)
     else:
         # Still alive after 5s — send SIGKILL
         print("Daemon did not stop gracefully, sending SIGKILL...")
         try:
-            os.kill(pid, signal.SIGKILL)
+            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except ProcessLookupError:
             pass
 

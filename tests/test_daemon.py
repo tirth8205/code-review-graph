@@ -1028,6 +1028,33 @@ class TestDaemonCLI:
             _handle_stop(args)
 
         assert exc_info.value.code == 1
+    def test_handle_stop_waits_for_daemon_to_exit(self):
+        """_handle_stop waits until the daemon process exits."""
+        from code_review_graph.daemon_cli import _handle_stop
+        args = MagicMock()
+        with (
+            patch(
+                "code_review_graph.daemon.is_daemon_running",
+                return_value=True,
+            ),
+            patch(
+                "code_review_graph.daemon.read_pid",
+                return_value=1234,
+            ),
+            patch(
+                "code_review_graph.daemon.pid_alive",
+                side_effect=[True, False],
+            ),
+            patch("code_review_graph.daemon.clear_pid") as mock_clear_pid,
+            patch("os.kill") as mock_kill,
+            patch("builtins.print"),
+        ):
+            _handle_stop(args)
+
+        mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+        mock_clear_pid.assert_called_once()
+
+
 
     def test_handle_status_not_running(self):
         """_handle_status displays 'not running' when daemon is down."""
