@@ -748,6 +748,50 @@ class TestFullBuild:
         finally:
             store.close()
 
+    def test_full_build_removes_nodes_left_without_a_file_node(self, tmp_path):
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        current = tmp_path / "sample.py"
+        current.write_text("def hello():\n    pass\n")
+        orphan_path = str(tmp_path / "generated" / "orphan.js")
+        orphan_edge_path = str(tmp_path / "generated" / "orphan-edge.js")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            store.upsert_node(
+                NodeInfo(
+                    kind="Function",
+                    name="loadData",
+                    file_path=orphan_path,
+                    line_start=1,
+                    line_end=2,
+                    language="javascript",
+                )
+            )
+            store.upsert_edge(
+                EdgeInfo(
+                    kind="CALLS",
+                    source=f"{orphan_edge_path}::caller",
+                    target=f"{orphan_edge_path}::target",
+                    file_path=orphan_edge_path,
+                )
+            )
+            store.commit()
+
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ):
+                result = full_build(tmp_path, store)
+
+            assert result["stale_files_removed"] == 2
+            assert store.get_nodes_by_file(orphan_path) == []
+            assert store._conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE file_path = ?",
+                (orphan_edge_path,),
+            ).fetchone()[0] == 0
+        finally:
+            store.close()
+
 
 class TestIncrementalUpdate:
     def test_incremental_with_no_changes(self, tmp_path):
