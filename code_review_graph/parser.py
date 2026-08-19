@@ -782,6 +782,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    ".liquid": "liquid",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -2410,6 +2411,21 @@ class CodeParser:
     _BLADE_DIRECTIVE_RE = re.compile(
         r"""(?<!@)@(extends|include|component|livewire)\s*\(\s*(['"])([^'"]+)\2\s*\)""",
     )
+    _LIQUID_COMMENT_RE = re.compile(
+        r"\{%-?\s*comment\s*-?%\}.*?\{%-?\s*endcomment\s*-?%\}",
+        re.DOTALL,
+    )
+    _LIQUID_TAG_RE = re.compile(
+        r"\{%-?\s*([A-Za-z_][A-Za-z0-9_-]*)(.*?)-?%\}",
+        re.DOTALL,
+    )
+    _LIQUID_OUTPUT_RE = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}", re.DOTALL)
+    _LIQUID_ASSIGN_RE = re.compile(
+        r"(?<![\w-])assign\s+([A-Za-z_][A-Za-z0-9_]*)\s*="
+    )
+    _LIQUID_RENDER_RE = re.compile(
+        r"(?<![\w-])(render|include)\s+(['\"])([^'\"]+)\2"
+    )
     _LARAVEL_ROUTE_FACADE = "Illuminate\\Support\\Facades\\Route"
     _LARAVEL_ELOQUENT_MODEL = "Illuminate\\Database\\Eloquent\\Model"
     _LARAVEL_ROUTE_VERBS = frozenset({
@@ -2628,6 +2644,8 @@ class CodeParser:
 
         if language == "blade":
             return self._parse_blade(path, source)
+        if language == "liquid":
+            return self._parse_liquid(path, source)
 
         # Vue SFCs: parse with vue parser, then delegate script blocks to JS/TS
         if language == "vue":
@@ -2967,6 +2985,87 @@ class CodeParser:
                 line=masked.count("\n", 0, match.start()) + 1,
                 extra={"blade_directive": directive},
             ))
+        return nodes, edges
+
+    @classmethod
+    def _mask_liquid_comments(cls, text: str) -> str:
+        """Mask Liquid comments while preserving offsets and line numbers."""
+        def replace_comment(match: re.Match[str]) -> str:
+            return "".join(
+                character if character in "\r\n" else " "
+                for character in match.group(0)
+            )
+
+        return cls._LIQUID_COMMENT_RE.sub(replace_comment, text)
+
+    def _parse_liquid(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Index Liquid files without requiring a dedicated Tree-sitter grammar."""
+        text = source.decode("utf-8", errors="replace")
+        masked = self._mask_liquid_comments(text)
+        file_path = normalize_file_path(path)
+        nodes = [
+            NodeInfo(
+                kind="File",
+                name=file_path,
+                file_path=file_path,
+                line_start=1,
+                line_end=source.count(b"\n") + 1,
+                language="liquid",
+                is_test=_is_test_file(file_path),
+            ),
+        ]
+        edges: list[EdgeInfo] = []
+
+        def line_at(offset: int) -> int:
+            return masked.count("\n", 0, offset) + 1
+
+        for match in self._LIQUID_OUTPUT_RE.finditer(masked):
+            expression = " ".join(match.group(1).split())
+            if not expression:
+                continue
+            line = line_at(match.start())
+            nodes.append(NodeInfo(
+                kind="Output",
+                name=f"output_{line}:{expression[:120]}",
+                file_path=file_path,
+                line_start=line,
+                line_end=line_at(match.end()),
+                language="liquid",
+            ))
+
+        for tag_match in self._LIQUID_TAG_RE.finditer(masked):
+            tag = tag_match.group(1)
+            body = tag_match.group(2)
+            segments = [body] if tag == "liquid" else []
+            if tag in ("assign", "render", "include"):
+                segments.append(f"{tag}{body}")
+            for segment in segments:
+                for assign in self._LIQUID_ASSIGN_RE.finditer(segment):
+                    line = line_at(tag_match.start(2) + assign.start())
+                    nodes.append(NodeInfo(
+                        kind="Variable",
+                        name=assign.group(1),
+                        file_path=file_path,
+                        line_start=line,
+                        line_end=line,
+                        language="liquid",
+                    ))
+
+                for render in self._LIQUID_RENDER_RE.finditer(segment):
+                    offset = tag_match.start(2) + render.start()
+                    edges.append(EdgeInfo(
+                        kind="REFERENCES",
+                        source=file_path,
+                        target=render.group(3),
+                        file_path=file_path,
+                        line=line_at(offset),
+                        extra={"liquid_directive": render.group(1)},
+                    ))
+
         return nodes, edges
 
     def _parse_vue(
