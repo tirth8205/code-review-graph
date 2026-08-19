@@ -832,3 +832,24 @@ class TestFlows:
         )
         assert abs_left in matched
         assert abs_right not in matched
+
+    def test_expand_with_repo_root_skips_nested_same_basename(self, tmp_path):
+        """Root-level util.py must not LIKE-match left/util.py when repo_root is set."""
+        from code_review_graph.flows import expand_changed_file_paths
+
+        left = tmp_path / "left"
+        left.mkdir()
+        abs_root = str((tmp_path / "util.py").resolve())
+        abs_nested = str((left / "util.py").resolve())
+        self._add_func("root_util", path=abs_root)
+        self._add_func("nested_util", path=abs_nested)
+
+        matched = expand_changed_file_paths(
+            self.store, ["util.py"], repo_root=tmp_path,
+        )
+        assert abs_root in matched
+        assert abs_nested not in matched
+
+        # Without repo_root, LIKE fallback may still resolve absolute forms.
+        matched_any = expand_changed_file_paths(self.store, ["util.py"])
+        assert abs_root in matched_any or abs_nested in matched_any
