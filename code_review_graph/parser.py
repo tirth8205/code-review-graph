@@ -2614,15 +2614,16 @@ class CodeParser:
         tree = None
         parse_source = source
         if language == "c" and path.suffix.lower() == ".h":
-            cpp_parser = self._get_parser("cpp")
-            if cpp_parser is not None:
-                cpp_source = self._mask_cpp_qt_macros(source)
-                cpp_tree = cpp_parser.parse(cpp_source)
-                if self._has_cpp_header_evidence(cpp_tree.root_node):
-                    language = "cpp"
-                    parser = cpp_parser
-                    tree = cpp_tree
-                    parse_source = cpp_source
+            if self._has_cpp_header_text_evidence(source):
+                cpp_parser = self._get_parser("cpp")
+                if cpp_parser is not None:
+                    cpp_source = self._mask_cpp_qt_macros(source)
+                    cpp_tree = cpp_parser.parse(cpp_source)
+                    if self._has_cpp_header_evidence(cpp_tree.root_node):
+                        language = "cpp"
+                        parser = cpp_parser
+                        tree = cpp_tree
+                        parse_source = cpp_source
         elif language == "cpp":
             parse_source = self._mask_cpp_qt_macros(source)
 
@@ -2824,8 +2825,21 @@ class CodeParser:
         return False
 
     @staticmethod
+    def _has_cpp_header_text_evidence(source: bytes) -> bool:
+        """Cheaply decide whether a C header merits a speculative C++ parse."""
+        return any(
+            token in source
+            for token in (
+                b"class", b"namespace", b"template", b"::",
+                b"constexpr", b"noexcept", b"->",
+            )
+        )
+
+    @staticmethod
     def _mask_cpp_qt_macros(source: bytes) -> bytes:
         """Shield structural Qt macros without changing byte or line offsets."""
+        if b"Q_" not in source and b"QT_" not in source:
+            return source
         masked = bytearray(source)
         length = len(source)
         index = 0
