@@ -1813,3 +1813,37 @@ class TestRenamePurgeParity:
             assert store.get_nodes_by_file(str(tmp_path / "b.py"))
         finally:
             store.close()
+
+
+class TestWatchObserverLiveness:
+    """#811: an emitter-thread death must exit watch(), not freeze silently."""
+
+    @staticmethod
+    def _fake_observer(observer_alive: bool, emitter_alive: bool):
+        class _Emitter:
+            def __init__(self, alive: bool) -> None:
+                self._alive = alive
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        class _Shim:
+            is_alive = staticmethod(lambda: observer_alive)
+            emitters = [_Emitter(emitter_alive)]
+
+        return _Shim()
+
+    def test_alive_observer_with_alive_emitter_is_healthy(self):
+        from code_review_graph.incremental import _observer_threads_alive
+
+        assert _observer_threads_alive(self._fake_observer(True, True))
+
+    def test_dead_observer_is_not_healthy(self):
+        from code_review_graph.incremental import _observer_threads_alive
+
+        assert not _observer_threads_alive(self._fake_observer(False, True))
+
+    def test_dead_emitter_is_not_healthy_even_if_observer_lives(self):
+        from code_review_graph.incremental import _observer_threads_alive
+
+        assert not _observer_threads_alive(self._fake_observer(True, False))
