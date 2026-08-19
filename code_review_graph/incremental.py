@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from pathlib import Path, PurePosixPath
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
@@ -1537,6 +1537,21 @@ def _create_watch_handler(
     return GraphUpdateHandler()
 
 
+def _observer_threads_alive(observer: "Any") -> bool:
+    """Whether the watchdog observer AND every emitter thread are still alive.
+
+    The watchdog observer thread itself can stay alive after an internal
+    emitter reader thread has crashed (the inotify ``_wd_for_path`` KeyError
+    under heavy create/delete churn, or the Windows
+    ``ReadDirectoryChangesW`` equivalent). A dead emitter silently stops
+    delivering events while ``daemon status`` keeps reporting the child
+    process as alive, so watch() must treat emitter death as fatal (#811).
+    """
+    if not observer.is_alive():
+        return False
+    return all(emitter.is_alive() for emitter in observer.emitters)
+
+
 def watch(
     repo_root: Path,
     store: GraphStore,
@@ -1574,6 +1589,15 @@ def watch(
         while True:
             _time.sleep(1)
             handler.raise_if_failed()
+            if not _observer_threads_alive(observer):
+                # Emitter-thread death is silent for the process: poll-based
+                # daemon health checks cannot see it. Exit the child so the
+                # daemon restarts watch instead of serving a frozen graph (#811).
+                logger.critical(
+                    "watch observer thread died; exiting so the daemon can "
+                    "restart watch (see issue #811)"
+                )
+                raise SystemExit(1)
     except KeyboardInterrupt:
         observer.stop()
     finally:
