@@ -707,6 +707,37 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return []
 
+
+def _find_content_mismatches(repo_root: Path, store: "GraphStore") -> list[str]:
+    """Find indexed files whose bytes differ from the graph's last parsed hash.
+
+    Git diffs compare the working tree with a base commit.  If a file is
+    changed, incrementally indexed, and then reverted before the next update,
+    that diff is empty even though the graph still represents the intermediate
+    content.  Comparing indexed hashes with the files on disk catches that
+    round trip and also catches a reverted file when another path keeps the
+    git diff non-empty.
+    """
+    mismatched_files: list[str] = []
+
+    for stored_path, stored_hash in store.get_file_hashes().items():
+        path = Path(stored_path)
+        if not path.is_absolute():
+            path = repo_root / path
+        try:
+            relative_path = path.relative_to(repo_root).as_posix()
+            current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        except (OSError, ValueError):
+            # Missing files are handled by stale-file reconciliation.  Paths
+            # outside the repository cannot be represented as relative update
+            # inputs and are left to that reconciliation path as well.
+            continue
+        if current_hash != stored_hash:
+            mismatched_files.append(relative_path)
+
+    return mismatched_files
+
+
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
     """Return changed files in an SVN working copy.
 
@@ -1196,6 +1227,9 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
+    changed_files = list(
+        dict.fromkeys([*changed_files, *_find_content_mismatches(repo_root, store)]),
+    )
     stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
 
     if not changed_files and not stale_files:
