@@ -43,7 +43,9 @@ def expand_changed_file_paths(
     ``git diff --name-only`` yields repo-relative paths, while parsed nodes
     store absolute ``file_path`` values (and tests often use relative paths).
     Matching must accept both without treating ``%`` / ``_`` as wildcards
-    (#569).
+    (#569). When *repo_root* is provided, only exact absolute/relative
+    variants are used — the ``LIKE`` basename fallback is skipped so a
+    root-level ``util.py`` cannot match ``left/util.py``.
     """
     root = Path(repo_root).resolve() if repo_root is not None else None
     variants: list[str] = []
@@ -83,12 +85,12 @@ def expand_changed_file_paths(
     matched_seen = set(variants)
     if variants:
         for i in range(0, len(variants), _SQL_BATCH):
-            batch = variants[i:i + _SQL_BATCH]
-            placeholders = ",".join("?" * len(batch))
+            path_batch = variants[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(path_batch))
             rows = store._conn.execute(
                 f"SELECT DISTINCT file_path FROM nodes "  # nosec B608
                 f"WHERE file_path IN ({placeholders})",
-                batch,
+                path_batch,
             ).fetchall()
             for row in rows:
                 fp = row[0]
@@ -96,27 +98,29 @@ def expand_changed_file_paths(
                     matched.append(fp)
                     matched_seen.add(fp)
 
-    # Relative inputs without a repo root (or mixed stores): match only at a
-    # path-separator boundary. Stored paths are POSIX (#774), so anchor on '/'.
-    # Keep an escaped Windows '\' pattern for any legacy backslash rows.
-    for rel in relative_inputs:
-        escaped = _escape_like_literal(rel)
-        patterns = (
-            escaped,                 # exact relative path
-            f"%/{escaped}",          # POSIX separator anchor
-            f"%\\\\{escaped}",       # legacy Windows separator anchor
-        )
-        for pattern in patterns:
-            rows = store._conn.execute(
-                "SELECT DISTINCT file_path FROM nodes "
-                "WHERE file_path LIKE ? ESCAPE '\\'",
-                (pattern,),
-            ).fetchall()
-            for row in rows:
-                fp = row[0]
-                if fp not in matched_seen:
-                    matched.append(fp)
-                    matched_seen.add(fp)
+    # LIKE fallback is only for relative inputs without a repo root, where we
+    # cannot build exact absolute variants. When repo_root is known, skip it:
+    # otherwise root-level ``util.py`` also matches ``left/util.py`` via
+    # ``%/util.py``, and incremental clears the wrong file's flows.
+    if root is None:
+        for rel in relative_inputs:
+            escaped = _escape_like_literal(rel)
+            patterns = (
+                escaped,                 # exact relative path
+                f"%/{escaped}",          # POSIX separator anchor
+                f"%\\\\{escaped}",       # legacy Windows separator anchor
+            )
+            for pattern in patterns:
+                rows = store._conn.execute(
+                    "SELECT DISTINCT file_path FROM nodes "
+                    "WHERE file_path LIKE ? ESCAPE '\\'",
+                    (pattern,),
+                ).fetchall()
+                for row in rows:
+                    fp = row[0]
+                    if fp not in matched_seen:
+                        matched.append(fp)
+                        matched_seen.add(fp)
     return matched
 
 
@@ -179,32 +183,33 @@ def clear_flows_for_files(store: GraphStore, file_paths: list[str]) -> set[str]:
 
     conn = store._conn
     if conn.in_transaction:
-        conn.commit()
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     conn.execute("BEGIN IMMEDIATE")
     try:
         for i in range(0, len(flow_ids), _SQL_BATCH):
-            batch = flow_ids[i:i + _SQL_BATCH]
-            placeholders = ",".join("?" * len(batch))
+            flow_batch = flow_ids[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(flow_batch))
             conn.execute(
                 f"DELETE FROM flow_memberships WHERE flow_id IN ({placeholders})",  # nosec B608
-                batch,
+                flow_batch,
             )
             conn.execute(
                 f"DELETE FROM flows WHERE id IN ({placeholders})",  # nosec B608
-                batch,
+                flow_batch,
             )
         # Drop memberships that still point at nodes about to be deleted so
         # replacement cannot leave dangling flow_memberships rows.
         for i in range(0, len(node_ids), _SQL_BATCH):
-            batch = node_ids[i:i + _SQL_BATCH]
-            placeholders = ",".join("?" * len(batch))
+            node_batch = node_ids[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(node_batch))
             conn.execute(
                 f"DELETE FROM flow_memberships WHERE node_id IN ({placeholders})",  # nosec B608
-                batch,
+                node_batch,
             )
             conn.execute(
                 f"DELETE FROM flows WHERE entry_point_id IN ({placeholders})",  # nosec B608
-                batch,
+                node_batch,
             )
         conn.commit()
     except BaseException:
@@ -220,7 +225,8 @@ def purge_orphan_flow_data(store: GraphStore) -> int:
     """
     conn = store._conn
     if conn.in_transaction:
-        conn.commit()
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     conn.execute("BEGIN IMMEDIATE")
     try:
         cur = conn.execute(
@@ -718,13 +724,13 @@ def incremental_trace_flows(
     affected_ids: list[int] = []
     if expanded:
         for i in range(0, len(expanded), _SQL_BATCH):
-            batch = expanded[i:i + _SQL_BATCH]
-            placeholders = ",".join("?" * len(batch))
+            path_batch = expanded[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(path_batch))
             affected_rows = conn.execute(
                 f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
                 f"JOIN nodes n ON n.id = fm.node_id "
                 f"WHERE n.file_path IN ({placeholders})",
-                batch,
+                path_batch,
             ).fetchall()
             affected_ids.extend(r[0] for r in affected_rows)
         affected_ids = list(dict.fromkeys(affected_ids))
@@ -735,13 +741,13 @@ def incremental_trace_flows(
     entry_point_ids: set[int] = set()
     if affected_ids:
         for i in range(0, len(affected_ids), _SQL_BATCH):
-            batch = affected_ids[i:i + _SQL_BATCH]
-            ep_placeholders = ",".join("?" * len(batch))
+            id_batch = affected_ids[i:i + _SQL_BATCH]
+            ep_placeholders = ",".join("?" * len(id_batch))
             ep_rows = conn.execute(
                 f"SELECT f.entry_point_id, n.qualified_name FROM flows f "  # nosec B608
                 f"LEFT JOIN nodes n ON n.id = f.entry_point_id "
                 f"WHERE f.id IN ({ep_placeholders})",
-                batch,
+                id_batch,
             ).fetchall()
             for row in ep_rows:
                 if row[0] is not None:
@@ -756,7 +762,10 @@ def incremental_trace_flows(
     # orphaned flow_memberships rows pointing at deleted flows.  See #258.
     if affected_ids:
         if conn.in_transaction:
-            conn.commit()
+            logger.warning(
+                "Rolling back uncommitted transaction before BEGIN IMMEDIATE"
+            )
+            conn.rollback()
         conn.execute("BEGIN IMMEDIATE")
         try:
             for fid in affected_ids:

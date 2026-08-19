@@ -950,6 +950,50 @@ class TestIncrementalUpdate:
         finally:
             store.close()
 
+    def test_incremental_root_basename_does_not_clear_nested_flows(self, tmp_path):
+        """With repo_root, changing util.py must not delete left/util.py flows."""
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+
+        left = tmp_path / "left"
+        left.mkdir()
+        root_util = tmp_path / "util.py"
+        nested_util = left / "util.py"
+        root_util.write_text(
+            "def root_entry():\n    return root_helper()\n\n"
+            "def root_helper():\n    return 1\n"
+        )
+        nested_util.write_text(
+            "def nested_entry():\n    return nested_helper()\n\n"
+            "def nested_helper():\n    return 2\n"
+        )
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["util.py", "left/util.py"],
+            )
+            store_flows(store, trace_flows(store))
+            before_names = {f["name"] for f in get_flows(store)}
+            assert "root_entry" in before_names
+            assert "nested_entry" in before_names
+
+            root_util.write_text(
+                "def root_entry():\n    return root_helper()\n\n"
+                "def root_helper():\n    return 1\n\n"
+                "def root_extra():\n    return 3\n"
+            )
+            # postprocess none: wrongly expanded nested paths would lose flows forever
+            incremental_update(
+                tmp_path, store, changed_files=["util.py"],
+            )
+            after_names = {f["name"] for f in get_flows(store)}
+            assert "nested_entry" in after_names
+        finally:
+            store.close()
+
     @staticmethod
     def _community_assignment_signature(store) -> list[tuple[tuple[str, str], ...]]:
         """Stable community membership fingerprint (name, kind), ID-independent."""

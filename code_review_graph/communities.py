@@ -891,7 +891,8 @@ def remap_community_assignments(
     updated = 0
     items = list(community_by_qn.items())
     if conn.in_transaction:
-        conn.commit()
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     conn.execute("BEGIN IMMEDIATE")
     try:
         for qn, cid in items:
@@ -917,7 +918,8 @@ def purge_empty_communities(store: GraphStore) -> int:
     """
     conn = store._conn
     if conn.in_transaction:
-        conn.commit()
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
     conn.execute("BEGIN IMMEDIATE")
     try:
         # Refresh sizes from live node assignments.
