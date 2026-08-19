@@ -245,6 +245,14 @@ class TestChanges:
         # Untested gets 0.30, tested gets 0.05 for test coverage component.
         assert untested_score > tested_score
 
+    def test_risk_score_lifecycle_method_has_no_untested_penalty(self):
+        """Lifecycle methods do not retain the untested risk penalty (#865)."""
+        self._add_func("setUp", path="a.py", line_start=1, line_end=10)
+        node = self.store.get_node("a.py::setUp")
+        assert node is not None
+
+        assert compute_risk_score(self.store, node) == 0.0
+
     def test_risk_score_security_keywords_boost(self):
         """Functions with security keywords score higher."""
         self._add_func("process_data", path="a.py")

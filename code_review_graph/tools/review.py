@@ -6,7 +6,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..changes import analyze_changes, parse_diff_ranges, parse_git_diff_ranges  # noqa: F401
+from ..changes import (  # noqa: F401
+    analyze_changes,
+    is_test_gap_exempt,
+    parse_diff_ranges,
+    parse_git_diff_ranges,
+)
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
@@ -95,7 +100,10 @@ def get_review_context(
             tested_qualified = {e.source_qualified for e in test_edges}
             test_gap_count = sum(
                 1 for f in changed_funcs
-                if f.qualified_name not in tested_qualified
+                if (
+                    f.qualified_name not in tested_qualified
+                    and not is_test_gap_exempt(f)
+                )
             )
 
             summary_parts = [
@@ -240,7 +248,11 @@ def _generate_review_guidance(
 
     untested = [
         f for f in changed_funcs
-        if f.qualified_name not in tested_funcs and not f.is_test
+        if (
+            f.qualified_name not in tested_funcs
+            and not f.is_test
+            and not is_test_gap_exempt(f)
+        )
     ]
     if untested:
         guidance_parts.append(
