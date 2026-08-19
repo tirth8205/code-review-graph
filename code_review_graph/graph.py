@@ -861,9 +861,8 @@ class GraphStore:
             source_qualified: str,
             desired_extra: dict,
             serialized_extra: str,
-        ) -> bool:
+        ) -> None:
             """Keep parser-generated TESTED_BY mirrors aligned with CALLS."""
-            changed_mirror = False
             mirrors = self._conn.execute(
                 "SELECT id, source_qualified, extra FROM edges "
                 "WHERE kind = 'TESTED_BY' AND target_qualified = ? "
@@ -898,8 +897,6 @@ class GraphStore:
                 mirror_updates.append(
                     (source_qualified, serialized_extra, mirror["id"]),
                 )
-                changed_mirror = True
-            return changed_mirror
 
         for edge in rows:
             try:
