@@ -141,6 +141,32 @@ The graph uses SQLite with WAL mode. If you see lock errors:
 - Check that the file isn't matched by an ignore pattern
 - Run with `full_rebuild=True` to force a complete re-parse
 
+## Empty or incomplete graph (poisoned `graph.db`)
+
+Older releases could create an empty `.code-review-graph/graph.db` when
+commands like `status`, `detect-changes`, `visualize`, `wiki`, or `watch`
+ran before the first full build. Incremental `update` then only re-parsed
+changed files, so the graph stayed incomplete while looking "valid."
+
+Current CLI behavior:
+
+- `status`, `detect-changes`, `visualize`, `wiki`, and `watch` **do not**
+  create a database when none exists — they exit with
+  `No graph found … Run code-review-graph build first.`
+- `update` auto-repairs **missing** or **zero-node** graphs by falling back
+  to a full rebuild.
+
+If a graph was already poisoned (schema present, some nodes, but far fewer
+indexed files than the repo has — e.g. only files touched after an empty DB
+was created), run a full rebuild:
+
+```bash
+code-review-graph build
+```
+
+`build` always re-parses the whole tree (there is no separate `--force`
+flag). After that, `update` / hooks / `watch` can safely stay incremental.
+
 ## Graph seems stale
 - Hooks auto-update on edit/commit
 - If stale, run `/code-review-graph:build-graph` manually

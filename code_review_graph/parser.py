@@ -14420,21 +14420,13 @@ class CodeParser:
                     return child.text.decode("utf-8", errors="replace")
                 if child.type == "package" and child.text != b"package":
                     return child.text.decode("utf-8", errors="replace")
-        # Java: method_declaration has return type_identifier before the method
-        # identifier — skip straight to the first plain identifier child to
-        # avoid returning the return type as the function name.
-        if language == "java" and kind == "function" and node.type in (
-            "method_declaration", "constructor_declaration",
-        ):
-            for child in node.children:
-                if child.type == "identifier":
-                    return child.text.decode("utf-8", errors="replace")
-            return None
-        # C#: unlike Java there is no type_identifier — a non-generic return
-        # type such as ``Task`` is itself an ``identifier``, so the generic
-        # loop below would return it instead of the method name. Read the
-        # ``name`` field; unusual shapes still fall through.
-        if language == "csharp" and kind == "function" and node.type in (
+        # Java / C#: read the grammar ``name`` field for methods and
+        # constructors. Java return types are usually ``type_identifier``, but
+        # walking for the first ``identifier`` is the same fragile pattern that
+        # misnamed C# methods when a non-generic return type is itself an
+        # ``identifier`` (e.g. ``Task``). Prefer the name field; unusual shapes
+        # still fall through.
+        if language in ("java", "csharp") and kind == "function" and node.type in (
             "method_declaration", "constructor_declaration",
         ):
             name_node = node.child_by_field_name("name")
@@ -14532,16 +14524,6 @@ class CodeParser:
         if language == "go" and node.type == "method_declaration":
             for child in node.children:
                 if child.type == "field_identifier":
-                    return child.text.decode("utf-8", errors="replace")
-        # Java methods: tree-sitter-java puts type_identifier or generic_type
-        # (return type) before identifier (method name).  Must run before
-        # the generic loop, which would match the return type's
-        # type_identifier (e.g. "String", "ConfigBean").
-        # Constructors are fine — they have no return type node.
-        # Kotlin is unaffected: its syntax places the name before the type.
-        if language == "java" and node.type == "method_declaration":
-            for child in node.children:
-                if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
         # Swift init/deinit/subscript: the grammar gives none of them a usable
         # name. `init_declaration`'s name field is the `init` keyword itself,
@@ -14697,31 +14679,25 @@ class CodeParser:
         """Extract the receiver type from a Go method_declaration.
 
         For ``func (s *T) Foo() {...}`` returns ``"T"``. For ``func (T) Foo()``
-        also returns ``"T"``. Returns None if no receiver is present.
-
-        The receiver is always the first ``parameter_list`` child of a
-        Go ``method_declaration`` and contains a single ``parameter_declaration``
-        whose type is either a ``type_identifier`` or a ``pointer_type``
-        wrapping one. See: #190
+        also returns ``"T"``. Generic receivers ``T[P]`` and ``*T[P]`` return
+        ``"T"``. Returns None if no receiver is present. See: #190, #832
         """
-        for child in node.children:
-            if child.type != "parameter_list":
-                continue
-            for param in child.children:
-                if param.type != "parameter_declaration":
-                    continue
-                for sub in param.children:
-                    if sub.type == "type_identifier":
-                        return sub.text.decode("utf-8", errors="replace")
-                    if sub.type == "pointer_type":
-                        for ptr_child in sub.children:
-                            if ptr_child.type == "type_identifier":
-                                return ptr_child.text.decode(
-                                    "utf-8", errors="replace"
-                                )
-            # First parameter_list is always the receiver; stop searching.
+        receiver = node.child_by_field_name("receiver")
+        if receiver is None:
             return None
-        return None
+        parameter = next(
+            (child for child in receiver.named_children
+             if child.type == "parameter_declaration"),
+            None,
+        )
+        receiver_type = parameter.child_by_field_name("type") if parameter else None
+        while receiver_type is not None and receiver_type.type in {
+            "generic_type", "pointer_type",
+        }:
+            receiver_type = next(iter(receiver_type.named_children), None)
+        if receiver_type is None or receiver_type.type != "type_identifier":
+            return None
+        return receiver_type.text.decode("utf-8", errors="replace")
 
     @staticmethod
     def _cpp_scope_join(
@@ -15276,6 +15252,20 @@ class CodeParser:
             parts = text.split()
             if len(parts) >= 2:
                 imports.append(parts[-1].rstrip(";"))
+        elif language == "kotlin":
+            # tree-sitter-kotlin folds any comment that follows the LAST import
+            # into that import_header node, so the node text is not a module
+            # name (it can be a whole KDoc block). Read the identifier child
+            # instead; re-append ".*" when a wildcard_import sibling is present.
+            base = ""
+            wildcard = False
+            for child in node.children:
+                if child.type == "identifier":
+                    base = child.text.decode("utf-8", errors="replace")
+                elif child.type == "wildcard_import":
+                    wildcard = True
+            if base:
+                imports.append(f"{base}.*" if wildcard else base)
         elif language == "solidity":
             # import "path/to/file.sol" or import {Symbol} from "path"
             for child in node.children:

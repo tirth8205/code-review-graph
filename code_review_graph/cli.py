@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
 ]
 
 
@@ -96,6 +96,21 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty"):
         return False
     return sys.stdout.isatty()
+
+
+def _configure_utf8_stdio() -> None:
+    """Allow Unicode CLI decoration on streams using a legacy encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding or encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
 
 
 def _print_banner() -> None:
@@ -315,6 +330,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
@@ -335,6 +351,11 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target in ("codebuddy", "all"):
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
             print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
+
+        # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
+        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+            hermes_skills_dir = install_hermes_skills(repo_root)
+            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -602,6 +623,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
 
 def main() -> None:
     """Main CLI entry point."""
+    _configure_utf8_stdio()
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
@@ -1603,21 +1625,31 @@ def main() -> None:
         "wiki",
         "dead-code",
     )
-    status_data_dir = (
-        args.command == "status" and bool(getattr(args, "data_dir", None))
+    # Read-only consumers must not create graph.db / data dirs / registry
+    # entries when the graph is missing (follow-up to #777 / #782; see #803).
+    _read_only_db_cmds = frozenset({
+        "status",
+        "detect-changes",
+        "visualize",
+        "wiki",
+        "watch",
+    })
+    explicit_data_dir = bool(getattr(args, "data_dir", None))
+    read_only_explicit_data_dir = (
+        args.command in _read_only_db_cmds and explicit_data_dir
     )
-    if args.command in _data_dir_cmds and not status_data_dir:
+    if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command == "status":
-        if status_data_dir:
+    if args.command in _read_only_db_cmds:
+        if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
             db_path = get_db_path(repo_root, read_only=True)
         legacy_db = repo_root / ".code-review-graph.db"
         default_db = repo_root / ".code-review-graph" / "graph.db"
         if (
-            not status_data_dir
+            not read_only_explicit_data_dir
             and not db_path.exists()
             and db_path.resolve() == default_db.resolve()
             and legacy_db.exists()
@@ -1627,7 +1659,10 @@ def main() -> None:
             db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
-    if args.command in ("dead-code", "forget", "status") and not db_path.exists():
+    if (
+        args.command in ("dead-code", "forget", *_read_only_db_cmds)
+        and not db_path.exists()
+    ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
@@ -1896,7 +1931,13 @@ def main() -> None:
         elif args.command == "visualize":
             from .incremental import get_data_dir
 
-            data_dir = get_data_dir(repo_root)
+            # Prefer an explicit --data-dir so read-only resolution still
+            # writes exports next to the graph without registry side-effects.
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
             if fmt == "json":
@@ -1960,7 +2001,12 @@ def main() -> None:
             from .incremental import get_data_dir
             from .wiki import generate_wiki
 
-            wiki_dir = get_data_dir(repo_root) / "wiki"
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
+            wiki_dir = data_dir / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(

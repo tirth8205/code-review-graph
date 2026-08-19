@@ -420,6 +420,19 @@ def analyze_changes(
             for key, ranges in parse_diff_ranges(repo_root, base).items()
         }
 
+    # The affected-flows lookup and the no-ranges fallback match
+    # changed_files against nodes.file_path, which stores absolute
+    # normalized paths. CLI callers pass repo-relative diff paths, so an
+    # exact IN (...) match finds no nodes and detect-changes reports
+    # "0 affected flow(s)" even when the MCP tool reports hundreds on the
+    # same input (#848). Remap the same way as changed_ranges keys;
+    # already-absolute inputs (MCP) pass through pathlib joining unchanged.
+    if repo_root is not None:
+        _root = Path(repo_root)
+        changed_files = [
+            normalize_file_path(_root / fp) for fp in changed_files
+        ]
+
     # Map changes to nodes.
     if changed_ranges:
         changed_nodes = map_changes_to_nodes(store, changed_ranges)
