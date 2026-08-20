@@ -20,7 +20,14 @@ from ..uncertainty import (
     empty_query_confidence,
     empty_search_confidence,
 )
-from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
+from ._common import (
+    _BUILTIN_CALL_NAMES,
+    _bounded,
+    _get_store,
+    _resolve_graph_file_paths,
+    _shown_of,
+    _validate_positive_int,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +56,20 @@ _QUERY_PATTERNS = {
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _MAX_FQN_CANDIDATES = 100
+
+# Hard ceilings for the query-owned response lists. They mirror the review
+# context contract: a caller may lower a bound, but cannot ask for a payload
+# that dwarfs the client. Minimal search already projects to a tiny row, while
+# minimal large-function rows carry enough identity to act on more matches.
+_MAX_IMPACT_FILES = 200
+_MAX_IMPACT_NODES = 100
+_MAX_IMPACT_EDGES = 150
+_MAX_SEARCH_RESULTS_STANDARD = 100
+_MAX_SEARCH_RESULTS_MINIMAL = 5
+_MAX_LARGE_FUNCTIONS_STANDARD = 100
+_MAX_LARGE_FUNCTIONS_MINIMAL = 500
+_MAX_TRAVERSAL_TOKEN_BUDGET = 10_000
+_FETCH_ALL = 10**9
 
 
 def _looks_like_java_method_fqn(target: str) -> bool:
@@ -131,9 +152,11 @@ def get_impact_radius(
     Returns:
         Changed nodes, impacted nodes, impacted files, connecting edges,
         plus ``truncated`` flag and ``total_impacted`` count.
+
+    Every response list respects ``max_results`` and a per-list hard ceiling.
+    Count fields always describe the untruncated result.
     """
-    if isinstance(max_results, bool) or max_results < 1:
-        raise ValueError("max_results must be an integer greater than or equal to 1")
+    _validate_positive_int(max_results, "max_results")
 
     store, root = _get_store(repo_root)
     try:
@@ -146,9 +169,15 @@ def get_impact_radius(
             return {
                 "status": "ok",
                 "summary": "No changed files detected.",
+                "changed_files": [],
                 "changed_nodes": [],
                 "impacted_nodes": [],
                 "impacted_files": [],
+                "edges": [],
+                "changed_files_total": 0,
+                "changed_nodes_total": 0,
+                "impacted_files_total": 0,
+                "edges_total": 0,
                 "truncated": False,
                 "total_impacted": 0,
             }
@@ -157,7 +186,7 @@ def get_impact_radius(
         original_tokens = estimate_file_tokens(root, changed_files)
         abs_files = _resolve_graph_file_paths(store, root, changed_files)
         result = store.get_impact_radius(
-            abs_files, max_depth=max_depth, max_nodes=max_results
+            abs_files, max_depth=max_depth, max_nodes=_FETCH_ALL
         )
 
         impact_scores = result.get("impact_scores", {})
@@ -170,20 +199,37 @@ def get_impact_radius(
                 node_dict["impact_score"] = score
             impacted_dicts.append(node_dict)
         edge_dicts = [edge_to_dict(e) for e in result["edges"]]
-        truncated = result["truncated"]
+        shown_changed_files, changed_files_total, changed_files_cut = _bounded(
+            changed_files, max_results, _MAX_IMPACT_FILES,
+        )
+        shown_changed_nodes, changed_nodes_total, changed_nodes_cut = _bounded(
+            changed_dicts, max_results, _MAX_IMPACT_NODES,
+        )
+        shown_impacted_nodes, _impacted_total, impacted_nodes_cut = _bounded(
+            impacted_dicts, max_results, _MAX_IMPACT_NODES,
+        )
+        shown_impacted_files, impacted_files_total, impacted_files_cut = _bounded(
+            result["impacted_files"], max_results, _MAX_IMPACT_FILES,
+        )
+        shown_edges, edges_total, edges_cut = _bounded(
+            edge_dicts, max_results, _MAX_IMPACT_EDGES,
+        )
         total_impacted = result["total_impacted"]
+        truncated = (
+            result["truncated"] or changed_files_cut or changed_nodes_cut
+            or impacted_nodes_cut or impacted_files_cut or edges_cut
+        )
 
         summary_parts = [
-            f"Blast radius for {len(changed_files)} changed file(s):",
-            f"  - {len(changed_dicts)} nodes directly changed",
-            f"  - {len(impacted_dicts)} nodes impacted (within {max_depth} hops)",
-            f"  - {len(result['impacted_files'])} additional files affected",
+            f"Blast radius for {changed_files_total} changed file(s)"
+            + _shown_of(len(shown_changed_files), changed_files_total) + ":",
+            f"  - {changed_nodes_total} nodes directly changed"
+            + _shown_of(len(shown_changed_nodes), changed_nodes_total),
+            f"  - {total_impacted} nodes impacted (within {max_depth} hops)"
+            + _shown_of(len(shown_impacted_nodes), total_impacted),
+            f"  - {impacted_files_total} additional files affected"
+            + _shown_of(len(shown_impacted_files), impacted_files_total),
         ]
-        if truncated:
-            summary_parts.append(
-                f"  - Results truncated: showing {len(impacted_dicts)}"
-                f" of {total_impacted} impacted nodes"
-            )
 
         # "Nothing is impacted" and "nothing about these files is indexed"
         # look identical to a reader without this marker.
@@ -197,7 +243,7 @@ def get_impact_radius(
             )
 
         if detail_level == "minimal":
-            impacted_count = len(impacted_dicts)
+            impacted_count = total_impacted
             if impacted_count > 20:
                 risk = "high"
             elif impacted_count > 5:
@@ -205,16 +251,18 @@ def get_impact_radius(
             else:
                 risk = "low"
             key_entities = [
-                n["name"] for n in impacted_dicts[:5]
+                n["name"] for n in shown_impacted_nodes[:5]
             ]
             minimal_response = {
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
-                "impacted_file_count": len(result["impacted_files"]),
+                "impacted_file_count": impacted_files_total,
                 "key_entities": key_entities,
                 "truncated": truncated,
-                "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
+                "nodes_omitted": max(
+                    0, total_impacted - len(shown_impacted_nodes)
+                ),
             }
             if confidence:
                 minimal_response["confidence"] = confidence
@@ -224,14 +272,20 @@ def get_impact_radius(
         response: dict[str, Any] = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
-            "changed_files": changed_files,
-            "changed_nodes": changed_dicts,
-            "impacted_nodes": impacted_dicts,
-            "impacted_files": result["impacted_files"],
-            "edges": edge_dicts,
+            "changed_files": shown_changed_files,
+            "changed_nodes": shown_changed_nodes,
+            "impacted_nodes": shown_impacted_nodes,
+            "impacted_files": shown_impacted_files,
+            "edges": shown_edges,
+            "changed_files_total": changed_files_total,
+            "changed_nodes_total": changed_nodes_total,
+            "impacted_files_total": impacted_files_total,
+            "edges_total": edges_total,
             "truncated": truncated,
             "total_impacted": total_impacted,
-            "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
+            "nodes_omitted": max(
+                0, total_impacted - len(shown_impacted_nodes)
+            ),
         }
         if confidence:
             response["confidence"] = confidence
@@ -765,20 +819,33 @@ def semantic_search_nodes(
         detail_level: "standard" (full output) or "minimal" (summary only).
 
     Returns:
-        Ranked list of matching nodes.
+        Ranked list of matching nodes. ``total`` is the untruncated match
+        count; ``results`` is bounded by ``limit`` and the detail-level
+        ceiling.
     """
+    _validate_positive_int(limit, "limit")
+
     store, root = _get_store(repo_root)
     try:
         mode_out: list[str] = []
         results = hybrid_search(
-            store, query, kind=kind, limit=limit, context_files=context_files,
+            store, query, kind=kind, limit=_FETCH_ALL,
+            context_files=context_files,
             model=model, provider=provider, _out_mode=mode_out,
         )
 
         search_mode = mode_out[0] if mode_out else "keyword"
+        hard_cap = (
+            _MAX_SEARCH_RESULTS_MINIMAL
+            if detail_level == "minimal"
+            else _MAX_SEARCH_RESULTS_STANDARD
+        )
+        visible_results, total, truncated = _bounded(results, limit, hard_cap)
 
-        summary = f"Found {len(results)} node(s) matching '{query}'" + (
-            f" (kind={kind})" if kind else ""
+        summary = (
+            f"Found {total} node(s) matching '{query}'"
+            + (f" (kind={kind})" if kind else "")
+            + _shown_of(len(visible_results), total)
         )
 
         # Zero hits can mean "no such symbol" or "never indexed"/"stale index";
@@ -794,7 +861,7 @@ def semantic_search_nodes(
                     for k in ("name", "kind", "file_path", "score")
                     if k in r
                 }
-                for r in results[:5]
+                for r in visible_results
             ]
             minimal_response: dict[str, Any] = {
                 "status": "ok",
@@ -802,8 +869,10 @@ def semantic_search_nodes(
                 "search_mode": search_mode,
                 "summary": summary,
                 "results": minimal_results,
-                "result_count": len(results),
-                "results_omitted": max(0, len(results) - len(minimal_results)),
+                "result_count": len(minimal_results),
+                "total": total,
+                "truncated": truncated,
+                "results_omitted": max(0, total - len(minimal_results)),
             }
             if confidence:
                 minimal_response["confidence"] = confidence
@@ -814,7 +883,11 @@ def semantic_search_nodes(
             "query": query,
             "search_mode": search_mode,
             "summary": summary,
-            "results": results,
+            "results": visible_results,
+            "result_count": len(visible_results),
+            "total": total,
+            "truncated": truncated,
+            "results_omitted": max(0, total - len(visible_results)),
         }
         if confidence:
             result["confidence"] = confidence
@@ -901,6 +974,7 @@ def find_large_functions(
     file_path_pattern: str | None = None,
     limit: int = 50,
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -910,57 +984,89 @@ def find_large_functions(
     Args:
         min_lines: Minimum line count to flag (default: 50).
         kind: Filter by node kind: Function, Class, File, or Test.
-        file_path_pattern: Filter by file path substring (e.g. "components/").
+        file_path_pattern: Filter by file path substring (e.g., "components/").
         limit: Maximum results (default: 50).
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" returns full rows; "minimal" projects
+            identifying fields and permits a larger ceiling.
 
     Returns:
-        Oversized nodes with line counts, ordered largest first.
+        Oversized nodes with line counts, ordered largest first. ``total`` is
+        the untruncated count and ``results`` respects both ``limit`` and the
+        detail-level ceiling.
     """
+    _validate_positive_int(limit, "limit")
+
     store, root = _get_store(repo_root)
     try:
         nodes = store.get_nodes_by_size(
             min_lines=min_lines,
             kind=kind,
             file_path_pattern=file_path_pattern,
-            limit=limit,
+            limit=_FETCH_ALL,
         )
 
         results = []
-        for n in nodes:
-            d = node_to_dict(n)
-            d["line_count"] = (
-                (n.line_end - n.line_start + 1)
-                if n.line_start and n.line_end
+        for node in nodes:
+            row = node_to_dict(node)
+            row["line_count"] = (
+                (node.line_end - node.line_start + 1)
+                if node.line_start and node.line_end
                 else 0
             )
             # Make file_path relative for readability
             try:
-                d["relative_path"] = str(Path(n.file_path).relative_to(root))
+                row["relative_path"] = str(
+                    Path(node.file_path).relative_to(root)
+                )
             except ValueError:
-                d["relative_path"] = n.file_path
-            results.append(d)
+                row["relative_path"] = node.file_path
+            results.append(row)
+
+        hard_cap = (
+            _MAX_LARGE_FUNCTIONS_MINIMAL
+            if detail_level == "minimal"
+            else _MAX_LARGE_FUNCTIONS_STANDARD
+        )
+        visible_results, total, truncated = _bounded(results, limit, hard_cap)
+        if detail_level == "minimal":
+            visible_results = [
+                {
+                    key: row[key]
+                    for key in (
+                        "name", "qualified_name", "kind", "relative_path",
+                        "line_start", "line_end", "line_count",
+                    )
+                    if key in row
+                }
+                for row in visible_results
+            ]
 
         summary_parts = [
-            f"Found {len(results)} node(s) with >= {min_lines} lines"
+            f"Found {total} node(s) with >= {min_lines} lines"
             + (f" (kind={kind})" if kind else "")
             + (f" matching '{file_path_pattern}'" if file_path_pattern else "")
+            + _shown_of(len(visible_results), total)
             + ":",
         ]
-        for r in results[:10]:
+        for row in visible_results[:10]:
             summary_parts.append(
-                f"  {r['line_count']:>4} lines | {r['kind']:>8} | "
-                f"{r['name']} ({r['relative_path']}:{r['line_start']})"
+                f"  {row['line_count']:>4} lines | {row['kind']:>8} | "
+                f"{row['name']} ({row['relative_path']}:{row['line_start']})"
             )
-        if len(results) > 10:
-            summary_parts.append(f"  ... and {len(results) - 10} more")
+        if len(visible_results) > 10:
+            summary_parts.append(f"  ... and {len(visible_results) - 10} more")
 
         return {
             "status": "ok",
             "summary": "\n".join(summary_parts),
-            "total_found": len(results),
+            "total_found": total,
             "min_lines": min_lines,
-            "results": results,
+            "total": total,
+            "result_count": len(visible_results),
+            "truncated": truncated,
+            "results_omitted": max(0, total - len(visible_results)),
+            "results": visible_results,
         }
     finally:
         store.close()
@@ -984,10 +1090,14 @@ def traverse_graph_func(
         query: Search string to find the starting node.
         mode: "bfs" (breadth-first) or "dfs" (depth-first).
         depth: Max traversal depth (1-6). Default: 3.
-        token_budget: Approximate token limit for results.
+        token_budget: Approximate token limit for results, capped at
+            ``_MAX_TRAVERSAL_TOKEN_BUDGET``.
         repo_root: Repository root path.
     """
-    store, root = _get_store(repo_root)
+    _validate_positive_int(token_budget, "token_budget")
+    visible_budget = min(token_budget, _MAX_TRAVERSAL_TOKEN_BUDGET)
+
+    store, _root = _get_store(repo_root)
     try:
         results = hybrid_search(store, query, limit=1)
         if not results:
@@ -999,71 +1109,71 @@ def traverse_graph_func(
         start_qn = results[0]["qualified_name"]
         depth = max(1, min(depth, 6))
 
-        # BFS / DFS traversal
-        visited: dict[str, int] = {}  # qn -> depth
-        queue: list[tuple[str, int]] = [
-            (start_qn, 0),
-        ]
-        traversal: list[dict] = []
-        approx_tokens = 0
+        # Walk the complete bounded-depth result first. The caller gets the
+        # true node count even when the response budget only permits a prefix.
+        visited: set[str] = set()
+        queue: list[tuple[str, int]] = [(start_qn, 0)]
+        traversal: list[dict[str, Any]] = []
 
         while queue:
             if mode == "bfs":
-                current_qn, cur_depth = queue.pop(0)
+                current_qn, current_depth = queue.pop(0)
             else:
-                current_qn, cur_depth = queue.pop()
+                current_qn, current_depth = queue.pop()
 
-            if current_qn in visited:
+            if current_qn in visited or current_depth > depth:
                 continue
-            if cur_depth > depth:
-                continue
+            visited.add(current_qn)
 
-            visited[current_qn] = cur_depth
             node = store.get_node(current_qn)
             if not node:
                 continue
 
-            entry = {
+            traversal.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": node.qualified_name,
                 "kind": node.kind,
                 "file": node.file_path,
-                "depth": cur_depth,
-            }
-            approx_tokens += len(str(entry)) // 4
-            if approx_tokens > token_budget:
+                "depth": current_depth,
+            })
+
+            out_edges = store.get_edges_by_source(current_qn)
+            in_edges = store.get_edges_by_target(current_qn)
+            for edge in out_edges:
+                if edge.target_qualified not in visited:
+                    queue.append((edge.target_qualified, current_depth + 1))
+            for edge in in_edges:
+                if edge.source_qualified not in visited:
+                    queue.append((edge.source_qualified, current_depth + 1))
+
+        total = len(traversal)
+        visible_traversal: list[dict[str, Any]] = []
+        used_tokens = 0
+        for entry in traversal:
+            entry_tokens = max(1, len(str(entry)) // 4)
+            if used_tokens + entry_tokens > visible_budget:
                 break
+            visible_traversal.append(entry)
+            used_tokens += entry_tokens
 
-            traversal.append(entry)
-
-            # Get neighbours
-            out_edges = store.get_edges_by_source(
-                current_qn
-            )
-            in_edges = store.get_edges_by_target(
-                current_qn
-            )
-            for e in out_edges:
-                tgt = e.target_qualified
-                if tgt not in visited:
-                    queue.append((tgt, cur_depth + 1))
-            for e in in_edges:
-                src = e.source_qualified
-                if src not in visited:
-                    queue.append((src, cur_depth + 1))
-
+        truncated = len(visible_traversal) < total
+        summary = (
+            f"Traversed {total} node(s) from '{start_qn}'"
+            + _shown_of(len(visible_traversal), total)
+        )
         return {
             "start_node": start_qn,
             "mode": mode,
             "max_depth": depth,
-            "nodes_visited": len(traversal),
-            "traversal": traversal,
-            "truncated": approx_tokens > token_budget,
+            "token_budget": visible_budget,
+            "nodes_visited": len(visible_traversal),
+            "total": total,
+            "traversal": visible_traversal,
+            "truncated": truncated,
+            "summary": summary,
             "next_tool_suggestions": [
-                "query_graph callers_of"
-                " -- focused relationship query",
-                "get_impact_radius"
-                " -- blast radius analysis",
+                "query_graph callers_of -- focused relationship query",
+                "get_impact_radius -- blast radius analysis",
             ],
         }
     finally:

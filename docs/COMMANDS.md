@@ -54,10 +54,12 @@ base: str = "HEAD~1"
 ```
 changed_files: list[str] | None  # Auto-detected from VCS
 max_depth: int = 2               # Hops in graph
+max_results: int = 500           # Per-list maximum (nodes max 100; files max 200; edges max 150)
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
 ```
+Each list reports its untruncated `*_total`; `truncated` marks any cut.
 Relevant responses may include compact estimated `context_savings` metadata.
 
 #### `query_graph_tool`
@@ -91,7 +93,7 @@ Relevant responses may include compact estimated `context_savings` metadata.
 query: str
 depth: int = 3                  # 1-6
 mode: str = "bfs"               # "bfs" or "dfs"
-token_budget: int = 2000
+token_budget: int = 2000        # Capped at 10000 approximate tokens
 repo_root: str | None
 ```
 
@@ -99,7 +101,7 @@ repo_root: str | None
 ```
 query: str           # Search string
 kind: str | None     # File, Class, Function, Type, Test
-limit: int = 20
+limit: int = 20      # Max 100 in standard mode; minimal mode shows max 5
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
 provider: str | None # local, openai, google, minimax, voyage
@@ -124,8 +126,9 @@ repo_root: str | None
 min_lines: int = 50                # Minimum line count threshold
 kind: str | None                   # File, Class, Function, or Test
 file_path_pattern: str | None      # Filter by file path substring
-limit: int = 50                    # Max results to return
+limit: int = 50                    # Max 100 standard / 500 minimal results
 repo_root: str | None
+detail_level: str = "standard"     # "standard" or "minimal"
 ```
 
 #### `get_docs_section_tool`
