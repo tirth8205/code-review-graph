@@ -1564,6 +1564,39 @@ class TestWatchReconciliation:
         finally:
             store.close()
 
+    def test_watch_accepts_resolved_event_paths_for_symlinked_repo_root(self, tmp_path):
+        import os
+        import sys
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        source = repo / "source.py"
+        source.write_text("def source():\n    pass\n")
+        linked_repo = tmp_path / "repo-link"
+        if sys.platform == "win32":
+            import _winapi
+
+            _winapi.CreateJunction(str(repo), str(linked_repo))
+        else:
+            linked_repo.symlink_to(repo, target_is_directory=True)
+
+        store = GraphStore(repo / "graph.db")
+        handler = _create_watch_handler(linked_repo, store, None)
+        try:
+            from watchdog.events import FileModifiedEvent
+
+            with patch(
+                "code_review_graph.incremental.collect_all_files",
+                side_effect=AssertionError("resolved root event inventoried repository"),
+            ):
+                handler.process([FileModifiedEvent(str(source))])
+
+            assert store.get_nodes_by_file(str(linked_repo / "source.py"))
+        finally:
+            store.close()
+            if sys.platform == "win32" and linked_repo.exists():
+                os.rmdir(linked_repo)
+
     def test_watch_rejects_file_below_symlinked_ancestor_outside_repo(self, tmp_path):
         outside = tmp_path.parent / f"{tmp_path.name}-outside"
         outside.mkdir()

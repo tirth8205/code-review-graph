@@ -1407,7 +1407,17 @@ def _create_watch_handler(
             try:
                 relative = candidate.relative_to(lexical_root)
             except ValueError:
-                return None
+                if lexical_root == resolved_root:
+                    return None
+                # Some backends—notably FSEvents on macOS—report the resolved
+                # path even when the watcher was scheduled through a symlinked
+                # repository root. Retry against the resolved root so both
+                # spellings refer to the same watched tree.
+                candidate = Path(os.path.realpath(path))
+                try:
+                    relative = candidate.relative_to(resolved_root)
+                except ValueError:
+                    return None
             existing = candidate
             while not existing.exists() and existing != lexical_root:
                 existing = existing.parent
