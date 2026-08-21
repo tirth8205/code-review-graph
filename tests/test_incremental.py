@@ -1813,3 +1813,121 @@ class TestRenamePurgeParity:
             assert store.get_nodes_by_file(str(tmp_path / "b.py"))
         finally:
             store.close()
+
+
+class TestRevertedContentParity:
+    """Issue #817: an edit/revert round trip must not leave ghost nodes."""
+
+    def test_content_scan_runs_only_for_reconciling_updates(self, tmp_path, monkeypatch):
+        source = tmp_path / "source.py"
+        source.write_text("def foo():\n    return 1\n")
+        scan_calls = []
+
+        def fake_content_scan(repo_root, store):
+            scan_calls.append(repo_root)
+            return [], {}
+
+        monkeypatch.setattr(
+            incremental_module,
+            "_find_content_mismatches",
+            fake_content_scan,
+        )
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            disabled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["source.py"],
+                reconcile_stale=False,
+            )
+
+            assert disabled_result["files_updated"] == 1
+            assert scan_calls == []
+
+            reconciled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=[],
+                reconcile_stale=True,
+            )
+
+            assert reconciled_result["files_updated"] == 0
+            assert scan_calls == [tmp_path]
+        finally:
+            store.close()
+
+    def test_reverted_file_with_empty_diff_is_reparsed(self, tmp_path):
+        source = tmp_path / "source.py"
+        original = "def foo():\n    return 1\n"
+        intermediate = original + "\n\ndef bar():\n    return 2\n"
+        source.write_text(original)
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo"}
+
+            source.write_text(intermediate)
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo", "bar"}
+
+            source.write_text(original)
+            result = incremental_update(tmp_path, store, changed_files=[])
+
+            assert result["changed_files"] == ["source.py"]
+            assert result["files_updated"] == 1
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo"}
+        finally:
+            store.close()
+
+    def test_reverted_file_is_reconciled_alongside_another_change(self, tmp_path):
+        source = tmp_path / "source.py"
+        other = tmp_path / "other.py"
+        original = "def foo():\n    return 1\n"
+        intermediate = original + "\n\ndef bar():\n    return 2\n"
+        source.write_text(original)
+        other.write_text("def other():\n    return 3\n")
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["source.py", "other.py"],
+            )
+
+            source.write_text(intermediate)
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+
+            source.write_text(original)
+            other.write_text("def other():\n    return 4\n")
+            result = incremental_update(tmp_path, store, changed_files=["other.py"])
+
+            assert set(result["changed_files"]) == {"other.py", "source.py"}
+            assert result["files_updated"] == 2
+
+            source_functions = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert source_functions == {"foo"}
+            other_functions = {
+                node.name for node in store.get_nodes_by_file(str(other))
+                if node.kind == "Function"
+            }
+            assert other_functions == {"other"}
+        finally:
+            store.close()

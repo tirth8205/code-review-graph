@@ -1199,6 +1199,16 @@ class GraphStore:
         ).fetchall()
         return [r["file_path"] for r in rows]
 
+    def get_file_hashes(self) -> dict[str, str]:
+        """Return indexed file paths mapped to the hash last stored for each file."""
+        rows = self._conn.execute(
+            "SELECT file_path, file_hash FROM nodes WHERE kind = 'File'"
+        ).fetchall()
+        return {
+            normalize_file_path(row["file_path"]): row["file_hash"] or ""
+            for row in rows
+        }
+
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
         """Keyword search across node names.
 
