@@ -708,7 +708,10 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
         return []
 
 
-def _find_content_mismatches(repo_root: Path, store: "GraphStore") -> list[str]:
+def _find_content_mismatches(
+    repo_root: Path,
+    store: "GraphStore",
+) -> tuple[list[str], dict[str, str]]:
     """Find indexed files whose bytes differ from the graph's last parsed hash.
 
     Git diffs compare the working tree with a base commit.  If a file is
@@ -719,6 +722,7 @@ def _find_content_mismatches(repo_root: Path, store: "GraphStore") -> list[str]:
     git diff non-empty.
     """
     mismatched_files: list[str] = []
+    current_hashes: dict[str, str] = {}
 
     for stored_path, stored_hash in store.get_file_hashes().items():
         path = Path(stored_path)
@@ -726,7 +730,9 @@ def _find_content_mismatches(repo_root: Path, store: "GraphStore") -> list[str]:
             path = repo_root / path
         try:
             relative_path = path.relative_to(repo_root).as_posix()
-            current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+            raw = path.read_bytes()
+            current_hash = hashlib.sha256(raw).hexdigest()
+            current_hashes[relative_path] = current_hash
         except (OSError, ValueError):
             # Missing files are handled by stale-file reconciliation.  Paths
             # outside the repository cannot be represented as relative update
@@ -735,7 +741,7 @@ def _find_content_mismatches(repo_root: Path, store: "GraphStore") -> list[str]:
         if current_hash != stored_hash:
             mismatched_files.append(relative_path)
 
-    return mismatched_files
+    return mismatched_files, current_hashes
 
 
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
@@ -1227,9 +1233,17 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
-    changed_files = list(
-        dict.fromkeys([*changed_files, *_find_content_mismatches(repo_root, store)]),
-    )
+    content_mismatches: list[str] = []
+    current_hashes: dict[str, str] = {}
+    if reconcile_stale:
+        # The content scan reads every indexed file.  Watch batches disable stale
+        # reconciliation to remain proportional to filesystem events; reverted
+        # content arrives in those events and is covered by the normal hash check.
+        content_mismatches, current_hashes = _find_content_mismatches(
+            repo_root,
+            store,
+        )
+    changed_files = list(dict.fromkeys([*changed_files, *content_mismatches]))
     stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
 
     if not changed_files and not stale_files:
@@ -1276,11 +1290,21 @@ def incremental_update(
         if parser.detect_language(abs_path) is None:
             continue
         # Quick hash check to skip unchanged files
+        normalized_path = normalize_file_path(rel_path)
+        fhash = current_hashes.get(normalized_path)
+        if fhash is None:
+            try:
+                raw = abs_path.read_bytes()
+                fhash = hashlib.sha256(raw).hexdigest()
+            except (OSError, PermissionError):
+                fhash = None
         try:
-            raw = abs_path.read_bytes()
-            fhash = hashlib.sha256(raw).hexdigest()
             existing_nodes = store.get_nodes_by_file(str(abs_path))
-            if existing_nodes and existing_nodes[0].file_hash == fhash:
+            if (
+                fhash is not None
+                and existing_nodes
+                and existing_nodes[0].file_hash == fhash
+            ):
                 continue
         except (OSError, PermissionError):
             pass

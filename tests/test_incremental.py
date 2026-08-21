@@ -1774,6 +1774,45 @@ class TestRenamePurgeParity:
 class TestRevertedContentParity:
     """Issue #817: an edit/revert round trip must not leave ghost nodes."""
 
+    def test_content_scan_runs_only_for_reconciling_updates(self, tmp_path, monkeypatch):
+        source = tmp_path / "source.py"
+        source.write_text("def foo():\n    return 1\n")
+        scan_calls = []
+
+        def fake_content_scan(repo_root, store):
+            scan_calls.append(repo_root)
+            return [], {}
+
+        monkeypatch.setattr(
+            incremental_module,
+            "_find_content_mismatches",
+            fake_content_scan,
+        )
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            disabled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["source.py"],
+                reconcile_stale=False,
+            )
+
+            assert disabled_result["files_updated"] == 1
+            assert scan_calls == []
+
+            reconciled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=[],
+                reconcile_stale=True,
+            )
+
+            assert reconciled_result["files_updated"] == 0
+            assert scan_calls == [tmp_path]
+        finally:
+            store.close()
+
     def test_reverted_file_with_empty_diff_is_reparsed(self, tmp_path):
         source = tmp_path / "source.py"
         original = "def foo():\n    return 1\n"
