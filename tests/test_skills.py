@@ -584,6 +584,23 @@ class TestGenerateCodexHooksConfig:
         assert "code-review-graph update --skip-flows" in post_cmd
         assert "code-review-graph status" in session_cmd
 
+    def test_windows_commands_drain_stdin_and_exit_successfully(self, tmp_path):
+        config = generate_codex_hooks_config(tmp_path)
+        post = config["hooks"]["PostToolUse"][0]["hooks"][0]
+        session = config["hooks"]["SessionStart"][0]["hooks"][0]
+
+        for command in (post["commandWindows"], session["commandWindows"]):
+            assert command.startswith(
+                'powershell.exe -NoProfile -NonInteractive -Command "'
+            )
+            assert "[Console]::In.ReadToEnd() | Out-Null" in command
+            assert "git rev-parse --git-dir" in command
+            assert command.endswith('exit 0"')
+
+        assert "code-review-graph update --skip-flows" in post["commandWindows"]
+        assert "code-review-graph status" in session["commandWindows"]
+        assert "Not a git repo, skipping" in session["commandWindows"]
+
 
 class TestInstallCodexHooks:
     def test_creates_hooks_file(self, tmp_path, monkeypatch):

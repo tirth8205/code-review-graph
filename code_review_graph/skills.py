@@ -1104,6 +1104,12 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 " && code-review-graph update --skip-flows"
                                 " || true"
                             ),
+                            "commandWindows": (
+                                'powershell.exe -NoProfile -NonInteractive -Command "'
+                                "[Console]::In.ReadToEnd() | Out-Null; "
+                                "if ((git rev-parse --git-dir) -eq $null) { exit 0 }; "
+                                'code-review-graph update --skip-flows; exit 0"'
+                            ),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1121,6 +1127,13 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                                 "git rev-parse --git-dir >/dev/null 2>&1"
                                 " && code-review-graph status"
                                 " || echo 'Not a git repo, skipping'"
+                            ),
+                            "commandWindows": (
+                                'powershell.exe -NoProfile -NonInteractive -Command "'
+                                "[Console]::In.ReadToEnd() | Out-Null; "
+                                "if ((git rev-parse --git-dir) -eq $null) { "
+                                "'Not a git repo, skipping'; exit 0 }; "
+                                'code-review-graph status; exit 0"'
                             ),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
