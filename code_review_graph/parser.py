@@ -13654,7 +13654,9 @@ class CodeParser:
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
-                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue"]
+                extensions = [
+                    ".ts", ".tsx", ".js", ".jsx", ".vue", ".mts", ".cts",
+                ]
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
@@ -13672,8 +13674,14 @@ class CodeParser:
                         return str(target.resolve())
                 # ESM/NodeNext writes `./foo.js` for a file that is `foo.ts` on
                 # disk; only here does replacing the suffix become correct.
-                if base.suffix in (".js", ".jsx", ".mjs", ".cjs"):
-                    for ext in (".ts", ".tsx"):
+                suffix_substitutions = {
+                    ".js": (".ts", ".tsx", ".jsx"),
+                    ".jsx": (".ts", ".tsx"),
+                    ".mjs": (".mts",),
+                    ".cjs": (".cts",),
+                }
+                if base.suffix in suffix_substitutions:
+                    for ext in suffix_substitutions[base.suffix]:
                         target = base.with_suffix(ext)
                         if target.is_file():
                             return str(target.resolve())
