@@ -22,6 +22,7 @@ Use the knowledge graph to systematically trace and debug issues.
 - Recent changes are the most common source of new issues.
 
 ## Token Efficiency Rules
-- ALWAYS start with `get_minimal_context_tool(task="<your task>")` before any other graph tool.
+- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
 - Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
 - Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

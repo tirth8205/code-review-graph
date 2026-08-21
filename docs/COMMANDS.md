@@ -67,6 +67,7 @@ pattern: str    # callers_of, references_to, callees_of, imports_of, importers_o
 target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
+max_results: int = 100           # Minimal mode additionally caps visible results at 5
 ```
 
 #### `get_review_context_tool`
@@ -74,11 +75,15 @@ detail_level: str = "standard"   # "standard" or "minimal"
 changed_files: list[str] | None
 max_depth: int = 2
 include_source: bool = True
-max_lines_per_file: int = 200
+max_lines_per_file: int = 200    # Capped at 500
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
+max_results: int = 50            # Graph nodes per list (max 100) and edges (max 150)
+max_files: int = 25              # Files listed and given snippets (max 200)
 ```
+Snippets share an 800-line budget across the whole response. Each list reports
+its untruncated `*_total`, and `context.truncated` marks any cut.
 Relevant responses may include compact estimated `context_savings` metadata.
 
 #### `traverse_graph_tool`
@@ -145,6 +150,8 @@ flow_id: int | None          # Database ID from list_flows_tool
 flow_name: str | None        # Name to search (partial match)
 include_source: bool = False # Include source snippets for each step
 repo_root: str | None
+max_steps: int = 50          # Capped at 200; flow.total_steps reports the full count
+max_source_lines: int = 400  # Shared across all steps; capped at 2000
 ```
 
 #### `get_affected_flows_tool`
@@ -152,7 +159,12 @@ repo_root: str | None
 changed_files: list[str] | None  # Auto-detected from VCS
 base: str = "HEAD~1"
 repo_root: str | None
+detail_level: str = "standard"   # "standard" full step details, "minimal" metadata only
+max_flows: int = 50              # 0 means "no caller limit"
 ```
+Standard mode carries a full `steps` list per flow, so it additionally caps
+visible flows at 25 and spends a shared 400-step budget across them; minimal
+mode caps at 500. `total` always reports the untruncated flow count. See #849.
 
 ### Community Tools
 
@@ -162,7 +174,11 @@ sort_by: str = "size"    # size, cohesion, name
 min_size: int = 0
 repo_root: str | None
 detail_level: str = "standard"
+max_results: int = 50    # Communities returned (max 200)
+max_members: int = 10    # Member names per community in standard mode (max 25)
 ```
+Each community's `size` still reports its true member count;
+`members_truncated` marks a cut member list.
 
 #### `get_community_tool`
 ```
@@ -170,38 +186,48 @@ community_name: str | None   # Name to search (partial match)
 community_id: int | None     # Database ID
 include_members: bool = False
 repo_root: str | None
+max_members: int = 25        # Member entries returned (max 25)
 ```
 
 #### `get_architecture_overview_tool`
 ```
 repo_root: str | None
 detail_level: str = "minimal"    # "minimal" compact default, "standard" full detail
+max_results: int = 100           # Cross-community rows and warnings (max 200)
+max_members: int = 10            # Member names per community in standard mode (max 25)
 ```
+`cross_community_edges_total` reports the untruncated row count.
 Minimal responses may include compact estimated `context_savings` metadata.
 
 ### Graph Health and Architecture Tools
 
 #### `get_hub_nodes_tool`
 ```
-top_n: int = 10
+top_n: int = 10                  # Capped at 100
 repo_root: str | None
+detail_level: str = "standard"   # "minimal" returns name, kind, total_degree
 ```
 
 #### `get_bridge_nodes_tool`
 ```
-top_n: int = 10
+top_n: int = 10                  # Capped at 100
 repo_root: str | None
+detail_level: str = "standard"   # "minimal" returns name, kind, betweenness
 ```
 
 #### `get_knowledge_gaps_tool`
 ```
 repo_root: str | None
+max_per_category: int = 15       # Entries per gap category (max 50)
+detail_level: str = "standard"   # "minimal" drops file paths
 ```
+`summary` maps each category to its untruncated count.
 
 #### `get_surprising_connections_tool`
 ```
-top_n: int = 15
+top_n: int = 15                  # Capped at 100
 repo_root: str | None
+detail_level: str = "standard"   # "minimal" returns source, target, kind, score
 ```
 
 #### `get_suggested_questions_tool`
@@ -219,8 +245,13 @@ include_source: bool = False
 max_depth: int = 2
 repo_root: str | None
 detail_level: str = "standard"
+max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
+max_flows: int = 20          # Affected flows embedded (max 200)
 ```
 Primary tool for code review. Maps changed files to affected functions, flows, communities, and test coverage gaps. Returns risk scores and prioritized review items.
+Embedded flows carry per-flow metadata only — use `get_affected_flows_tool` for
+step detail. `changed_functions_total`, `test_gaps_total`, and
+`affected_flows_total` report the untruncated counts.
 Relevant responses may include compact estimated `context_savings` metadata.
 
 #### `refactor_tool`
@@ -231,13 +262,18 @@ new_name: str | None         # (rename) New name
 kind: str | None             # (dead_code) Function or Class
 file_pattern: str | None     # (dead_code) Filter by file path substring
 repo_root: str | None
+max_results: int = 50        # Edits/symbols/suggestions returned (max 150)
+detail_level: str = "standard"  # "minimal" keeps identifying fields only
 ```
+Truncating a rename preview truncates only the response: the stored preview
+keeps every edit, so `apply_refactor_tool` still applies the full set.
 
 #### `apply_refactor_tool`
 ```
 refactor_id: str             # ID from prior refactor_tool call
 repo_root: str | None
 dry_run: bool = False        # Return diff without writing files
+max_diff_files: int = 25     # Per-file diffs in a dry run (max 150)
 ```
 
 ### Wiki Tools
@@ -252,7 +288,9 @@ force: bool = False          # Regenerate all pages even if unchanged
 ```
 community_name: str          # Community name to look up
 repo_root: str | None
+max_chars: int = 20000       # Page content returned (max 80000)
 ```
+`total_chars` reports the real page length; `truncated` marks a cut.
 
 ### Multi-Repo Tools
 
@@ -265,8 +303,24 @@ repo_root: str | None
 ```
 query: str
 kind: str | None
-limit: int = 20
+limit: int = 20              # Results per repo
+max_results: int = 50        # Merged results across all repos (max 100)
 ```
+
+## Result Bounds
+
+Every tool that returns a list is bounded, so no single MCP response can blow
+a context window (see #849). The contract is uniform:
+
+- Defaults are small. Pass the tool's cap parameter to widen up to its hard
+  ceiling, or a smaller value to narrow.
+- Truncation is never silent: the response reports the untruncated count
+  (`total`, or a `*_total` field per list), sets `truncated: true`, and the
+  summary line says how many of how many are shown.
+- Cap parameters reject values below 1 and reject booleans, the same way
+  `query_graph_tool`'s `max_results` does.
+- Hard ceilings are enforced in code and pinned by `tests/test_token_budget.py`,
+  which records the measured per-tool budget table as reviewable data.
 
 ## MCP Prompts (5 workflow templates)
 

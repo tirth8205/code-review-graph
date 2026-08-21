@@ -19,6 +19,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ._legacy_instructions import LEGACY_INSTRUCTION_SECTIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -891,12 +893,14 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `children_of` on a file to see all its functions and classes.\n"
             "- Use `find_large_functions_tool` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
-            "before any other graph tool.\n"
+            '- Start with `get_minimal_context_tool(task="<your task>")` '
+            "before other graph tools.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens."
+            "and ≤800 total output tokens.\n"
+            "- Read the implementation and its tests before changing code. The graph "
+            "narrows scope; it does not replace the source."
         ),
     },
     "review-changes.md": {
@@ -919,12 +923,14 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
-            "before any other graph tool.\n"
+            '- Start with `get_minimal_context_tool(task="<your task>")` '
+            "before other graph tools.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens."
+            "and ≤800 total output tokens.\n"
+            "- Read the implementation and its tests before changing code. The graph "
+            "narrows scope; it does not replace the source."
         ),
     },
     "debug-issue.md": {
@@ -945,12 +951,14 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
-            "before any other graph tool.\n"
+            '- Start with `get_minimal_context_tool(task="<your task>")` '
+            "before other graph tools.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens."
+            "and ≤800 total output tokens.\n"
+            "- Read the implementation and its tests before changing code. The graph "
+            "narrows scope; it does not replace the source."
         ),
     },
     "refactor-safely.md": {
@@ -973,12 +981,14 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions_tool` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            '- ALWAYS start with `get_minimal_context_tool(task="<your task>")` '
-            "before any other graph tool.\n"
+            '- Start with `get_minimal_context_tool(task="<your task>")` '
+            "before other graph tools.\n"
             '- Use `detail_level="minimal"` on all calls. Only escalate to '
             '"standard" when minimal is insufficient.\n'
             "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens."
+            "and ≤800 total output tokens.\n"
+            "- Read the implementation and its tests before changing code. The graph "
+            "narrows scope; it does not replace the source."
         ),
     },
 }
@@ -1332,14 +1342,30 @@ def install_codex_hooks(repo_root: Path) -> Path:
 
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
 
+# Closes the managed block so reinstall can replace it without guessing where it
+# ends. Releases before this shipped only the opening marker; those blocks are
+# matched by their full text instead, see _legacy_instructions.
+_CLAUDE_MD_SECTION_END_MARKER = "<!-- /code-review-graph MCP tools -->"
+
+# Shared across every platform instruction file so the wording stays identical.
+_INSTRUCTION_INTRO = """**This project has a knowledge graph. Start with the code-review-graph
+MCP tools to narrow scope, then read the source.** The graph is cheaper than scanning files and
+gives you structural context (callers, dependents, test coverage) that file search cannot."""
+
+_INSTRUCTION_GUARDRAILS = """### Verify in the source
+
+- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
+- For any non-trivial change, read the implementation and the relevant tests before concluding.
+- Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
+  recovery, or compatibility code.
+- When the graph and the source disagree, the source wins. The graph may be stale or may not
+  model that relationship.
+- An empty graph result can mean "not indexed" or "not statically visible", not "does not exist"."""
+
 _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 ## MCP Tools: code-review-graph
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
-the codebase.** The graph is faster, cheaper (fewer tokens), and gives
-you structural context (callers, dependents, test coverage) that file
-scanning cannot.
+{_INSTRUCTION_INTRO}
 
 ### When to use graph tools FIRST
 
@@ -1349,7 +1375,7 @@ scanning cannot.
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
 - **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
-Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+{_INSTRUCTION_GUARDRAILS}
 
 ### Key Tools
 
@@ -1370,6 +1396,7 @@ Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
 2. Use `detect_changes_tool` for code review.
 3. Use `get_affected_flows_tool` to understand impact.
 4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
+{_CLAUDE_MD_SECTION_END_MARKER}
 """
 
 # Copilot-specific instruction file content: uses VS Code tool references and
@@ -1384,11 +1411,7 @@ description: >-
 {_CLAUDE_MD_SECTION_MARKER}
 ## MCP Tools: code-review-graph
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using file/search tools to
-explore the codebase.** The graph is faster, cheaper (fewer
-tokens), and gives you structural context (callers, dependents,
-test coverage) that file scanning cannot.
+{_INSTRUCTION_INTRO}
 
 ### When to use graph tools FIRST
 
@@ -1398,8 +1421,7 @@ test coverage) that file scanning cannot.
 - **Finding relationships**: `query_graph_tool` callers_of/callees_of
 - **Architecture questions**: `get_architecture_overview_tool`
 
-Fall back to file/search tools **only** when the graph doesn't
-cover what you need.
+{_INSTRUCTION_GUARDRAILS}
 
 ### Key Tools
 
@@ -1420,6 +1442,7 @@ cover what you need.
 2. Use `detect_changes_tool` for code review.
 3. Use `get_affected_flows_tool` to understand impact.
 4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
+{_CLAUDE_MD_SECTION_END_MARKER}
 """
 
 # Maps instruction file path → (marker, section) for files that need content
@@ -1434,33 +1457,96 @@ _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS: dict[str, tuple[str, str]] = {
 }
 
 
-def _inject_instructions(file_path: Path, marker: str, section: str) -> bool:
-    """Append an instruction section to a file if not already present.
+def _known_instruction_sections() -> tuple[str, ...]:
+    """Every block text this project has ever generated, longest first.
 
-    Idempotent: checks if the marker is already present before appending.
-    Creates the file if it doesn't exist.
+    Longest first matters: a shorter variant that happens to be contained in a
+    longer one must never win the match and leave the tail behind.
+    """
+    current = (_CLAUDE_MD_SECTION, _COPILOT_SECTION)
+    return tuple(sorted({*current, *LEGACY_INSTRUCTION_SECTIONS}, key=len, reverse=True))
 
-    Returns True if the file was modified.
+
+def _upgrade_managed_block(existing: str, section: str) -> str | None:
+    """Replace a previously generated block with ``section``.
+
+    Only text that exactly equals a known generated block is ever rewritten, so
+    anything the user wrote around it survives byte for byte. Blocks predating
+    the end marker have no closing boundary, which is why nothing here searches
+    for one; guessing where such a block stops would eat user content.
+
+    Returns the new file content, or None when the marker is present but no
+    known block is, meaning someone edited the block by hand.
+    """
+    stale = [
+        block
+        for block in _known_instruction_sections()
+        if block != section and block in existing
+    ]
+    if not stale:
+        return None
+    # Anchor on the longest match, then drop any duplicate blocks an older
+    # release left behind. Splitting around the anchor keeps the cleanup away
+    # from the text being written in, which a plain str.replace would not.
+    head = stale[0]
+    index = existing.index(head)
+    before, after = existing[:index], existing[index + len(head) :]
+    for block in stale[1:]:
+        before = before.replace(block, "")
+        after = after.replace(block, "")
+    if section in before or section in after:
+        # The current block is already there; the stale ones were duplicates.
+        return before + after
+    return before + section + after
+
+
+def _inject_instructions(file_path: Path, marker: str, section: str) -> str:
+    """Create, or upgrade in place, the managed instruction block in a file.
+
+    Returns one of:
+
+    - ``"created"``: the block was written for the first time, creating the
+      file or appending to one that had no block.
+    - ``"updated"``: an older generated block was replaced with the current one.
+    - ``"unchanged"``: the file already holds the current block, byte for byte.
+      Nothing is written, so repeated installs do not touch the file.
+    - ``"conflict"``: the marker is present but the block matches nothing this
+      project generated, so it was hand-edited. The file is left alone and the
+      caller is expected to tell the user about it.
     """
     existing = ""
     if file_path.exists():
         existing = file_path.read_text(encoding="utf-8", errors="replace")
 
     if marker in existing:
-        logger.info("%s already contains instructions, skipping.", file_path.name)
-        return False
+        upgraded = _upgrade_managed_block(existing, section)
+        if upgraded is None:
+            if section in existing:
+                logger.info("%s already holds the current instructions.", file_path.name)
+                return "unchanged"
+            logger.warning(
+                "%s has a hand-edited code-review-graph section; leaving it alone.",
+                file_path,
+            )
+            return "conflict"
+        file_path.write_text(upgraded, encoding="utf-8")
+        logger.info("Updated the MCP tools section in %s", file_path)
+        return "updated"
 
     separator = "\n" if existing and not existing.endswith("\n") else ""
     extra_newline = "\n" if existing else ""
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_text(existing + separator + extra_newline + section, encoding="utf-8")
     logger.info("Appended MCP tools section to %s", file_path)
-    return True
+    return "created"
 
 
-def inject_claude_md(repo_root: Path) -> None:
-    """Append MCP tools section to CLAUDE.md."""
-    _inject_instructions(
+def inject_claude_md(repo_root: Path) -> str:
+    """Create or upgrade the MCP tools section in CLAUDE.md.
+
+    Returns the outcome string documented on ``_inject_instructions``.
+    """
+    return _inject_instructions(
         repo_root / "CLAUDE.md",
         _CLAUDE_MD_SECTION_MARKER,
         _CLAUDE_MD_SECTION,
@@ -1495,7 +1581,9 @@ def _remove_legacy_instruction_file(path: Path) -> None:
     content = path.read_text(encoding="utf-8", errors="replace")
     if _CLAUDE_MD_SECTION_MARKER not in content:
         return
-    for section in (_COPILOT_SECTION, _CLAUDE_MD_SECTION):
+    # Longest first, so removing a long block cannot leave the tail of a shorter
+    # variant it contains. Anything not generated by this project is left alone.
+    for section in _known_instruction_sections():
         content = content.replace(section, "")
     if _CLAUDE_MD_SECTION_MARKER in content:
         return
@@ -1702,9 +1790,30 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
     - any other platform key (``cursor``, ``windsurf``, ``antigravity``,
       ``opencode``, ``codex``): writes only the files associated with that platform.
 
-    Returns list of filenames that were created or updated.
+    Returns list of filenames that were created or updated. Use
+    ``inject_instruction_files`` when the caller also needs to know which files
+    were left alone because someone edited the block by hand.
     """
-    updated: list[str] = []
+    outcomes = inject_instruction_files(repo_root, target=target, include_claude_md=False)
+    return [name for name, outcome in outcomes.items() if outcome in ("created", "updated")]
+
+
+def inject_instruction_files(
+    repo_root: Path,
+    target: str = "all",
+    *,
+    include_claude_md: bool = True,
+) -> dict[str, str]:
+    """Write every instruction file for ``target`` and report what happened.
+
+    Maps each filename to ``"created"``, ``"updated"``, ``"unchanged"`` or
+    ``"conflict"``, as documented on ``_inject_instructions``. This is the entry
+    point the install command uses so it can tell the user which files it
+    upgraded and which ones need manual attention.
+    """
+    outcomes: dict[str, str] = {}
+    if include_claude_md and target in ("claude", "all"):
+        outcomes["CLAUDE.md"] = inject_claude_md(repo_root)
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
         if target != "all" and target not in owners:
             continue
@@ -1713,13 +1822,12 @@ def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[s
             marker, section = _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS[filename]
         else:
             marker, section = _CLAUDE_MD_SECTION_MARKER, _CLAUDE_MD_SECTION
-        if _inject_instructions(path, marker, section):
-            updated.append(filename)
+        outcomes[filename] = _inject_instructions(path, marker, section)
     for filename, owners in _LEGACY_PLATFORM_INSTRUCTION_FILES.items():
         if target != "all" and target not in owners:
             continue
         _remove_legacy_instruction_file(repo_root / filename)
-    return updated
+    return outcomes
 
 
 # --- Cursor hooks ---

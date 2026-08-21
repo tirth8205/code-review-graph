@@ -162,30 +162,43 @@ def _instruction_files_to_modify(
     """Return the list of instruction files that ``install`` would write
     or modify, given the current state of the repo and the selected
     platform target. Used for the dry-run / confirm preview (#173).
+
+    A file holding a section from an older release is listed as ``(update)``:
+    install replaces that block in place rather than leaving it stale (#314).
     """
-    from .skills import _CLAUDE_MD_SECTION_MARKER, _PLATFORM_INSTRUCTION_FILES
+    from .skills import (
+        _CLAUDE_MD_SECTION,
+        _CLAUDE_MD_SECTION_MARKER,
+        _COPILOT_SECTION,
+        _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS,
+        _PLATFORM_INSTRUCTION_FILES,
+        _upgrade_managed_block,
+    )
 
     targets: list[str] = []
 
+    def _describe(filename: str, path: Path, section: str) -> None:
+        if not path.exists():
+            targets.append(f"{filename} (new)")
+            return
+        content = path.read_text(encoding="utf-8", errors="replace")
+        if _CLAUDE_MD_SECTION_MARKER not in content:
+            targets.append(f"{filename} (append)")
+        elif _upgrade_managed_block(content, section) is not None:
+            targets.append(f"{filename} (update)")
+
     if target in ("claude", "all"):
-        claude_md = repo_root / "CLAUDE.md"
-        if claude_md.exists():
-            content = claude_md.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append("CLAUDE.md (append)")
-        else:
-            targets.append("CLAUDE.md (new)")
+        _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
 
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
         if target != "all" and target not in owners:
             continue
-        path = repo_root / filename
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append(f"{filename} (append)")
-        else:
-            targets.append(f"{filename} (new)")
+        section = (
+            _COPILOT_SECTION
+            if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+            else _CLAUDE_MD_SECTION
+        )
+        _describe(filename, repo_root / filename, section)
 
     return targets
 
@@ -321,8 +334,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_claude_md,
-        inject_platform_instructions,
+        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
@@ -364,14 +376,24 @@ def _handle_init(args: argparse.Namespace) -> None:
             "Inject graph instructions into the files above?",
             default_yes=True,
         ):
-            if target in ("claude", "all"):
-                inject_claude_md(repo_root)
-            inject_platform_instructions(repo_root, target=target)
-            # Use the precomputed instr_targets list for the confirmation
-            # message; we don't need the fresh return value from
-            # inject_platform_instructions here.
-            names = [t.split(" ")[0] for t in instr_targets]
-            print(f"Injected graph instructions into: {', '.join(names)}")
+            outcomes = inject_instruction_files(repo_root, target=target)
+            for label, wording in (
+                ("created", "Injected graph instructions into"),
+                ("updated", "Updated graph instructions in"),
+            ):
+                names = [f for f, o in outcomes.items() if o == label]
+                if names:
+                    print(f"{wording}: {', '.join(names)}")
+            # A hand-edited block is never overwritten, so say which file it is
+            # rather than reporting success the user did not get (#314).
+            stale = [f for f, o in outcomes.items() if o == "conflict"]
+            if stale:
+                print(
+                    "Left edited graph instructions alone in: "
+                    f"{', '.join(stale)}. Delete the section between "
+                    "<!-- code-review-graph MCP tools --> and its closing marker "
+                    "and reinstall to pick up the current text."
+                )
         else:
             print("Skipped instruction injection (user declined).")
     elif skip_instructions:

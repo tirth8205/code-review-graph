@@ -839,34 +839,69 @@ def _remove_skill_file(
         _prune_empty_directory(path.parent, boundary)
 
 
+def _join_without_instruction(before: str, after: str) -> str:
+    """Close the gap a removed instruction block leaves behind.
+
+    The text on either side is kept. Only the whitespace at the seam is
+    normalised, so removing a block from the middle of a file does not leave a
+    pile of blank lines where it used to be.
+    """
+    if not after.strip():
+        # The block ran to the end, which is where install appends it.
+        return before.rstrip() + ("\n" if before.strip() else "")
+    if not before.strip():
+        return after.lstrip("\n")
+    return before.rstrip("\n") + "\n\n" + after.lstrip("\n")
+
+
 def _remove_instruction(
     path: Path,
-    section: str,
     boundary: Path,
     report: UninstallReport,
     *,
     dry_run: bool,
 ) -> None:
+    """Strip every generated instruction block from a file.
+
+    Only text that exactly equals a block this project generated is removed, so
+    a section someone edited by hand survives and is reported instead. Blocks
+    written before the closing marker existed have no end boundary, which is why
+    nothing here searches for one: their full recorded text is the boundary.
+    Matching every known variant means a block from any past release comes out,
+    not just one written by the running version (#314).
+    """
     if not path.exists() or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
     if raw is None:
         return
-    exact_index = raw.find(section)
-    if exact_index >= 0:
-        start = exact_index
-        end = exact_index + len(section)
-        rewritten = raw[:start] + raw[end:]
-    else:
-        marker_index = raw.find(skills._CLAUDE_MD_SECTION_MARKER)
-        if marker_index < 0:
-            return
-        report.skipped_paths.append(
-            f"{path} (marked instruction section differs from a known installed section; "
-            "left unchanged)"
-        )
+
+    rewritten = raw
+    # Longest first, so removing a short variant cannot strand the tail of a
+    # longer one that contains it. The loop also clears duplicate blocks that
+    # older releases stacked up (#558).
+    for known in skills._known_instruction_sections():
+        while (index := rewritten.find(known)) >= 0:
+            rewritten = _join_without_instruction(
+                rewritten[:index], rewritten[index + len(known) :]
+            )
+
+    if rewritten == raw:
+        if skills._CLAUDE_MD_SECTION_MARKER in raw:
+            report.skipped_paths.append(
+                f"{path} (marked instruction section differs from a known installed section; "
+                "left unchanged)"
+            )
         return
-    rewritten = rewritten.rstrip() + ("\n" if rewritten.strip() else "")
+
+    if skills._CLAUDE_MD_SECTION_MARKER in rewritten:
+        # One block was generated and another was edited. Remove what this
+        # project owns and name the file so the user can deal with the rest.
+        report.skipped_paths.append(
+            f"{path} (a further marked instruction section differs from a known "
+            "installed section; left unchanged)"
+        )
+
     if rewritten:
         _write_text(
             path,
@@ -1211,23 +1246,18 @@ def _process_repo(
                         dry_run=dry_run,
                     )
 
-    instruction_sections = {
-        "CLAUDE.md": skills._CLAUDE_MD_SECTION,
-        **{
-            relative: skills._PLATFORM_INSTRUCTION_CUSTOM_SECTIONS.get(
-                relative,
-                (skills._CLAUDE_MD_SECTION_MARKER, skills._CLAUDE_MD_SECTION),
-            )[1]
-            for relative in (
-                *skills._PLATFORM_INSTRUCTION_FILES,
-                *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
-            )
-        },
-    }
-    for relative, section in instruction_sections.items():
+    # Every variant is matched per file, so which section a given path was
+    # written with no longer has to be worked out here.
+    instruction_files = dict.fromkeys(
+        (
+            "CLAUDE.md",
+            *skills._PLATFORM_INSTRUCTION_FILES,
+            *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
+        )
+    )
+    for relative in instruction_files:
         _remove_instruction(
             repo_root / relative,
-            section,
             repo_root,
             report,
             dry_run=dry_run,

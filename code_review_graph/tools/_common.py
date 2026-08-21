@@ -262,6 +262,53 @@ def _resolve_graph_file_paths(
     return resolved
 
 
+# ---------------------------------------------------------------------------
+# Result bounding (#849 follow-up)
+# ---------------------------------------------------------------------------
+#
+# Every MCP tool response has to survive a client-side context window. #849
+# found get_affected_flows returning 247k tokens inside a workflow documented
+# as "5 tool calls, 800 tokens total"; PR #853 capped that one tool. These
+# helpers give the remaining tools the same contract:
+#
+#   * ``total`` always reports the untruncated count,
+#   * ``truncated`` marks that the list was cut,
+#   * the summary line says how many of how many are shown.
+#
+# Each tool pairs a caller-facing default with a hard ceiling. The ceiling
+# exists so a caller passing ``max_results=1_000_000`` still gets a response
+# that fits the ~25k-token budget most MCP clients allow for one tool result.
+
+
+def _validate_positive_int(value: int, name: str) -> int:
+    """Validate a caller-supplied result bound.
+
+    Mirrors the check ``query.py`` applies to ``max_results``: ``bool`` is
+    rejected explicitly because ``True`` would otherwise silently mean 1.
+    """
+    if isinstance(value, bool) or value < 1:
+        raise ValueError(f"{name} must be an integer greater than or equal to 1")
+    return value
+
+
+def _bounded(
+    items: "list[Any]", max_results: int, hard_cap: int,
+) -> tuple[list[Any], int, bool]:
+    """Cap *items* at ``min(max_results, hard_cap)``.
+
+    Returns ``(visible, total, truncated)`` where ``total`` is the
+    untruncated length, so callers can always report the real count.
+    """
+    total = len(items)
+    limit = min(max_results, hard_cap)
+    return list(items[:limit]), total, total > limit
+
+
+def _shown_of(shown: int, total: int) -> str:
+    """Return the ``", showing N of M"`` fragment used by capped summaries."""
+    return f", showing {shown} of {total}" if shown < total else ""
+
+
 def compact_response(
     summary: str,
     key_entities: list[str] | None = None,

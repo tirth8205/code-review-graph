@@ -122,21 +122,40 @@ class TestMaxFlowsBoundaries(_FlowFixture):
 
 
 class TestDefaultCapAtScale(_FlowFixture):
-    """The default max_flows=50 must bound a 60-flow response (#849)."""
+    """The default max_flows must bound a 60-flow response (#849).
+
+    PR #853 capped the *count* at 50. That was not enough: in standard mode
+    each flow carries a full ``steps`` list (~980 tokens on a real graph), so
+    50 flows still serialized to ~49k tokens. Standard mode now caps at 25
+    and minimal mode at 500 -- a per-detail-level ceiling, the same shape
+    query.py uses when it caps minimal-mode results at five.
+    """
 
     def setup_method(self):
         self.setup_flows(60)
 
-    def test_default_truncates_sixty_flows_to_fifty(self):
+    def test_default_truncates_sixty_flows_to_the_standard_ceiling(self):
         result = self.affected()
         assert result["status"] == "ok"
         assert result["total"] == 60
-        assert len(result["affected_flows"]) == 50
+        assert len(result["affected_flows"]) == 25
         assert result["truncated"] is True
-        assert "showing 50" in result["summary"]
+        assert "showing 25 of 60" in result["summary"]
 
-    def test_zero_disables_limit_at_scale(self):
+    def test_zero_means_no_caller_limit_but_still_hits_the_ceiling(self):
+        """``max_flows=0`` keeps its documented meaning, bounded.
+
+        An escape hatch that can return a quarter of a million tokens is the
+        bug #849 reported, not a feature, so the ceiling still applies.
+        """
         result = self.affected(max_flows=0)
+        assert result["total"] == 60
+        assert len(result["affected_flows"]) == 25
+        assert result["truncated"] is True
+
+    def test_zero_in_minimal_mode_returns_everything_under_its_ceiling(self):
+        """Minimal rows cost ~18 tokens, so their ceiling is 500."""
+        result = self.affected(max_flows=0, detail_level="minimal")
         assert result["truncated"] is False
         assert len(result["affected_flows"]) == result["total"] == 60
 

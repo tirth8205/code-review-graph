@@ -114,6 +114,7 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "code_review_graph/visualization.py" = ["E501"]  # embedded HTML/JS template
+"code_review_graph/_legacy_instructions.py" = ["E501"]  # verbatim past output, must not be reflowed
 "tests/fixtures/sample_databricks_export.py" = ["F841", "W292"]  # intentional fixture patterns
 "tests/fixtures/sample_notebook.ipynb" = ["F401", "I001"]  # fixture imports: intentionally unused, split across cells
 "tests/test_multilang.py" = ["E501"]  # long assertions with explanatory comments
