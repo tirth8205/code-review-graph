@@ -1030,6 +1030,169 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
+# --- Documentation-driven skills ---
+
+DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
+    "build-graph": {
+        "description": "Build or update the code review knowledge graph. Run this first to initialize, or let hooks keep it updated automatically.",
+        "argument_hint": "[full]",
+        "title": "Build Graph",
+        "body": (
+            "Build or incrementally update the persistent code knowledge graph for this repository.\n\n"
+            "## Steps\n\n"
+            "1. **Check graph status** by calling the `list_graph_stats_tool` MCP tool.\n"
+            "   - If the graph has never been built (last_updated is null), proceed with a full build.\n"
+            "   - If the graph exists, proceed with an incremental update.\n\n"
+            "2. **Build the graph** by calling the `build_or_update_graph_tool` MCP tool:\n"
+            "   - For first-time setup: `build_or_update_graph_tool(full_rebuild=True)`\n"
+            "   - For updates: `build_or_update_graph_tool()` (incremental by default)\n\n"
+            "3. **Verify** by calling `list_graph_stats_tool` again and report the results:\n"
+            "   - Number of files parsed\n"
+            "   - Number of nodes and edges created\n"
+            "   - Languages detected\n"
+            "   - Any errors encountered\n\n"
+            "## When to Use\n\n"
+            "- First time setting up the graph for a repository\n"
+            "- After major refactoring or branch switches\n"
+            "- If the graph seems stale or out of sync\n"
+            "- The graph auto-updates via hooks on edit/commit, so manual builds are rarely needed\n\n"
+            "## Notes\n\n"
+            "- The graph is stored as a SQLite database (`.code-review-graph/graph.db`) in the repo root\n"
+            "- Binary files, generated files, and patterns in `.code-review-graphignore` are skipped\n"
+            "- Supported languages: Python, TypeScript/JavaScript, Vue, Go, Rust, Java, Scala, C#, Ruby, Kotlin, Swift, PHP, Solidity, C/C++"
+        ),
+    },
+    "review-delta": {
+        "description": "Review only changes since last commit using impact analysis. Token-efficient delta review with automatic blast-radius detection.",
+        "argument_hint": "[file or function name]",
+        "title": "Review Delta",
+        "body": (
+            "Perform a focused, token-efficient code review of only the changed code and its blast radius.\n\n"
+            "**Token optimization:** Before starting, call `get_docs_section_tool(section_name=\"review-delta\")` for the optimized workflow. Use ONLY changed nodes + 2-hop neighbors in context.\n\n"
+            "## Steps\n\n"
+            "1. **Ensure the graph is current** by calling `build_or_update_graph_tool()` (incremental update).\n\n"
+            "2. **Get review context** by calling `get_review_context_tool()`. This returns:\n"
+            "   - Changed files (auto-detected from git diff)\n"
+            "   - Impacted nodes and files (blast radius)\n"
+            "   - Source code snippets for changed areas\n"
+            "   - Review guidance (test coverage gaps, wide impact warnings, inheritance concerns)\n\n"
+            "3. **Analyze the blast radius** by reviewing the `impacted_nodes` and `impacted_files` in the context. Focus on:\n"
+            "   - Functions whose callers changed (may need signature/behavior verification)\n"
+            "   - Classes with inheritance changes (Liskov substitution concerns)\n"
+            "   - Files with many dependents (high-risk changes)\n\n"
+            "4. **Perform the review** using the context. For each changed file:\n"
+            "   - Review the source snippet for correctness, style, and potential bugs\n"
+            "   - Check if impacted callers/dependents need updates\n"
+            "   - Verify test coverage using `query_graph_tool(pattern=\"tests_for\", target=<function_name>)`\n"
+            "   - Flag any untested changed functions\n\n"
+            "5. **Report findings** in a structured format:\n"
+            "   - **Summary**: One-line overview of the changes\n"
+            "   - **Risk level**: Low / Medium / High (based on blast radius)\n"
+            "   - **Issues found**: Bugs, style issues, missing tests\n"
+            "   - **Blast radius**: List of impacted files/functions\n"
+            "   - **Recommendations**: Actionable suggestions\n\n"
+            "## Advantages Over Full-Repo Review\n\n"
+            "- Only sends changed + impacted code to the model (5-10x fewer tokens)\n"
+            "- Automatically identifies blast radius without manual file searching\n"
+            "- Provides structural context (who calls what, inheritance chains)\n"
+            "- Flags untested functions automatically"
+        ),
+    },
+    "review-pr": {
+        "description": "Review a PR or branch diff using the knowledge graph for full structural context. Outputs a structured review with blast-radius analysis.",
+        "argument_hint": "[PR number or branch name]",
+        "title": "Review PR",
+        "body": (
+            "Perform a comprehensive code review of a pull request or branch diff using the knowledge graph.\n\n"
+            "**Token optimization:** Before starting, call `get_docs_section_tool(section_name=\"review-pr\")` for the optimized workflow. Never include full files unless explicitly asked.\n\n"
+            "## Steps\n\n"
+            "1. **Identify the changes** for the PR:\n"
+            "   - If a PR number or branch is provided, use `git diff main...<branch>` to get changed files\n"
+            "   - Otherwise auto-detect from the current branch vs main/master\n\n"
+            "2. **Update the graph** by calling `build_or_update_graph_tool(base=\"main\")` to ensure the graph reflects the current state.\n\n"
+            "3. **Get the full review context** by calling `get_review_context_tool(base=\"main\")`:\n"
+            "   - This uses `main` (or the specified base branch) as the diff base\n"
+            "   - Returns all changed files across all commits in the PR\n\n"
+            "4. **Analyze impact** by calling `get_impact_radius_tool(base=\"main\")`:\n"
+            "   - Review the blast radius across the entire PR\n"
+            "   - Identify high-risk areas (widely depended-upon code)\n\n"
+            "5. **Deep-dive each changed file**:\n"
+            "   - Read the full source of files with significant changes\n"
+            "   - Use `query_graph_tool(pattern=\"callers_of\", target=<func>)` for high-risk functions\n"
+            "   - Use `query_graph_tool(pattern=\"tests_for\", target=<func>)` to verify test coverage\n"
+            "   - Check for breaking changes in public APIs\n\n"
+            "6. **Generate structured review output**:\n\n"
+            "   ```\n"
+            "   ## PR Review: <title>\n\n"
+            "   ### Summary\n"
+            "   <1-3 sentence overview>\n\n"
+            "   ### Risk Assessment\n"
+            "   - **Overall risk**: Low / Medium / High\n"
+            "   - **Blast radius**: X files, Y functions impacted\n"
+            "   - **Test coverage**: N changed functions covered / M total\n\n"
+            "   ### File-by-File Review\n"
+            "   #### <file_path>\n"
+            "   - Changes: <description>\n"
+            "   - Impact: <who depends on this>\n"
+            "   - Issues: <bugs, style, concerns>\n\n"
+            "   ### Missing Tests\n"
+            "   - <function_name> in <file> - no test coverage found\n\n"
+            "   ### Recommendations\n"
+            "   1. <actionable suggestion>\n"
+            "   2. <actionable suggestion>\n"
+            "   ```\n\n"
+            "## Tips\n\n"
+            "- For large PRs, focus on the highest-impact files first (most dependents)\n"
+            "- Use `semantic_search_nodes_tool` to find related code the PR might have missed\n"
+            "- Check if renamed/moved functions have updated all callers"
+        ),
+    },
+}
+
+
+def render_documentary_skill_markdown(slug: str) -> str:
+    """Render the checked-in markdown for a documentation-driven skill."""
+    spec = DOCUMENTARY_SKILLS[slug]
+    frontmatter = [
+        "---",
+        f"name: {slug}",
+        f"description: {spec['description']}",
+    ]
+    argument_hint = spec.get("argument_hint")
+    if argument_hint:
+        frontmatter.append(f'argument-hint: "{argument_hint}"')
+    frontmatter.append("---")
+    frontmatter.append("")
+    frontmatter.append(f"# {spec['title']}")
+    frontmatter.append("")
+    frontmatter.append(spec["body"])
+    frontmatter.append("")
+    return "\n".join(frontmatter)
+
+
+def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
+    """Generate the documentation-driven skills under ``skills/``.
+
+    Args:
+        repo_root: Repository root directory.
+        skills_dir: Custom skills directory. Defaults to repo_root/skills.
+
+    Returns:
+        Path to the skills directory.
+    """
+    if skills_dir is None:
+        skills_dir = repo_root / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for slug in DOCUMENTARY_SKILLS:
+        skill_subdir = skills_dir / slug
+        skill_subdir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_subdir / "SKILL.md"
+        skill_path.write_text(render_documentary_skill_markdown(slug), encoding="utf-8")
+
+    return skills_dir
+
+
 def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
