@@ -1297,6 +1297,7 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
+    store.set_metadata("intentionally_incomplete", "0")
     if not cpp_errors:
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
     _store_vcs_metadata(repo_root, store)
