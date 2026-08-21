@@ -12,13 +12,240 @@ import json
 import logging
 import re
 from collections import deque
-from typing import Optional
+from pathlib import Path
+from typing import Iterable, Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
 from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
+
+_SQL_BATCH = 450
+
+
+def _escape_like_literal(value: str) -> str:
+    """Escape ``\\``, ``%``, and ``_`` for use in a SQL LIKE pattern."""
+    return (
+        value.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
+
+def expand_changed_file_paths(
+    store: GraphStore,
+    changed_files: Iterable[str],
+    repo_root: str | Path | None = None,
+) -> list[str]:
+    """Expand *changed_files* to every path form present in the graph.
+
+    ``git diff --name-only`` yields repo-relative paths, while parsed nodes
+    store absolute ``file_path`` values (and tests often use relative paths).
+    Matching must accept both without treating ``%`` / ``_`` as wildcards
+    (#569). When *repo_root* is provided, only exact absolute/relative
+    variants are used — the ``LIKE`` basename fallback is skipped so a
+    root-level ``util.py`` cannot match ``left/util.py``.
+    """
+    root = Path(repo_root).resolve() if repo_root is not None else None
+    variants: list[str] = []
+    seen: set[str] = set()
+    relative_inputs: list[str] = []
+
+    def _add(path: str) -> None:
+        normalized = normalize_file_path(path)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            variants.append(normalized)
+
+    for raw in changed_files:
+        text = normalize_file_path(raw)
+        _add(text)
+        path = Path(raw)
+        if path.is_absolute():
+            _add(str(path))
+            try:
+                resolved = path.resolve()
+                _add(str(resolved))
+                if root is not None:
+                    _add(str(resolved.relative_to(root)))
+            except (OSError, ValueError):
+                pass
+        else:
+            relative_inputs.append(text)
+            if root is not None:
+                _add(str(root / path))
+                try:
+                    _add(str((root / path).resolve()))
+                except OSError:
+                    pass
+
+    # Exact hits first (graph identities are POSIX-normalized; see #774).
+    matched: list[str] = list(variants)
+    matched_seen = set(variants)
+    if variants:
+        for i in range(0, len(variants), _SQL_BATCH):
+            path_batch = variants[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(path_batch))
+            rows = store._conn.execute(
+                f"SELECT DISTINCT file_path FROM nodes "  # nosec B608
+                f"WHERE file_path IN ({placeholders})",
+                path_batch,
+            ).fetchall()
+            for row in rows:
+                fp = row[0]
+                if fp not in matched_seen:
+                    matched.append(fp)
+                    matched_seen.add(fp)
+
+    # LIKE fallback is only for relative inputs without a repo root, where we
+    # cannot build exact absolute variants. When repo_root is known, skip it:
+    # otherwise root-level ``util.py`` also matches ``left/util.py`` via
+    # ``%/util.py``, and incremental clears the wrong file's flows.
+    if root is None:
+        for rel in relative_inputs:
+            escaped = _escape_like_literal(rel)
+            patterns = (
+                escaped,                 # exact relative path
+                f"%/{escaped}",          # POSIX separator anchor
+                f"%\\\\{escaped}",       # legacy Windows separator anchor
+            )
+            for pattern in patterns:
+                rows = store._conn.execute(
+                    "SELECT DISTINCT file_path FROM nodes "
+                    "WHERE file_path LIKE ? ESCAPE '\\'",
+                    (pattern,),
+                ).fetchall()
+                for row in rows:
+                    fp = row[0]
+                    if fp not in matched_seen:
+                        matched.append(fp)
+                        matched_seen.add(fp)
+    return matched
+
+
+def _flows_touching_files(
+    store: GraphStore,
+    file_paths: list[str],
+) -> tuple[list[int], list[int], set[str]]:
+    """Return ``(node_ids, flow_ids, entry_point_qns)`` for *file_paths*."""
+    if not file_paths:
+        return [], [], set()
+
+    node_ids = list(store.get_node_ids_by_files(file_paths))
+    if not node_ids:
+        return [], [], set()
+
+    flow_ids = store.get_flow_ids_by_node_ids(set(node_ids))
+    if not flow_ids:
+        return node_ids, [], set()
+
+    conn = store._conn
+    entry_qns: set[str] = set()
+    for i in range(0, len(flow_ids), _SQL_BATCH):
+        batch = flow_ids[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT n.qualified_name FROM flows f "  # nosec B608
+            f"JOIN nodes n ON n.id = f.entry_point_id "
+            f"WHERE f.id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        entry_qns.update(r[0] for r in rows if r[0])
+    return node_ids, flow_ids, entry_qns
+
+
+def capture_affected_flow_entry_points(
+    store: GraphStore,
+    file_paths: list[str],
+) -> set[str]:
+    """Return entry-point qualified names for flows touching *file_paths*.
+
+    Must run **before** node replacement: after ``remove_file_data`` the old
+    node IDs are gone and membership JOINs can no longer find those flows.
+    """
+    _node_ids, _flow_ids, entry_qns = _flows_touching_files(store, file_paths)
+    return entry_qns
+
+
+def clear_flows_for_files(store: GraphStore, file_paths: list[str]) -> set[str]:
+    """Delete flows that touch *file_paths* before those nodes are replaced.
+
+    Returns the entry-point qualified names that should be re-traced after
+    replacement (stable across node ID churn).
+    """
+    if not file_paths:
+        return set()
+
+    node_ids, flow_ids, entry_qns = _flows_touching_files(store, file_paths)
+    if not node_ids and not flow_ids:
+        return entry_qns
+
+    conn = store._conn
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for i in range(0, len(flow_ids), _SQL_BATCH):
+            flow_batch = flow_ids[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(flow_batch))
+            conn.execute(
+                f"DELETE FROM flow_memberships WHERE flow_id IN ({placeholders})",  # nosec B608
+                flow_batch,
+            )
+            conn.execute(
+                f"DELETE FROM flows WHERE id IN ({placeholders})",  # nosec B608
+                flow_batch,
+            )
+        # Drop memberships that still point at nodes about to be deleted so
+        # replacement cannot leave dangling flow_memberships rows.
+        for i in range(0, len(node_ids), _SQL_BATCH):
+            node_batch = node_ids[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(node_batch))
+            conn.execute(
+                f"DELETE FROM flow_memberships WHERE node_id IN ({placeholders})",  # nosec B608
+                node_batch,
+            )
+            conn.execute(
+                f"DELETE FROM flows WHERE entry_point_id IN ({placeholders})",  # nosec B608
+                node_batch,
+            )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return entry_qns
+
+
+def purge_orphan_flow_data(store: GraphStore) -> int:
+    """Remove flow rows/memberships that reference missing nodes.
+
+    Returns the number of orphan memberships deleted.
+    """
+    conn = store._conn
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cur = conn.execute(
+            "DELETE FROM flow_memberships WHERE node_id NOT IN (SELECT id FROM nodes)"
+        )
+        deleted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
+        conn.execute(
+            "DELETE FROM flows WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
+        )
+        # Flows whose memberships were fully purged.
+        conn.execute(
+            "DELETE FROM flows WHERE id NOT IN ("
+            "SELECT DISTINCT flow_id FROM flow_memberships)"
+        )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return deleted
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -460,52 +687,73 @@ def incremental_trace_flows(
     store: GraphStore,
     changed_files: list[str],
     max_depth: int = 15,
+    repo_root: str | Path | None = None,
+    entry_point_qns: Iterable[str] | None = None,
 ) -> int:
     """Re-trace only flows that touch *changed_files*.  Much faster than full trace.
 
-    1. Find flow IDs whose memberships reference nodes in *changed_files*.
-    2. Collect the entry-point node IDs of those flows before deleting them.
-    3. Delete only the affected flows and their memberships.
-    4. Re-detect entry points, keeping those in *changed_files* **or** whose
-       node ID was an entry point of a deleted flow.
-    5. BFS-trace each relevant entry point via :func:`_trace_single_flow`.
-    6. INSERT the new flows (without clearing unrelated flows).
+    1. Expand *changed_files* to absolute/relative forms present in the graph (#569).
+    2. Purge orphan memberships left behind by node ID replacement.
+    3. Find flow IDs whose memberships reference nodes in the expanded paths.
+    4. Collect entry-point node IDs / qualified names before deleting those flows.
+    5. Delete only the affected flows and their memberships.
+    6. Re-detect entry points in expanded paths **or** matching pre-captured
+       entry-point qualified names (stable across node replacement).
+    7. BFS-trace each relevant entry point via :func:`_trace_single_flow`.
+    8. INSERT the new flows (without clearing unrelated flows).
 
     Returns the number of re-traced flows that were stored.
     """
-    if not changed_files:
+    if not changed_files and not entry_point_qns:
         return 0
 
     # Graph identity uses POSIX separators (#774); bridge native-separator
     # caller paths before matching against stored file_path values.
     changed_files = [normalize_file_path(p) for p in changed_files]
     conn = store._conn
-    changed_file_set = set(changed_files)
+    expanded = expand_changed_file_paths(store, changed_files, repo_root=repo_root)
+    changed_file_set = set(expanded)
+    preserved_entry_qns = {qn for qn in (entry_point_qns or []) if qn}
+
+    # Safety net for callers that replace nodes without clear_flows_for_files.
+    purge_orphan_flow_data(store)
 
     # ------------------------------------------------------------------
-    # 1. Find affected flow IDs
+    # 1. Find affected flow IDs (path-expanded)
     # ------------------------------------------------------------------
-    placeholders = ",".join("?" * len(changed_files))
-    affected_rows = conn.execute(
-        f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
-        f"JOIN nodes n ON n.id = fm.node_id "
-        f"WHERE n.file_path IN ({placeholders})",
-        changed_files,
-    ).fetchall()
-    affected_ids = [r[0] for r in affected_rows]
+    affected_ids: list[int] = []
+    if expanded:
+        for i in range(0, len(expanded), _SQL_BATCH):
+            path_batch = expanded[i:i + _SQL_BATCH]
+            placeholders = ",".join("?" * len(path_batch))
+            affected_rows = conn.execute(
+                f"SELECT DISTINCT fm.flow_id FROM flow_memberships fm "  # nosec B608
+                f"JOIN nodes n ON n.id = fm.node_id "
+                f"WHERE n.file_path IN ({placeholders})",
+                path_batch,
+            ).fetchall()
+            affected_ids.extend(r[0] for r in affected_rows)
+        affected_ids = list(dict.fromkeys(affected_ids))
 
     # ------------------------------------------------------------------
-    # 2. Collect old entry-point node IDs before deletion
+    # 2. Collect old entry-point node IDs / QNs before deletion
     # ------------------------------------------------------------------
     entry_point_ids: set[int] = set()
     if affected_ids:
-        ep_placeholders = ",".join("?" * len(affected_ids))
-        ep_rows = conn.execute(
-            f"SELECT entry_point_id FROM flows "  # nosec B608
-            f"WHERE id IN ({ep_placeholders})",
-            affected_ids,
-        ).fetchall()
-        entry_point_ids = {r[0] for r in ep_rows}
+        for i in range(0, len(affected_ids), _SQL_BATCH):
+            id_batch = affected_ids[i:i + _SQL_BATCH]
+            ep_placeholders = ",".join("?" * len(id_batch))
+            ep_rows = conn.execute(
+                f"SELECT f.entry_point_id, n.qualified_name FROM flows f "  # nosec B608
+                f"LEFT JOIN nodes n ON n.id = f.entry_point_id "
+                f"WHERE f.id IN ({ep_placeholders})",
+                id_batch,
+            ).fetchall()
+            for row in ep_rows:
+                if row[0] is not None:
+                    entry_point_ids.add(row[0])
+                if row[1]:
+                    preserved_entry_qns.add(row[1])
 
     # ------------------------------------------------------------------
     # 3. Delete affected flows and their memberships
@@ -514,7 +762,10 @@ def incremental_trace_flows(
     # orphaned flow_memberships rows pointing at deleted flows.  See #258.
     if affected_ids:
         if conn.in_transaction:
-            conn.commit()
+            logger.warning(
+                "Rolling back uncommitted transaction before BEGIN IMMEDIATE"
+            )
+            conn.rollback()
         conn.execute("BEGIN IMMEDIATE")
         try:
             for fid in affected_ids:
@@ -533,7 +784,11 @@ def incremental_trace_flows(
     entry_points = detect_entry_points(store)
     relevant_eps = [
         ep for ep in entry_points
-        if ep.file_path in changed_file_set or ep.id in entry_point_ids
+        if (
+            ep.file_path in changed_file_set
+            or ep.id in entry_point_ids
+            or ep.qualified_name in preserved_entry_qns
+        )
     ]
 
     # ------------------------------------------------------------------

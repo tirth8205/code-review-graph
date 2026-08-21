@@ -1077,8 +1077,14 @@ def _reconcile_stale_files(
     repo_root: Path,
     store: GraphStore,
     current_files: list[str] | None = None,
+    *,
+    remove: bool = True,
 ) -> list[str]:
-    """Remove graph files absent from the current parseable repository inventory."""
+    """Remove graph files absent from the current parseable repository inventory.
+
+    When *remove* is False, only identify stale paths so callers can capture
+    flow/community state before the permanent delete (#569).
+    """
     stored_files = set(store.get_all_files())
     current_paths: set[str]
     if current_files is not None:
@@ -1104,7 +1110,7 @@ def _reconcile_stale_files(
             ):
                 current_paths.add(stored_file)
     stale_files = sorted(stored_files - current_paths)
-    if stale_files:
+    if stale_files and remove:
         store.remove_files_permanently(stale_files)
     return stale_files
 
@@ -1364,7 +1370,11 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
-    stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
+    stale_files = (
+        _reconcile_stale_files(repo_root, store, remove=False)
+        if reconcile_stale
+        else []
+    )
 
     if not changed_files and not stale_files:
         return {
@@ -1420,8 +1430,39 @@ def incremental_update(
             pass
         to_parse.append(rel_path)
 
-    # Persist deletions before store_file_nodes_edges() opens its own
-    # explicit transaction — avoids nested transaction errors.
+    # Capture flow/community memberships BEFORE node replacement or permanent
+    # deletion. After nodes are removed/recreated the old IDs are gone, so
+    # postprocess can no longer discover affected flows via membership JOINs
+    # (#569). Include deleted/renamed/stale paths here — not only to_parse.
+    from .communities import (
+        capture_community_assignments,
+        purge_empty_communities,
+        remap_community_assignments,
+    )
+    from .flows import (
+        clear_flows_for_files,
+        expand_changed_file_paths,
+        purge_orphan_flow_data,
+    )
+
+    # Pass raw relative/absolute paths; expand_changed_file_paths owns
+    # variant generation so we do not expand twice per update.
+    lifecycle_inputs = [
+        *[rel_path.replace("\\", "/") for rel_path in to_parse],
+        *missing_paths,
+        *stale_files,
+    ]
+    lifecycle_paths = expand_changed_file_paths(
+        store, lifecycle_inputs, repo_root=repo_root,
+    )
+    flow_entry_point_qns = sorted(
+        clear_flows_for_files(store, lifecycle_paths)
+    )
+    community_by_qn = capture_community_assignments(store, lifecycle_paths)
+    communities_were_affected = bool(community_by_qn) or bool(missing_paths) or bool(
+        stale_files
+    )
+
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
 
@@ -1464,8 +1505,18 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
-    removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
-    files_updated = parsed_files + len(stale_files) + removed_files
+    removed_files = 0
+    to_remove = sorted(set(missing_paths) | set(stale_files))
+    if to_remove:
+        removed_files = store.remove_files_permanently(to_remove)
+
+    # Remap surviving community IDs onto replacement nodes, drop orphan flow
+    # rows, and remove community rows that no longer have any members.
+    remap_community_assignments(store, community_by_qn)
+    purge_orphan_flow_data(store)
+    purge_empty_communities(store)
+
+    files_updated = parsed_files + removed_files
     if files_updated:
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
@@ -1511,6 +1562,8 @@ def incremental_update(
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "stale_files_removed": len(stale_files),
+        "flow_entry_point_qns": flow_entry_point_qns,
+        "communities_were_affected": communities_were_affected,
         "errors": errors,
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,

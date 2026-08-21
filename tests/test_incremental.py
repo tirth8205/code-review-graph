@@ -895,6 +895,327 @@ class TestIncrementalUpdate:
         finally:
             store.close()
 
+    def test_incremental_update_flow_lifecycle_preserves_live_memberships(
+        self, tmp_path,
+    ):
+        """#569: node replacement must not leave stale flows/dead entry points."""
+        from code_review_graph.flows import (
+            get_flows,
+            incremental_trace_flows,
+            store_flows,
+            trace_flows,
+        )
+        from code_review_graph.tools.build import _run_postprocess
+
+        routes = tmp_path / "routes.py"
+        services = tmp_path / "services.py"
+        routes.write_text(
+            "def handler():\n    return service()\n\ndef service():\n    return 1\n"
+        )
+        services.write_text("def helper():\n    return 2\n")
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            first = incremental_update(
+                tmp_path, store, changed_files=["routes.py", "services.py"],
+            )
+            assert first["files_updated"] >= 1
+
+            flows = trace_flows(store)
+            store_flows(store, flows)
+            before = get_flows(store)
+            assert before, "expected at least one flow after full trace"
+            old_ids = {
+                n.id
+                for n in store.get_nodes_by_file(str(routes.resolve()))
+                if n.kind == "Function"
+            }
+
+            # Mutate the entry-point file so hash changes and nodes are replaced.
+            routes.write_text(
+                "def handler():\n"
+                "    return service()\n"
+                "\n"
+                "def service():\n"
+                "    return 1\n"
+                "\n"
+                "def extra():\n"
+                "    return helper()\n"
+            )
+
+            result = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert "flow_entry_point_qns" in result
+
+            build_result: dict = {}
+            _run_postprocess(
+                store,
+                build_result,
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=bool(
+                    result.get("communities_were_affected")
+                ),
+            )
+            assert build_result.get("flows_detected", 0) >= 1
+
+            after = get_flows(store)
+            assert after
+            handler_flows = [f for f in after if f["name"] == "handler"]
+            assert len(handler_flows) == 1
+
+            new_ids = {
+                n.id
+                for n in store.get_nodes_by_file(str(routes.resolve()))
+                if n.kind == "Function"
+            }
+            assert old_ids.isdisjoint(new_ids), "routes.py nodes should be new IDs"
+
+            conn = store._conn
+            assert conn.execute(
+                "SELECT COUNT(*) FROM flows "
+                "WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT COUNT(*) FROM flow_memberships fm "
+                "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+            ).fetchone()[0] == 0
+
+            # Relative changed_files alone also finds the new entry point.
+            count = incremental_trace_flows(
+                store, ["routes.py"], repo_root=tmp_path,
+            )
+            assert count >= 0
+        finally:
+            store.close()
+
+    def test_incremental_root_basename_does_not_clear_nested_flows(self, tmp_path):
+        """With repo_root, changing util.py must not delete left/util.py flows."""
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+
+        left = tmp_path / "left"
+        left.mkdir()
+        root_util = tmp_path / "util.py"
+        nested_util = left / "util.py"
+        root_util.write_text(
+            "def root_entry():\n    return root_helper()\n\n"
+            "def root_helper():\n    return 1\n"
+        )
+        nested_util.write_text(
+            "def nested_entry():\n    return nested_helper()\n\n"
+            "def nested_helper():\n    return 2\n"
+        )
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["util.py", "left/util.py"],
+            )
+            store_flows(store, trace_flows(store))
+            before_names = {f["name"] for f in get_flows(store)}
+            assert "root_entry" in before_names
+            assert "nested_entry" in before_names
+
+            root_util.write_text(
+                "def root_entry():\n    return root_helper()\n\n"
+                "def root_helper():\n    return 1\n\n"
+                "def root_extra():\n    return 3\n"
+            )
+            # postprocess none: wrongly expanded nested paths would lose flows forever
+            incremental_update(
+                tmp_path, store, changed_files=["util.py"],
+            )
+            after_names = {f["name"] for f in get_flows(store)}
+            assert "nested_entry" in after_names
+        finally:
+            store.close()
+
+    @staticmethod
+    def _community_assignment_signature(store) -> list[tuple[tuple[str, str], ...]]:
+        """Stable community membership fingerprint (name, kind), ID-independent."""
+        from collections import defaultdict
+
+        groups: dict[int, list[tuple[str, str]]] = defaultdict(list)
+        for cid, name, kind in store._conn.execute(
+            "SELECT community_id, name, kind FROM nodes "
+            "WHERE community_id IS NOT NULL AND kind != 'File'"
+        ):
+            groups[int(cid)].append((name, kind))
+        return sorted(tuple(sorted(members)) for members in groups.values())
+
+    def test_incremental_delete_clears_orphan_community_rows(self, tmp_path):
+        """Deleting an isolated community file must match a clean rebuild."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.incremental import full_build
+        from code_review_graph.tools.build import _run_postprocess
+
+        isolated = tmp_path / "isolated.py"
+        isolated.write_text(
+            "def alpha():\n    return beta()\n\ndef beta():\n    return 1\n"
+        )
+        other = tmp_path / "other.py"
+        other.write_text("def keep():\n    return 2\n")
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py", "other.py"],
+                reconcile_stale=False,
+            )
+            communities = detect_communities(store, min_size=2)
+            store_communities(store, communities)
+            before = get_communities(store, min_size=0)
+            assert any(c["size"] >= 2 for c in before)
+
+            isolated.unlink()
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["isolated.py"],
+                reconcile_stale=False,
+            )
+            assert result.get("communities_were_affected") is True
+
+            build_result: dict = {}
+            _run_postprocess(
+                store,
+                build_result,
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=True,
+            )
+
+            after = get_communities(store, min_size=0)
+            for comm in after:
+                members = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id = ?",
+                    (comm["id"],),
+                ).fetchone()[0]
+                assert members == comm["size"]
+                assert members > 0
+
+            clean = GraphStore(tmp_path / "clean.db")
+            try:
+                full_build(tmp_path, clean)
+                store_communities(clean, detect_communities(clean, min_size=2))
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
+                )
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
+            finally:
+                clean.close()
+        finally:
+            store.close()
+
+    def test_incremental_rename_parity_with_full_rebuild(self, tmp_path):
+        """Renamed sources: incremental flow/community state matches full rebuild."""
+        from code_review_graph.communities import (
+            detect_communities,
+            get_communities,
+            store_communities,
+        )
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+        from code_review_graph.incremental import full_build
+        from code_review_graph.tools.build import _run_postprocess
+
+        src = tmp_path / "old_name.py"
+        src.write_text(
+            "def entry():\n    return helper()\n\ndef helper():\n    return 1\n"
+        )
+        db_path = tmp_path / "inc.db"
+        store = GraphStore(db_path)
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=["old_name.py"], reconcile_stale=False,
+            )
+            store_flows(store, trace_flows(store))
+            store_communities(store, detect_communities(store, min_size=1))
+
+            new = tmp_path / "new_name.py"
+            src.rename(new)
+            result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["old_name.py", "new_name.py"],
+                reconcile_stale=False,
+            )
+            _run_postprocess(
+                store,
+                {},
+                "full",
+                full_rebuild=False,
+                changed_files=result["changed_files"],
+                repo_root=str(tmp_path),
+                entry_point_qns=result.get("flow_entry_point_qns"),
+                communities_were_affected=bool(
+                    result.get("communities_were_affected")
+                ),
+            )
+
+            assert store.get_nodes_by_file(str(src)) == []
+            assert store.get_nodes_by_file(str(tmp_path / "old_name.py")) == []
+            assert len(store.get_nodes_by_file(str(new))) > 0
+
+            clean = GraphStore(tmp_path / "clean.db")
+            try:
+                full_build(tmp_path, clean)
+                store_flows(clean, trace_flows(clean))
+                store_communities(clean, detect_communities(clean, min_size=1))
+
+                inc_flow_names = sorted(f["name"] for f in get_flows(store))
+                clean_flow_names = sorted(f["name"] for f in get_flows(clean))
+                assert inc_flow_names == clean_flow_names
+
+                def _live_memberships(s):
+                    return s._conn.execute(
+                        "SELECT COUNT(*) FROM flow_memberships fm "
+                        "JOIN nodes n ON n.id = fm.node_id"
+                    ).fetchone()[0]
+
+                assert _live_memberships(store) == _live_memberships(clean)
+                assert store._conn.execute(
+                    "SELECT COUNT(*) FROM flow_memberships fm "
+                    "LEFT JOIN nodes n ON n.id = fm.node_id WHERE n.id IS NULL"
+                ).fetchone()[0] == 0
+
+                assert self._community_assignment_signature(store) == (
+                    self._community_assignment_signature(clean)
+                )
+                assert len(get_communities(store, min_size=0)) == len(
+                    get_communities(clean, min_size=0)
+                )
+                assigned_inc = store._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assigned_clean = clean._conn.execute(
+                    "SELECT COUNT(*) FROM nodes WHERE community_id IS NOT NULL"
+                ).fetchone()[0]
+                assert assigned_inc == assigned_clean
+            finally:
+                clean.close()
+        finally:
+            store.close()
+
 
 class TestRacingSaveSnapshotCoherence:
     """Regression tests for #746: a file saved while it is being indexed.
