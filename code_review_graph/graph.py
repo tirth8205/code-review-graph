@@ -1190,9 +1190,16 @@ class GraphStore:
         # every represented path so those orphans can be purged, while explicit
         # virtual nodes (such as Spring Event markers) remain outside the file
         # inventory and are managed by their owning resolver.
+        # A killed writer can leave extra='' (or truncated text), which makes
+        # json_extract raise SQLite 'malformed JSON' and crash every caller of
+        # get_all_files. json_valid gates the extraction, and the truthiness
+        # comparison keeps extra='{"virtual": false}' visible instead of
+        # making the node immortal to reconciliation (#864).
         rows = self._conn.execute(
             "SELECT file_path FROM nodes "
-            "WHERE json_extract(extra, '$.virtual') IS NULL "
+            "WHERE extra IS NULL "
+            "OR json_valid(extra) = 0 "
+            "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1 "
             "UNION "
             "SELECT file_path FROM edges "
             "ORDER BY file_path"
