@@ -1086,7 +1086,13 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "perl": ["use_statement", "require_expression"],
     "kotlin": ["import_header"],
     "swift": ["import_declaration"],
-    "php": ["namespace_use_declaration"],
+    "php": [
+        "namespace_use_declaration",
+        "include_expression",
+        "include_once_expression",
+        "require_expression",
+        "require_once_expression",
+    ],
     "scala": ["import_declaration"],
     "solidity": ["import_directive"],
     # Dart: import_or_export wraps library_import > import_specification > configurable_uri
@@ -13788,7 +13794,12 @@ class CodeParser:
             # ``.../App/Foo``) resolve; vendor/global classes (``\Exception``)
             # and ``use function`` / ``use const`` targets with no matching
             # file stay unresolved and keep the bare FQN, like JDK imports.
-            rel_path = module.replace("\\", "/").lstrip("/") + ".php"
+            normalized_module = module.replace("\\", "/").lstrip("/")
+            rel_path = (
+                normalized_module
+                if normalized_module.endswith(".php")
+                else normalized_module + ".php"
+            )
             try:
                 boundary = self._php_repository_boundary(caller_dir)
                 current = caller_dir.resolve()
@@ -15708,6 +15719,22 @@ class CodeParser:
                     if txt and txt != "extends":
                         imports.append(txt)
         elif language == "php":
+            include_types = {
+                "include_expression",
+                "include_once_expression",
+                "require_expression",
+                "require_once_expression",
+            }
+            if node.type in include_types:
+                for child in node.children:
+                    if child.type == "string":
+                        value = child.text.decode(
+                            "utf-8", errors="replace",
+                        ).strip("'\"")
+                        if value:
+                            imports.append(value)
+                return imports
+
             # ``namespace_use_declaration`` covers several shapes:
             #   use A\B\C;            use A\B\C as D;
             #   use function A\b;     use const A\B;
