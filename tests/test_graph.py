@@ -361,6 +361,32 @@ class TestGraphStore:
         result = self.store.get_nodes_by_file("/test/file.py")
         assert len(result) == 2
 
+    def test_store_file_nodes_edges_collapses_duplicate_call_sites(self):
+        """Regression for #721: the batched store must collapse duplicate call
+        sites (same kind/source/target/file/line) into a single edge exactly
+        like the previous per-row upsert path, and replacing a file must drop
+        stale rows instead of merging with them.
+        """
+        nodes = [self._make_file_node(), self._make_func_node()]
+        dup_edge = EdgeInfo(
+            kind="CALLS", source="/test/file.py::my_func",
+            target="/test/file.py::other", file_path="/test/file.py", line=10,
+        )
+        self.store.store_file_nodes_edges(
+            "/test/file.py", nodes, [dup_edge, dup_edge]
+        )
+        assert (
+            self.store._conn.execute(
+                "SELECT COUNT(*) FROM edges WHERE kind='CALLS'"
+            ).fetchone()[0]
+        ) == 1
+
+        # Re-store the same file with no edges: stale rows must be gone.
+        self.store.store_file_nodes_edges("/test/file.py", nodes, [])
+        assert (
+            self.store._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        ) == 0
+
     def test_store_after_remove_no_transaction_error(self):
         """Regression test for #135: store_file_nodes_edges after
         remove_file_data must not raise 'cannot start a transaction
