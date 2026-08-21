@@ -31,6 +31,11 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "__construct", "__init__", "__destruct",
 })
 
+
+def is_test_gap_exempt(node: GraphNode) -> bool:
+    """Return whether a lifecycle node is exempt from test-gap reporting."""
+    return node.kind == "Function" and node.name in _TEST_GAP_EXEMPT_NAMES
+
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
@@ -363,9 +368,10 @@ def compute_risk_score(
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(node.qualified_name)
-    test_count = len(transitive_tests)
-    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+    if not is_test_gap_exempt(node):
+        transitive_tests = store.get_transitive_tests(node.qualified_name)
+        test_count = len(transitive_tests)
+        score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
@@ -495,7 +501,7 @@ def analyze_changes(
     for node in changed_funcs:
         if node.is_test:
             continue
-        if node.name in _TEST_GAP_EXEMPT_NAMES:
+        if is_test_gap_exempt(node):
             continue
         # TESTED_BY edges are stored as source=production, target=test by the
         # parser, so a changed production function finds its tests by source.
