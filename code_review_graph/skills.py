@@ -1202,6 +1202,21 @@ fi
     return hook_path
 
 
+def _is_crg_hook(entry: Any) -> bool:
+    """Return True if a hook entry contains a code-review-graph command."""
+    if not isinstance(entry, dict):
+        return False
+    if isinstance(entry.get("command"), str) and "code-review-graph" in entry["command"]:
+        return True
+    inner_hooks = entry.get("hooks", [])
+    if isinstance(inner_hooks, list):
+        for inner in inner_hooks:
+            if isinstance(inner, dict) and isinstance(inner.get("command"), str):
+                if "code-review-graph" in inner["command"]:
+                    return True
+    return False
+
+
 def _merge_hooks_into_settings(
     settings_dir: Path,
     hooks_config: dict[str, Any],
@@ -1228,7 +1243,8 @@ def _merge_hooks_into_settings(
     merged_hooks = dict(existing_hooks)
     for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
         if isinstance(merged_hooks.get(hook_name), list):
-            merged_list = list(merged_hooks[hook_name])
+            # Remove all existing code-review-graph entries to clear duplicates or stale versions (#558)
+            merged_list = [e for e in merged_hooks[hook_name] if not _is_crg_hook(e)]
             for entry in hook_entries:
                 if entry not in merged_list:
                     merged_list.append(entry)
