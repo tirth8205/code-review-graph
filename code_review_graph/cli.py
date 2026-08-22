@@ -541,6 +541,40 @@ _GRAPH_TOOL_COMMANDS = {
 }
 
 
+_PATH_REPO_COMMANDS = frozenset({
+    "install",
+    "init",
+    "uninstall",
+    "build",
+    "update",
+    "postprocess",
+    "embed",
+    "watch",
+    "status",
+    "forget",
+    "visualize",
+    "wiki",
+    "detect-changes",
+    "dead-code",
+    "serve",
+    "mcp",
+    *_GRAPH_TOOL_COMMANDS,
+})
+
+
+def _canonicalize_repo_argument(args: argparse.Namespace) -> None:
+    """Canonicalize path-valued ``--repo`` arguments in place.
+
+    Commands whose ``--repo`` value is a repository *name* rather than a path
+    (eval configs and daemon log aliases) are deliberately excluded. Every
+    path consumer receives the same absolute, symlink-resolved spelling before
+    it opens a database or compares stored paths.
+    """
+    repo = getattr(args, "repo", None)
+    if args.command in _PATH_REPO_COMMANDS and repo:
+        args.repo = str(Path(repo).expanduser().resolve())
+
+
 def _find_explicit_repo_root(start: Path) -> "Path | None":
     """Resolve an explicit --repo for graph-tool commands.
 
@@ -1327,6 +1361,8 @@ def main() -> None:
         _print_banner()
         return
 
+    _canonicalize_repo_argument(args)
+
     if (
         args.command == "refactor"
         and args.mode == "rename"
@@ -1765,6 +1801,9 @@ def main() -> None:
                     postprocess=pp,
                     **embedding_refresh_kwargs,
                 )
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
             finally:
                 logging.disable(previous_disable)
             nodes = result.get("total_nodes", 0)

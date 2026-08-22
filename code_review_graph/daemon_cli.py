@@ -110,9 +110,31 @@ def _handle_restart(args: argparse.Namespace) -> None:
     _handle_start(args)
 
 
+def _format_age(seconds: float | None) -> str:
+    """Render an age in seconds compactly: ``12s``, ``4m``, ``3h``, ``2d``."""
+    if seconds is None:
+        return "-"
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.0f}h"
+    return f"{seconds / 86400:.0f}d"
+
+
 def _handle_status(_args: argparse.Namespace) -> None:
     """Show daemon status and configuration."""
-    from .daemon import is_daemon_running, load_config, load_state, pid_alive, read_pid
+    from .daemon import (
+        is_daemon_running,
+        load_config,
+        load_state,
+        pid_alive,
+        read_pid,
+        read_watch_health,
+        watcher_status,
+    )
 
     config = load_config()
     running = is_daemon_running()
@@ -139,15 +161,57 @@ def _handle_status(_args: argparse.Namespace) -> None:
 
     if running:
         state = load_state()
-        print(f"  {'Alias':<{alias_width}}  {'Status':<8}  {'PID':<8}  Path")
-        print(f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 40}")
+        header = (
+            f"  {'Alias':<{alias_width}}  {'Status':<8}  {'Watcher':<8}  "
+            f"{'PID':<8}  {'Event':<6}  Path"
+        )
+        print(header)
+        print(
+            f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 8}  "
+            f"{'-' * 6}  {'-' * 40}"
+        )
+        stalled = False
+        degraded = False
         for repo in config.repos:
             entry = state.get(repo.alias, {})
             child_pid: int | None = entry.get("pid")
             alive = child_pid is not None and pid_alive(child_pid)
             status_str = "alive" if alive else "dead"
             pid_str = str(child_pid) if child_pid is not None else "-"
-            print(f"  {repo.alias:<{alias_width}}  {status_str:<8}  {pid_str:<8}  {repo.path}")
+            health = read_watch_health(repo.path)
+            watcher = watcher_status(alive, health)
+            stalled = stalled or watcher == "stalled"
+            degraded = degraded or watcher == "partial"
+            last_event = health.get("last_event_at") if health else None
+            event_str = (
+                _format_age(time.time() - last_event)
+                if isinstance(last_event, (int, float))
+                else "-"
+            )
+            print(
+                f"  {repo.alias:<{alias_width}}  {status_str:<8}  {watcher:<8}  "
+                f"{pid_str:<8}  {event_str:<6}  {repo.path}"
+            )
+        if stalled:
+            print()
+            print(
+                "  A stalled watcher means the process is up but its filesystem "
+                "observer is not;"
+            )
+            print(
+                "  the graph is no longer updating. Check the log, then: "
+                "crg-daemon restart"
+            )
+        if degraded:
+            print()
+            print(
+                "  A partial watcher ran out of watch slots and fell back to one "
+                "recursive watch:"
+            )
+            print(
+                "  still complete, but ignored trees are watched again. Raise "
+                "CRG_MAX_WATCH_SCHEDULES."
+            )
     else:
         print(f"  {'Alias':<{alias_width}}  Path")
         print(f"  {'-' * alias_width}  {'-' * 40}")

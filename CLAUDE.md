@@ -107,6 +107,7 @@ uv run code-review-graph eval               # Run evaluation benchmarks
 - `tests/test_migrations.py` — Database migrations
 - `tests/test_eval.py` — Evaluation framework
 - `tests/test_tsconfig_resolver.py` — TypeScript path resolution
+- `tests/test_repo_root_identity.py` — One graph identity per repository root spelling
 - `tests/test_integration_v2.py` — v2 pipeline integration test
 - `tests/test_action_render.py` — GitHub Action PR comment renderer (`scripts/render_pr_comment.py`)
 - `tests/fixtures/` — Sample files for each supported language

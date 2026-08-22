@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from code_review_graph import cli
@@ -84,7 +85,7 @@ class TestServeCommand:
                 cli.main()
 
         mock_serve.assert_called_once_with(
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             auto_watch=True,
             tools=None,
         )
@@ -101,7 +102,7 @@ class TestServeCommand:
                 cli.main()
 
         mock_serve.assert_called_once_with(
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             auto_watch=False,
         )
 
@@ -192,7 +193,7 @@ class TestBuildUpdateCommands:
 
         mock_build.assert_called_once_with(
             full_rebuild=True,
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             postprocess="none",
         )
         mock_postprocess.assert_not_called()
@@ -230,7 +231,7 @@ class TestBuildUpdateCommands:
         # can resolve the base to the last-synced commit.
         mock_build.assert_called_once_with(
             full_rebuild=False,
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             base=None,
             postprocess="minimal",
         )

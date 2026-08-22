@@ -1199,6 +1199,17 @@ class GraphStore:
         ).fetchall()
         return [r["file_path"] for r in rows]
 
+    def get_file_marker_paths(self) -> list[str]:
+        """Return paths that have authoritative File nodes.
+
+        Reconciliation uses this to distinguish a graph anchored to another
+        repository from orphan Function/Edge rows left by a failed update.
+        """
+        rows = self._conn.execute(
+            "SELECT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
+        ).fetchall()
+        return [row["file_path"] for row in rows]
+
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
         """Keyword search across node names.
 

@@ -10,6 +10,7 @@ No external dependencies beyond Python stdlib — no tmux required.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -98,6 +99,13 @@ def __dir__() -> list[str]:
 
 
 _HEALTH_CHECK_INTERVAL = 30
+
+# Restarting a watcher costs a full initial update, so a repo that cannot stay
+# up must not be restarted every health check forever.  The delay doubles per
+# consecutive failure and resets once a watcher has stayed up this long.
+_RESTART_BACKOFF_BASE = float(os.environ.get("CRG_RESTART_BACKOFF", "30"))
+_RESTART_BACKOFF_MAX = float(os.environ.get("CRG_RESTART_BACKOFF_MAX", "900"))
+_RESTART_HEALTHY_SECONDS = float(os.environ.get("CRG_RESTART_HEALTHY_AFTER", "600"))
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -526,6 +534,97 @@ def _is_pid_alive(pid: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Watcher health (written by each watch child, read here)
+# ---------------------------------------------------------------------------
+
+# A watcher whose observer thread died keeps its process alive, so ``poll()``
+# alone reports it healthy forever.  Each watch child publishes its observer
+# state and last-event time here instead; anything older than this is a stall.
+# See: #811.
+_WATCH_HEALTH_STALE_SECONDS = float(os.environ.get("CRG_WATCH_HEALTH_STALE", "90"))
+
+
+def watch_health_dir() -> Path:
+    """Directory holding one health file per watched repository."""
+    return crg_home() / "watch-health"
+
+
+def watch_health_path(repo_root: str | Path) -> Path:
+    """Health file for *repo_root*.
+
+    Keyed by the real path so the watch child and the daemon agree even when
+    one of them was handed a symlinked or relative path.  Deliberately free of
+    heavy imports: ``crg-daemon status`` must stay instant.
+    """
+    key = os.path.realpath(os.path.expanduser(str(repo_root)))
+    digest = hashlib.sha256(key.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return watch_health_dir() / f"{digest}.json"
+
+
+def read_watch_health(
+    repo_root: str | Path,
+    *,
+    stale_after: float = _WATCH_HEALTH_STALE_SECONDS,
+) -> dict[str, Any] | None:
+    """Read a watcher's published health, or None when it never published any.
+
+    The returned dict gains ``age`` (seconds since the last heartbeat) and
+    ``stalled`` (observer reported dead, or heartbeat too old).
+    """
+    try:
+        raw = watch_health_path(repo_root).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    updated_at = data.get("updated_at")
+    age = time.time() - updated_at if isinstance(updated_at, (int, float)) else None
+    data["age"] = age
+    data["stalled"] = bool(
+        data.get("observer_alive") is False or (age is not None and age > stale_after)
+    )
+    return data
+
+
+def clear_watch_health(repo_root: str | Path) -> None:
+    """Drop a watcher's health file (the daemon reaped or dropped the child)."""
+    try:
+        watch_health_path(repo_root).unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - best-effort cleanup
+        pass
+
+
+def watcher_status(alive: bool, health: dict[str, Any] | None) -> str:
+    """Summarise one watcher: ``dead``, ``stalled``, ``partial``, ``unknown``, ``ok``.
+
+    ``partial`` means the watcher ran out of watch budget and fell back to a
+    coarser recursive watch — still watching everything, but no longer
+    filtering ignored trees.
+    """
+    if not alive:
+        return "dead"
+    if health is None:
+        return "unknown"
+    if health.get("stalled"):
+        return "stalled"
+    return "partial" if health.get("degraded") else "ok"
+
+
+def _health_fields(repo_path: str, alive: bool) -> dict[str, Any]:
+    """Watcher-health columns for one repo entry in :meth:`WatchDaemon.status`."""
+    health = read_watch_health(repo_path)
+    return {
+        "watcher": watcher_status(alive, health),
+        "observer_alive": None if health is None else health.get("observer_alive"),
+        "last_event_at": None if health is None else health.get("last_event_at"),
+        "health_age": None if health is None else health.get("age"),
+        "degraded": None if health is None else bool(health.get("degraded")),
+        "phase": None if health is None else health.get("phase"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # ConfigWatcher — monitors config file for live changes
 # ---------------------------------------------------------------------------
 
@@ -663,6 +762,7 @@ class WatchDaemon:
         self._health_thread: threading.Thread | None = None
         self._health_stop: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
+        self._restarts: dict[str, dict[str, float]] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -712,7 +812,8 @@ class WatchDaemon:
 
         with self._lock:
             for alias, proc in list(self._children.items()):
-                self._terminate_child(alias, proc)
+                repo = self._current_repos.get(alias)
+                self._terminate_child(alias, proc, repo.path if repo else None)
             self._children.clear()
 
         self._current_repos.clear()
@@ -764,7 +865,8 @@ class WatchDaemon:
             for alias in to_remove:
                 proc = self._children.pop(alias, None)
                 if proc is not None:
-                    self._terminate_child(alias, proc)
+                    self._terminate_child(alias, proc, self._current_repos[alias].path)
+                self._restarts.pop(alias, None)
                 del self._current_repos[alias]
 
             # Add new watchers
@@ -777,7 +879,7 @@ class WatchDaemon:
             for alias in to_update:
                 proc = self._children.pop(alias, None)
                 if proc is not None:
-                    self._terminate_child(alias, proc)
+                    self._terminate_child(alias, proc, self._current_repos[alias].path)
                 repo = desired[alias]
                 self._start_watcher(repo)
                 self._current_repos[alias] = repo
@@ -799,6 +901,10 @@ class WatchDaemon:
         ``_children`` dict.  When called from a separate process (e.g. the
         CLI ``status`` command), falls back to the persisted state file and
         checks liveness via ``os.kill(pid, 0)``.
+
+        A live process is not the same as a working watcher, so every entry
+        also carries the watcher health the child publishes: ``watcher``
+        (ok/stalled/unknown/dead), ``observer_alive`` and ``last_event_at``.
         """
         repos: list[dict[str, Any]] = []
         with self._lock:
@@ -813,6 +919,8 @@ class WatchDaemon:
                             "path": repo.path,
                             "alive": alive,
                             "pid": proc.pid if proc is not None else None,
+                            "restarts": self.restart_count(alias),
+                            **_health_fields(repo.path, alive),
                         }
                     )
             else:
@@ -828,6 +936,8 @@ class WatchDaemon:
                             "path": repo.path,
                             "alive": alive,
                             "pid": pid,
+                            "restarts": self.restart_count(repo.alias),
+                            **_health_fields(repo.path, alive),
                         }
                     )
         return {
@@ -901,18 +1011,79 @@ class WatchDaemon:
                 break
             self._check_health()
 
+    def _restart_delay(self, alias: str) -> float:
+        """Seconds to wait before the next restart of *alias*.
+
+        A watcher that keeps dying — a broken repo, an unreadable database —
+        used to be restarted every 30s forever, each attempt paying for a full
+        initial update.  The delay doubles per failure and resets once a
+        watcher has stayed up long enough to count as healthy.
+        """
+        state = self._restarts.setdefault(alias, {"count": 0, "next_attempt": 0.0})
+        started_at = state.get("started_at")
+        if isinstance(started_at, (int, float)):
+            if time.monotonic() - started_at >= _RESTART_HEALTHY_SECONDS:
+                state["count"] = 0
+        state["count"] = int(state["count"]) + 1
+        delay = min(
+            _RESTART_BACKOFF_BASE * (2 ** (int(state["count"]) - 1)),
+            _RESTART_BACKOFF_MAX,
+        )
+        return float(delay)
+
+    def restart_count(self, alias: str) -> int:
+        """How many times *alias* has been restarted since it was last healthy."""
+        return int(self._restarts.get(alias, {}).get("count", 0))
+
     def _check_health(self) -> None:
-        """Check each watcher child and restart if dead."""
+        """Check each watcher child and restart if dead.
+
+        A watcher that died takes the process with it and is restarted here,
+        with exponential backoff so a repo that cannot start does not burn a
+        full initial update every 30s.  One that is merely stalled — observer
+        threads gone, heartbeat frozen — is reported, not restarted: the child
+        exits on its own when it detects that, and restarting on a stale
+        heartbeat alone risks a restart loop.
+        """
         restarted = False
         with self._lock:
             for alias, repo in list(self._current_repos.items()):
                 proc = self._children.get(alias)
                 if proc is None or proc.poll() is not None:
-                    logger.warning("Watcher for '%s' is dead — restarting", alias)
-                    # Clean up dead process entry
                     self._children.pop(alias, None)
+                    state = self._restarts.get(alias, {})
+                    now = time.monotonic()
+                    if now < float(state.get("next_attempt", 0.0)):
+                        logger.debug(
+                            "Watcher for '%s' is dead; waiting %.0fs before restart %d",
+                            alias,
+                            float(state["next_attempt"]) - now,
+                            self.restart_count(alias) + 1,
+                        )
+                        continue
+                    delay = self._restart_delay(alias)
+                    self._restarts[alias]["next_attempt"] = now + delay
+                    logger.warning(
+                        "Watcher for '%s' is dead — restarting (attempt %d, "
+                        "next retry no sooner than %.0fs)",
+                        alias,
+                        self.restart_count(alias),
+                        delay,
+                    )
                     self._start_watcher(repo)
                     restarted = True
+                    continue
+                health = read_watch_health(repo.path)
+                if health is not None and health.get("stalled"):
+                    age = health.get("age")
+                    logger.warning(
+                        "Watcher for '%s' is running but stalled "
+                        "(observer_alive=%s, last heartbeat %s) — "
+                        "the graph is not being updated",
+                        alias,
+                        health.get("observer_alive"),
+                        f"{age:.0f}s ago" if isinstance(age, (int, float)) else "unknown",
+                    )
         if restarted:
             self._save_state()
 
@@ -1072,6 +1243,8 @@ class WatchDaemon:
         log_fd.close()
 
         self._children[repo.alias] = proc
+        self._restarts.setdefault(repo.alias, {"count": 0, "next_attempt": 0.0})
+        self._restarts[repo.alias]["started_at"] = time.monotonic()
         logger.info(
             "Started watcher for '%s' (PID %d) — log: %s",
             repo.alias,
@@ -1080,8 +1253,19 @@ class WatchDaemon:
         )
 
     @staticmethod
-    def _terminate_child(alias: str, proc: subprocess.Popen[bytes]) -> None:
-        """Gracefully terminate a child process (SIGTERM, then SIGKILL)."""
+    def _terminate_child(
+        alias: str,
+        proc: subprocess.Popen[bytes],
+        repo_path: str | None = None,
+    ) -> None:
+        """Gracefully terminate a child process (SIGTERM, then SIGKILL).
+
+        The child clears its own health file on SIGTERM, but a killed or
+        already-dead one cannot, and a leftover file reads as a stalled
+        watcher forever — so the reaper clears it too.
+        """
+        if repo_path:
+            clear_watch_health(repo_path)
         if proc.poll() is not None:
             return  # already dead
 
