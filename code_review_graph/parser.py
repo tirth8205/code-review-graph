@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import threading
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -51,7 +52,8 @@ class CellInfo(NamedTuple):
 
 
 _SQL_TABLE_RE = re.compile(
-    r"(?:FROM|JOIN|INTO|CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW)|INSERT\s+OVERWRITE)"
+    r"(?:FROM|JOIN|INTO|CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW)"
+    r"(?:\s+IF\s+NOT\s+EXISTS)?|INSERT\s+OVERWRITE)"
     r"\s+((?:`[^`]+`|\w+)(?:\.(?:`[^`]+`|\w+))*)",
     re.IGNORECASE,
 )
@@ -443,7 +445,7 @@ _SQL_KEYWORDS: frozenset[str] = frozenset({
     "UNION", "INTERSECT", "EXCEPT", "AS", "ON", "USING", "SET",
     "VALUES", "DEFAULT", "NULL", "TRUE", "FALSE",
     "INNER", "OUTER", "LEFT", "RIGHT", "FULL", "CROSS", "NATURAL",
-    "LATERAL", "RECURSIVE", "ONLY", "WITH",
+    "LATERAL", "RECURSIVE", "ONLY", "WITH", "IF", "NOT", "EXISTS",
 })
 
 logger = logging.getLogger(__name__)
@@ -4668,6 +4670,7 @@ class CodeParser:
             )
 
         is_cpp = any(node.language == "cpp" for node in nodes)
+        is_go = any(node.language == "go" for node in nodes)
 
         def cpp_resolution_extra(
             extra: dict,
@@ -4702,6 +4705,12 @@ class CodeParser:
                     callable_symbols[bare].append(entry)
                 source_scopes[qualified] = node.parent_name
 
+        go_receivers = {
+            self._node_qualified(node): node.extra["go_receiver"]
+            for node in nodes
+            if node.language == "go" and "go_receiver" in node.extra
+        }
+
         def candidate_entries(
             target: str,
             edge_kind: str,
@@ -4721,6 +4730,30 @@ class CodeParser:
                 continue
             receiver = edge.extra.get("receiver")
             has_receiver = bool(receiver)
+            if (
+                is_go
+                and edge.kind == "CALLS"
+                and edge.extra.get("go_method_receiver")
+                and receiver == go_receivers.get(edge.source)
+            ):
+                candidates = [
+                    qualified
+                    for qualified, parent_scope in candidate_entries(
+                        edge.target, edge.kind,
+                    )
+                    if parent_scope == source_scopes.get(edge.source)
+                ]
+                if len(candidates) == 1:
+                    edge = EdgeInfo(
+                        kind=edge.kind,
+                        source=edge.source,
+                        target=candidates[0],
+                        file_path=edge.file_path,
+                        line=edge.line,
+                        extra=edge.extra,
+                    )
+                    resolved.append(edge)
+                    continue
             if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
                 # JS/TS calls retain their full member expression as evidence
                 # (``app.handle``) while keeping the method name (``handle``)
@@ -6225,6 +6258,9 @@ class CodeParser:
         import_map: Optional[dict[str, str]] = None,
         defined_names: Optional[set[str]] = None,
         _depth: int = 0,
+        _go_receiver_bindings: Optional[
+            tuple[str, tuple[int, ...], tuple[int, ...]]
+        ] = None,
     ) -> None:
         """Recursively walk the AST and extract nodes/edges."""
         if _depth > self._MAX_AST_DEPTH:
@@ -6445,7 +6481,7 @@ class CodeParser:
                 if self._extract_calls(
                     child, source, language, file_path, nodes, edges,
                     enclosing_class, enclosing_func,
-                    import_map, defined_names, _depth,
+                    import_map, defined_names, _depth, _go_receiver_bindings,
                 ):
                     continue
 
@@ -6489,6 +6525,7 @@ class CodeParser:
                 enclosing_func=enclosing_func,
                 import_map=import_map, defined_names=defined_names,
                 _depth=_depth + 1,
+                _go_receiver_bindings=_go_receiver_bindings,
             )
 
     def _elixir_call_identifier(self, node) -> Optional[str]:
@@ -10400,6 +10437,14 @@ class CodeParser:
 
         # Java: detect Temporal method-level annotations and Kafka listeners
         method_extra: dict = {}
+        go_receiver_bindings = None
+        if language == "go" and child.type == "method_declaration":
+            receiver_name = self._get_go_receiver_name(child)
+            if receiver_name:
+                method_extra["go_receiver"] = receiver_name
+                go_receiver_bindings = self._go_receiver_binding_index(
+                    child, receiver_name,
+                )
         if julia_qualifier:
             method_extra["julia_module_qualifier"] = julia_qualifier
         if language == "java" and deco_list:
@@ -10558,6 +10603,7 @@ class CodeParser:
             enclosing_class=recursive_class, enclosing_func=identity_name,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
+            _go_receiver_bindings=go_receiver_bindings,
         )
         return True
 
@@ -10604,6 +10650,9 @@ class CodeParser:
         import_map: Optional[dict[str, str]],
         defined_names: Optional[set[str]],
         _depth: int,
+        _go_receiver_bindings: Optional[
+            tuple[str, tuple[int, ...], tuple[int, ...]]
+        ] = None,
     ) -> bool:
         """Extract call expressions, including test runner special cases.
 
@@ -10726,7 +10775,7 @@ class CodeParser:
                     call_extra["member_call"] = member_call
             if (
                 language in self._TYPED_CALL_LANGUAGES
-                or language in ("cpp", "rust")
+                or language in ("cpp", "go", "rust")
             ):
                 receiver, method_name = self._get_member_call_receiver_method(
                     child, language,
@@ -10735,6 +10784,15 @@ class CodeParser:
                     call_name = method_name
                 if receiver:
                     call_extra["receiver"] = receiver
+                    if (
+                        language == "go"
+                        and _go_receiver_bindings is not None
+                        and receiver == _go_receiver_bindings[0]
+                        and not self._go_receiver_is_shadowed(
+                            child, _go_receiver_bindings,
+                        )
+                    ):
+                        call_extra["go_method_receiver"] = True
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
 
@@ -10871,6 +10929,29 @@ class CodeParser:
             method = callee.child_by_field_name("field")
             if receiver is None or method is None:
                 return None, None
+            return (
+                receiver.text.decode("utf-8", errors="replace"),
+                method.text.decode("utf-8", errors="replace"),
+            )
+
+        if language == "go" and node.type == "call_expression":
+            callee = node.child_by_field_name("function")
+            if callee is None or callee.type != "selector_expression":
+                return None, None
+            receiver = callee.child_by_field_name("operand")
+            method = callee.child_by_field_name("field")
+            if receiver is None or method is None:
+                return None, None
+            while receiver.type == "parenthesized_expression":
+                if len(receiver.named_children) != 1:
+                    break
+                receiver = receiver.named_children[0]
+            if (
+                receiver.type == "unary_expression"
+                and receiver.children
+                and receiver.children[0].type == "*"
+            ):
+                receiver = receiver.child_by_field_name("operand") or receiver
             return (
                 receiver.text.decode("utf-8", errors="replace"),
                 method.text.decode("utf-8", errors="replace"),
@@ -12193,13 +12274,17 @@ class CodeParser:
     ) -> None:
         """Extract REFERENCES from identifier arguments (callbacks)."""
         for ch in args_node.children:
-            if ch.type == "identifier":
-                name = ch.text.decode("utf-8", errors="replace")
-                self._emit_reference_if_known(
-                    name, language, file_path, caller, edges,
-                    import_map, defined_names,
-                    line=ch.start_point[0] + 1,
-                )
+            reference_node = ch
+            if ch.type == "keyword_argument" and language == "python":
+                reference_node = ch.child_by_field_name("value")
+            if reference_node is None or reference_node.type != "identifier":
+                continue
+            name = reference_node.text.decode("utf-8", errors="replace")
+            self._emit_reference_if_known(
+                name, language, file_path, caller, edges,
+                import_map, defined_names,
+                line=reference_node.start_point[0] + 1,
+            )
 
     def _extract_solidity_constructs(
         self,
@@ -13573,11 +13658,25 @@ class CodeParser:
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
-                # Try with extensions
+                # APPEND the extension — never `with_suffix`, which REPLACES the
+                # final suffix and so resolves `./outlet.entity` to `outlet.ts`
+                # instead of `outlet.entity.ts`. Dotted stems are the dominant
+                # NestJS convention (*.entity.ts, *.service.ts, *.controller.ts,
+                # *.guard.ts, *.module.ts), so the replace form silently dropped
+                # every relative import between them — a confident, wrong `0`
+                # from importers_of. Mirrors `_probe_path` in tsconfig_resolver.py,
+                # which already had this right for alias imports.
                 for ext in extensions:
-                    target = base.with_suffix(ext)
+                    target = Path(str(base) + ext)
                     if target.is_file():
                         return str(target.resolve())
+                # ESM/NodeNext writes `./foo.js` for a file that is `foo.ts` on
+                # disk; only here does replacing the suffix become correct.
+                if base.suffix in (".js", ".jsx", ".mjs", ".cjs"):
+                    for ext in (".ts", ".tsx"):
+                        target = base.with_suffix(ext)
+                        if target.is_file():
+                            return str(target.resolve())
                 # Try index file in directory
                 if base.is_dir():
                     for ext in extensions:
@@ -13596,8 +13695,13 @@ class CodeParser:
                 base = caller_dir / module
                 if base.is_file():
                     return str(base.resolve())
-                # Fallback: try appending .dart
-                target = base.with_suffix(".dart")
+                # Fallback: try appending .dart. APPEND, never `with_suffix`,
+                # which REPLACES the final suffix — same bug class as the
+                # JS/TS resolver above. Imports normally already carry the
+                # `.dart` extension (caught by `base.is_file()` above), so
+                # this only bites an omitted extension on a dotted stem
+                # (e.g. `./thing.model` where `thing.model.dart` exists).
+                target = Path(str(base) + ".dart")
                 if target.is_file():
                     return str(target.resolve())
             elif module.startswith("package:"):
@@ -14420,21 +14524,13 @@ class CodeParser:
                     return child.text.decode("utf-8", errors="replace")
                 if child.type == "package" and child.text != b"package":
                     return child.text.decode("utf-8", errors="replace")
-        # Java: method_declaration has return type_identifier before the method
-        # identifier — skip straight to the first plain identifier child to
-        # avoid returning the return type as the function name.
-        if language == "java" and kind == "function" and node.type in (
-            "method_declaration", "constructor_declaration",
-        ):
-            for child in node.children:
-                if child.type == "identifier":
-                    return child.text.decode("utf-8", errors="replace")
-            return None
-        # C#: unlike Java there is no type_identifier — a non-generic return
-        # type such as ``Task`` is itself an ``identifier``, so the generic
-        # loop below would return it instead of the method name. Read the
-        # ``name`` field; unusual shapes still fall through.
-        if language == "csharp" and kind == "function" and node.type in (
+        # Java / C#: read the grammar ``name`` field for methods and
+        # constructors. Java return types are usually ``type_identifier``, but
+        # walking for the first ``identifier`` is the same fragile pattern that
+        # misnamed C# methods when a non-generic return type is itself an
+        # ``identifier`` (e.g. ``Task``). Prefer the name field; unusual shapes
+        # still fall through.
+        if language in ("java", "csharp") and kind == "function" and node.type in (
             "method_declaration", "constructor_declaration",
         ):
             name_node = node.child_by_field_name("name")
@@ -14532,16 +14628,6 @@ class CodeParser:
         if language == "go" and node.type == "method_declaration":
             for child in node.children:
                 if child.type == "field_identifier":
-                    return child.text.decode("utf-8", errors="replace")
-        # Java methods: tree-sitter-java puts type_identifier or generic_type
-        # (return type) before identifier (method name).  Must run before
-        # the generic loop, which would match the return type's
-        # type_identifier (e.g. "String", "ConfigBean").
-        # Constructors are fine — they have no return type node.
-        # Kotlin is unaffected: its syntax places the name before the type.
-        if language == "java" and node.type == "method_declaration":
-            for child in node.children:
-                if child.type == "identifier":
                     return child.text.decode("utf-8", errors="replace")
         # Swift init/deinit/subscript: the grammar gives none of them a usable
         # name. `init_declaration`'s name field is the `init` keyword itself,
@@ -14697,31 +14783,206 @@ class CodeParser:
         """Extract the receiver type from a Go method_declaration.
 
         For ``func (s *T) Foo() {...}`` returns ``"T"``. For ``func (T) Foo()``
-        also returns ``"T"``. Returns None if no receiver is present.
-
-        The receiver is always the first ``parameter_list`` child of a
-        Go ``method_declaration`` and contains a single ``parameter_declaration``
-        whose type is either a ``type_identifier`` or a ``pointer_type``
-        wrapping one. See: #190
+        also returns ``"T"``. Generic receivers ``T[P]`` and ``*T[P]`` return
+        ``"T"``. Returns None if no receiver is present. See: #190, #832
         """
-        for child in node.children:
-            if child.type != "parameter_list":
-                continue
-            for param in child.children:
-                if param.type != "parameter_declaration":
-                    continue
-                for sub in param.children:
-                    if sub.type == "type_identifier":
-                        return sub.text.decode("utf-8", errors="replace")
-                    if sub.type == "pointer_type":
-                        for ptr_child in sub.children:
-                            if ptr_child.type == "type_identifier":
-                                return ptr_child.text.decode(
-                                    "utf-8", errors="replace"
-                                )
-            # First parameter_list is always the receiver; stop searching.
+        receiver = node.child_by_field_name("receiver")
+        if receiver is None:
             return None
-        return None
+        parameter = next(
+            (child for child in receiver.named_children
+             if child.type == "parameter_declaration"),
+            None,
+        )
+        receiver_type = parameter.child_by_field_name("type") if parameter else None
+        while receiver_type is not None and receiver_type.type in {
+            "generic_type", "pointer_type",
+        }:
+            receiver_type = next(iter(receiver_type.named_children), None)
+        if receiver_type is None or receiver_type.type != "type_identifier":
+            return None
+        return receiver_type.text.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _get_go_receiver_name(node) -> Optional[str]:
+        """Return the variable name from a Go method receiver."""
+        receiver = node.child_by_field_name("receiver")
+        if receiver is None:
+            return None
+        parameter = next(
+            (child for child in receiver.children if child.type == "parameter_declaration"),
+            None,
+        )
+        if parameter is None:
+            return None
+        name = next(
+            (child for child in parameter.children if child.type == "identifier"),
+            None,
+        )
+        return name.text.decode("utf-8", errors="replace") if name else None
+
+    _GO_LEXICAL_SCOPE_TYPES = frozenset({
+        "block", "communication_case", "default_case", "expression_case", "type_case",
+    })
+    _GO_DECLARATION_NAME_FIELDS = {
+        "const_spec": "name",
+        "type_alias": "name",
+        "type_spec": "name",
+        "var_spec": "name",
+    }
+    _GO_INIT_SCOPE_PARENTS = frozenset({
+        "expression_switch_statement", "if_statement", "type_switch_statement",
+    })
+    _GO_PARAMETER_TYPES = frozenset({
+        "parameter_declaration", "variadic_parameter_declaration",
+    })
+
+    @staticmethod
+    def _go_field_binds_name(node, field: str, name: str) -> bool:
+        """Return whether a grammar field declares ``name``."""
+        for field_node in node.children_by_field_name(field):
+            candidates = (
+                field_node.named_children
+                if field_node.type == "expression_list"
+                else (field_node,)
+            )
+            if any(
+                candidate.type in {"identifier", "type_identifier"}
+                and candidate.text.decode("utf-8", errors="replace") == name
+                for candidate in candidates
+            ):
+                return True
+        return False
+
+    @classmethod
+    def _go_function_parameters_bind_name(cls, node, name: str) -> bool:
+        """Return whether a function's parameters or named results bind ``name``."""
+        for field_name in ("parameters", "result"):
+            for parameter_list in node.children_by_field_name(field_name):
+                if any(
+                    parameter.type in cls._GO_PARAMETER_TYPES
+                    and cls._go_field_binds_name(parameter, "name", name)
+                    for parameter in parameter_list.named_children
+                ):
+                    return True
+        return False
+
+    def _go_receiver_binding_index(
+        self, method, receiver_name: str,
+    ) -> tuple[str, tuple[int, ...], tuple[int, ...]]:
+        """Build merged lexical-shadow intervals for one Go method."""
+        body = method.child_by_field_name("body")
+        if body is None:
+            return receiver_name, (), ()
+
+        def scope_key(scope) -> tuple[str, int, int]:
+            return scope.type, scope.start_byte, scope.end_byte
+
+        intervals: list[tuple[int, int]] = []
+        receiver_scopes = {scope_key(body)}
+        stack = [(body, body)]
+        while stack:
+            node, scope = stack.pop()
+            if node.type in self._GO_LEXICAL_SCOPE_TYPES:
+                scope = node
+
+            if node.type == "func_literal":
+                function_body = node.child_by_field_name("body")
+                if (
+                    function_body is not None
+                    and self._go_function_parameters_bind_name(node, receiver_name)
+                ):
+                    intervals.append((function_body.start_byte, function_body.end_byte))
+                    receiver_scopes.add(scope_key(function_body))
+
+            if (
+                node.type == "type_switch_statement"
+                and self._go_field_binds_name(node, "alias", receiver_name)
+            ):
+                for case in node.named_children:
+                    if case.type not in {"default_case", "type_case"}:
+                        continue
+                    statements = next(
+                        (
+                            child for child in case.named_children
+                            if child.type == "statement_list"
+                        ),
+                        None,
+                    )
+                    if statements is not None:
+                        intervals.append((statements.start_byte, case.end_byte))
+                    receiver_scopes.add(scope_key(case))
+
+            declaration_field = self._GO_DECLARATION_NAME_FIELDS.get(node.type)
+            if (
+                declaration_field is not None
+                and self._go_field_binds_name(node, declaration_field, receiver_name)
+            ):
+                intervals.append((node.end_byte, scope.end_byte))
+                receiver_scopes.add(scope_key(scope))
+
+            if (
+                node.type == "short_var_declaration"
+                and self._go_field_binds_name(node, "left", receiver_name)
+            ):
+                parent = node.parent
+                if parent is not None and parent.type == "for_clause":
+                    binding_scope = parent.parent
+                elif parent is not None and parent.type in self._GO_INIT_SCOPE_PARENTS:
+                    binding_scope = parent
+                else:
+                    binding_scope = scope
+                if (
+                    binding_scope is not None
+                    and scope_key(binding_scope) not in receiver_scopes
+                ):
+                    intervals.append((node.end_byte, binding_scope.end_byte))
+                    receiver_scopes.add(scope_key(binding_scope))
+
+            if (
+                node.type == "range_clause"
+                and any(child.type == ":=" for child in node.children)
+                and self._go_field_binds_name(node, "left", receiver_name)
+            ):
+                loop = node.parent
+                loop_body = loop.child_by_field_name("body") if loop is not None else None
+                if loop_body is not None:
+                    intervals.append((loop_body.start_byte, loop_body.end_byte))
+                    receiver_scopes.add(scope_key(loop_body))
+
+            if (
+                node.type == "receive_statement"
+                and any(child.type == ":=" for child in node.children)
+                and self._go_field_binds_name(node, "left", receiver_name)
+                and node.parent is not None
+            ):
+                intervals.append((node.end_byte, node.parent.end_byte))
+                receiver_scopes.add(scope_key(node.parent))
+
+            stack.extend((child, scope) for child in reversed(node.named_children))
+
+        merged: list[tuple[int, int]] = []
+        for start, end in sorted(intervals):
+            if start >= end:
+                continue
+            if merged and start <= merged[-1][1]:
+                merged[-1] = merged[-1][0], max(merged[-1][1], end)
+            else:
+                merged.append((start, end))
+        return (
+            receiver_name,
+            tuple(start for start, _ in merged),
+            tuple(end for _, end in merged),
+        )
+
+    @staticmethod
+    def _go_receiver_is_shadowed(
+        node,
+        bindings: tuple[str, tuple[int, ...], tuple[int, ...]],
+    ) -> bool:
+        """Return whether a pre-indexed Go binding shadows the receiver."""
+        index = bisect_right(bindings[1], node.start_byte) - 1
+        return index >= 0 and node.start_byte < bindings[2][index]
 
     @staticmethod
     def _cpp_scope_join(
@@ -15276,6 +15537,20 @@ class CodeParser:
             parts = text.split()
             if len(parts) >= 2:
                 imports.append(parts[-1].rstrip(";"))
+        elif language == "kotlin":
+            # tree-sitter-kotlin folds any comment that follows the LAST import
+            # into that import_header node, so the node text is not a module
+            # name (it can be a whole KDoc block). Read the identifier child
+            # instead; re-append ".*" when a wildcard_import sibling is present.
+            base = ""
+            wildcard = False
+            for child in node.children:
+                if child.type == "identifier":
+                    base = child.text.decode("utf-8", errors="replace")
+                elif child.type == "wildcard_import":
+                    wildcard = True
+            if base:
+                imports.append(f"{base}.*" if wildcard else base)
         elif language == "solidity":
             # import "path/to/file.sol" or import {Symbol} from "path"
             for child in node.children:

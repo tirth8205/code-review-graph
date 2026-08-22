@@ -2,8 +2,22 @@
 
 ## [Unreleased]
 
+## [2.3.8] - 2026-08-21
+
 ### Added
 
+- Empty results from `query_graph`, `get_impact_radius`, and
+  `semantic_search_nodes` now carry a one-sentence `confidence` field saying
+  *why* the count is zero: the target was never indexed, the graph is behind
+  the working tree, a known static-analysis gap applies to that language and
+  query (PHP container resolution and `include`/`require`, JS/TS callbacks and
+  route registration, npm-aliased imports, Java AOP and reflection, Go
+  structural interface satisfaction, C# DI, Python `getattr` and registry
+  decorators), or the zero is a verified real absence. The field is capped at
+  140 characters and is emitted **only** when the result list is empty, so
+  responses that carry results are byte-identical to before. One honest
+  sentence is far cheaper than the wrong conclusion or the repo-wide grep a
+  bare zero provokes (#314, #819, #850, #851).
 - Added a Voyage AI embedding provider (`--provider voyage`, key from
   `VOYAGE_API_KEY`, opt-in request throttling via
   `CRG_VOYAGE_MIN_INTERVAL_SEC`). Embeddings are now persisted after each
@@ -23,6 +37,73 @@
 
 ### Fixed
 
+- Every MCP tool response is now bounded. #849 found `get_affected_flows`
+  returning roughly 247k tokens inside a workflow documented as "5 tool calls,
+  800 tokens total"; measuring all 30 registered tools against a real
+  5.6k-node graph found the same shape in ten more places, several of them on
+  the default path. Each list now carries a hard ceiling, keeps its
+  untruncated total, and reports "showing N of M" in the summary, so a caller
+  can tell a short answer from a truncated one. Four query tools are still
+  unbounded and tracked in #888 (#849, #853, #887).
+- A repository is now one graph however its root is spelled. Every
+  path-valued `--repo` is canonicalized at the CLI boundary, and the full
+  build, incremental update and watch entry points each resolve their root, so
+  `.`, a relative path, a trailing slash, a symlinked path and an absolute
+  path no longer split the graph or reconcile each other away. An incremental
+  run whose stored `File` nodes all belong to a different root is refused with
+  a clear error instead of emptying the graph file by file, while orphan-only
+  cleanup from #861 is unchanged (#889).
+- A repository reached through a symlinked path is watched and indexed instead
+  of silently dropping every filesystem event, both through
+  `code-review-graph watch --repo` and through `serve --auto-watch` (#892).
+- Watch mode no longer registers OS watches inside ignored trees, and no longer
+  keeps running after its filesystem observer dies. Watches are now planned per
+  directory (ignored trees are skipped, the repo root is watched
+  non-recursively, and directories that appear or disappear later are picked up
+  from a per-tick listing rather than from directory events, which macOS never
+  delivers for a child of a non-recursive watch), nested build output such as
+  `moduleA/target/` is ignored when a sibling `pom.xml` proves it is build
+  output — reported at info level and overridable per path with `!path` in
+  `.code-review-graphignore` — and a dead watchdog thread makes the watcher log
+  an error and exit non-zero so the daemon restarts it, while a deleted watch
+  root is merely released. `crg-daemon status` gained a `Watcher` column
+  (ok/partial/stalled/unknown/dead) and last-event age, and the daemon now backs
+  off exponentially between restarts of a watcher that keeps dying (#811).
+- Deleting and recreating a watched directory (`rm -rf src && mkdir src`, or two
+  branch switches in a row) no longer kills the watcher or silently drops the
+  recreated directory from the graph. Watches are tracked by inode rather than
+  by path, so a replacement is released and re-adopted instead of being read as
+  a dead watcher, and a directory adopted after startup is planned the same way
+  startup plans the repository — its own `node_modules` and `target` stay
+  unwatched (#811).
+- `code-review-graph watch --repo .` no longer empties the graph on startup. The
+  watcher resolves its repository root before reconciling, so stored absolute
+  paths are no longer all treated as stale, and a graph built under a genuinely
+  different root is now refused with a clear error instead of being reconciled
+  away file by file (#811).
+- The generated instruction sections no longer tell agents to always use the
+  graph before reading source and to fall back to file search only when the
+  graph misses. Every platform instruction file now carries the same short
+  guardrails: narrow scope with the graph, read the implementation and its
+  tests before a non-trivial change, prefer the source when the two disagree,
+  and treat an empty graph result as possibly unindexed rather than absent.
+  CONTRIBUTING.md also states what a new platform target must include before
+  it will be reviewed (#314).
+- Reinstalling now upgrades an instruction section written by an older release
+  instead of skipping the file because the opening marker was already there,
+  which is what made every wording fix invisible to existing users. Generated
+  sections carry a closing marker so the block has real boundaries; blocks from
+  before that marker existed are matched by their exact recorded text, so
+  anything written around them survives byte for byte. A section someone edited
+  by hand is left alone and named in the install output instead of being
+  overwritten, and `install` now reports created, updated and left-alone files
+  separately (#314, #558).
+- `uninstall` now removes an instruction section written by any past release,
+  not only one written by the running version, so asking for the instructions
+  to go no longer leaves orphaned text behind. It matches the same recorded
+  block texts install uses, clears duplicate blocks, keeps the text on both
+  sides of the block, closes the gap without leaving a run of blank lines, and
+  still refuses to touch a section that was edited by hand (#314).
 - C# receiver calls (`Service.StaticCall()`, `obj.Method()`, `obj?.Method()`)
   now resolve to canonical method nodes using receiver-type and namespace
   evidence recorded at parse time, so `callers_of`, `get_impact_radius`, and
@@ -71,6 +152,8 @@
 - C# methods with a non-generic return type are no longer named after that
   type: `public async Task Foo()` indexed as `Task`, collapsing every such
   method in a class onto one qualified name (#791).
+- Java method and constructor names now use the grammar `name` field (same
+  approach as C#), instead of walking for the first `identifier` child (#804).
 - Added a post-index Python import resolver using unique module suffixes, so
   `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
   package candidates remain explicitly unresolved (#720).

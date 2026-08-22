@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "code-review-graph"
-version = "2.3.7"
+version = "2.3.8"
 description = "Local-first knowledge graph for token-efficient code review through MCP and CLI"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -55,7 +55,7 @@ embeddings = [
     "numpy>=1.26,<3",
 ]
 google-embeddings = [
-    "google-generativeai>=0.8.0,<1",
+    "google-genai>=1.0.0,<3",
 ]
 communities = [
     "igraph>=0.11.0",
@@ -69,6 +69,7 @@ wiki = [
 ]
 all = [
     "code-review-graph[embeddings]",
+    "code-review-graph[google-embeddings]",
     "code-review-graph[communities]",
     "code-review-graph[enrichment]",
     "code-review-graph[eval]",
@@ -113,6 +114,7 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "code_review_graph/visualization.py" = ["E501"]  # embedded HTML/JS template
+"code_review_graph/_legacy_instructions.py" = ["E501"]  # verbatim past output, must not be reflowed
 "tests/fixtures/sample_databricks_export.py" = ["F841", "W292"]  # intentional fixture patterns
 "tests/fixtures/sample_notebook.ipynb" = ["F401", "I001"]  # fixture imports: intentionally unused, split across cells
 "tests/test_multilang.py" = ["E501"]  # long assertions with explanatory comments

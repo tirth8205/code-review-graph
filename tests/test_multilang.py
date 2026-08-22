@@ -53,14 +53,16 @@ class TestGoParsing:
         struct they belong to.
         """
         funcs = [n for n in self.nodes if n.kind == "Function"]
-        by_name = {f.name: f for f in funcs}
-        assert "FindByID" in by_name
-        assert "Save" in by_name
-        assert by_name["FindByID"].parent_name == "InMemoryRepo"
-        assert by_name["Save"].parent_name == "InMemoryRepo"
+        find_by_id = next(f for f in funcs if f.name == "FindByID")
+        save = next(
+            f for f in funcs
+            if f.name == "Save" and f.parent_name == "InMemoryRepo"
+        )
+        assert find_by_id.parent_name == "InMemoryRepo"
+        assert save.parent_name == "InMemoryRepo"
         # Free functions should still have no parent.
-        assert by_name["NewInMemoryRepo"].parent_name is None
-        assert by_name["CreateUser"].parent_name is None
+        assert next(f for f in funcs if f.name == "NewInMemoryRepo").parent_name is None
+        assert next(f for f in funcs if f.name == "CreateUser").parent_name is None
 
         contains = [(e.source, e.target) for e in self.edges if e.kind == "CONTAINS"]
         find_by_id_contains = [
@@ -81,6 +83,177 @@ class TestGoParsing:
         # not the file path.
         assert find_by_id_contains[0][0].endswith("::InMemoryRepo")
         assert save_contains[0][0].endswith("::InMemoryRepo")
+
+    def test_receiver_call_resolves_to_receiver_method(self):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith("::InMemoryRepo.SaveAndReturn")
+        ]
+        assert len(calls) == 1
+        assert calls[0].target.endswith("::InMemoryRepo.Save")
+        assert calls[0].extra["receiver"] == "r"
+
+    @pytest.mark.parametrize(
+        ("method_name", "call_count"),
+        [
+            ("CallsShadowedReceiver", 1),
+            ("CallsBlockShadowedReceiver", 1),
+            ("CallsVarShadowedReceiver", 1),
+            ("CallsRangeShadowedReceiver", 1),
+            ("CallsForClauseShadowedReceiver", 3),
+            ("CallsTypeSwitchShadowedReceiver", 1),
+            ("CallsExpressionCaseShadowedReceiver", 1),
+            ("CallsSelectCaseShadowedReceiver", 1),
+            ("CallsNamedResultShadowedReceiver", 1),
+        ],
+    )
+    def test_shadowed_receiver_call_stays_unresolved(
+        self, method_name, call_count,
+    ):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith(f"::ShadowA.{method_name}")
+            and edge.extra.get("receiver") == "a"
+        ]
+        assert len(calls) == call_count
+        assert all(edge.target == "Save" for edge in calls)
+        assert all("go_method_receiver" not in edge.extra for edge in calls)
+
+    def test_receiver_call_resolves_after_shadowing_scope(self):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith("::ShadowA.CallsAfterShadowScope")
+            and edge.extra.get("receiver") == "a"
+        ]
+        assert [edge.target.endswith("::ShadowA.Save") for edge in calls] == [
+            False, True,
+        ]
+
+    def test_initializer_uses_receiver_before_shadowing(self):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith("::ShadowA.CallsInitializerScope")
+            and edge.extra.get("receiver") == "a"
+        ]
+        assert [edge.target.endswith("::ShadowA.Save") for edge in calls] == [
+            True, False,
+        ]
+
+    def test_same_scope_redeclaration_keeps_receiver_resolution(self):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith("::ShadowA.CallsSameScopeRedeclaration")
+            and edge.extra.get("receiver") == "a"
+        ]
+        assert len(calls) == 1
+        assert calls[0].target.endswith("::ShadowA.Save")
+        assert calls[0].extra["go_method_receiver"] is True
+
+    @pytest.mark.parametrize(
+        ("method_name", "receiver_resolution"),
+        [
+            ("CallsTypeSwitchInitShadowedReceiver", [True, False, True]),
+            ("CallsSelectReceiveShadowedReceiver", [True, False, True]),
+            ("CallsConstShadowedReceiver", [False, True]),
+            ("CallsTypeShadowedReceiver", [False, True]),
+        ],
+    )
+    def test_receiver_bindings_follow_lexical_lifetime(
+        self, method_name, receiver_resolution,
+    ):
+        calls = [
+            edge for edge in self.edges
+            if edge.kind == "CALLS"
+            and edge.source.endswith(f"::ShadowA.{method_name}")
+            and edge.extra.get("receiver") == "a"
+        ]
+        assert [
+            edge.target.endswith("::ShadowA.Save") for edge in calls
+        ] == receiver_resolution
+
+    def test_deep_receiver_scope_walk_does_not_overflow(self):
+        source = (
+            "package auth\n"
+            "type ShadowA struct{}\n"
+            "func (a *ShadowA) Save() {}\n"
+            "func (a *ShadowA) Deep() {\n"
+            + "(" * 1200
+            + "a.Save()"
+            + ")" * 1200
+            + "\n}\n"
+        ).encode()
+        root = self.parser._get_parser("go").parse(source).root_node
+        stack = [root]
+        method = None
+        call = None
+        while stack:
+            current = stack.pop()
+            if (
+                current.type == "method_declaration"
+                and current.child_by_field_name("name").text == b"Deep"
+            ):
+                method = current
+            if current.type == "call_expression":
+                call = current
+            stack.extend(current.children)
+        assert method is not None
+        assert call is not None
+        bindings = self.parser._go_receiver_binding_index(method, "a")
+        assert not self.parser._go_receiver_is_shadowed(call, bindings)
+
+    def test_receiver_binding_prepass_runs_once_per_method(self, monkeypatch):
+        builds = []
+        original = CodeParser._go_receiver_binding_index
+
+        def counted(parser, method, receiver_name):
+            name = method.child_by_field_name("name").text.decode()
+            if name == "ManyCalls":
+                builds.append(name)
+            return original(parser, method, receiver_name)
+
+        monkeypatch.setattr(CodeParser, "_go_receiver_binding_index", counted)
+        source = (
+            "package auth\n"
+            "type ShadowA struct{}\n"
+            "func (a *ShadowA) Save() {}\n"
+            "func (a *ShadowA) ManyCalls() {\n"
+            + "\n".join("a.Save()" for _ in range(200))
+            + "\n}\n"
+        ).encode()
+        _, edges = CodeParser().parse_bytes(Path("many_calls.go"), source)
+        calls = [
+            edge for edge in edges
+            if edge.kind == "CALLS" and edge.source.endswith("::ShadowA.ManyCalls")
+        ]
+        assert len(calls) == 200
+        assert builds == ["ManyCalls"]
+
+    def test_generic_methods_attached_to_receiver(self):
+        nodes, edges = self.parser.parse_bytes(
+            Path("generic.go"),
+            b"""package sample
+type Box[T any] struct{}
+func (b Box[T]) Value() {}
+func (b *Box[T]) Pointer() {}
+""",
+        )
+
+        parents = {
+            node.name: node.parent_name
+            for node in nodes
+            if node.kind == "Function"
+        }
+        assert parents == {"Value": "Box", "Pointer": "Box"}
+        assert {
+            edge.target.rsplit("::", 1)[-1]
+            for edge in edges
+            if edge.kind == "CONTAINS" and edge.source.endswith("::Box")
+        } == {"Box.Value", "Box.Pointer"}
 
 
 class TestRustParsing:
@@ -209,6 +382,42 @@ class TestJavaParsing:
     def test_finds_calls(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
         assert len(calls) >= 3
+
+
+class TestJavaMethodNames:
+    """Regression tests for #804: Java method/constructor names come from the
+    grammar ``name`` field (same approach as C# after #794), not the first
+    ``identifier`` child walk.
+    """
+
+    def _parse(self, source: str, tmp_path):
+        p = tmp_path / "x.java"
+        p.write_text(source, encoding="utf-8")
+        return CodeParser().parse_file(p)
+
+    def test_methods_and_constructors_use_name_field(self, tmp_path):
+        nodes, _ = self._parse(
+            "public class Suite {\n"
+            "    public Suite() { }\n"
+            "    public String getLabel() { return \"\"; }\n"
+            "    public User createUser() { return null; }\n"
+            "    public void plainVoid() { }\n"
+            "    public List<String> genericReturn() { return null; }\n"
+            "}\n",
+            tmp_path,
+        )
+        funcs = [n for n in nodes if n.kind == "Function"]
+        assert {f.name for f in funcs} == {
+            "Suite",
+            "getLabel",
+            "createUser",
+            "plainVoid",
+            "genericReturn",
+        }
+        assert len(funcs) == 5
+        assert "String" not in {f.name for f in funcs}
+        assert "User" not in {f.name for f in funcs}
+        assert "List" not in {f.name for f in funcs}
 
 
 class TestJavaImportResolution:
@@ -3635,6 +3844,17 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+    def test_multiple_if_not_exists_creates_keep_distinct_references(self):
+        _, edges = self.parser.parse_bytes(
+            Path("idempotent_schema.sql"),
+            b"CREATE TABLE IF NOT EXISTS customers (id INT);\n"
+            b"CREATE TABLE IF NOT EXISTS invoices (id INT);\n",
+        )
+        targets = [e.target for e in edges if e.kind == "IMPORTS_FROM"]
+        assert targets == ["customers", "invoices"]
+
+
 class TestZigParsing:
     def setup_method(self):
         self.parser = CodeParser()

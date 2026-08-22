@@ -403,6 +403,60 @@ class TestChanges:
         )
         assert len(result["affected_flows"]) >= 1
 
+    def test_analyze_changes_lifecycle_methods_not_test_gaps(self):
+        """Lifecycle and construction methods are exempt from gaps (#850)."""
+        self._add_func("setUp", path="thing_test_helper.py",
+                       line_start=1, line_end=5)
+        self._add_func("tearDown", path="thing_test_helper.py",
+                       line_start=6, line_end=10)
+        self._add_func("__construct", path="thing.php",
+                       line_start=1, line_end=5)
+        self._add_func("realMethod", path="thing.php",
+                       line_start=6, line_end=20)
+
+        result = analyze_changes(
+            self.store,
+            changed_files=["thing_test_helper.py", "thing.php"],
+            changed_ranges={
+                "thing_test_helper.py": [(1, 10)],
+                "thing.php": [(1, 20)],
+            },
+        )
+        gap_names = {g["name"] for g in result["test_gaps"]}
+        assert "setUp" not in gap_names
+        assert "tearDown" not in gap_names
+        assert "__construct" not in gap_names
+        assert "realMethod" in gap_names
+
+    def test_analyze_changes_flows_with_relative_cli_paths(self):
+        """Relative changed_files still hit flows stored under absolute paths.
+
+        Real builds store absolute node paths while the CLI passes
+        repo-relative diff paths, which made detect-changes report
+        "0 affected flow(s)" where the MCP tool reported them (#848).
+        """
+        repo_root = "/repo" if not Path("C:/").exists() else "C:/repo"
+        routes_abs = f"{repo_root}/routes.py"
+        services_abs = f"{repo_root}/services.py"
+        self._add_func("handler", path=routes_abs, line_start=1, line_end=10)
+        self._add_func("service", path=services_abs, line_start=1, line_end=10)
+        self._add_call(
+            f"{routes_abs}::handler",
+            f"{services_abs}::service",
+            routes_abs,
+        )
+
+        flows = trace_flows(self.store)
+        store_flows(self.store, flows)
+
+        result = analyze_changes(
+            self.store,
+            changed_files=["services.py"],
+            changed_ranges={services_abs: [(1, 10)]},
+            repo_root=repo_root,
+        )
+        assert len(result["affected_flows"]) >= 1
+
     def test_analyze_changes_review_priorities_ordered(self):
         """Review priorities are ordered by descending risk score."""
         # Create several functions with varying risk levels.

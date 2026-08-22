@@ -1266,6 +1266,44 @@ class TestFlowTools:
         assert "flow(s) affected" in result["summary"]
         assert "changed_files" in result
 
+    def test_get_affected_flows_minimal_drops_steps(self):
+        """detail_level="minimal" strips per-flow step details (#849)."""
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            detail_level="minimal",
+        )
+        assert result["status"] == "ok"
+        assert result["total"] >= 1
+        for flow in result["affected_flows"]:
+            assert "steps" not in flow
+            assert "path" not in flow
+            assert "name" in flow
+            assert "criticality" in flow
+
+    def test_get_affected_flows_max_flows_truncates(self):
+        """max_flows bounds the list while total keeps the full count (#849)."""
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            max_flows=1,
+        )
+        assert result["status"] == "ok"
+        assert len(result["affected_flows"]) <= 1
+        if result["total"] > 1:
+            assert result["truncated"] is True
+            assert "showing 1" in result["summary"]
+
+    def test_get_affected_flows_max_flows_zero_disables_limit(self):
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            max_flows=0,
+        )
+        assert result["status"] == "ok"
+        assert result["truncated"] is False
+        assert len(result["affected_flows"]) == result["total"]
+
 
 class TestCommunityTools:
     """Tests for community-related MCP tool functions."""

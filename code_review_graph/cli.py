@@ -55,7 +55,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
 ]
 
 
@@ -96,6 +96,21 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty"):
         return False
     return sys.stdout.isatty()
+
+
+def _configure_utf8_stdio() -> None:
+    """Allow Unicode CLI decoration on streams using a legacy encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = getattr(stream, "encoding", None)
+        if not encoding or encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8")
+        except (OSError, ValueError):
+            pass
 
 
 def _print_banner() -> None:
@@ -147,30 +162,43 @@ def _instruction_files_to_modify(
     """Return the list of instruction files that ``install`` would write
     or modify, given the current state of the repo and the selected
     platform target. Used for the dry-run / confirm preview (#173).
+
+    A file holding a section from an older release is listed as ``(update)``:
+    install replaces that block in place rather than leaving it stale (#314).
     """
-    from .skills import _CLAUDE_MD_SECTION_MARKER, _PLATFORM_INSTRUCTION_FILES
+    from .skills import (
+        _CLAUDE_MD_SECTION,
+        _CLAUDE_MD_SECTION_MARKER,
+        _COPILOT_SECTION,
+        _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS,
+        _PLATFORM_INSTRUCTION_FILES,
+        _upgrade_managed_block,
+    )
 
     targets: list[str] = []
 
+    def _describe(filename: str, path: Path, section: str) -> None:
+        if not path.exists():
+            targets.append(f"{filename} (new)")
+            return
+        content = path.read_text(encoding="utf-8", errors="replace")
+        if _CLAUDE_MD_SECTION_MARKER not in content:
+            targets.append(f"{filename} (append)")
+        elif _upgrade_managed_block(content, section) is not None:
+            targets.append(f"{filename} (update)")
+
     if target in ("claude", "all"):
-        claude_md = repo_root / "CLAUDE.md"
-        if claude_md.exists():
-            content = claude_md.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append("CLAUDE.md (append)")
-        else:
-            targets.append("CLAUDE.md (new)")
+        _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
 
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
         if target != "all" and target not in owners:
             continue
-        path = repo_root / filename
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append(f"{filename} (append)")
-        else:
-            targets.append(f"{filename} (new)")
+        section = (
+            _COPILOT_SECTION
+            if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+            else _CLAUDE_MD_SECTION
+        )
+        _describe(filename, repo_root / filename, section)
 
     return targets
 
@@ -306,8 +334,7 @@ def _handle_init(args: argparse.Namespace) -> None:
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_claude_md,
-        inject_platform_instructions,
+        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
@@ -315,6 +342,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
@@ -336,6 +364,11 @@ def _handle_init(args: argparse.Namespace) -> None:
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
             print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
 
+        # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
+        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+            hermes_skills_dir = install_hermes_skills(repo_root)
+            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
     if not skip_instructions and instr_targets:
@@ -343,14 +376,24 @@ def _handle_init(args: argparse.Namespace) -> None:
             "Inject graph instructions into the files above?",
             default_yes=True,
         ):
-            if target in ("claude", "all"):
-                inject_claude_md(repo_root)
-            inject_platform_instructions(repo_root, target=target)
-            # Use the precomputed instr_targets list for the confirmation
-            # message; we don't need the fresh return value from
-            # inject_platform_instructions here.
-            names = [t.split(" ")[0] for t in instr_targets]
-            print(f"Injected graph instructions into: {', '.join(names)}")
+            outcomes = inject_instruction_files(repo_root, target=target)
+            for label, wording in (
+                ("created", "Injected graph instructions into"),
+                ("updated", "Updated graph instructions in"),
+            ):
+                names = [f for f, o in outcomes.items() if o == label]
+                if names:
+                    print(f"{wording}: {', '.join(names)}")
+            # A hand-edited block is never overwritten, so say which file it is
+            # rather than reporting success the user did not get (#314).
+            stale = [f for f, o in outcomes.items() if o == "conflict"]
+            if stale:
+                print(
+                    "Left edited graph instructions alone in: "
+                    f"{', '.join(stale)}. Delete the section between "
+                    "<!-- code-review-graph MCP tools --> and its closing marker "
+                    "and reinstall to pick up the current text."
+                )
         else:
             print("Skipped instruction injection (user declined).")
     elif skip_instructions:
@@ -498,6 +541,40 @@ _GRAPH_TOOL_COMMANDS = {
 }
 
 
+_PATH_REPO_COMMANDS = frozenset({
+    "install",
+    "init",
+    "uninstall",
+    "build",
+    "update",
+    "postprocess",
+    "embed",
+    "watch",
+    "status",
+    "forget",
+    "visualize",
+    "wiki",
+    "detect-changes",
+    "dead-code",
+    "serve",
+    "mcp",
+    *_GRAPH_TOOL_COMMANDS,
+})
+
+
+def _canonicalize_repo_argument(args: argparse.Namespace) -> None:
+    """Canonicalize path-valued ``--repo`` arguments in place.
+
+    Commands whose ``--repo`` value is a repository *name* rather than a path
+    (eval configs and daemon log aliases) are deliberately excluded. Every
+    path consumer receives the same absolute, symlink-resolved spelling before
+    it opens a database or compares stored paths.
+    """
+    repo = getattr(args, "repo", None)
+    if args.command in _PATH_REPO_COMMANDS and repo:
+        args.repo = str(Path(repo).expanduser().resolve())
+
+
 def _find_explicit_repo_root(start: Path) -> "Path | None":
     """Resolve an explicit --repo for graph-tool commands.
 
@@ -602,6 +679,7 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
 
 def main() -> None:
     """Main CLI entry point."""
+    _configure_utf8_stdio()
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
@@ -1283,6 +1361,8 @@ def main() -> None:
         _print_banner()
         return
 
+    _canonicalize_repo_argument(args)
+
     if (
         args.command == "refactor"
         and args.mode == "rename"
@@ -1603,21 +1683,31 @@ def main() -> None:
         "wiki",
         "dead-code",
     )
-    status_data_dir = (
-        args.command == "status" and bool(getattr(args, "data_dir", None))
+    # Read-only consumers must not create graph.db / data dirs / registry
+    # entries when the graph is missing (follow-up to #777 / #782; see #803).
+    _read_only_db_cmds = frozenset({
+        "status",
+        "detect-changes",
+        "visualize",
+        "wiki",
+        "watch",
+    })
+    explicit_data_dir = bool(getattr(args, "data_dir", None))
+    read_only_explicit_data_dir = (
+        args.command in _read_only_db_cmds and explicit_data_dir
     )
-    if args.command in _data_dir_cmds and not status_data_dir:
+    if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command == "status":
-        if status_data_dir:
+    if args.command in _read_only_db_cmds:
+        if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
             db_path = get_db_path(repo_root, read_only=True)
         legacy_db = repo_root / ".code-review-graph.db"
         default_db = repo_root / ".code-review-graph" / "graph.db"
         if (
-            not status_data_dir
+            not read_only_explicit_data_dir
             and not db_path.exists()
             and db_path.resolve() == default_db.resolve()
             and legacy_db.exists()
@@ -1627,7 +1717,10 @@ def main() -> None:
             db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
-    if args.command in ("dead-code", "forget", "status") and not db_path.exists():
+    if (
+        args.command in ("dead-code", "forget", *_read_only_db_cmds)
+        and not db_path.exists()
+    ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
@@ -1708,6 +1801,9 @@ def main() -> None:
                     postprocess=pp,
                     **embedding_refresh_kwargs,
                 )
+            except RuntimeError as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                sys.exit(1)
             finally:
                 logging.disable(previous_disable)
             nodes = result.get("total_nodes", 0)
@@ -1896,7 +1992,13 @@ def main() -> None:
         elif args.command == "visualize":
             from .incremental import get_data_dir
 
-            data_dir = get_data_dir(repo_root)
+            # Prefer an explicit --data-dir so read-only resolution still
+            # writes exports next to the graph without registry side-effects.
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
             if fmt == "json":
@@ -1960,7 +2062,12 @@ def main() -> None:
             from .incremental import get_data_dir
             from .wiki import generate_wiki
 
-            wiki_dir = get_data_dir(repo_root) / "wiki"
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
+            wiki_dir = data_dir / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(

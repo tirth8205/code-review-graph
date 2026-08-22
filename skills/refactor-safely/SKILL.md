@@ -20,9 +20,10 @@ Use the knowledge graph to plan and execute refactoring with confidence.
 - Always preview before applying (rename mode gives you an edit list).
 - Check `get_impact_radius_tool` before major refactors.
 - Use `get_affected_flows_tool` to ensure no critical paths are broken.
-- Run `find_large_functions` to identify decomposition targets.
+- Run `find_large_functions_tool` to identify decomposition targets.
 
 ## Token Efficiency Rules
-- ALWAYS start with `get_minimal_context(task="<your task>")` before any other graph tool.
+- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
 - Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
 - Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

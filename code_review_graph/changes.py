@@ -20,6 +20,17 @@ from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
 
+
+# Lifecycle and construction methods are exercised implicitly by every test
+# that touches their class, so listing them as test gaps is noise that
+# inflates the gap count and the Untested summary (#850). Names cover
+# PHPUnit/xUnit and Python unittest conventions.
+_TEST_GAP_EXEMPT_NAMES = frozenset({
+    "setUp", "tearDown", "setUpBeforeClass", "tearDownAfterClass",
+    "setup_method", "teardown_method", "setUpClass", "tearDownClass",
+    "__construct", "__init__", "__destruct",
+})
+
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
@@ -420,6 +431,19 @@ def analyze_changes(
             for key, ranges in parse_diff_ranges(repo_root, base).items()
         }
 
+    # The affected-flows lookup and the no-ranges fallback match
+    # changed_files against nodes.file_path, which stores absolute
+    # normalized paths. CLI callers pass repo-relative diff paths, so an
+    # exact IN (...) match finds no nodes and detect-changes reports
+    # "0 affected flow(s)" even when the MCP tool reports hundreds on the
+    # same input (#848). Remap the same way as changed_ranges keys;
+    # already-absolute inputs (MCP) pass through pathlib joining unchanged.
+    if repo_root is not None:
+        _root = Path(repo_root)
+        changed_files = [
+            normalize_file_path(_root / fp) for fp in changed_files
+        ]
+
     # Map changes to nodes.
     if changed_ranges:
         changed_nodes = map_changes_to_nodes(store, changed_ranges)
@@ -470,6 +494,8 @@ def analyze_changes(
     test_gaps: list[dict[str, Any]] = []
     for node in changed_funcs:
         if node.is_test:
+            continue
+        if node.name in _TEST_GAP_EXEMPT_NAMES:
             continue
         # TESTED_BY edges are stored as source=production, target=test by the
         # parser, so a changed production function finds its tests by source.
