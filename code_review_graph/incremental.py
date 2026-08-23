@@ -1808,8 +1808,11 @@ class _WatchSupervisor:
         self._live_threads: dict[int, threading.Thread] = {}
         self._repaired_roots: set[str] = set()
         self._degraded = False
+        self._failed_paths: set[str] = set()
         self._last_health_write = 0.0
-        self._last_health_state: tuple[bool, bool, tuple[str, ...]] | None = None
+        self._last_health_state: (
+            tuple[bool, bool, tuple[str, ...], tuple[str, ...]] | None
+        ) = None
         self._started_at = time.time()
         self._token = f"{os.getpid()}.{uuid.uuid4().hex[:8]}"
 
@@ -1821,7 +1824,7 @@ class _WatchSupervisor:
 
     @property
     def degraded(self) -> bool:
-        """True once the watch budget forced a coarser, recursive watch."""
+        """True when coverage is reduced or filtering has become coarser."""
         return self._degraded
 
     def attach(self, observer: Any) -> None:
@@ -1844,20 +1847,24 @@ class _WatchSupervisor:
             self._repo_root,
         )
 
-    def _schedule(self, path: Path, *, recursive: bool) -> None:
+    def _schedule(self, path: Path, *, recursive: bool) -> bool:
         key = str(path)
         if key in self._watches:
-            return
+            return True
         try:
             handle = self._observer.schedule(self._handler, key, recursive=recursive)
         except OSError as exc:
             logger.warning("Could not watch %s: %s", key, exc)
-            return
+            self._failed_paths.add(key)
+            self._degraded = True
+            return False
+        self._failed_paths.discard(key)
         self._watches[key] = _WatchEntry(handle, _watch_identity(key))
         if recursive:
             self._shallow.discard(key)
         else:
             self._shallow.add(key)
+        return True
 
     def sync_watches(self) -> tuple[list[str], list[str]]:
         """Reconcile the watches under every non-recursive watch.
@@ -1930,12 +1937,12 @@ class _WatchSupervisor:
             # Promoting the parent — often the repository root — hands every
             # ignored tree under it back to the OS, which is the condition
             # #811 is about.  It is the last resort, never the first.
-            self._promote_to_recursive(os.path.dirname(candidate))
-            return True
-        for path, recursive in plan:
-            self._schedule(path, recursive=recursive)
-        logger.info("Watching new directory %s (%d watch(es))", relative, len(plan))
-        return True
+            return self._promote_to_recursive(os.path.dirname(candidate))
+        registered = sum(
+            self._schedule(path, recursive=recursive) for path, recursive in plan
+        )
+        logger.info("Watching new directory %s (%d watch(es))", relative, registered)
+        return registered > 0
 
     def _affordable_plan(self, directory: Path) -> list[tuple[Path, bool]] | None:
         """The most selective plan for *directory* that fits the budget.
@@ -1958,11 +1965,11 @@ class _WatchSupervisor:
         # One recursive watch still filters every other directory in the repo.
         return [(directory, True)]
 
-    def _promote_to_recursive(self, parent: str) -> None:
+    def _promote_to_recursive(self, parent: str) -> bool:
         """Trade filtering for coverage when the watch budget runs out."""
         for path in [parent, *self._descendants_of(parent)]:
             self._release_directory(path)
-        self._schedule(Path(parent), recursive=True)
+        scheduled = self._schedule(Path(parent), recursive=True)
         self._degraded = True
         logger.warning(
             "Watch budget of %d reached; watching %s recursively instead — ignored "
@@ -1971,6 +1978,7 @@ class _WatchSupervisor:
             self._max_schedules,
             parent,
         )
+        return scheduled
 
     def _release_directory(self, path: str) -> None:
         entry = self._watches.pop(path, None)
@@ -2107,7 +2115,12 @@ class _WatchSupervisor:
         if self._health_path is None:
             return
         now = time.time()
-        state = (observer_alive, self._degraded, tuple(dead_threads))
+        state = (
+            observer_alive,
+            self._degraded,
+            tuple(dead_threads),
+            tuple(sorted(self._failed_paths)),
+        )
         if (
             not force
             and state == self._last_health_state
@@ -2125,6 +2138,7 @@ class _WatchSupervisor:
             "watched_paths": len(self._watches),
             "dead_threads": list(dead_threads),
             "degraded": self._degraded,
+            "failed_paths": sorted(self._failed_paths),
             "phase": phase,
         }
         try:
