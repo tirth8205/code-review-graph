@@ -127,7 +127,8 @@ Creates markdown wiki pages for each detected community in `.code-review-graph/w
 ```bash
 code-review-graph register /path/to/other/repo --alias mylib
 ```
-Then use `cross_repo_search_tool` to search across all registered repositories.
+Then use `cross_repo_search_tool` to search the registered repositories, all of
+them by default or a named subset via `repos`.
 
 ## Context Savings
 

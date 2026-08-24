@@ -499,7 +499,7 @@ Your AI assistant uses these automatically once the graph is built.
 | `generate_wiki_tool` | Generate markdown wiki from communities |
 | `get_wiki_page_tool` | Retrieve a specific wiki page |
 | `list_repos_tool` | List registered repositories |
-| `cross_repo_search_tool` | Search across all registered repositories |
+| `cross_repo_search_tool` | Search registered repositories, all of them or a named subset |
 
 **MCP Prompts** (5 workflow templates):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`

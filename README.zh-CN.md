@@ -251,7 +251,7 @@ code-review-graph serve            # 启动 MCP 服务器
 | `generate_wiki_tool` | 从社区结构生成 Markdown Wiki |
 | `get_wiki_page_tool` | 获取特定 Wiki 页面 |
 | `list_repos_tool` | 列出已注册的仓库 |
-| `cross_repo_search_tool` | 跨所有注册仓库搜索 |
+| `cross_repo_search_tool` | 跨注册仓库搜索，全部或指定的子集 |
 
 **MCP 提示模板**（5 种工作流模板）：
 `review_changes`、`architecture_map`、`debug_issue`、`onboard_developer`、`pre_merge_check`

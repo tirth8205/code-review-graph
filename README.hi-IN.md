@@ -251,7 +251,7 @@ code-review-graph serve            # MCP सर्वर शुरू करे�
 | `generate_wiki_tool` | कम्युनिटीज़ से मार्कडाउन विकी जनरेट करें |
 | `get_wiki_page_tool` | कोई विशेष विकी पेज प्राप्त करें |
 | `list_repos_tool` | रजिस्टर्ड रिपॉज़िटरीज़ की सूची |
-| `cross_repo_search_tool` | सभी रजिस्टर्ड रिपॉज़िटरीज़ में सर्च करें |
+| `cross_repo_search_tool` | रजिस्टर्ड रिपॉज़िटरीज़ में सर्च करें, सभी या नामित उपसमूह |
 
 **MCP प्रॉम्प्ट्स** (5 वर्कफ़्लो टेम्प्लेट):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`

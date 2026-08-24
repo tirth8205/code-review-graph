@@ -1037,10 +1037,11 @@ def cross_repo_search_tool(
     kind: Optional[str] = None,
     limit: int = 20,
     max_results: int = 50,
+    repos: Optional[list[str]] = None,
 ) -> dict:
-    """Search for code entities across all registered repositories.
+    """Search for code entities across registered repositories.
 
-    Runs hybrid search on each registered repo's graph database and interleaves
+    Runs hybrid search on each searched repo's graph database and interleaves
     results by repository-local rank. Equal ranks follow registry order, and up
     to ``limit`` results per searched repo may be returned. Register repos first
     with the CLI 'register' command.
@@ -1049,11 +1050,18 @@ def cross_repo_search_tool(
         query: Search string to match against node names.
         kind: Optional filter: File, Class, Function, Type, or Test.
         limit: Maximum results per repo. Default: 20.
-        max_results: Maximum merged results across all repos; total reports
-            the untruncated merged count. Default: 50.
+        max_results: Maximum merged results across searched repos; total
+            reports the untruncated merged count. Default: 50.
+        repos: Optional repo aliases or folder names to search. Default: every
+            registered repo. Use it when the registry spans unrelated products
+            and only some of them can answer the question. Matching is exact
+            and case-sensitive, and paths are not accepted. Names matching no
+            registry entry come back in ``unknown``; a name matching several
+            entries selects all of them and is listed in ``ambiguous``.
     """
     return cross_repo_search_func(
         query=query, kind=kind, limit=limit, max_results=max_results,
+        repos=repos,
     )
 
 

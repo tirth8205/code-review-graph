@@ -304,8 +304,24 @@ max_chars: int = 20000       # Page content returned (max 80000)
 query: str
 kind: str | None
 limit: int = 20              # Results per repo
-max_results: int = 50        # Merged results across all repos (max 100)
+max_results: int = 50        # Merged results across searched repos (max 100)
+repos: list[str] | None      # Aliases or folder names; default: every registered repo
 ```
+
+`repos` narrows the fan-out when the registry spans unrelated products, so the
+answer is not diluted by repositories that cannot address the query. Every alias
+is matched before any folder name, so an explicit alias always beats another
+entry's incidental folder name, and registry order still decides the merge
+tie-breaker.
+
+Matching is exact and case-sensitive, and paths are not accepted (unlike
+`Registry.resolve_repo`): this parameter only narrows an already-trusted
+registry, so an unmatched name is reported rather than guessed at. Names
+matching no entry come back in `unknown`; a name matching several entries
+selects all of them and is listed in `ambiguous`. Both lists are bounded like
+every other list in a response, with `unknown_total` / `ambiguous_total` and
+`unknown_truncated` / `ambiguous_truncated` reporting the real counts, and the
+summary carries those counts rather than echoing the caller's names.
 
 ## Result Bounds
 

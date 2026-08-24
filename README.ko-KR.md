@@ -253,7 +253,7 @@ code-review-graph serve            # MCP 서버 시작
 | `generate_wiki_tool` | 커뮤니티에서 마크다운 위키 생성 |
 | `get_wiki_page_tool` | 특정 위키 페이지 조회 |
 | `list_repos_tool` | 등록된 저장소 목록 |
-| `cross_repo_search_tool` | 등록된 모든 저장소에서 검색 |
+| `cross_repo_search_tool` | 등록된 저장소에서 검색, 전체 또는 지정한 일부 |
 
 **MCP 프롬프트** (5개 워크플로 템플릿):
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`

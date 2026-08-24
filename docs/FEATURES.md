@@ -51,7 +51,7 @@
 - **Risk-scored change detection**: `detect_changes` maps git diffs to affected functions, flows, communities, and test coverage gaps with priority ordering.
 - **Refactoring tools**: Rename preview with edit list, dead code detection, community-driven refactoring suggestions.
 - **Wiki generation**: Auto-generate markdown wiki pages for each community with optional LLM summaries (ollama).
-- **Multi-repo registry**: Register multiple repositories, search across all of them with `cross_repo_search`.
+- **Multi-repo registry**: Register multiple repositories and search them with `cross_repo_search`, all of them or a named subset.
 - **Full-text search**: FTS5 virtual table with porter stemming for hybrid keyword + vector search.
 - **Database migrations**: Versioned schema migrations (v1-v5) with automatic upgrade on startup.
 - **Optional dependency groups**: `[embeddings]`, `[google-embeddings]`, `[communities]`, `[eval]`, `[wiki]`, `[all]`.

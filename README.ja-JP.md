@@ -253,7 +253,7 @@ code-review-graph serve            # MCPサーバーの起動
 | `generate_wiki_tool` | コミュニティからMarkdown Wikiを生成 |
 | `get_wiki_page_tool` | 特定のWikiページの取得 |
 | `list_repos_tool` | 登録済みリポジトリの一覧 |
-| `cross_repo_search_tool` | 全登録リポジトリを横断検索 |
+| `cross_repo_search_tool` | 登録リポジトリを横断検索、全体または指定した一部 |
 
 **MCPプロンプト**（5つのワークフローテンプレート）：
 `review_changes`, `architecture_map`, `debug_issue`, `onboard_developer`, `pre_merge_check`
