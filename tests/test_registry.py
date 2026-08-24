@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from code_review_graph.registry import ConnectionPool, Registry, resolve_repo
+from code_review_graph.tools.registry_tools import _select_repos
 
 
 class TestRegistry:
@@ -297,6 +298,186 @@ class TestCrossRepoSearch:
         ]
         assert result["summary"] == "Found 4 result(s) across 2 repo(s) for 'splash'"
         assert [call.kwargs["limit"] for call in mock_search.call_args_list] == [2, 2]
+        assert "unknown" not in result
+
+    def _three_repo_registry(self, tmp_path):
+        """Three registered repos, one of them addressed only by folder name."""
+        entries = []
+        for folder, alias in (("android", "android"), ("ios", "ios"), ("web", None)):
+            repo = tmp_path / folder
+            repo.mkdir()
+            db = tmp_path / f"{folder}.db"
+            db.touch()
+            entry = {"path": str(repo)}
+            if alias:
+                entry["alias"] = alias
+            entries.append((entry, db))
+        return entries
+
+    def test_cross_repo_search_repos_limits_the_registry_fanout(self, tmp_path):
+        """``repos`` searches only the named repos, by alias or folder name."""
+        from code_review_graph.tools import cross_repo_search_func
+
+        entries = self._three_repo_registry(tmp_path)
+        ios_results = [{"name": "SplashViewController", "score": 3.0}]
+        web_results = [{"name": "SplashBanner", "score": 0.5}]
+
+        with (
+            patch("code_review_graph.registry.Registry") as mock_registry_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.get_db_path",
+                side_effect=[entries[1][1], entries[2][1]],
+            ),
+            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.hybrid_search",
+                side_effect=[ios_results, web_results],
+            ) as mock_search,
+        ):
+            mock_registry_cls.return_value.list_repos.return_value = [
+                entry for entry, _ in entries
+            ]
+            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+
+            result = cross_repo_search_func(query="splash", repos=["web", "ios"])
+
+        # Only the two named repos are opened at all: android never reaches search.
+        assert mock_search.call_count == 2
+        assert result["repos_searched"] == ["ios", "web"]
+        assert [item["repo"] for item in result["results"]] == ["ios", "web"]
+        assert result["unknown"] == []
+
+    def test_cross_repo_search_reports_names_that_match_no_repo(self, tmp_path):
+        """Unknown names are reported, not silently dropped."""
+        from code_review_graph.tools import cross_repo_search_func
+
+        entries = self._three_repo_registry(tmp_path)
+
+        with (
+            patch("code_review_graph.registry.Registry") as mock_registry_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.get_db_path",
+                side_effect=[entries[0][1]],
+            ),
+            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.hybrid_search",
+                side_effect=[[{"name": "Splash", "score": 0.03}]],
+            ),
+        ):
+            mock_registry_cls.return_value.list_repos.return_value = [
+                entry for entry, _ in entries
+            ]
+            mock_store_cls.side_effect = [MagicMock()]
+
+            result = cross_repo_search_func(
+                query="splash", repos=["android", "desktop"]
+            )
+
+        assert result["status"] == "ok"
+        assert result["repos_searched"] == ["android"]
+        assert result["unknown"] == ["desktop"]
+
+    def test_cross_repo_search_repos_matching_nothing_searches_nothing(self, tmp_path):
+        """A selection that matches no entry returns empty, never the whole registry."""
+        from code_review_graph.tools import cross_repo_search_func
+
+        entries = self._three_repo_registry(tmp_path)
+
+        with (
+            patch("code_review_graph.registry.Registry") as mock_registry_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.hybrid_search"
+            ) as mock_search,
+        ):
+            mock_registry_cls.return_value.list_repos.return_value = [
+                entry for entry, _ in entries
+            ]
+
+            result = cross_repo_search_func(query="splash", repos=["desktop"])
+
+        assert result["status"] == "ok"
+        assert result["results"] == []
+        assert result["repos_searched"] == []
+        assert result["unknown"] == ["desktop"]
+        mock_search.assert_not_called()
+
+    def test_cross_repo_search_repos_cannot_reorder_the_merge(self, tmp_path):
+        """Selection order does not change the registry-order tie-breaker."""
+        from code_review_graph.tools import cross_repo_search_func
+
+        entries = self._three_repo_registry(tmp_path)
+        android_results = [{"name": "Splash", "score": 0.03}]
+        ios_results = [{"name": "SplashViewController", "score": 3.0}]
+
+        with (
+            patch("code_review_graph.registry.Registry") as mock_registry_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.get_db_path",
+                side_effect=[entries[0][1], entries[1][1]],
+            ),
+            patch("code_review_graph.tools.registry_tools.GraphStore") as mock_store_cls,
+            patch(
+                "code_review_graph.tools.registry_tools.hybrid_search",
+                side_effect=[android_results, ios_results],
+            ),
+        ):
+            mock_registry_cls.return_value.list_repos.return_value = [
+                entry for entry, _ in entries
+            ]
+            mock_store_cls.side_effect = [MagicMock(), MagicMock()]
+
+            result = cross_repo_search_func(query="splash", repos=["ios", "android"])
+
+        assert [item["repo"] for item in result["results"]] == ["android", "ios"]
+
+    def test_cross_repo_search_tool_forwards_repo_selection(self):
+        """The MCP tool passes ``repos`` through, and defaults it to None."""
+        from code_review_graph import main as crg_main
+        from code_review_graph.main import cross_repo_search_tool
+
+        with patch.object(
+            crg_main, "cross_repo_search_func", return_value={"status": "ok"}
+        ) as mock_func:
+            cross_repo_search_tool(query="splash", repos=["android"])
+            cross_repo_search_tool(query="splash")
+
+        forwarded = [call.kwargs["repos"] for call in mock_func.call_args_list]
+        assert forwarded == [["android"], None]
+
+
+class TestSelectRepos:
+    """Direct tests for the registry selection helper behind ``repos``."""
+
+    ENTRIES = [
+        {"path": "/src/android", "alias": "droid"},
+        {"path": "/src/ios"},
+        {"path": "/src/web", "alias": "frontend"},
+    ]
+
+    def test_select_repos_matches_alias_then_folder_name(self):
+        selected, unknown = _select_repos(self.ENTRIES, ["droid", "ios"])
+
+        assert [entry["path"] for entry in selected] == ["/src/android", "/src/ios"]
+        assert unknown == []
+
+    def test_select_repos_keeps_registry_order(self):
+        selected, _ = _select_repos(self.ENTRIES, ["frontend", "droid"])
+
+        assert [entry["path"] for entry in selected] == ["/src/android", "/src/web"]
+
+    def test_select_repos_reports_unknown_names(self):
+        selected, unknown = _select_repos(self.ENTRIES, ["droid", "desktop", "tv"])
+
+        assert [entry["path"] for entry in selected] == ["/src/android"]
+        assert unknown == ["desktop", "tv"]
+
+    def test_select_repos_deduplicates_alias_and_folder_of_one_repo(self):
+        """A repo named twice, once by alias and once by folder, is searched once."""
+        selected, unknown = _select_repos(self.ENTRIES, ["droid", "android"])
+
+        assert [entry["path"] for entry in selected] == ["/src/android"]
+        assert unknown == []
 
 
 class TestSetDataDir:

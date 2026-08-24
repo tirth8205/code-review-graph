@@ -51,13 +51,39 @@ def list_repos_func() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _select_repos(
+    repos: list[dict[str, Any]],
+    names: list[str],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Pick the registry entries named by ``names``, preserving registry order.
+
+    A name matches an entry's alias first, then the final component of its
+    path, so an entry registered as ``{"path": ".../billing-api", "alias":
+    "billing"}`` is selected by either ``["billing"]`` or ``["billing-api"]``.
+    Registry order is preserved so the caller cannot change the merge
+    tie-breaker by reordering ``names``.
+
+    Returns the selected entries and the names that matched nothing.
+    """
+    by_name: dict[str, int] = {}
+    for index, entry in enumerate(repos):
+        folder = Path(entry["path"]).name
+        by_name.setdefault(entry.get("alias") or folder, index)
+        by_name.setdefault(folder, index)
+
+    wanted = {by_name[name] for name in names if name in by_name}
+    unknown = [name for name in names if name not in by_name]
+    return [entry for i, entry in enumerate(repos) if i in wanted], unknown
+
+
 def cross_repo_search_func(
     query: str,
     kind: str | None = None,
     limit: int = 20,
     max_results: int = 50,
+    repos: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Search across all registered repositories.
+    """Search across registered repositories.
 
     [REGISTRY] Runs hybrid_search on each registered repo's graph database
     and merges the results.
@@ -70,10 +96,17 @@ def cross_repo_search_func(
             (default 50, capped at 100). ``total`` reports the untruncated
             merged count; without it the response grew with the number of
             registered repos rather than with the caller's ``limit``.
+        repos: Optional aliases or folder names to search. Omitted or empty
+            searches every registered repo. A registry that spans unrelated
+            products otherwise contributes each repo's best local rank to the
+            top of the merged list, so the caller pays for repositories that
+            cannot answer the question. Names matching no entry are returned
+            in ``unknown`` rather than dropped, since a silently skipped repo
+            is indistinguishable from one that simply had no matches.
 
     Returns:
-        Combined search results from all registered repos, plus ``total``
-        and ``truncated``.
+        Combined search results from the searched repos, plus ``total``
+        and ``truncated``, and ``unknown`` when ``repos`` was given.
     """
     from ..registry import Registry
 
@@ -82,8 +115,8 @@ def cross_repo_search_func(
 
     try:
         registry = Registry()
-        repos = registry.list_repos()
-        if not repos:
+        all_repos = registry.list_repos()
+        if not all_repos:
             return {
                 "status": "ok",
                 "summary": (
@@ -93,10 +126,29 @@ def cross_repo_search_func(
                 "results": [],
             }
 
+        unknown: list[str] = []
+        if repos:
+            selected, unknown = _select_repos(all_repos, repos)
+            if not selected:
+                return {
+                    "status": "ok",
+                    "summary": (
+                        f"No registered repository matches {repos}. "
+                        "Use 'repos' to list the registry."
+                    ),
+                    "results": [],
+                    "total": 0,
+                    "truncated": False,
+                    "repos_searched": [],
+                    "unknown": unknown,
+                }
+        else:
+            selected = all_repos
+
         ranked_results: list[tuple[int, int, dict[str, Any]]] = []
         searched_repos: list[str] = []
 
-        for repo_index, repo_entry in enumerate(repos):
+        for repo_index, repo_entry in enumerate(selected):
             repo_path = Path(repo_entry["path"])
             db_path = get_db_path(repo_path)
             if not db_path.exists():
@@ -130,7 +182,7 @@ def cross_repo_search_func(
             _MAX_CROSS_REPO_RESULTS,
         )
 
-        return {
+        response = {
             "status": "ok",
             "summary": (
                 f"Found {total} result(s) across "
@@ -142,5 +194,8 @@ def cross_repo_search_func(
             "truncated": truncated,
             "repos_searched": searched_repos,
         }
+        if repos:
+            response["unknown"] = unknown
+        return response
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

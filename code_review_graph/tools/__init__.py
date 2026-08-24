@@ -22,7 +22,7 @@ Exposes 27 tools:
 19. generate_wiki         - generate markdown wiki from community structure
 20. get_wiki_page         - retrieve a specific wiki page
 21. list_repos            - list registered repositories
-22. cross_repo_search     - search across all registered repositories
+22. cross_repo_search     - search registered repositories, all or a named subset
 23. get_hub_nodes         - find most connected nodes (architectural hotspots)
 24. get_bridge_nodes      - find architectural chokepoints (betweenness centrality)
 25. get_knowledge_gaps    - identify structural weaknesses

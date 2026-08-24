@@ -304,8 +304,15 @@ max_chars: int = 20000       # Page content returned (max 80000)
 query: str
 kind: str | None
 limit: int = 20              # Results per repo
-max_results: int = 50        # Merged results across all repos (max 100)
+max_results: int = 50        # Merged results across searched repos (max 100)
+repos: list[str] | None      # Aliases or folder names; default: every registered repo
 ```
+
+`repos` narrows the fan-out when the registry spans unrelated products, so the
+answer is not diluted by repositories that cannot address the query. Names are
+matched against each entry's alias first, then its folder name, and registry
+order still decides the merge tie-breaker. Names matching no entry are returned
+in `unknown` rather than dropped.
 
 ## Result Bounds
 
