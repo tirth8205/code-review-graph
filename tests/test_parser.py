@@ -692,6 +692,83 @@ class Plain:
             imports = [e for e in edges if e.kind == "IMPORTS_FROM"]
             assert any("@/bar" in e.target for e in imports)
 
+    # --- Relative import resolution: dotted stems and NodeNext ---
+
+    def test_relative_import_dotted_stem_resolves_to_full_filename(self):
+        """`./outlet.entity` must resolve to `outlet.entity.ts`, not `outlet.ts`.
+
+        `Path.with_suffix()` REPLACES the final suffix, so appending an
+        extension via `with_suffix` mistook the `.entity` in the stem for an
+        existing suffix and probed `outlet.ts` instead. Dotted stems are the
+        dominant NestJS convention (`*.entity.ts`, `*.service.ts`,
+        `*.controller.ts`, `*.guard.ts`, `*.module.ts`), so relative imports
+        between them resolved to the wrong file (or a sibling file that
+        happens to share the truncated name), and `importers_of` reported a
+        confident, wrong zero for the real target.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "outlet.entity.ts").write_text(
+                "export class Outlet {}\n", encoding="utf-8",
+            )
+            # A decoy at the truncated name: proves a wrong resolution
+            # lands here instead of raising or returning None.
+            (root / "outlet.ts").write_text(
+                "export const wrongFile = true;\n", encoding="utf-8",
+            )
+            importer = root / "outlet.service.ts"
+
+            resolved = self.parser._resolve_module_to_file(
+                "./outlet.entity", str(importer), "typescript",
+            )
+
+            assert resolved == str((root / "outlet.entity.ts").resolve()), (
+                f"expected outlet.entity.ts, got {resolved!r}"
+            )
+
+    def test_relative_import_nodenext_js_extension_resolves_ts_source(self):
+        """NodeNext/ESM TypeScript writes `./foo.js` for a source that is
+        `foo.ts` on disk. This is the one case where replacing the suffix
+        is correct, and must survive alongside the append-first fix above —
+        a future simplification that drops the ESM fallback should turn
+        this test red.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "foo.ts").write_text("export const foo = 1;\n", encoding="utf-8")
+            importer = root / "bar.ts"
+
+            resolved = self.parser._resolve_module_to_file(
+                "./foo.js", str(importer), "typescript",
+            )
+
+            assert resolved == str((root / "foo.ts").resolve())
+
+    def test_relative_import_dart_dotted_stem_resolves_to_full_filename(self):
+        """Same bug class as the TS resolver: Dart's `with_suffix(".dart")`
+        fallback replaces a dotted stem's final segment instead of
+        appending. Imports normally already carry the `.dart` extension, so
+        this only bites when one is omitted, but the fallback exists
+        precisely for that case and should not silently mis-resolve it.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "thing.model.dart").write_text(
+                "class Thing {}\n", encoding="utf-8",
+            )
+            (root / "thing.dart").write_text(
+                "class WrongFile {}\n", encoding="utf-8",
+            )
+            importer = root / "consumer.dart"
+
+            resolved = self.parser._resolve_module_to_file(
+                "./thing.model", str(importer), "dart",
+            )
+
+            assert resolved == str((root / "thing.model.dart").resolve()), (
+                f"expected thing.model.dart, got {resolved!r}"
+            )
+
     # --- Vitest/Jest test detection ---
 
     def test_vitest_test_detection(self):
@@ -746,7 +823,7 @@ class Plain:
             f"All edges: {[(e.kind, e.source, e.target) for e in edges]}"
         )
 
-    # --- Python callback REFERENCES (#363) ---
+    # --- Python callback REFERENCES (#363, #840) ---
     # Functions passed as bare-identifier arguments (executor.submit(fn),
     # filter(fn, xs), map(fn, xs), df.apply(fn), ...) should produce
     # REFERENCES edges so dead-code detection does not flag them as unused.
@@ -764,6 +841,13 @@ class Plain:
                 f"Expected REFERENCES edge to {callback}, got targets: "
                 f"{ref_target_names}"
             )
+
+    def test_python_keyword_callback_reference_emitted(self):
+        """A function passed as a keyword-argument value should produce a reference."""
+        nodes, edges = self.parser.parse_file(FIXTURES / "sample_callback_refs.py")
+        refs = [e for e in edges if e.kind == "REFERENCES"]
+        ref_target_names = {e.target.rsplit("::", 1)[-1] for e in refs}
+        assert "keyword_callback" in ref_target_names
 
     def test_python_callback_references_not_treated_as_dead(self):
         """End-to-end: with REFERENCES edges in place, find_dead_code
@@ -785,7 +869,10 @@ class Plain:
                 dead = find_dead_code(store)
                 dead_names = {d["name"] for d in dead}
                 for callback in (
-                    "executor_callback", "filter_callback", "map_callback",
+                    "executor_callback",
+                    "filter_callback",
+                    "map_callback",
+                    "keyword_callback",
                 ):
                     assert callback not in dead_names, (
                         f"{callback} was flagged as dead but is used as a "

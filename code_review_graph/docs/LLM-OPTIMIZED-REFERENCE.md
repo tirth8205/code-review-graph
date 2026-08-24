@@ -30,6 +30,10 @@ MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_develope
 Skills: build-graph, debug-issue, explore-codebase, refactor-safely, review-changes, review-delta, review-pr
 CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|mcp|wiki|detect-changes|postprocess|embed|register|unregister|repos|eval|daemon]
 Token efficiency: Prefer detail_level="minimal" where available. Always call get_minimal_context_tool first. Some review/context tools return compact estimated context_savings metadata.
+
+Result bounds: every tool that returns a list is bounded. Defaults are small; pass the tool's cap parameter to widen up to its hard ceiling, or a smaller value to narrow. Truncation is never silent — the response reports the untruncated count (`total`, or a `*_total` field per list), sets `truncated: true`, and the summary line says how many of how many are shown.
+Cap parameters by tool: max_results (query_graph, get_review_context, detect_changes, list_communities, get_architecture_overview, refactor, cross_repo_search), max_flows (get_affected_flows, detect_changes), max_members (list_communities, get_community, get_architecture_overview), max_steps + max_source_lines (get_flow), max_per_category (get_knowledge_gaps), top_n (get_hub_nodes, get_bridge_nodes, get_surprising_connections), limit (list_flows, semantic_search_nodes, find_large_functions), max_files (get_review_context), max_chars (get_wiki_page), max_diff_files (apply_refactor).
+Bounds reject values below 1 and reject booleans. get_affected_flows keeps max_flows=0 as "no caller limit", still subject to its ceiling (25 flows in standard mode, 500 in minimal, plus a shared 400-step budget) — see #849.
 </section>
 
 <section name="legal">

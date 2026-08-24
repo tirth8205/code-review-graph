@@ -15,6 +15,11 @@ from ..hints import generate_hints, get_session
 from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
 from ..parser import normalize_file_path
 from ..search import hybrid_search
+from ..uncertainty import (
+    empty_impact_confidence,
+    empty_query_confidence,
+    empty_search_confidence,
+)
 from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
 
 logger = logging.getLogger(__name__)
@@ -180,6 +185,17 @@ def get_impact_radius(
                 f" of {total_impacted} impacted nodes"
             )
 
+        # "Nothing is impacted" and "nothing about these files is indexed"
+        # look identical to a reader without this marker.
+        confidence = None
+        if not impacted_dicts:
+            changed_language = next(
+                (n.language for n in result["changed_nodes"] if n.language), None,
+            )
+            confidence = empty_impact_confidence(
+                store, root, changed_files, abs_files, changed_language,
+            )
+
         if detail_level == "minimal":
             impacted_count = len(impacted_dicts)
             if impacted_count > 20:
@@ -200,10 +216,12 @@ def get_impact_radius(
                 "truncated": truncated,
                 "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
             }
+            if confidence:
+                minimal_response["confidence"] = confidence
             attach_context_savings(minimal_response, original_tokens=original_tokens)
             return minimal_response
 
-        response = {
+        response: dict[str, Any] = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
@@ -215,6 +233,8 @@ def get_impact_radius(
             "total_impacted": total_impacted,
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
         }
+        if confidence:
+            response["confidence"] = confidence
         attach_context_savings(response, original_tokens=original_tokens)
         return response
     finally:
@@ -353,10 +373,17 @@ def query_graph(
                     }
 
         if not node and pattern not in ("consumers_of", "file_summary"):
-            return {
+            # This branch, not the empty-result path below, is where an
+            # unresolved target actually lands for most patterns, so the
+            # not-indexed marker has to be attached here too.
+            unresolved: dict[str, Any] = {
                 "status": "not_found",
                 "summary": f"No node found matching '{target}'.",
             }
+            unresolved_note = empty_query_confidence(store, root, pattern, target, None)
+            if unresolved_note:
+                unresolved["confidence"] = unresolved_note
+            return unresolved
 
         qn = node.qualified_name if node else target
 
@@ -656,6 +683,16 @@ def query_graph(
         if results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
 
+        # A zero here is the dangerous direction: agents read it as "none
+        # exist" and either conclude wrongly or fall back to grepping the
+        # repository. One capped sentence prevents both, and is attached only
+        # when the result set is empty so non-empty responses are unchanged.
+        confidence = (
+            empty_query_confidence(store, root, pattern, target, node)
+            if total_results == 0
+            else None
+        )
+
         if detail_level == "minimal":
             minimal_results = [
                 {
@@ -665,7 +702,7 @@ def query_graph(
                 }
                 for r in results
             ]
-            return {
+            minimal_response: dict[str, Any] = {
                 "status": "ok",
                 "pattern": pattern,
                 "target": target,
@@ -675,8 +712,11 @@ def query_graph(
                 "results_omitted": results_omitted,
                 "results": minimal_results,
             }
+            if confidence:
+                minimal_response["confidence"] = confidence
+            return minimal_response
 
-        return {
+        response: dict[str, Any] = {
             "status": "ok",
             "pattern": pattern,
             "target": target,
@@ -687,6 +727,9 @@ def query_graph(
             "results": results,
             "edges": edges_out,
         }
+        if confidence:
+            response["confidence"] = confidence
+        return response
     finally:
         store.close()
 
@@ -738,6 +781,12 @@ def semantic_search_nodes(
             f" (kind={kind})" if kind else ""
         )
 
+        # Zero hits can mean "no such symbol" or "never indexed"/"stale index";
+        # only the marker distinguishes them.
+        confidence = (
+            empty_search_confidence(store, root, query) if not results else None
+        )
+
         if detail_level == "minimal":
             minimal_results = [
                 {
@@ -747,7 +796,7 @@ def semantic_search_nodes(
                 }
                 for r in results[:5]
             ]
-            return {
+            minimal_response: dict[str, Any] = {
                 "status": "ok",
                 "query": query,
                 "search_mode": search_mode,
@@ -756,6 +805,9 @@ def semantic_search_nodes(
                 "result_count": len(results),
                 "results_omitted": max(0, len(results) - len(minimal_results)),
             }
+            if confidence:
+                minimal_response["confidence"] = confidence
+            return minimal_response
 
         result: dict[str, object] = {
             "status": "ok",
@@ -764,6 +816,8 @@ def semantic_search_nodes(
             "summary": summary,
             "results": results,
         }
+        if confidence:
+            result["confidence"] = confidence
         result["_hints"] = generate_hints(
             "semantic_search_nodes", result, get_session()
         )

@@ -86,6 +86,7 @@ code-review-graph install --platform kiro         # configure only Kiro
 code-review-graph install --platform copilot      # configure only GitHub Copilot (VS Code)
 code-review-graph install --platform copilot-cli  # configure only GitHub Copilot CLI
 code-review-graph install --platform codebuddy    # configure only CodeBuddy Code
+code-review-graph install --platform hermes       # configure only Hermes Agent
 ```
 
 Requires Python 3.10+. For the best experience, install [uv](https://docs.astral.sh/uv/) (the MCP config will use `uvx` if available, otherwise falls back to the `code-review-graph` command directly).
@@ -297,7 +298,7 @@ The benchmark also runs an honest **co-change mode**: the predictor is seeded wi
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, and evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Blast-radius analysis** | Shows which functions, classes, and files are likely affected by a change |
 | **Auto-update hooks** | Hooks and watch mode can update the graph on file saves and supported commit hooks |
-| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
 | **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
 | **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
@@ -712,5 +713,5 @@ MIT. See [LICENSE](LICENSE).
 <br>
 <a href="https://code-review-graph.com">code-review-graph.com</a><br><br>
 <code>pip install code-review-graph && code-review-graph install</code><br>
-<sub>Works with Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI</sub>
+<sub>Works with Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, and Hermes Agent</sub>
 </p>

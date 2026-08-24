@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -435,7 +436,7 @@ class TestRefreshWiring:
 
         build.assert_called_once_with(
             full_rebuild=True,
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             postprocess="full",
             embedding_provider="local",
             embedding_model="test-model",

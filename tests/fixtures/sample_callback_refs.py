@@ -1,8 +1,8 @@
 """Fixture for issue #363: function references in callback positions.
 
-Each `*_callback` function is passed as a bare-identifier argument to
-another call. They are never invoked with parens, so without REFERENCES
-edge tracking they would be flagged as dead code.
+Each `*_callback` function is passed as an argument to another call, either
+directly or as a keyword value. They are never invoked with parens, so without
+REFERENCES edge tracking they would be flagged as dead code.
 """
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,6 +19,10 @@ def map_callback(item):
     return item * 2
 
 
+def keyword_callback(args):
+    return args
+
+
 def trigger_executor():
     with ThreadPoolExecutor() as executor:
         future = executor.submit(executor_callback)
@@ -33,3 +37,7 @@ def trigger_filter():
 def trigger_map():
     items = [1, 2, 3]
     return list(map(map_callback, items))
+
+
+def register_keyword_callback(parser):
+    parser.set_defaults(func=keyword_callback)

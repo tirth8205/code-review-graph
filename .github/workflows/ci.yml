@@ -87,6 +87,23 @@ jobs:
       - name: Run tests with coverage
         run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
 
+  google-embeddings:
+    name: Google embeddings (${{ matrix.extra }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extra: [google-embeddings, all]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+      - name: Install optional dependency set
+        run: pip install -e ".[${{ matrix.extra }}]"
+      - name: Construct Google embedding provider
+        run: python scripts/smoke_google_embeddings.py
+
   windows-native:
     name: Windows daemon and file handles
     runs-on: windows-latest

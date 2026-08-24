@@ -150,6 +150,82 @@ def test_status_missing_graph_exits_without_creating_data_tree(
     assert not data_dir.exists()
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["status", "detect-changes", "visualize", "wiki", "watch"],
+)
+def test_read_only_commands_missing_graph_do_not_create_empty_db(
+    command, tmp_path, monkeypatch, capsys,
+):
+    """#803: read-only consumers must not poison a repo with empty graph.db."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    # detect-changes requires a real git worktree for root discovery.
+    if command == "detect-changes":
+        import subprocess
+
+        subprocess.run(
+            ["git", "-C", str(repo), "init", "-q"],
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            timeout=30,
+        )
+    data_dir = tmp_path / "missing-data"
+    monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
+    monkeypatch.delenv("CRG_HOME", raising=False)
+    argv = ["code-review-graph", command, "--repo", str(repo)]
+
+    with patch(
+        "code_review_graph.registry.default_registry_path",
+        return_value=tmp_path / "missing-registry.json",
+    ):
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main()
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "No graph found" in err
+    assert not data_dir.exists()
+    assert not (repo / ".code-review-graph").exists()
+
+
+@pytest.mark.parametrize("command", ["visualize", "wiki", "watch", "status"])
+def test_read_only_commands_data_dir_option_is_read_only(
+    command, tmp_path, monkeypatch, capsys,
+):
+    """Explicit --data-dir must not create dirs/registry when the graph is missing."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    data_dir = tmp_path / "explicit-data"
+    registry_path = tmp_path / "registry" / "registry.json"
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    argv = [
+        "code-review-graph",
+        command,
+        "--repo",
+        str(repo),
+        "--data-dir",
+        str(data_dir),
+    ]
+
+    with patch(
+        "code_review_graph.registry.default_registry_path",
+        return_value=registry_path,
+    ):
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert not data_dir.exists()
+    assert not registry_path.exists()
+
+
 def test_status_preserves_legacy_graph_migration(tmp_path, monkeypatch, capsys):
     repo = tmp_path / "repo"
     repo.mkdir()

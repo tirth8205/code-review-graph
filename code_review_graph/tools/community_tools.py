@@ -9,11 +9,43 @@ from ..communities import get_architecture_overview, get_communities
 from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
-from ._common import _get_store
+from ._common import _bounded, _get_store, _shown_of, _validate_positive_int
 
 # ---------------------------------------------------------------------------
 # Tool 13: list_communities  [EXPLORE]
 # ---------------------------------------------------------------------------
+
+# Hard ceilings. ``get_communities`` embeds every member's qualified name in
+# each community, so a repo with one 3000-member community produced a 200k+
+# token response before this cap (the same class of bug as #849).
+_MAX_COMMUNITIES = 200
+# A member entry is one absolute qualified name, ~36 tokens. 25 per
+# community keeps a 200-community overview inside a single response.
+_MAX_MEMBERS = 25
+# A per-edge cross-community row carries two absolute qualified names,
+# ~100 tokens. 200 rows is the most a standard overview can afford.
+_MAX_CROSS_EDGES = 200
+
+
+def _cap_members(
+    community: dict[str, Any], max_members: int,
+) -> dict[str, Any]:
+    """Return a copy of *community* whose member lists are bounded.
+
+    ``size`` already carries the true member count, so the caller never
+    loses the total; ``members_truncated`` marks that the list was cut.
+    """
+    capped = dict(community)
+    for key in ("members", "member_details"):
+        rows = capped.get(key)
+        if not isinstance(rows, list):
+            continue
+        visible, total, truncated = _bounded(rows, max_members, _MAX_MEMBERS)
+        capped[key] = visible
+        if truncated:
+            capped[f"{key}_total"] = total
+            capped["members_truncated"] = True
+    return capped
 
 
 def list_communities_func(
@@ -21,6 +53,8 @@ def list_communities_func(
     sort_by: str = "size",
     min_size: int = 0,
     detail_level: str = "standard",
+    max_results: int = 50,
+    max_members: int = 10,
 ) -> dict[str, Any]:
     """List detected code communities in the codebase.
 
@@ -36,24 +70,42 @@ def list_communities_func(
         detail_level: "standard" (default) returns full community data;
                       "minimal" returns only name, size, and cohesion
                       per community.
+        max_results: Maximum communities to return (default 50, capped at
+                     200). ``total`` reports the untruncated count.
+        max_members: Maximum member names listed per community in standard
+                     mode (default 10, capped at 100). Each community's
+                     ``size`` still reports its true member count.
 
     Returns:
-        List of communities with size and cohesion scores.
+        Communities with size and cohesion scores, plus ``total`` and
+        ``truncated``.
     """
+    _validate_positive_int(max_results, "max_results")
+    _validate_positive_int(max_members, "max_members")
+
     store, root = _get_store(repo_root)
     try:
-        communities = get_communities(
-            store, sort_by=sort_by, min_size=min_size
+        communities, total, truncated = _bounded(
+            get_communities(store, sort_by=sort_by, min_size=min_size),
+            max_results,
+            _MAX_COMMUNITIES,
         )
         if detail_level == "minimal":
             communities = [
                 {"name": c["name"], "size": c["size"], "cohesion": c["cohesion"]}
                 for c in communities
             ]
+        else:
+            communities = [_cap_members(c, max_members) for c in communities]
         result: dict[str, object] = {
             "status": "ok",
-            "summary": f"Found {len(communities)} communities",
+            "summary": (
+                f"Found {total} communities"
+                + _shown_of(len(communities), total)
+            ),
             "communities": communities,
+            "total": total,
+            "truncated": truncated,
         }
         result["_hints"] = generate_hints(
             "list_communities", result, get_session()
@@ -75,6 +127,7 @@ def get_community_func(
     community_id: int | None = None,
     include_members: bool = False,
     repo_root: str | None = None,
+    max_members: int = 25,
 ) -> dict[str, Any]:
     """Get details of a single code community.
 
@@ -87,10 +140,17 @@ def get_community_func(
         community_id: Database ID of the community.
         include_members: If True, include full member node details.
         repo_root: Repository root path. Auto-detected if omitted.
+        max_members: Maximum member entries to include (default 25, capped
+                     at 100). The community's ``size`` still reports its
+                     true member count and ``members_truncated`` marks the
+                     cut. Without this bound a single 3000-member community
+                     serialized to >130k tokens.
 
     Returns:
         Community details, or not_found status.
     """
+    _validate_positive_int(max_members, "max_members")
+
     store, root = _get_store(repo_root)
     try:
         community: dict | None = None
@@ -121,6 +181,8 @@ def get_community_func(
                 member_nodes = store.get_nodes_by_community_id(cid)
                 members = [node_to_dict(n) for n in member_nodes]
                 community["member_details"] = members
+
+        community = _cap_members(community, max_members)
 
         result = {
             "status": "ok",
@@ -192,6 +254,8 @@ def _minimal_overview(overview: dict[str, Any]) -> dict[str, Any]:
 def get_architecture_overview_func(
     repo_root: str | None = None,
     detail_level: str = "minimal",
+    max_results: int = 100,
+    max_members: int = 10,
 ) -> dict[str, Any]:
     """Generate an architecture overview based on community structure.
 
@@ -206,20 +270,47 @@ def get_architecture_overview_func(
                       (typical reduction: 600KB -> <5KB);
                       "standard" returns the full overview including
                       per-edge cross-community detail.
+        max_results: Maximum cross-community rows and warnings to return
+                     (default 100, capped at 200).
+                     ``cross_community_edges_total`` reports the
+                     untruncated count.
+        max_members: (standard only) Maximum member names per community
+                     (default 10, capped at 25). Standard mode returned
+                     >600k tokens on this repo without these bounds.
 
     Returns:
         Architecture overview with communities, cross-community edges,
-        and warnings.
+        warnings, and a ``truncated`` flag.
     """
+    _validate_positive_int(max_results, "max_results")
+    _validate_positive_int(max_members, "max_members")
+
     store, root = _get_store(repo_root)
     try:
         full_overview = get_architecture_overview(store)
         overview = full_overview
         if detail_level == "minimal":
             overview = _minimal_overview(full_overview)
+        else:
+            overview = dict(full_overview)
+            overview["communities"] = [
+                _cap_members(c, max_members)
+                for c in overview.get("communities", [])
+            ]
+        cross, cross_total, truncated = _bounded(
+            overview["cross_community_edges"], max_results, _MAX_CROSS_EDGES,
+        )
+        overview["cross_community_edges"] = cross
+        # One warning per highly-coupled community pair grows quadratically
+        # with the community count, so it needs the same bound.
+        warnings, warn_total, warn_cut = _bounded(
+            overview["warnings"], max_results, _MAX_CROSS_EDGES,
+        )
+        overview["warnings"] = warnings
+        truncated = truncated or warn_cut
         n_communities = len(overview["communities"])
-        n_cross = len(overview["cross_community_edges"])
-        n_warnings = len(overview["warnings"])
+        n_cross = len(cross)
+        n_warnings = warn_total
         cross_label = (
             "community pairs"
             if detail_level == "minimal"
@@ -229,10 +320,13 @@ def get_architecture_overview_func(
             "status": "ok",
             "summary": (
                 f"Architecture: {n_communities} communities, "
-                f"{n_cross} {cross_label}, "
+                f"{cross_total} {cross_label}"
+                + _shown_of(n_cross, cross_total) + ", "
                 f"{n_warnings} warning(s)"
             ),
             **overview,
+            "cross_community_edges_total": cross_total,
+            "truncated": truncated,
         }
         result["_hints"] = generate_hints(
             "get_architecture_overview", result, get_session()

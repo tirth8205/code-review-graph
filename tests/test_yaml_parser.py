@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import code_review_graph.parser as parser_module
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import CodeParser
@@ -272,6 +273,24 @@ def test_malformed_and_recursive_yaml_fail_safely(tmp_path: Path) -> None:
     assert len(nodes) < 10
     recursive = next(node for node in _yaml_paths(nodes) if node.name == "$.root.self")
     assert recursive.extra["is_alias"] is True
+
+
+def test_oversized_generic_yaml_is_skipped(tmp_path: Path) -> None:
+    parser = CodeParser()
+    parser._MAX_GENERIC_YAML_BYTES = 8
+
+    assert parser.parse_bytes(tmp_path / "large.yml", b"key: value\n") == ([], [])
+
+
+def test_yaml_without_anchors_skips_event_parse(tmp_path: Path, monkeypatch) -> None:
+    def unexpected_event_parse(_text: str):
+        raise AssertionError("anchor event pass should not run")
+
+    monkeypatch.setattr(parser_module._yaml, "parse", unexpected_event_parse)
+
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "plain.yml", b"key: value\n")
+
+    assert {node.name for node in _yaml_paths(nodes)} == {"$", "$.key"}
 
 
 def test_deep_yaml_and_duplicate_metadata_are_bounded(tmp_path: Path) -> None:

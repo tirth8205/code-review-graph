@@ -9,8 +9,13 @@ from typing import Any
 from ..graph import GraphStore
 from ..incremental import get_db_path
 from ..search import hybrid_search
+from ._common import _bounded, _shown_of, _validate_positive_int
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling on the merged result set. ``limit`` is per repo, so a
+# registry with 40 repos returned 40x the caller's expectation.
+_MAX_CROSS_REPO_RESULTS = 100
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +55,7 @@ def cross_repo_search_func(
     query: str,
     kind: str | None = None,
     limit: int = 20,
+    max_results: int = 50,
 ) -> dict[str, Any]:
     """Search across all registered repositories.
 
@@ -60,11 +66,19 @@ def cross_repo_search_func(
         query: Search query string.
         kind: Optional node kind filter (e.g. "Function", "Class").
         limit: Maximum results per repo (default: 20).
+        max_results: Maximum merged results to return across all repos
+            (default 50, capped at 100). ``total`` reports the untruncated
+            merged count; without it the response grew with the number of
+            registered repos rather than with the caller's ``limit``.
 
     Returns:
-        Combined search results from all registered repos.
+        Combined search results from all registered repos, plus ``total``
+        and ``truncated``.
     """
     from ..registry import Registry
+
+    _validate_positive_int(limit, "limit")
+    _validate_positive_int(max_results, "max_results")
 
     try:
         registry = Registry()
@@ -110,15 +124,22 @@ def cross_repo_search_func(
         # Scores from different search paths are not comparable across repos.
         # Merge by each repo's local rank and use registry order as a stable tie-breaker.
         ranked_results.sort(key=lambda item: (item[0], item[1]))
-        all_results = [result for _, _, result in ranked_results]
+        all_results, total, truncated = _bounded(
+            [result for _, _, result in ranked_results],
+            max_results,
+            _MAX_CROSS_REPO_RESULTS,
+        )
 
         return {
             "status": "ok",
             "summary": (
-                f"Found {len(all_results)} result(s) across "
+                f"Found {total} result(s) across "
                 f"{len(searched_repos)} repo(s) for '{query}'"
+                + _shown_of(len(all_results), total)
             ),
             "results": all_results,
+            "total": total,
+            "truncated": truncated,
             "repos_searched": searched_repos,
         }
     except Exception as exc:

@@ -154,7 +154,7 @@ The only network activity is opt-in:
 - **Local embeddings** (`pip install "code-review-graph[embeddings]"`) download the
   sentence-transformers model from HuggingFace on first use. Your code does not leave
   the machine.
-- **Cloud embeddings** (OpenAI-compatible, Google Gemini, MiniMax) send the text being
+- **Cloud embeddings** (OpenAI-compatible, Google Gemini, MiniMax, Voyage AI) send the text being
   embedded — currently function signatures — to the provider you explicitly configure
   via environment variables. CRG prints an egress warning unless you acknowledge it
   with `CRG_ACCEPT_CLOUD_EMBEDDINGS=1`; the warning is skipped automatically when the

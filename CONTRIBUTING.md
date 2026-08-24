@@ -80,6 +80,47 @@ If you just need a language for your own repo, you may not need to contribute at
 3. Add a sample fixture file in `tests/fixtures/`
 4. Add parsing tests in `tests/test_multilang.py`
 
+## Adding a Platform Target
+
+Every supported AI tool is permanent maintenance surface. Its config path, schema, install merge,
+uninstall, and tests all have to keep working on every release. Some existing targets were merged
+without any evidence that the integration worked in a released client, and those are the ones that
+break. New targets are held to the bar below.
+
+Start with a platform request issue (https://github.com/tirth8205/code-review-graph/issues/new/choose)
+so the client can be discussed before anyone writes code. A pull request that adds a platform will
+not be reviewed until it includes all of the following.
+
+1. A link to the platform's official MCP configuration documentation. Blog posts, forum replies,
+   and screenshots of a settings dialog are not enough.
+2. The exact config file path and the exact schema of a server entry, including which top-level key
+   holds the servers, whether that value is an object or an array, and whether a `type` field is
+   required.
+3. The entry added through the existing `PLATFORMS` table in `code_review_graph/skills.py`, plus
+   `_PLATFORM_CHOICES` in `code_review_graph/cli.py`. Use the fields already there: `name`,
+   `config_path`, `key`, `detect`, `format`, `needs_type`, and where needed `legacy_keys`,
+   `server_type`, `entry_fields`. If the client needs something the table cannot express, say so in
+   the pull request and explain why, rather than adding a bespoke code path beside it.
+4. Preservation of unrelated user settings. Install must merge only the `code-review-graph` server
+   entry and leave every other server, key, and top-level setting intact. If the file cannot be
+   parsed, install must skip it rather than rewrite it.
+5. A byte-idempotent reinstall. Running install twice must leave the config file and any generated
+   instruction file byte for byte identical.
+6. A working uninstall in `code_review_graph/uninstall.py` that removes only what install added,
+   including any legacy keys, and leaves the rest of the file untouched.
+7. Lifecycle tests matching the existing ones: an install, reinstall, and uninstall test in
+   `tests/test_cli_install.py` shaped like `test_copilot_cli_install_reinstall_uninstall_lifecycle`,
+   and a passing run of the all-platforms sweep in `tests/test_uninstall.py`
+   (`test_uninstall_removes_mcp_entry_for_every_current_platform_spec`), which every new entry is
+   automatically subject to.
+8. Evidence from a real released client: a screenshot or transcript of an actual session in that
+   client where a code-review-graph tool is invoked and returns a result. A rendered image of text,
+   a mockup, or a description of what should happen is not evidence.
+
+If no maintainer can install and run the client, the request may be declined or left open until
+someone who uses it is willing to own it and respond when it breaks. An existing target may also be
+removed if it breaks and nobody steps up to fix it.
+
 ## Reporting Issues
 
 - Open an issue via the issue forms: https://github.com/tirth8205/code-review-graph/issues/new/choose (bug report, feature request, or platform request — blank issues are disabled)
