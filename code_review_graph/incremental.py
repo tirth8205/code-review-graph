@@ -22,10 +22,11 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NamedTuple, Optional
 
+from .constants import _int_env
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
 
-_MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
+_MAX_PARSE_WORKERS = _int_env("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
 
 # Set only while the in-process FastMCP server is using stdio transport.
 # This is deliberately separate from ``sys.stdin.isatty()``: CI, cron, and
@@ -236,8 +237,8 @@ NESTED_OUTPUT_DIR_MARKERS: dict[str, frozenset[str]] = {
 # (no file stats), stops at ``CRG_MODULE_SCAN_DEPTH`` levels, never descends
 # into an already-ignored tree, and its result is cached per repository so
 # incremental updates never pay for it twice inside the TTL.
-_MODULE_SCAN_DEPTH = int(os.environ.get("CRG_MODULE_SCAN_DEPTH", "3"))
-_MODULE_SCAN_MAX_DIRS = int(os.environ.get("CRG_MODULE_SCAN_MAX_DIRS", "2000"))
+_MODULE_SCAN_DEPTH = _int_env("CRG_MODULE_SCAN_DEPTH", 3)
+_MODULE_SCAN_MAX_DIRS = _int_env("CRG_MODULE_SCAN_MAX_DIRS", 2000)
 _MAX_NESTED_OUTPUT_PATTERNS = 200
 _NESTED_IGNORE_TTL_SECONDS = float(os.environ.get("CRG_NESTED_IGNORE_TTL", "300"))
 
@@ -669,7 +670,7 @@ def _is_binary(path: Path) -> bool:
         return True
 
 
-_GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
+_GIT_TIMEOUT = _int_env("CRG_GIT_TIMEOUT", 30)  # seconds, configurable
 
 # When True, `git ls-files --recurse-submodules` is used so that files
 # inside git submodules are included in the graph.  Opt-in via env var;
