@@ -33,6 +33,22 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
 
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
+
+class GitTimeoutError(RuntimeError):
+    """A git/svn command exceeded CRG_GIT_TIMEOUT (#913).
+
+    The caller cannot distinguish a timeout from an empty diff via the
+    empty dict alone; this exception makes the difference explicit.
+    """
+
+    def __init__(self, command: str, timeout: int) -> None:
+        self.command = command
+        self.timeout = timeout
+        super().__init__(
+            f"{command} timed out after {timeout}s; "
+            f"the diff was not read so the review analysed nothing"
+        )
+
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 _SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
 
@@ -73,6 +89,8 @@ def parse_git_diff_ranges(
         if result.returncode != 0:
             logger.warning("git diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
             return {}
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError("git diff", _GIT_TIMEOUT) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("git diff error: %s", exc)
         return {}
@@ -115,6 +133,8 @@ def parse_svn_diff_ranges(
         if result.returncode != 0:
             logger.warning("svn diff failed (rc=%d): %s", result.returncode, result.stderr[:200])
             return {}
+    except subprocess.TimeoutExpired as exc:
+        raise GitTimeoutError("svn diff", _GIT_TIMEOUT) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("svn diff error: %s", exc)
         return {}
