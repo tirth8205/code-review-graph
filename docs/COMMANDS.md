@@ -98,7 +98,7 @@ repo_root: str | None
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test
+kind: str | None     # File, Class, Function, Type, Test, YamlPath
 limit: int = 20
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
@@ -122,7 +122,7 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count threshold
-kind: str | None                   # File, Class, Function, or Test
+kind: str | None                   # File, Class, Function, Test, or YamlPath
 file_path_pattern: str | None      # Filter by file path substring
 limit: int = 50                    # Max results to return
 repo_root: str | None
@@ -248,8 +248,8 @@ detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
 ```
-Primary tool for code review. Maps changed files to affected functions, flows, communities, and test coverage gaps. Returns risk scores and prioritized review items.
-Embedded flows carry per-flow metadata only — use `get_affected_flows_tool` for
+Primary tool for code review. Maps changed files to affected functions, YAML paths, flows, communities, and test coverage gaps. Returns `changed_yaml_paths` separately from function risk/test-gap scoring, plus risk scores and prioritized code review items.
+Embedded flows carry per-flow metadata only. Use `get_affected_flows_tool` for
 step detail. `changed_functions_total`, `test_gaps_total`, and
 `affected_flows_total` report the untruncated counts.
 Relevant responses may include compact estimated `context_savings` metadata.

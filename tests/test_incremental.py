@@ -248,6 +248,7 @@ class TestIgnorePatterns:
         assert "**/.git/**" in patterns
         assert "**/__pycache__/**" in patterns
         assert "/build/**" in patterns
+        assert "pnpm-lock.yaml" in patterns
 
     def test_custom_ignore_file(self, tmp_path):
         ignore = tmp_path / ".code-review-graphignore"

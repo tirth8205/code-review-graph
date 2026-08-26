@@ -109,7 +109,7 @@ vectors, and degrades provider or transport failures to graph-build warnings.
 ```
 Ask your MCP client: "Review my recent changes with risk scoring"
 ```
-Uses `detect_changes_tool` to map diffs to affected functions, flows, communities, and test gaps.
+Uses `detect_changes_tool` to map diffs to affected functions, YAML paths, flows, communities, and test gaps.
 
 ### 8. Explore architecture (v2)
 ```
@@ -141,7 +141,7 @@ Since v2.3.4, review and impact tools include compact `context_savings` metadata
 
 ## Supported Languages
 
-The parser currently covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte single-file components, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
+The parser currently covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, value-free generic YAML structure, Vue/Svelte single-file components, Astro files parsed through the TypeScript parser, Jupyter/Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`).
 
 Extension-less scripts are detected by shebang for common bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
@@ -149,7 +149,7 @@ Languages not covered yet can be added without a fork via a `.code-review-graph/
 
 ## What Gets Indexed
 
-- **Nodes**: Files, Classes, Functions/Methods, Types, Tests — plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
+- **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths — plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES — plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 
 See [schema.md](schema.md) for full details.

@@ -28,8 +28,9 @@ def test_ordinary_yaml_in_tasks_directory_is_not_treated_as_ansible() -> None:
         source,
     )
 
-    assert nodes == []
-    assert edges == []
+    assert any(node.kind == "YamlPath" for node in nodes)
+    assert not any(node.language == "ansible" for node in nodes)
+    assert all(edge.kind == "CONTAINS" for edge in edges)
 
 
 def test_ansible_relationships_reference_real_unique_nodes(tmp_path: Path) -> None:
