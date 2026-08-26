@@ -54,6 +54,7 @@ from code_review_graph import main as crg_main
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.tools import analysis_tools, community_tools, review
+from code_review_graph.tools import query as query_tools
 from code_review_graph.tools import refactor_tools as refactor_mod
 
 try:  # pragma: no cover - exercised only when tiktoken is installed
@@ -186,25 +187,8 @@ def count_tokens(value: Any) -> int:
 # A sentinel that pushes any result cap past its hard ceiling.
 HUGE = 10**6
 
-# Tools whose result lists live in code_review_graph/tools/query.py. That
-# module is owned elsewhere and its unbounded worst cases are reported, not
-# fixed, by this change:
-#   * get_impact_radius  -- changed_nodes and edges ignore max_results
-#     (3.4M tokens on a whole-repo diff), and max_results is not even
-#     exposed on the MCP tool signature.
-#   * find_large_functions -- limit is neither validated nor capped
-#     (737k tokens at limit=10**6).
-#   * traverse_graph -- token_budget is neither validated nor capped
-#     (385k tokens at token_budget=10**6).
-#   * semantic_search_nodes -- limit is neither validated nor capped.
-# Their *default* budgets are still asserted below; only the worst case is
-# skipped, so a regression in normal use is still caught here.
-QUERY_OWNED_UNBOUNDED = {
-    "get_impact_radius_tool",
-    "find_large_functions_tool",
-    "traverse_graph_tool",
-    "semantic_search_nodes_tool",
-}
+# The four query-owned tools from #888 now participate in the table above.
+QUERY_OWNED_UNBOUNDED = set()
 
 # No tool this change owns may exceed this even with every knob maxed out.
 # Before the sweep, six tools blew past it by one to two orders of
@@ -238,12 +222,9 @@ BUDGETS: dict[str, dict[str, Any]] = {
     },
     "get_impact_radius_tool": {
         "default": {"changed_files": "LEAF"},
-        "worst": {"changed_files": "ALL", "max_depth": 5},
-        # Higher than it should be: changed_nodes and edges ignore
-        # max_results in query.py, so even a single-file default grows with
-        # the graph. Reported, not fixed here.
+        "worst": {"changed_files": "ALL", "max_depth": 5, "max_results": HUGE},
         "default_max": 12_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        "worst_max": 50_000,
     },
     "query_graph_tool": {
         "default": {"pattern": "callers_of", "target": "helper_0_0_0"},
@@ -274,7 +255,7 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"query": "helper"},
         "worst": {"query": "helper", "limit": HUGE},
         "default_max": 8_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        "worst_max": 30_000,
     },
     "embed_graph_tool": {
         # sentence-transformers is not a test dependency, so this exercises
@@ -300,7 +281,7 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {},
         "worst": {"min_lines": 1, "limit": HUGE},
         "default_max": 20_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        "worst_max": 30_000,
     },
     "list_flows_tool": {
         "default": {},
@@ -451,7 +432,7 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default": {"query": "helper_0_0_0"},
         "worst": {"query": "helper_0_0_0", "depth": 6, "token_budget": HUGE},
         "default_max": 8_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        "worst_max": 30_000,
     },
     "list_repos_tool": {
         "no_repo_root": True,
@@ -642,6 +623,24 @@ MAX_CEILINGS = {
     "analysis_tools._MAX_GAPS_PER_CATEGORY": (
         analysis_tools._MAX_GAPS_PER_CATEGORY, 50,
     ),
+    "query_tools._MAX_IMPACT_FILES": (query_tools._MAX_IMPACT_FILES, 200),
+    "query_tools._MAX_IMPACT_NODES": (query_tools._MAX_IMPACT_NODES, 100),
+    "query_tools._MAX_IMPACT_EDGES": (query_tools._MAX_IMPACT_EDGES, 150),
+    "query_tools._MAX_SEARCH_RESULTS_STANDARD": (
+        query_tools._MAX_SEARCH_RESULTS_STANDARD, 100,
+    ),
+    "query_tools._MAX_SEARCH_RESULTS_MINIMAL": (
+        query_tools._MAX_SEARCH_RESULTS_MINIMAL, 5,
+    ),
+    "query_tools._MAX_LARGE_FUNCTIONS_STANDARD": (
+        query_tools._MAX_LARGE_FUNCTIONS_STANDARD, 100,
+    ),
+    "query_tools._MAX_LARGE_FUNCTIONS_MINIMAL": (
+        query_tools._MAX_LARGE_FUNCTIONS_MINIMAL, 500,
+    ),
+    "query_tools._MAX_TRAVERSAL_TOKEN_BUDGET": (
+        query_tools._MAX_TRAVERSAL_TOKEN_BUDGET, 10_000,
+    ),
     "review._MAX_REVIEW_NODES": (review._MAX_REVIEW_NODES, 100),
     "review._MAX_REVIEW_EDGES": (review._MAX_REVIEW_EDGES, 150),
     "review._MAX_REVIEW_SOURCE_LINES": (review._MAX_REVIEW_SOURCE_LINES, 800),
@@ -739,6 +738,36 @@ def test_hard_ceilings_bind(repo):
         dead["total"], refactor_mod._MAX_REFACTOR_RESULTS,
     )
 
+    impact = crg_main.get_impact_radius_tool(
+        repo_root=root, changed_files=all_files, max_depth=5,
+        max_results=HUGE,
+    )
+    assert impact["changed_files_total"] <= query_tools._MAX_IMPACT_FILES
+    assert impact["changed_nodes_total"] > query_tools._MAX_IMPACT_NODES
+    assert len(impact["changed_files"]) <= query_tools._MAX_IMPACT_FILES
+    assert len(impact["changed_nodes"]) == query_tools._MAX_IMPACT_NODES
+    assert len(impact["impacted_nodes"]) <= query_tools._MAX_IMPACT_NODES
+    assert len(impact["edges"]) <= query_tools._MAX_IMPACT_EDGES
+
+    search = crg_main.semantic_search_nodes_tool(
+        repo_root=root, query="helper", limit=HUGE,
+    )
+    assert search["total"] > query_tools._MAX_SEARCH_RESULTS_STANDARD
+    assert len(search["results"]) == query_tools._MAX_SEARCH_RESULTS_STANDARD
+
+    large = crg_main.find_large_functions_tool(
+        repo_root=root, min_lines=1, limit=HUGE,
+    )
+    assert large["total"] > query_tools._MAX_LARGE_FUNCTIONS_STANDARD
+    assert len(large["results"]) == query_tools._MAX_LARGE_FUNCTIONS_STANDARD
+
+    traversal = crg_main.traverse_graph_tool(
+        repo_root=root, query="helper_0_0_0", depth=6,
+        token_budget=HUGE,
+    )
+    assert traversal["total"] > len(traversal["traversal"])
+    assert traversal["truncated"] is True
+
 
 class TestTruncationContract:
     """The contract PR #853 established, applied to the newly capped tools."""
@@ -762,6 +791,85 @@ class TestTruncationContract:
         assert community["members_truncated"] is True
         # ``size`` is the real member count, not the truncated list length.
         assert community["size"] > len(community["members"])
+
+    def test_impact_radius_caps_every_response_list(self, repo):
+        result = crg_main.get_impact_radius_tool(
+            repo_root=repo["root"], changed_files=repo["files"],
+            max_results=1,
+        )
+        assert result["truncated"] is True
+        assert result["changed_files_total"] == len(repo["files"])
+        assert len(result["changed_files"]) == 1
+        assert result["changed_nodes_total"] > 1
+        assert len(result["changed_nodes"]) == 1
+
+    def test_impact_radius_caps_reachable_response_lists(self, repo):
+        result = crg_main.get_impact_radius_tool(
+            repo_root=repo["root"], changed_files=["pkg0/mod0.py"],
+            max_results=1,
+        )
+        assert result["total_impacted"] > len(result["impacted_nodes"])
+        assert result["impacted_files_total"] > len(result["impacted_files"])
+        assert result["edges_total"] > len(result["edges"])
+        assert "showing 1 of" in result["summary"]
+
+    def test_semantic_search_reports_untruncated_total(self, repo):
+        result = crg_main.semantic_search_nodes_tool(
+            repo_root=repo["root"], query="helper", limit=1,
+        )
+        assert result["truncated"] is True
+        assert result["total"] > len(result["results"])
+        assert result["result_count"] == 1
+        assert result["results_omitted"] == result["total"] - 1
+        assert f"showing 1 of {result['total']}" in result["summary"]
+
+    def test_semantic_search_detail_level_uses_smaller_ceiling(self, repo):
+        result = crg_main.semantic_search_nodes_tool(
+            repo_root=repo["root"], query="helper", limit=HUGE,
+            detail_level="minimal",
+        )
+        assert result["truncated"] is True
+        assert len(result["results"]) == query_tools._MAX_SEARCH_RESULTS_MINIMAL
+        assert result["result_count"] == len(result["results"])
+        assert result["results_omitted"] == (
+            result["total"] - len(result["results"])
+        )
+
+    def test_large_functions_reports_untruncated_total(self, repo):
+        result = crg_main.find_large_functions_tool(
+            repo_root=repo["root"], min_lines=1, limit=1,
+        )
+        assert result["truncated"] is True
+        assert result["total"] > len(result["results"])
+        assert result["result_count"] == 1
+        assert result["results_omitted"] == result["total"] - 1
+        assert f"showing 1 of {result['total']}" in result["summary"]
+
+    def test_large_functions_minimal_allows_more_compact_rows(self, repo):
+        result = crg_main.find_large_functions_tool(
+            repo_root=repo["root"], min_lines=1, limit=HUGE,
+            detail_level="minimal",
+        )
+        assert result["truncated"] is True
+        assert result["total"] > query_tools._MAX_LARGE_FUNCTIONS_MINIMAL
+        assert len(result["results"]) == (
+            query_tools._MAX_LARGE_FUNCTIONS_MINIMAL
+        )
+        assert set(result["results"][0]) <= {
+            "name", "qualified_name", "kind", "relative_path",
+            "line_start", "line_end", "line_count",
+        }
+
+    def test_traversal_budget_is_validated_and_never_overshoots(self, repo):
+        result = crg_main.traverse_graph_tool(
+            repo_root=repo["root"], query="helper_0_0_0",
+            token_budget=1,
+        )
+        assert result["total"] > 0
+        assert result["traversal"] == []
+        assert result["nodes_visited"] == 0
+        assert result["truncated"] is True
+        assert "showing 0 of" in result["summary"]
 
     def test_detect_changes_flows_carry_no_step_lists(self, repo):
         """#849's payload must not leak back in through detect_changes."""
@@ -816,6 +924,11 @@ class TestBoundValidation:
             ("list_communities_tool", {"max_members": True}),
             ("get_community_tool", {"max_members": 0}),
             ("get_architecture_overview_tool", {"max_results": 0}),
+            ("get_impact_radius_tool", {"max_results": 0}),
+            ("get_impact_radius_tool", {"max_results": True}),
+            ("semantic_search_nodes_tool", {"query": "x", "limit": 0}),
+            ("find_large_functions_tool", {"limit": True}),
+            ("traverse_graph_tool", {"query": "x", "token_budget": -1}),
             ("list_flows_tool", {"limit": 0}),
             ("get_flow_tool", {"max_steps": 0}),
             ("get_flow_tool", {"max_source_lines": -5}),

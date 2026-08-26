@@ -222,6 +222,7 @@ def get_minimal_context_tool(
 def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
+    max_results: int = 500,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
@@ -234,6 +235,8 @@ def get_impact_radius_tool(
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         max_depth: Number of hops to traverse in the dependency graph. Default: 2.
+        max_results: Maximum entries in each response list. Per-list hard
+            ceilings still apply. Default: 500.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
@@ -241,6 +244,7 @@ def get_impact_radius_tool(
     root = _resolve_repo_root(repo_root)
     return with_provenance(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
+        max_results=max_results,
         repo_root=root, base=base, detail_level=detail_level,
     ), root)
 
@@ -458,6 +462,7 @@ def find_large_functions_tool(
     file_path_pattern: Optional[str] = None,
     limit: int = 50,
     repo_root: Optional[str] = None,
+    detail_level: str = "standard",
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -470,11 +475,13 @@ def find_large_functions_tool(
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" for full rows or "minimal" for compact rows.
+            Default: standard.
     """
     root = _resolve_repo_root(repo_root)
     return with_provenance(find_large_functions(
         min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=root,
+        limit=limit, repo_root=root, detail_level=detail_level,
     ), root)
 
 
