@@ -184,7 +184,7 @@ def get_flow(
                 file_path = fp
                 if file_path and file_path.is_file():
                     try:
-                        lines = file_path.read_text(
+                        lines = file_path.read_text(encoding="utf-8",
                             errors="replace"
                         ).splitlines()
                         start = max(

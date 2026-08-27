@@ -261,7 +261,7 @@ def get_review_context(
                 full_path = root / rel_path
                 if full_path.is_file():
                     try:
-                        lines = full_path.read_text(
+                        lines = full_path.read_text(encoding="utf-8",
                             errors="replace"
                         ).splitlines()
                         allowed = min(per_file, budget)
@@ -622,7 +622,7 @@ def detect_changes_func(
                     file_path = Path(fp)
                     if file_path.is_file():
                         try:
-                            lines = file_path.read_text(
+                            lines = file_path.read_text(encoding="utf-8",
                                 errors="replace"
                             ).splitlines()
                             start = max(0, ls - 1)
