@@ -628,6 +628,134 @@ class TestCSharpParsing:
         assert "Status" not in by_source
         assert "byte" not in {edge.target for edge in inherits}
 
+    def test_nested_types_keep_complete_identity_and_containment(self, tmp_path):
+        path = tmp_path / "Nested.cs"
+        path.write_text(
+            "public class Details {\n"
+            "    public class QueryHandler { public void Handle() {} }\n"
+            "}\n"
+            "public class Edit {\n"
+            "    public class QueryHandler { public void Handle() {} }\n"
+            "}\n"
+            "public class A {\n"
+            "    public class B {\n"
+            "        public class C { public void M() {} }\n"
+            "    }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(path)
+        prefix = path.as_posix()
+        qualified = {
+            self.parser._node_qualified(node)
+            for node in nodes
+            if node.kind != "File"
+        }
+        assert {
+            f"{prefix}::Details.QueryHandler.Handle",
+            f"{prefix}::Edit.QueryHandler.Handle",
+            f"{prefix}::A.B.C",
+            f"{prefix}::A.B.C.M",
+        } <= qualified
+
+        contains = {
+            (edge.source, edge.target)
+            for edge in edges
+            if edge.kind == "CONTAINS"
+        }
+        assert {
+            (f"{prefix}::Details", f"{prefix}::Details.QueryHandler"),
+            (
+                f"{prefix}::Details.QueryHandler",
+                f"{prefix}::Details.QueryHandler.Handle",
+            ),
+            (f"{prefix}::Edit", f"{prefix}::Edit.QueryHandler"),
+            (
+                f"{prefix}::Edit.QueryHandler",
+                f"{prefix}::Edit.QueryHandler.Handle",
+            ),
+            (f"{prefix}::A", f"{prefix}::A.B"),
+            (f"{prefix}::A.B", f"{prefix}::A.B.C"),
+            (f"{prefix}::A.B.C", f"{prefix}::A.B.C.M"),
+        } <= contains
+        assert all(source == prefix or source in qualified for source, _ in contains)
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.tools.query import query_graph
+
+        graph_dir = tmp_path / ".code-review-graph"
+        graph_dir.mkdir()
+        store = GraphStore(graph_dir / "graph.db")
+        try:
+            store.store_file_nodes_edges(str(path), nodes, edges)
+        finally:
+            store.close()
+
+        # Addressed by qualified name; short-name lookup of a dotted nested
+        # path is a separate query-resolution change.
+        result = query_graph(
+            "children_of",
+            f"{prefix}::Details.QueryHandler",
+            repo_root=str(tmp_path),
+        )
+        assert result["status"] == "ok"
+        assert {child["name"] for child in result["results"]} == {"Handle"}
+
+    def test_incremental_upgrade_rebuilds_legacy_nested_identities(self, tmp_path):
+        from unittest.mock import patch
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import (
+            CSHARP_IDENTITY_VERSION,
+            incremental_update,
+        )
+        from code_review_graph.parser import NodeInfo
+
+        path = tmp_path / "Nested.cs"
+        path.write_text(
+            "public class Details {\n"
+            "    public class QueryHandler { public void Handle() {} }\n"
+            "}\n"
+            "public class Edit {\n"
+            "    public class QueryHandler { public void Handle() {} }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        store = GraphStore(tmp_path / "graph.db")
+        legacy = f"{path.as_posix()}::QueryHandler.Handle"
+        try:
+            store.upsert_node(NodeInfo(
+                kind="Function",
+                name="Handle",
+                file_path=str(path),
+                line_start=2,
+                line_end=2,
+                language="csharp",
+                parent_name="QueryHandler",
+            ))
+            store.commit()
+
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["Nested.cs"],
+            ):
+                result = incremental_update(tmp_path, store, changed_files=[])
+
+            assert result["identity_rebuild"] is True
+            assert store.get_metadata("csharp_identity_version") == (
+                CSHARP_IDENTITY_VERSION
+            )
+            assert store.get_node(legacy) is None
+            assert store.get_node(
+                f"{path.as_posix()}::Details.QueryHandler.Handle"
+            ) is not None
+            assert store.get_node(
+                f"{path.as_posix()}::Edit.QueryHandler.Handle"
+            ) is not None
+        finally:
+            store.close()
+
     @pytest.mark.parametrize(
         ("statement", "expected_targets"),
         [
@@ -971,6 +1099,192 @@ class TestCSharpReceiverCallResolution:
         "    }\n"
         "}\n"
     )
+    NESTED = (
+        "public class Details\n"
+        "{\n"
+        "    public class QueryHandler { public void Handle() { } }\n"
+        "}\n"
+        "public class Edit\n"
+        "{\n"
+        "    public class QueryHandler { public void Handle() { } }\n"
+        "}\n"
+    )
+    NESTED_CONSUMERS = (
+        "public class DetailsConsumer\n"
+        "{\n"
+        "    Details.QueryHandler handler;\n"
+        "    public void CallDetails() { handler.Handle(); }\n"
+        "}\n"
+        "public class EditConsumer\n"
+        "{\n"
+        "    Edit.QueryHandler handler;\n"
+        "    public void CallEdit() { handler.Handle(); }\n"
+        "}\n"
+        "public class AmbiguousConsumer\n"
+        "{\n"
+        "    QueryHandler handler;\n"
+        "    public void CallAmbiguous() { handler.Handle(); }\n"
+        "}\n"
+    )
+    PREFIX_COLLISION = (
+        "public class A\n"
+        "{\n"
+        "    public class B\n"
+        "    {\n"
+        "        public class C { public void M() { } }\n"
+        "    }\n"
+        "}\n"
+        "public class ExactPathConsumer\n"
+        "{\n"
+        "    B.C value;\n"
+        "    public void Call() { value.M(); }\n"
+        "}\n"
+        "public class LexicalOuter\n"
+        "{\n"
+        "    public class D\n"
+        "    {\n"
+        "        public class E { public void M() { } }\n"
+        "    }\n"
+        "    public class SuffixPathConsumer\n"
+        "    {\n"
+        "        D.E value;\n"
+        "        public void Call() { value.M(); }\n"
+        "    }\n"
+        "}\n"
+        "public class E { public void M() { } }\n"
+    )
+    WRONG_NAMESPACE_EXACT_PATH = (
+        "namespace Other;\n"
+        "public class Vault\n"
+        "{\n"
+        "    public class Archive\n"
+        "    {\n"
+        "        public class StoreHandler { public void Store() { } }\n"
+        "    }\n"
+        "}\n"
+    )
+    WRONG_NAMESPACE_EXACT_CONSUMER = (
+        "public class ExactPathNamespaceConsumer\n"
+        "{\n"
+        "    Vault.Archive.StoreHandler handler;\n"
+        "    public void Call() { handler.Store(); }\n"
+        "}\n"
+    )
+    GLOBAL_USING = "global using Depot;\n"
+    GLOBAL_USING_TARGET = (
+        "namespace Depot;\n"
+        "public class Crate\n"
+        "{\n"
+        "    public class PackHandler { public void Pack() { } }\n"
+        "}\n"
+    )
+    GLOBAL_USING_CONSUMER = (
+        "public class GlobalUsingConsumer\n"
+        "{\n"
+        "    Crate.PackHandler handler;\n"
+        "    public void Call() { handler.Pack(); }\n"
+        "}\n"
+    )
+    MULTI_NAMESPACE = (
+        "namespace App\n"
+        "{\n"
+        "    public class SomethingElse { }\n"
+        "}\n"
+        "namespace Other\n"
+        "{\n"
+        "    public class Journal\n"
+        "    {\n"
+        "        public class PostHandler { public void Post() { } }\n"
+        "    }\n"
+        "}\n"
+    )
+    MULTI_NAMESPACE_CONSUMER = (
+        "public class MultiNamespaceConsumer\n"
+        "{\n"
+        "    App.Journal.PostHandler handler;\n"
+        "    public void Call() { handler.Post(); }\n"
+        "}\n"
+    )
+    WRONG_NAMESPACE = (
+        "namespace Other;\n"
+        "public class Ledger\n"
+        "{\n"
+        "    public class AuditHandler { public void Run() { } }\n"
+        "}\n"
+    )
+    WRONG_NAMESPACE_CONSUMER = (
+        "public class WrongNamespaceConsumer\n"
+        "{\n"
+        "    App.Ledger.AuditHandler handler;\n"
+        "    public void Call() { handler.Run(); }\n"
+        "}\n"
+    )
+    LONE_NESTED = (
+        "public class Wrapper\n"
+        "{\n"
+        "    public class LoneHandler { public void Handle() { } }\n"
+        "}\n"
+    )
+    LONE_BARE_CONSUMER = (
+        "using External;\n"
+        "public class LoneBareConsumer\n"
+        "{\n"
+        "    LoneHandler handler;\n"
+        "    public void Call() { handler.Handle(); }\n"
+        "}\n"
+    )
+    EXACT_PREFIX_TARGET = (
+        "public class B\n"
+        "{\n"
+        "    public class C { public void M() { } }\n"
+        "}\n"
+    )
+    NAMESPACED = (
+        "namespace App\n"
+        "{\n"
+        "    public class Report\n"
+        "    {\n"
+        "        public class ExportHandler { public void Run() { } }\n"
+        "    }\n"
+        "}\n"
+    )
+    NAMESPACE_SUFFIX_DECOY = (
+        "public class X\n"
+        "{\n"
+        "    public class App\n"
+        "    {\n"
+        "        public class Report\n"
+        "        {\n"
+        "            public class ExportHandler { public void Run() { } }\n"
+        "        }\n"
+        "    }\n"
+        "}\n"
+    )
+    NAMESPACED_CONSUMER = (
+        "public class NamespacedConsumer\n"
+        "{\n"
+        "    App.Report.ExportHandler handler;\n"
+        "    public void Call() { handler.Run(); }\n"
+        "}\n"
+    )
+    LEXICAL_SHADOW = (
+        "public class D\n"
+        "{\n"
+        "    public class E { public void M() { } }\n"
+        "}\n"
+        "public class Shadower\n"
+        "{\n"
+        "    public class D\n"
+        "    {\n"
+        "        public class E { public void M() { } }\n"
+        "    }\n"
+        "    public class Consumer\n"
+        "    {\n"
+        "        D.E value;\n"
+        "        public void Call() { value.M(); }\n"
+        "    }\n"
+        "}\n"
+    )
 
     def _build(self, tmp_path):
         from unittest.mock import patch
@@ -987,6 +1301,25 @@ class TestCSharpReceiverCallResolution:
             "Single.cs": self.SINGLE,
             "Decoy.cs": self.DECOY,
             "ServiceTests.cs": self.TESTS,
+            "Nested.cs": self.NESTED,
+            "NestedConsumers.cs": self.NESTED_CONSUMERS,
+            "PrefixCollision.cs": self.PREFIX_COLLISION,
+            "ExactPrefixTarget.cs": self.EXACT_PREFIX_TARGET,
+            "LexicalShadow.cs": self.LEXICAL_SHADOW,
+            "LoneNested.cs": self.LONE_NESTED,
+            "WrongNamespace.cs": self.WRONG_NAMESPACE,
+            "MultiNamespace.cs": self.MULTI_NAMESPACE,
+            "WrongNamespaceExactPath.cs": self.WRONG_NAMESPACE_EXACT_PATH,
+            "WrongNamespaceExactConsumer.cs": self.WRONG_NAMESPACE_EXACT_CONSUMER,
+            "GlobalUsings.cs": self.GLOBAL_USING,
+            "GlobalUsingTarget.cs": self.GLOBAL_USING_TARGET,
+            "GlobalUsingConsumer.cs": self.GLOBAL_USING_CONSUMER,
+            "MultiNamespaceConsumer.cs": self.MULTI_NAMESPACE_CONSUMER,
+            "WrongNamespaceConsumer.cs": self.WRONG_NAMESPACE_CONSUMER,
+            "LoneBareConsumer.cs": self.LONE_BARE_CONSUMER,
+            "Namespaced.cs": self.NAMESPACED,
+            "NamespaceSuffixDecoy.cs": self.NAMESPACE_SUFFIX_DECOY,
+            "NamespacedConsumer.cs": self.NAMESPACED_CONSUMER,
         }
         for name, content in files.items():
             (tmp_path / name).write_text(content, encoding="utf-8")
@@ -1030,6 +1363,145 @@ class TestCSharpReceiverCallResolution:
         single = str(tmp_path / "Single.cs")
         targets = self._call_targets_of(tmp_path, "Runner.Go")
         assert f"{single}::Widget.Spin" in targets
+
+    def test_nested_receiver_calls_resolve_to_distinct_methods(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        self._build(tmp_path)
+        nested = str(tmp_path / "Nested.cs")
+        expected = {
+            "DetailsConsumer.CallDetails": (
+                "CallDetails", f"{nested}::Details.QueryHandler.Handle"
+            ),
+            "EditConsumer.CallEdit": (
+                "CallEdit", f"{nested}::Edit.QueryHandler.Handle"
+            ),
+        }
+        for caller, (caller_name, target) in expected.items():
+            assert self._call_targets_of(tmp_path, caller) == {target}
+            result = query_graph("callers_of", target, repo_root=str(tmp_path))
+            assert result["status"] == "ok"
+            resolved = {
+                node["name"]
+                for node in result["results"]
+                if node.get("target_resolution") != "unresolved"
+            }
+            assert resolved == {caller_name}
+
+    def test_bare_nested_receiver_stays_unresolved_when_ambiguous(self, tmp_path):
+        self._build(tmp_path)
+        assert self._call_targets_of(
+            tmp_path, "AmbiguousConsumer.CallAmbiguous",
+        ) == {"Handle"}
+
+    def test_exact_nested_receiver_beats_suffix_match(self, tmp_path):
+        self._build(tmp_path)
+        target = tmp_path / "ExactPrefixTarget.cs"
+        assert self._call_targets_of(
+            tmp_path, "ExactPathConsumer.Call",
+        ) == {f"{target.as_posix()}::B.C.M"}
+
+    def test_enclosing_scope_resolves_receiver_over_shorter_global_type(
+        self, tmp_path,
+    ):
+        """``D.E`` inside ``LexicalOuter`` binds to ``LexicalOuter.D.E`` through
+        the lexical phase, not to the shorter top-level ``E``."""
+        self._build(tmp_path)
+        target = tmp_path / "PrefixCollision.cs"
+        assert self._call_targets_of(
+            tmp_path, "LexicalOuter.SuffixPathConsumer.Call",
+        ) == {f"{target.as_posix()}::LexicalOuter.D.E.M"}
+
+    def test_shortened_receiver_requires_the_dropped_part_to_be_a_namespace(
+        self, tmp_path,
+    ):
+        """``App.Ledger.AuditHandler`` is stored as ``Ledger.AuditHandler``
+        only when ``App`` is the defining file's namespace. The one indexed
+        candidate here sits in namespace ``Other``, so dropping ``App`` to reach
+        it would bind a type the source never asked for; C# resolves the leading
+        identifier first and never restarts at a later component.
+        """
+        self._build(tmp_path)
+        targets = self._call_targets_of(tmp_path, "WrongNamespaceConsumer.Call")
+        assert targets == {"Run"}, targets
+
+    def test_dropped_namespace_must_be_the_files_only_namespace(self, tmp_path):
+        """The namespace evidence is per file, and one C# file may declare
+        several namespaces. ``Definitions.cs`` declaring both ``App`` and
+        ``Other`` proves only that ``App`` appears somewhere in the file, not
+        that it encloses ``Journal.PostHandler`` -- which actually sits in
+        ``Other``. Ambiguous evidence must not resolve the call.
+        """
+        self._build(tmp_path)
+        targets = self._call_targets_of(tmp_path, "MultiNamespaceConsumer.Call")
+        assert targets == {"Post"}, targets
+
+    @pytest.mark.xfail(
+        reason=(
+            "Known limitation: namespaces are absent from parent_name, so an "
+            "exact containing-type match cannot prove the candidate is the type "
+            "the receiver names. Deciding this needs per-node namespaces; "
+            "file-level evidence cannot. main mislinks this too, on the bare "
+            "name, so the branch narrows rather than introduces it."
+        ),
+    )
+    def test_exact_path_match_should_check_the_candidate_namespace(
+        self, tmp_path,
+    ):
+        """``Vault.Archive.StoreHandler`` declared inside ``namespace Other`` is
+        keyed exactly as the receiver spells it, but the caller means a
+        different type and cannot see ``Other``."""
+        self._build(tmp_path)
+        targets = self._call_targets_of(
+            tmp_path, "ExactPathNamespaceConsumer.Call",
+        )
+        assert targets == {"Store"}, targets
+
+    def test_global_using_target_still_resolves(self, tmp_path):
+        """A ``global using`` applies project-wide, from a different file than
+        the call site. Any future namespace-visibility check must not treat the
+        caller's own file as the only source of visibility evidence, or valid
+        calls like this one regress to unresolved.
+        """
+        self._build(tmp_path)
+        target = tmp_path / "GlobalUsingTarget.cs"
+        assert self._call_targets_of(tmp_path, "GlobalUsingConsumer.Call") == {
+            f"{target.as_posix()}::Crate.PackHandler.Pack"
+        }
+
+    def test_bare_receiver_never_selects_a_nested_type(self, tmp_path):
+        """A bare ``QueryHandler`` cannot name ``Details.QueryHandler`` in C#;
+        it has to be qualified. Even as the only indexed candidate it must stay
+        unresolved -- the real type may be in an unindexed dependency.
+        """
+        self._build(tmp_path)
+        targets = self._call_targets_of(tmp_path, "LoneBareConsumer.Call")
+        assert targets == {"Handle"}, targets
+
+    def test_enclosing_type_shadows_global_type_of_the_same_path(self, tmp_path):
+        """C# lookup starts at the innermost enclosing type, so inside
+        ``Shadower.Consumer`` the receiver ``D.E`` is ``Shadower.D.E`` even
+        though a top-level ``D.E`` also exists."""
+        self._build(tmp_path)
+        target = tmp_path / "LexicalShadow.cs"
+        assert self._call_targets_of(
+            tmp_path, "Shadower.Consumer.Call",
+        ) == {f"{target.as_posix()}::Shadower.D.E.M"}
+
+    def test_namespaced_receiver_beats_conflicting_containing_type_suffix(
+        self, tmp_path,
+    ):
+        """C# namespaces are not part of ``parent_name``, so the receiver
+        ``App.Report.ExportHandler`` only matches exactly once shortened to
+        ``Report.ExportHandler``. An unrelated nested type whose containing
+        path merely ends in ``App.Report.ExportHandler`` must not win first via
+        the suffix map -- every exact candidate is tried before any heuristic.
+        """
+        self._build(tmp_path)
+        target = tmp_path / "Namespaced.cs"
+        assert self._call_targets_of(
+            tmp_path, "NamespacedConsumer.Call",
+        ) == {f"{target.as_posix()}::Report.ExportHandler.Run"}
 
     def test_callers_of_returns_resolved_caller_after_full_build(self, tmp_path):
         from code_review_graph.tools.query import query_graph

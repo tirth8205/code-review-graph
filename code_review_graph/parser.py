@@ -5376,6 +5376,7 @@ class CodeParser:
                     result,
                     child.child_by_field_name("name"),
                     declared_type,
+                    keep_qualifier=True,
                 )
 
         elif language == "csharp" and node.type == "parameter":
@@ -5383,6 +5384,7 @@ class CodeParser:
                 result,
                 node.child_by_field_name("name"),
                 node.child_by_field_name("type"),
+                keep_qualifier=True,
             )
 
         elif language == "php" and node.type == "assignment_expression":
@@ -5426,18 +5428,28 @@ class CodeParser:
         return {name} if name else set()
 
     @classmethod
-    def _store_typed_binding(cls, result: dict[str, str], name_node, type_node) -> None:
+    def _store_typed_binding(
+        cls,
+        result: dict[str, str],
+        name_node,
+        type_node,
+        *,
+        keep_qualifier: bool = False,
+    ) -> None:
         if name_node is None or type_node is None:
             return
         name = name_node.text.decode("utf-8", errors="replace")
         type_name = cls._base_type_name(
             type_node.text.decode("utf-8", errors="replace"),
+            keep_qualifier=keep_qualifier,
         )
         if name and type_name:
             result[name] = type_name
 
     @classmethod
-    def _base_type_name(cls, annotation: str) -> Optional[str]:
+    def _base_type_name(
+        cls, annotation: str, *, keep_qualifier: bool = False,
+    ) -> Optional[str]:
         """Return the receiver class from a generic/nullable annotation."""
         current = annotation.strip()
         for _ in range(4):
@@ -5464,7 +5476,7 @@ class CodeParser:
                 "string", "unknown", "void",
             ):
                 return None
-            return outer
+            return match.group(1) if keep_qualifier else outer
         return None
 
     def _resolve_typed_method_target(
@@ -5490,7 +5502,7 @@ class CodeParser:
             # class receiver cannot be resolved to its defining file during
             # a single-file parse. Emit the receiver class as a scope target
             # for the graph-wide scoped resolver (#612).
-            base_type = self._base_type_name(type_name)
+            base_type = self._base_type_name(type_name, keep_qualifier=True)
             if not base_type:
                 return None
             return f"{base_type}::{method}"
@@ -7425,10 +7437,10 @@ class CodeParser:
         return qualifier, name
 
     @staticmethod
-    def _julia_scope_join(
+    def _scope_join(
         outer: Optional[str], inner: Optional[str],
     ) -> Optional[str]:
-        """Join Julia scope paths without repeating an existing prefix."""
+        """Join dotted scope paths without repeating an existing prefix."""
         if not outer:
             return inner
         if not inner:
@@ -7523,7 +7535,7 @@ class CodeParser:
         import_map: dict[str, str],
     ) -> Optional[str]:
         """Resolve a Julia import alias from the nearest lexical scope."""
-        scope = self._julia_scope_join(enclosing_class, enclosing_func)
+        scope = self._scope_join(enclosing_class, enclosing_func)
         scope_parts = scope.split(".") if scope else []
         for size in range(len(scope_parts), -1, -1):
             prefix = ".".join(scope_parts[:size])
@@ -7672,11 +7684,11 @@ class CodeParser:
                 if name:
                     is_test = _is_test_function(name, file_path, ())
                     kind = "Test" if is_test else "Function"
-                    lexical_parent = self._julia_scope_join(
+                    lexical_parent = self._scope_join(
                         enclosing_class, enclosing_func,
                     )
                     qualifier = self._julia_short_qualifier(lhs)
-                    identity_parent = self._julia_scope_join(
+                    identity_parent = self._scope_join(
                         lexical_parent, qualifier,
                     )
                     qualified = self._qualify(
@@ -7870,7 +7882,7 @@ class CodeParser:
                         vname = variant.text.decode(
                             "utf-8", errors="replace",
                         )
-                        variant_parent = self._julia_scope_join(
+                        variant_parent = self._scope_join(
                             enclosing_class, type_name,
                         )
                         qualified_v = self._qualify(
@@ -7915,7 +7927,7 @@ class CodeParser:
                 line_no = child.start_point[0] + 1
                 synth_base = f"testset:{desc}" if desc else "testset"
                 synth_name = f"{synth_base}@L{line_no}"
-                lexical_parent = self._julia_scope_join(
+                lexical_parent = self._scope_join(
                     enclosing_class, enclosing_func,
                 )
                 qualified = self._qualify(
@@ -10257,7 +10269,7 @@ class CodeParser:
         # CONTAINS edge
         class_container = (
             self._qualify(enclosing_class, file_path, None)
-            if language == "julia" and enclosing_class
+            if language in ("csharp", "julia") and enclosing_class
             else file_path
         )
         edges.append(EdgeInfo(
@@ -10295,8 +10307,8 @@ class CodeParser:
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
         # Recurse into class body
-        if language == "julia":
-            recursive_class = self._julia_scope_join(enclosing_class, name)
+        if language in ("csharp", "julia"):
+            recursive_class = self._scope_join(enclosing_class, name)
         else:
             recursive_class = name
         self._extract_from_tree(
@@ -10403,11 +10415,11 @@ class CodeParser:
         container_scope = enclosing_class
         julia_qualifier: Optional[str] = None
         if language == "julia":
-            lexical_parent = self._julia_scope_join(
+            lexical_parent = self._scope_join(
                 enclosing_class, enclosing_func,
             )
             julia_qualifier = self._julia_definition_qualifier(child)
-            parent_name = self._julia_scope_join(
+            parent_name = self._scope_join(
                 lexical_parent, julia_qualifier,
             )
             container_scope = lexical_parent
@@ -13066,7 +13078,7 @@ class CodeParser:
                 module_name = name_node.text.decode(
                     "utf-8", errors="replace",
                 )
-                current_scope = self._julia_scope_join(
+                current_scope = self._scope_join(
                     current_scope, module_name,
                 )
 
@@ -13078,7 +13090,7 @@ class CodeParser:
                     child, "julia", source, local_imports,
                 )
                 for alias, target in local_imports.items():
-                    key = self._julia_scope_join(current_scope, alias)
+                    key = self._scope_join(current_scope, alias)
                     if key:
                         import_map[key] = target
                 continue

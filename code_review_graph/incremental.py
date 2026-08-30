@@ -77,6 +77,12 @@ logger = logging.getLogger(__name__)
 
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+CSHARP_IDENTITY_VERSION = "1"
+_CSHARP_IDENTITY_METADATA_KEY = "csharp_identity_version"
+_IDENTITY_FORMATS = (
+    ("cpp", "C++", _CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION),
+    ("csharp", "C#", _CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION),
+)
 
 
 def _run_python_resolver(store: GraphStore) -> Optional[dict]:
@@ -1273,8 +1279,15 @@ def full_build(
     total_nodes = 0
     total_edges = 0
     errors = []
-    cpp_errors: set[str] = set()
+    identity_errors: dict[str, set[str]] = {
+        language: set() for language, _, _, _ in _IDENTITY_FORMATS
+    }
     file_count = len(files)
+
+    def record_identity_error(rel_path: str) -> None:
+        language = parser.detect_language(repo_root / rel_path)
+        if language in identity_errors:
+            identity_errors[language].add(str(rel_path))
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
 
@@ -1291,13 +1304,11 @@ def full_build(
                 total_edges += len(edges)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
-                if parser.detect_language(full_path) == "cpp":
-                    cpp_errors.add(str(rel_path))
+                record_identity_error(rel_path)
             except Exception as e:
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
-                if parser.detect_language(full_path) == "cpp":
-                    cpp_errors.add(str(rel_path))
+                record_identity_error(rel_path)
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
@@ -1315,8 +1326,7 @@ def full_build(
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
-                    if parser.detect_language(repo_root / rel_path) == "cpp":
-                        cpp_errors.add(str(rel_path))
+                    record_identity_error(rel_path)
                     continue
                 full_path = repo_root / rel_path
                 store.store_file_nodes_edges(
@@ -1332,8 +1342,9 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
-    if not cpp_errors:
-        store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+    for language, _, metadata_key, version in _IDENTITY_FORMATS:
+        if not identity_errors[language]:
+            store.set_metadata(metadata_key, version)
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
@@ -1375,12 +1386,16 @@ def incremental_update(
     parser = CodeParser(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
 
-    if (
-        store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
-        and store.has_nodes_for_language("cpp")
-    ):
+    pending_identity_formats = [
+        (language, label)
+        for language, label, metadata_key, version in _IDENTITY_FORMATS
+        if store.get_metadata(metadata_key) != version
+        and store.has_nodes_for_language(language)
+    ]
+    if pending_identity_formats:
         logger.info(
-            "C++ identity format changed; rebuilding the graph before incremental update",
+            "%s identity format changed; rebuilding the graph before incremental update",
+            ", ".join(label for _, label in pending_identity_formats),
         )
         rebuilt = full_build(repo_root, store)
         return {
@@ -1397,6 +1412,7 @@ def incremental_update(
             "event_resolution": rebuilt["event_resolution"],
             "temporal_resolution": rebuilt["temporal_resolution"],
             "hcl_resolution": rebuilt["hcl_resolution"],
+            "scoped_resolution": rebuilt["scoped_resolution"],
         }
 
     # Determine changed files
@@ -1507,7 +1523,8 @@ def incremental_update(
     if files_updated:
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
-        store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+        for _, _, metadata_key, version in _IDENTITY_FORMATS:
+            store.set_metadata(metadata_key, version)
         _store_vcs_metadata(repo_root, store)
         store.commit()
 

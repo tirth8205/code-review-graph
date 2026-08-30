@@ -105,6 +105,29 @@ def _fold(name: str, language: str) -> str:
     return name.casefold() if language == "php" else name
 
 
+def _csharp_scope_suffixes(name: str) -> list[str]:
+    """Return a C# type path from most to least qualified."""
+    parts = name.split(".")
+    return [".".join(parts[index:]) for index in range(len(parts))]
+
+
+def _csharp_lexical_scopes(enclosing: Optional[str], receiver: str) -> list[str]:
+    """Return the receiver resolved against each enclosing scope, innermost first.
+
+    C# name lookup starts in the innermost enclosing type and walks outward
+    before it ever considers a global type, so inside ``Outer.Consumer`` the
+    receiver ``D.E`` means ``Outer.D.E`` even when a top-level ``D.E`` exists.
+    ``("Outer.Consumer", "D.E")`` → ``["Outer.Consumer.D.E", "Outer.D.E"]``.
+    """
+    if not enclosing:
+        return []
+    parts = enclosing.split(".")
+    return [
+        ".".join(parts[: index + 1]) + f".{receiver}"
+        for index in reversed(range(len(parts)))
+    ]
+
+
 def _path_tokens(file_path: str) -> list[str]:
     """Path split into segments, with the file extension stripped off the last.
 
@@ -237,11 +260,7 @@ def _scope_and_method(
         scope, _, method = target.partition("::")
         if not scope or not method or "::" in method:
             return None
-        # Strip any namespace qualifier: ``Acme.Services.Service`` → ``Service``.
-        class_name = scope.rsplit(".", 1)[-1]
-        if not class_name:
-            return None
-        return class_name, method, False
+        return scope, method, False
 
     return None
 
@@ -285,7 +304,11 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         (*_METHOD_KINDS, *_SCOPED_LANGUAGES),
     ).fetchall():
         lang = row["language"]
-        key = (lang, _fold(row["parent_name"], lang), _fold(row["name"], lang))
+        key = (
+            lang,
+            _fold(row["parent_name"], lang),
+            _fold(row["name"], lang),
+        )
         method_map.setdefault(key, []).append(row["qualified_name"])
         file_of[row["qualified_name"]] = row["file_path"]
 
@@ -450,9 +473,74 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
             class_name = enclosing
         assert class_name is not None  # non-enclosing parse always sets a class
 
-        candidates = method_map.get(
-            (language, _fold(class_name, language), _fold(method, language))
-        )
+        # C# resolves a receiver by binding its leading identifier to a
+        # namespace or type, then binding each later component relative to what
+        # preceded it. It never discards a leading component and restarts.
+        #
+        # Two ordered phases approximate that. Both match a containing-type path
+        # exactly; there is no suffix fallback, because selecting a nested type
+        # from a bare receiver would bind names C# cannot bind.
+        #   1. lexical - the receiver under each enclosing type, innermost first
+        #   2. exact   - the receiver, then forms with a leading namespace removed
+        #
+        # Phase 2 exists only because namespaces are absent from ``parent_name``
+        # (they live in ``csharp_namespaces_by_file``), so a namespace-qualified
+        # receiver such as ``App.Report.ExportHandler`` is stored as
+        # ``Report.ExportHandler``. Every shortened form therefore has to prove
+        # the part it dropped really is a namespace of the candidate's defining
+        # file. Without that check the resolver would happily strip ``App`` and
+        # bind a ``Report.ExportHandler`` sitting in namespace ``Other`` -- a
+        # single candidate takes the single_match path, so nothing downstream
+        # would catch it. ``needs_enclosing`` targets already name the caller's
+        # own type, so they never take the lexical phase.
+        lookups: list[tuple[str, Optional[str]]] = []
+        if language == "csharp":
+            if not needs_enclosing:
+                lookups.extend(
+                    (scope, None)
+                    for scope in _csharp_lexical_scopes(
+                        _enclosing_class(row["source_qualified"]), class_name,
+                    )
+                )
+            parts = class_name.split(".")
+            lookups.extend(
+                (".".join(parts[index:]), ".".join(parts[:index]) or None)
+                for index in range(len(parts))
+            )
+        else:
+            lookups.append((class_name, None))
+
+        candidates = None
+        for candidate_class, dropped_namespace in lookups:
+            found = method_map.get((
+                language,
+                _fold(candidate_class, language),
+                _fold(method, language),
+            ))
+            if not found:
+                continue
+            if dropped_namespace is not None:
+                # The namespace evidence is per *file*, not per node, and one C#
+                # file may declare several namespaces. Membership alone would
+                # only prove the dropped name appears somewhere in the candidate's
+                # file, not that it encloses the candidate: a file declaring both
+                # ``App`` and ``Other`` would let ``App.Ledger.AuditHandler`` bind
+                # an ``Other.Ledger.AuditHandler``. Require the file to declare
+                # exactly the dropped namespace, so the evidence is unambiguous.
+                # This leaves genuine matches in multi-namespace files unresolved,
+                # which is the right trade for a resolver that must not fabricate
+                # edges; per-node namespaces would resolve them properly.
+                found = [
+                    candidate
+                    for candidate in found
+                    if csharp_namespaces_by_file.get(
+                        file_of.get(candidate, ""), set(),
+                    ) == {dropped_namespace}
+                ]
+                if not found:
+                    continue
+            candidates = found
+            break
         if not candidates:
             continue
 
