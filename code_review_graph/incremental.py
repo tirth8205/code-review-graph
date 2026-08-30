@@ -78,6 +78,13 @@ logger = logging.getLogger(__name__)
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 
+# Bumped when the parser changes how a Java/C# INHERITS target is spelled, so
+# graphs built by an older version are rebuilt instead of keeping targets that
+# no longer match any node. See #935.
+INHERITS_IDENTITY_VERSION = "1"
+_INHERITS_IDENTITY_METADATA_KEY = "inherits_identity_version"
+_INHERITS_IDENTITY_LANGUAGES = ("java", "csharp")
+
 
 def _run_python_resolver(store: GraphStore) -> Optional[dict]:
     """Run repository-wide Python import resolution without failing a build."""
@@ -1273,7 +1280,7 @@ def full_build(
     total_nodes = 0
     total_edges = 0
     errors = []
-    cpp_errors: set[str] = set()
+    failed_languages: set[str] = set()
     file_count = len(files)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
@@ -1291,13 +1298,11 @@ def full_build(
                 total_edges += len(edges)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
-                if parser.detect_language(full_path) == "cpp":
-                    cpp_errors.add(str(rel_path))
+                failed_languages.add(parser.detect_language(full_path) or "")
             except Exception as e:
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
-                if parser.detect_language(full_path) == "cpp":
-                    cpp_errors.add(str(rel_path))
+                failed_languages.add(parser.detect_language(full_path) or "")
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
@@ -1315,8 +1320,9 @@ def full_build(
                 if error:
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
-                    if parser.detect_language(repo_root / rel_path) == "cpp":
-                        cpp_errors.add(str(rel_path))
+                    failed_languages.add(
+                        parser.detect_language(repo_root / rel_path) or "",
+                    )
                     continue
                 full_path = repo_root / rel_path
                 store.store_file_nodes_edges(
@@ -1332,8 +1338,10 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
-    if not cpp_errors:
+    if "cpp" not in failed_languages:
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+    if failed_languages.isdisjoint(_INHERITS_IDENTITY_LANGUAGES):
+        store.set_metadata(_INHERITS_IDENTITY_METADATA_KEY, INHERITS_IDENTITY_VERSION)
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
@@ -1375,12 +1383,24 @@ def incremental_update(
     parser = CodeParser(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
 
+    stale_identity = None
     if (
         store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
         and store.has_nodes_for_language("cpp")
     ):
+        stale_identity = "C++"
+    elif (
+        store.get_metadata(_INHERITS_IDENTITY_METADATA_KEY) != INHERITS_IDENTITY_VERSION
+        and any(
+            store.has_nodes_for_language(language)
+            for language in _INHERITS_IDENTITY_LANGUAGES
+        )
+    ):
+        stale_identity = "Java/C# inheritance"
+    if stale_identity:
         logger.info(
-            "C++ identity format changed; rebuilding the graph before incremental update",
+            "%s identity format changed; rebuilding the graph before incremental update",
+            stale_identity,
         )
         rebuilt = full_build(repo_root, store)
         return {
@@ -1508,6 +1528,7 @@ def incremental_update(
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+        store.set_metadata(_INHERITS_IDENTITY_METADATA_KEY, INHERITS_IDENTITY_VERSION)
         _store_vcs_metadata(repo_root, store)
         store.commit()
 

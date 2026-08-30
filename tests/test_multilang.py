@@ -384,6 +384,124 @@ class TestJavaParsing:
         assert len(calls) >= 3
 
 
+@pytest.mark.parametrize(
+    ("file_name", "source", "constructed_type"),
+    [
+        (
+            "Generic.java",
+            "abstract class GenericBase<T> {}\n"
+            "class FromGeneric extends "
+            "GenericBase<java.util.Map<String, java.util.List<Integer>>> {}\n",
+            "GenericBase<java.util.Map<String, java.util.List<Integer>>>",
+        ),
+        (
+            "Generic.cs",
+            "abstract class GenericBase<T> {}\n"
+            "class FromGeneric : "
+            "GenericBase<System.Collections.Generic.Dictionary<string, "
+            "System.Collections.Generic.List<int>>> {}\n",
+            "GenericBase<System.Collections.Generic.Dictionary<string, "
+            "System.Collections.Generic.List<int>>>",
+        ),
+    ],
+)
+def test_generic_inheritance_targets_declaration(
+    tmp_path, file_name, source, constructed_type,
+):
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.tools.query import query_graph
+
+    path = tmp_path / file_name
+    nodes, edges = CodeParser().parse_bytes(path, source.encode())
+    inheritance = next(
+        edge for edge in edges
+        if edge.kind == "INHERITS" and edge.source.endswith("::FromGeneric")
+    )
+    assert inheritance.target == "GenericBase"
+    assert inheritance.extra["constructed_types"] == [constructed_type]
+
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges)
+
+    result = query_graph("inheritors_of", "GenericBase", repo_root=str(tmp_path))
+    assert result["status"] == "ok"
+    assert {node["name"] for node in result["results"]} == {"FromGeneric"}
+
+
+@pytest.mark.parametrize(
+    ("file_name", "source", "constructed"),
+    [
+        (
+            "Trivia.cs",
+            "interface I<T> {}\nclass C : I</* < */ string> {}\n",
+            "I</* < */ string>",
+        ),
+        (
+            "Trivia.java",
+            "interface I<T> {}\nclass C implements I</* < */ String> {}\n",
+            "I</* < */ String>",
+        ),
+    ],
+)
+def test_generic_target_ignores_angle_brackets_inside_trivia(
+    tmp_path, file_name, source, constructed,
+):
+    """A '<' inside a comment is trivia, not a generic delimiter.
+
+    Counting characters reads this legal source as unbalanced and leaves the
+    constructed spelling as the target, so the base stays unresolvable.
+    """
+    path = tmp_path / file_name
+    _, edges = CodeParser().parse_bytes(path, source.encode())
+    inheritance = next(
+        edge for edge in edges
+        if edge.kind == "INHERITS" and edge.source.endswith("::C")
+    )
+    assert inheritance.target == "I"
+    assert inheritance.extra["constructed_types"] == [constructed]
+
+
+@pytest.mark.parametrize("type_name", ["Foo<T", "Foo<T>>"])
+def test_generic_identity_preserves_unbalanced_type_arguments(type_name):
+    from code_review_graph.parser import _erase_type_arguments
+
+    assert _erase_type_arguments(type_name) == type_name
+
+
+def test_multiple_closed_constructions_keep_every_type_argument(tmp_path):
+    """C# may implement one generic interface at several closed constructions.
+
+    They erase to a single target and share the class declaration line, so
+    upsert_edge would treat one-edge-per-base as the same edge and keep only the
+    last construction.
+    """
+    from code_review_graph.graph import GraphStore
+
+    path = tmp_path / "Multi.cs"
+    source = "interface I<T> {}\nclass C : I<int>, I<string> {}\n"
+    nodes, edges = CodeParser().parse_bytes(path, source.encode())
+    inheritance = [
+        edge for edge in edges
+        if edge.kind == "INHERITS" and edge.source.endswith("::C")
+    ]
+    assert len(inheritance) == 1
+    assert inheritance[0].target == "I"
+    assert inheritance[0].extra["constructed_types"] == ["I<int>", "I<string>"]
+
+    graph_dir = tmp_path / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        store.store_file_nodes_edges(str(path), nodes, edges)
+        stored = [
+            edge for edge in store.get_edges_by_source(f"{path}::C")
+            if edge.kind == "INHERITS"
+        ]
+    assert len(stored) == 1
+    assert stored[0].extra["constructed_types"] == ["I<int>", "I<string>"]
+
+
 class TestJavaMethodNames:
     """Regression tests for #804: Java method/constructor names come from the
     grammar ``name`` field (same approach as C# after #794), not the first
@@ -604,7 +722,10 @@ class TestCSharpParsing:
         assert "IRepository" in targets
         assert "InMemoryRepo" in targets
         assert "System.IDisposable" in targets
-        assert "List<User>" in targets
+        assert "List" in targets
+        assert next(e for e in inherits if e.target == "List").extra == {
+            "constructed_types": ["List<User>"],
+        }
         assert all(not e.target.startswith(":") for e in inherits)
         assert all("," not in e.target for e in inherits)
 
@@ -619,8 +740,12 @@ class TestCSharpParsing:
         assert by_source.get("AuditedUser") == {"User", "IRepository"}
         assert by_source.get("TaggedUser") == {"User"}
         assert "IRepository" in by_source.get("Token", set())
-        assert "System.Collections.Generic.List<User>" in {
-            edge.target for edge in inherits
+        scoped_list = next(
+            edge for edge in inherits
+            if edge.target == "System.Collections.Generic.List"
+        )
+        assert scoped_list.extra == {
+            "constructed_types": ["System.Collections.Generic.List<User>"],
         }
         assert "ConstrainedHolder" not in by_source
         assert by_source.get("SeededRepo") == {"InMemoryRepo"}
@@ -4551,3 +4676,64 @@ class TestAnsibleMetaParsing:
     def test_depends_on_name_key_collections(self):
         dep_targets = {e.target for e in self.edges if e.kind == "DEPENDS_ON"}
         assert "security.hardening" in dep_targets
+
+
+def test_incremental_upgrade_rebuilds_legacy_generic_inheritance(tmp_path):
+    """A graph built before this change still spells the target GenericBase<string>.
+
+    Nothing reparses an unchanged file, so without an identity version the
+    stale target would survive the upgrade and #935 would persist.
+    """
+    from unittest.mock import patch
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import (
+        INHERITS_IDENTITY_VERSION,
+        incremental_update,
+    )
+    from code_review_graph.parser import EdgeInfo, NodeInfo
+
+    source_path = tmp_path / "Bases.cs"
+    source_path.write_text(
+        "public abstract class GenericBase<T> { }\n"
+        "public class FromGeneric : GenericBase<string> { }\n",
+        encoding="utf-8",
+    )
+    store = GraphStore(tmp_path / "graph.db")
+    try:
+        for name in ("GenericBase", "FromGeneric"):
+            store.upsert_node(NodeInfo(
+                kind="Class",
+                name=name,
+                file_path=str(source_path),
+                line_start=1,
+                line_end=1,
+                language="csharp",
+            ))
+        store.upsert_edge(EdgeInfo(
+            kind="INHERITS",
+            source=f"{source_path.as_posix()}::FromGeneric",
+            target="GenericBase<string>",
+            file_path=str(source_path),
+            line=2,
+        ))
+        store.commit()
+
+        with patch(
+            "code_review_graph.incremental.get_all_tracked_files",
+            return_value=["Bases.cs"],
+        ):
+            result = incremental_update(tmp_path, store, changed_files=[])
+
+        assert result["identity_rebuild"] is True
+        assert store.get_metadata("inherits_identity_version") == INHERITS_IDENTITY_VERSION
+        targets = [
+            edge.target_qualified
+            for edge in store.get_edges_by_source(
+                f"{source_path.as_posix()}::FromGeneric"
+            )
+            if edge.kind == "INHERITS"
+        ]
+        assert targets == ["GenericBase"]
+    finally:
+        store.close()

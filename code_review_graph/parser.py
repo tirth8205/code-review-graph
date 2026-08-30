@@ -2402,6 +2402,93 @@ def _ansible_is_play_item(item: object) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _erase_type_arguments(type_name: str) -> str:
+    """Strip type arguments to the name spelling inheritance lookup matches on.
+
+    This is deliberately *not* a language-level declaration identity. It drops
+    C#/Java generic arity, so ``G<T>`` and ``G<T, U>`` both yield ``G``, and it
+    does not resolve namespace or package qualification. Both limits match how
+    ``inheritors_of`` already resolves non-generic bases: nodes are keyed by
+    bare class name, and the bare-name fallback is arity- and namespace-blind
+    for every base, generic or not. The goal here is parity with the
+    non-generic path, not a full type identity.
+
+    Malformed type text (unbalanced angle brackets) is returned unchanged, so
+    an error-tolerant parse of a half-edited file never rewrites a target into
+    a bogus name.
+    """
+    depth = 0
+    identity = []
+    for char in type_name:
+        if char == "<":
+            depth += 1
+        elif char == ">":
+            if depth == 0:
+                return type_name
+            depth -= 1
+        elif depth == 0:
+            identity.append(char)
+    return "".join(identity).strip() if depth == 0 else type_name
+
+
+#: Grammar nodes holding a type argument list: ``<...>`` in C# and Java.
+_TYPE_ARGUMENT_NODES = ("type_argument_list", "type_arguments")
+
+
+def _declaration_name(node) -> str:
+    """Rebuild a base type's spelling from the syntax tree, minus type arguments.
+
+    Angle brackets cannot be located reliably by scanning characters, because
+    ``<`` and ``>`` also occur inside trivia that the grammar treats as
+    insignificant -- ``class C : I</* < */ string> {}`` is legal C# that a
+    bracket counter reads as unbalanced. Collecting leaf tokens and skipping the
+    type-argument subtrees lets the grammar decide what is a delimiter.
+
+    Returns an empty string when the node carries no usable tokens, which lets
+    callers fall back rather than store a truncated name.
+    """
+    tokens: list[str] = []
+
+    def collect(current) -> None:
+        if current.type in _TYPE_ARGUMENT_NODES or current.type == "comment":
+            return
+        if current.child_count == 0:
+            tokens.append(current.text.decode("utf-8", errors="replace"))
+            return
+        for child in current.children:
+            collect(child)
+
+    collect(node)
+    return "".join(tokens).strip()
+
+
+def _group_bases_by_target(entries: list[tuple[str, str]]) -> dict[str, list[str]]:
+    """Group ``(spelling, target)`` base entries by target, in source order.
+
+    C# permits one class to implement several closed constructions of the same
+    generic interface (``class C : I<int>, I<string> {}``). Those collapse to a
+    single target, and every collapsed base shares the class declaration line,
+    so emitting one edge each would produce rows that ``upsert_edge`` treats as
+    the same edge -- the last one silently overwriting the rest. Grouping first
+    keeps the relationship as one edge that records every construction.
+    """
+    grouped: dict[str, list[str]] = {}
+    for spelling, target in entries:
+        grouped.setdefault(target, []).append(spelling)
+    return grouped
+
+
+def _constructed_type_extra(target: str, constructions: list[str]) -> dict:
+    """Build the ``extra`` payload recording how *target* was constructed.
+
+    ``constructed_types`` is always a list, including for the single-construction
+    case, so consumers get one shape rather than one that changes when somebody
+    adds another interface to a class.
+    """
+    constructed = [c for c in dict.fromkeys(constructions) if c != target]
+    return {"constructed_types": constructed} if constructed else {}
+
+
 class CodeParser:
     """Parses source files using Tree-sitter and extracts structural information."""
 
@@ -10269,16 +10356,17 @@ class CodeParser:
         ))
 
         # Inheritance edges
-        bases = self._get_bases(child, language, source)
-        for base in bases:
+        base_entries = self._get_base_entries(child, language, source)
+        for target, constructions in _group_bases_by_target(base_entries).items():
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
                     name, file_path, class_parent,
                 ),
-                target=base,
+                target=target,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=_constructed_type_extra(target, constructions),
             ))
 
         # Spring DI: emit INJECTS edges for injected dependencies
@@ -15279,16 +15367,15 @@ class CodeParser:
                     return node.children[i + 1].text.decode("utf-8", errors="replace")
         return None
 
-    def _get_bases(self, node, language: str, source: bytes) -> list[str]:
-        """Extract base classes / implemented interfaces."""
+    def _get_base_type_nodes(self, node, language: str) -> list:
+        """Return the syntax nodes naming each base type, for Java and C#.
+
+        Kept separate from :meth:`_get_bases` so the raw spelling and the
+        tree-derived declaration name are read from one traversal instead of
+        being recovered from text afterwards.
+        """
         bases = []
-        if language == "python":
-            for child in node.children:
-                if child.type == "argument_list":
-                    for arg in child.children:
-                        if arg.type in ("identifier", "attribute"):
-                            bases.append(arg.text.decode("utf-8", errors="replace"))
-        elif language == "java":
+        if language == "java":
             # Java: superclass and super_interfaces wrap the keyword
             # (extends/implements) around type_identifier children.
             # Taking .text would include the keyword (e.g. "implements Foo").
@@ -15297,13 +15384,13 @@ class CodeParser:
                 if child.type == "superclass":
                     for sub in child.children:
                         if sub.type in ("type_identifier", "generic_type"):
-                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                            bases.append(sub)
                 elif child.type == "super_interfaces":
                     for sub in child.children:
                         if sub.type == "type_list":
                             for ident in sub.children:
                                 if ident.type in ("type_identifier", "generic_type"):
-                                    bases.append(ident.text.decode("utf-8", errors="replace"))
+                                    bases.append(ident)
         elif language == "csharp":
             # C# wraps ``: Base, IFace`` in a base_list. Iterate named type
             # entries so punctuation is excluded while qualified/generic names
@@ -15321,18 +15408,48 @@ class CodeParser:
                         # Positional records contain Base(args); retain only Base.
                         type_node = sub.child_by_field_name("type")
                         if type_node is not None:
-                            bases.append(
-                                type_node.text.decode("utf-8", errors="replace")
-                            )
+                            bases.append(type_node)
                         else:
                             for nested in sub.children:
                                 if nested.is_named and nested.type != "argument_list":
-                                    bases.append(
-                                        nested.text.decode("utf-8", errors="replace")
-                                    )
+                                    bases.append(nested)
                                     break
                         continue
-                    bases.append(sub.text.decode("utf-8", errors="replace"))
+                    bases.append(sub)
+        return bases
+
+    def _get_base_entries(
+        self, node, language: str, source: bytes,
+    ) -> list[tuple[str, str]]:
+        """Return ``(source spelling, edge target)`` for each base type.
+
+        For Java and C# the target is the declaration name with type arguments
+        removed, derived from the syntax tree so that comments and other trivia
+        inside a type argument list cannot be mistaken for generic delimiters.
+        Every other language targets the spelling unchanged.
+        """
+        if language not in ("java", "csharp"):
+            return [(base, base) for base in self._get_bases(node, language, source)]
+        entries = []
+        for base in self._get_base_type_nodes(node, language):
+            raw = base.text.decode("utf-8", errors="replace")
+            entries.append((raw, _declaration_name(base) or _erase_type_arguments(raw)))
+        return entries
+
+    def _get_bases(self, node, language: str, source: bytes) -> list[str]:
+        """Extract base classes / implemented interfaces."""
+        bases = []
+        if language == "python":
+            for child in node.children:
+                if child.type == "argument_list":
+                    for arg in child.children:
+                        if arg.type in ("identifier", "attribute"):
+                            bases.append(arg.text.decode("utf-8", errors="replace"))
+        elif language in ("java", "csharp"):
+            bases.extend(
+                base.text.decode("utf-8", errors="replace")
+                for base in self._get_base_type_nodes(node, language)
+            )
         elif language == "kotlin":
             # Look for superclass/interfaces in extends/implements clauses
             for child in node.children:
