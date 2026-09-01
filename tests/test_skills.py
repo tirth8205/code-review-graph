@@ -2366,6 +2366,12 @@ class TestOpenCodePluginContent:
         assert "event: async" in content
         assert '"tool.execute.before": async' in content
 
+    def test_hooks_scope_commands_to_opencode_directory(self):
+        """Global OpenCode hooks must always target the active project."""
+        content = _opencode_plugin_content()
+        assert "async ({ $, directory })" in content
+        assert content.count("--repo ${directory}") == 3
+
     def test_hooks_file_edited_event(self):
         content = _opencode_plugin_content()
         assert '"file.edited"' in content

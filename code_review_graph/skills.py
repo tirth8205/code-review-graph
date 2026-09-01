@@ -2103,13 +2103,13 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Installed by: code-review-graph install --platform opencode
  */
 
-const CodeReviewGraphPlugin: Plugin = async ({ $ }) => {
+const CodeReviewGraphPlugin: Plugin = async ({ $, directory }) => {
   return {
     // 1. Auto-update graph after file edits and show status for new sessions.
     event: async ({ event }) => {
       if (event.type === "file.edited") {
         try {
-          await $`code-review-graph update --skip-flows`.quiet()
+          await $`code-review-graph update --skip-flows --repo ${directory}`.quiet()
         } catch {
           // Swallow — graph may not be built yet for this project.
         }
@@ -2117,7 +2117,7 @@ const CodeReviewGraphPlugin: Plugin = async ({ $ }) => {
 
       if (event.type === "session.created") {
         try {
-          const result = await $`code-review-graph status`.quiet()
+          const result = await $`code-review-graph status --repo ${directory}`.quiet()
           const output = result.stdout?.toString().trim()
           if (output) {
             console.log("[code-review-graph]", output)
@@ -2138,7 +2138,7 @@ const CodeReviewGraphPlugin: Plugin = async ({ $ }) => {
           /^git\\s+commit/i.test(command)
         ) {
           const result =
-            await $`code-review-graph detect-changes --brief`.quiet()
+            await $`code-review-graph detect-changes --brief --repo ${directory}`.quiet()
           const text = result.stdout?.toString().trim()
           if (text) {
             console.log("[code-review-graph] Pre-commit analysis:\\n" + text)
