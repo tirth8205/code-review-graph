@@ -361,24 +361,42 @@ def _write_data_dir_gitignore(data_dir: Path) -> None:
             pass
 
 
-def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
+def get_data_dir(
+    repo_root: Path, *, create: bool = True, data_dir: str | Path | None = None,
+) -> Path:
     """Return the directory where this project's graph data lives.
 
     Resolution priority:
-    1. Registry entry for this repo (set via --data-dir)
-    2. CRG_DATA_DIR environment variable (global override)
-    3. Default: <repo>/.code-review-graph/
+    1. Explicit ``data_dir`` argument (per-call override)
+    2. Registry entry for this repo (set via --data-dir)
+    3. CRG_DATA_DIR environment variable (global override)
+    4. Default: <repo>/.code-review-graph/
 
     By default, ``<repo_root>/.code-review-graph``. If the
     ``CRG_DATA_DIR`` environment variable is set, it is used verbatim
     instead — letting you keep graphs outside the working tree (useful
     for ephemeral workspaces, Docker volumes, or shared caches). See: #155
 
+    ``data_dir`` outranks both because it names one repository for the
+    duration of one call. ``CRG_DATA_DIR`` is a single path for the whole
+    process, so it cannot serve several repositories from one MCP server,
+    and a registry entry is durable machine-global state that a caller
+    speaking only MCP has no way to write. Passing ``data_dir`` writes no
+    registry entry and leaves resolution for every other repository alone.
+
     By default the directory is created if it does not already exist; an
     inner ``.gitignore`` (with ``*``) is written so any accidentally-nested
     files never get committed. Both are idempotent. Pass ``create=False``
     when resolving the path for a read-only existence check.
     """
+    # An explicit per-call override wins over all ambient configuration.
+    if data_dir is not None and str(data_dir).strip():
+        resolved = Path(data_dir).expanduser().resolve()
+        if create:
+            resolved.mkdir(parents=True, exist_ok=True)
+            _write_data_dir_gitignore(resolved)
+        return resolved
+
     # Check registry first
     try:
         from .registry import Registry, default_registry_path
@@ -411,16 +429,19 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
     return data_dir
 
 
-def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
+def get_db_path(
+    repo_root: Path, *, read_only: bool = False, data_dir: str | Path | None = None,
+) -> Path:
     """Determine the database path for a repository.
 
-    Respects ``CRG_DATA_DIR`` (see :func:`get_data_dir`). Migrates a
-    legacy top-level ``.code-review-graph.db`` file into the new
-    directory when it exists (WAL/SHM side-files are discarded). Pass
-    ``read_only=True`` to resolve the current path without creating a data
-    directory, migrating a legacy database, or deleting side-files.
+    Respects an explicit ``data_dir`` and ``CRG_DATA_DIR`` (see
+    :func:`get_data_dir`). Migrates a legacy top-level
+    ``.code-review-graph.db`` file into the new directory when it exists
+    (WAL/SHM side-files are discarded). Pass ``read_only=True`` to resolve
+    the current path without creating a data directory, migrating a legacy
+    database, or deleting side-files.
     """
-    crg_dir = get_data_dir(repo_root, create=not read_only)
+    crg_dir = get_data_dir(repo_root, create=not read_only, data_dir=data_dir)
     new_db = crg_dir / "graph.db"
 
     if read_only:

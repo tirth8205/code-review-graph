@@ -50,6 +50,7 @@ def _cap_members(
 
 def list_communities_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     sort_by: str = "size",
     min_size: int = 0,
     detail_level: str = "standard",
@@ -83,7 +84,7 @@ def list_communities_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         communities, total, truncated = _bounded(
             get_communities(store, sort_by=sort_by, min_size=min_size),
@@ -127,6 +128,7 @@ def get_community_func(
     community_id: int | None = None,
     include_members: bool = False,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     max_members: int = 25,
 ) -> dict[str, Any]:
     """Get details of a single code community.
@@ -151,7 +153,7 @@ def get_community_func(
     """
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         community: dict | None = None
         all_communities = get_communities(store)
@@ -253,6 +255,7 @@ def _minimal_overview(overview: dict[str, Any]) -> dict[str, Any]:
 
 def get_architecture_overview_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
@@ -285,7 +288,7 @@ def get_architecture_overview_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_members, "max_members")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         full_overview = get_architecture_overview(store)
         overview = full_overview

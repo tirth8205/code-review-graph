@@ -114,6 +114,7 @@ def get_impact_radius(
     max_depth: int = 2,
     max_results: int = 500,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -135,7 +136,7 @@ def get_impact_radius(
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         if changed_files is None:
             changed_files = get_changed_files(root, base)
@@ -250,6 +251,7 @@ def query_graph(
     pattern: str,
     target: str,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     detail_level: str = "standard",
     max_results: int = 100,
 ) -> dict[str, Any]:
@@ -272,7 +274,7 @@ def query_graph(
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         if pattern not in _QUERY_PATTERNS:
             return {
@@ -744,6 +746,7 @@ def semantic_search_nodes(
     kind: str | None = None,
     limit: int = 20,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     context_files: list[str] | None = None,
     model: str | None = None,
     provider: str | None = None,
@@ -767,7 +770,7 @@ def semantic_search_nodes(
     Returns:
         Ranked list of matching nodes.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         mode_out: list[str] = []
         results = hybrid_search(
@@ -831,7 +834,7 @@ def semantic_search_nodes(
 # ---------------------------------------------------------------------------
 
 
-def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
+def list_graph_stats(repo_root: str | None = None, data_dir: str | None = None) -> dict[str, Any]:
     """Get aggregate statistics about the knowledge graph.
 
     Args:
@@ -840,7 +843,7 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
     Returns:
         Total nodes, edges, breakdown by kind, languages, and last update time.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         stats = store.get_stats()
 
@@ -862,7 +865,7 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
             summary_parts.append(f"  {kind}: {count}")
 
         # Add embedding info if available
-        emb_store = EmbeddingStore(get_db_path(root))
+        emb_store = EmbeddingStore(get_db_path(root, data_dir=data_dir))
         try:
             emb_count = emb_store.count()
             summary_parts.append("")
@@ -901,6 +904,7 @@ def find_large_functions(
     file_path_pattern: str | None = None,
     limit: int = 50,
     repo_root: str | None = None,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -917,7 +921,7 @@ def find_large_functions(
     Returns:
         Oversized nodes with line counts, ordered largest first.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         nodes = store.get_nodes_by_size(
             min_lines=min_lines,
@@ -977,6 +981,7 @@ def traverse_graph_func(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: str | None = None,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """BFS/DFS traversal from best-matching node.
 
@@ -987,7 +992,7 @@ def traverse_graph_func(
         token_budget: Approximate token limit for results.
         repo_root: Repository root path.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         results = hybrid_search(store, query, limit=1)
         if not results:

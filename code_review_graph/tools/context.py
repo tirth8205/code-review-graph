@@ -50,6 +50,7 @@ def get_minimal_context(
     task: str = "",
     changed_files: list[str] | None = None,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     base: str = "HEAD~1",
 ) -> dict[str, Any]:
     """Return minimum context an agent needs to start any task (~100 tokens).
@@ -69,14 +70,14 @@ def get_minimal_context(
         missing, empty, or known to have been built at a different Git commit.
     """
     root = _resolve_root(repo_root)
-    db_path = get_db_path(root, read_only=True)
+    db_path = get_db_path(root, read_only=True, data_dir=data_dir)
     if not db_path.is_file():
         return _not_ready(
             "missing_graph",
             "No graph database found. Build the graph before requesting context.",
         )
 
-    store, root = _get_store(str(root))
+    store, root = _get_store(str(root), data_dir)
     try:
         # 1. Quick stats
         stats = store.get_stats()
@@ -86,7 +87,7 @@ def get_minimal_context(
                 "The graph database contains no nodes. Build the graph before requesting context.",
             )
 
-        provenance = graph_provenance(str(root))
+        provenance = graph_provenance(str(root), data_dir)
         if provenance and provenance.get("head_matches_build") is False:
             return _not_ready(
                 "stale_graph",

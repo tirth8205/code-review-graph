@@ -68,7 +68,10 @@ logger = logging.getLogger(__name__)
 
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
+# Both defaults below are written once at startup by ``main()`` and never
+# mutated per request, so concurrent transports read a constant.
 _default_repo_root: str | None = None
+_default_data_dir: str | None = None
 
 
 def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
@@ -87,6 +90,22 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     return repo_root if repo_root else _default_repo_root
 
 
+def _resolve_data_dir(data_dir: Optional[str]) -> Optional[str]:
+    """Resolve data_dir for a tool call.
+
+    Order of precedence:
+    1. Explicit ``data_dir`` passed by the MCP client (highest).
+    2. ``--data-dir`` CLI flag passed to ``code-review-graph serve``
+       (captured in ``_default_data_dir``).
+    3. None — the underlying impl falls back to the registry entry for the
+       repository, then ``CRG_DATA_DIR``, then ``<repo>/.code-review-graph``.
+
+    Returning None preserves the existing resolution order exactly, so a
+    client that never passes ``data_dir`` sees no change in behaviour.
+    """
+    return data_dir if data_dir else _default_data_dir
+
+
 mcp = FastMCP(
     "code-review-graph",
     version=__version__,
@@ -102,6 +121,7 @@ mcp = FastMCP(
 async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     base: Optional[str] = None,
     postprocess: str = "full",
     recurse_submodules: Optional[bool] = None,
@@ -124,6 +144,10 @@ async def build_or_update_graph_tool(
     Args:
         full_rebuild: If True, re-parse all files. Default: False (incremental).
         repo_root: Repository root path. Auto-detected from current directory if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         base: Git ref to diff against for incremental updates. When omitted,
             resolves automatically to the commit the graph was last built at,
             so one update catches everything since the last sync (not just the
@@ -138,14 +162,15 @@ async def build_or_update_graph_tool(
             refresh. Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
 
     def _run() -> dict:
         return with_provenance(build_or_update_graph(
-            full_rebuild=full_rebuild, repo_root=root, base=base,
+            full_rebuild=full_rebuild, repo_root=root, data_dir=data_dir, base=base,
             postprocess=postprocess, recurse_submodules=recurse_submodules,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
-        ), root)
+        ), root, data_dir)
 
     return await asyncio.to_thread(_run)
 
@@ -156,6 +181,7 @@ async def run_postprocess_tool(
     communities: bool = True,
     fts: bool = True,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
 ) -> dict:
@@ -173,19 +199,24 @@ async def run_postprocess_tool(
         communities: Run community detection. Default: True.
         fts: Rebuild FTS index. Default: True.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         embedding_provider: Exact provider for an explicit embedding refresh.
             Must be supplied with embedding_model. Default: disabled.
         embedding_model: Exact model for an explicit embedding refresh.
             Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
 
     def _run() -> dict:
         return with_provenance(run_postprocess(
-            flows=flows, communities=communities, fts=fts, repo_root=root,
+            flows=flows, communities=communities, fts=fts, repo_root=root, data_dir=data_dir,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
-        ), root)
+        ), root, data_dir)
 
     return await asyncio.to_thread(_run)
 
@@ -195,6 +226,7 @@ def get_minimal_context_tool(
     task: str = "",
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     base: str = "HEAD~1",
 ) -> dict:
     """Get ultra-compact context for any task (~100 tokens). Always call this first.
@@ -209,13 +241,18 @@ def get_minimal_context_tool(
         task: What you are doing (e.g. "review PR #42", "debug login timeout").
         changed_files: Explicit list of changed files. Auto-detected if omitted.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         base: Git ref for diff comparison. Default: HEAD~1.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_minimal_context(
         task=task, changed_files=changed_files,
-        repo_root=root, base=base,
-    ), root)
+        repo_root=root, data_dir=data_dir, base=base,
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -223,6 +260,7 @@ def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
 ) -> dict:
@@ -235,14 +273,19 @@ def get_impact_radius_tool(
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         max_depth: Number of hops to traverse in the dependency graph. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
-        repo_root=root, base=base, detail_level=detail_level,
-    ), root)
+        repo_root=root, data_dir=data_dir, base=base, detail_level=detail_level,
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -250,6 +293,7 @@ def query_graph_tool(
     pattern: str,
     target: str,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
     max_results: int = 100,
 ) -> dict:
@@ -277,14 +321,19 @@ def query_graph_tool(
         pattern: Query pattern name (see above).
         target: Node name, qualified name, or file path to query.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
         max_results: Maximum results to return. Default: 100.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(query_graph(
-        pattern=pattern, target=target, repo_root=root,
+        pattern=pattern, target=target, repo_root=root, data_dir=data_dir,
         detail_level=detail_level, max_results=max_results,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -294,6 +343,7 @@ def get_review_context_tool(
     include_source: bool = True,
     max_lines_per_file: int = 200,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
     max_results: int = 100,
@@ -310,6 +360,10 @@ def get_review_context_tool(
         include_source: Include source code snippets. Default: True.
         max_lines_per_file: Max source lines per file. Default: 200.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         base: Git ref for change detection. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
@@ -319,12 +373,13 @@ def get_review_context_tool(
             Default: 25. Snippets share an 800-line budget.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_review_context(
         changed_files=changed_files, max_depth=max_depth,
         include_source=include_source, max_lines_per_file=max_lines_per_file,
-        repo_root=root, base=base, detail_level=detail_level,
+        repo_root=root, data_dir=data_dir, base=base, detail_level=detail_level,
         max_results=max_results, max_files=max_files,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -333,6 +388,7 @@ def semantic_search_nodes_tool(
     kind: Optional[str] = None,
     limit: int = 20,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
     detail_level: str = "standard",
@@ -350,6 +406,10 @@ def semantic_search_nodes_tool(
         kind: Optional filter: File, Class, Function, Type, or Test.
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         model: Embedding model for query vectors. Must match the model used
                during embed_graph. Falls back to CRG_EMBEDDING_MODEL env var
                (local), CRG_OPENAI_MODEL (openai), or CRG_VOYAGE_MODEL (voyage).
@@ -359,15 +419,17 @@ def semantic_search_nodes_tool(
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=root,
+        query=query, kind=kind, limit=limit, repo_root=root, data_dir=data_dir,
         model=model, provider=provider, detail_level=detail_level,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 async def embed_graph_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
 ) -> dict:
@@ -390,6 +452,10 @@ async def embed_graph_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         model: Embedding model. For local: HuggingFace ID/path; for openai:
                model ID (e.g. "text-embedding-3-small"); for google: Gemini
                model ID; for voyage: Voyage model ID (e.g. "voyage-code-3").
@@ -403,11 +469,12 @@ async def embed_graph_tool(
                   unless a model arg or CRG_VOYAGE_MODEL is supplied.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
 
     def _run() -> dict:
         return with_provenance(embed_graph(
-            repo_root=root, model=model, provider=provider,
-        ), root)
+            repo_root=root, data_dir=data_dir, model=model, provider=provider,
+        ), root, data_dir)
 
     return await asyncio.to_thread(_run)
 
@@ -415,6 +482,7 @@ async def embed_graph_tool(
 @mcp.tool()
 def list_graph_stats_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
 
@@ -423,9 +491,14 @@ def list_graph_stats_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(list_graph_stats(repo_root=root), root)
+    data_dir = _resolve_data_dir(data_dir)
+    return with_provenance(list_graph_stats(repo_root=root, data_dir=data_dir), root, data_dir)
 
 
 @mcp.tool()
@@ -458,6 +531,7 @@ def find_large_functions_tool(
     file_path_pattern: Optional[str] = None,
     limit: int = 50,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> dict:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -470,12 +544,17 @@ def find_large_functions_tool(
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(find_large_functions(
         min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=root,
-    ), root)
+        limit=limit, repo_root=root, data_dir=data_dir,
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -485,6 +564,7 @@ def list_flows_tool(
     kind: Optional[str] = None,
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> dict:
     """List execution flows in the codebase, sorted by criticality.
 
@@ -499,12 +579,17 @@ def list_flows_tool(
         detail_level: "standard" (default) returns full flow data; "minimal"
                       returns only name, criticality, and node_count per flow.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(list_flows(
-        repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
+        repo_root=root, data_dir=data_dir, sort_by=sort_by, limit=limit, kind=kind,
         detail_level=detail_level,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -513,6 +598,7 @@ def get_flow_tool(
     flow_name: Optional[str] = None,
     include_source: bool = False,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
 ) -> dict:
@@ -528,17 +614,22 @@ def get_flow_tool(
         flow_name: Name to search for (partial match). Ignored if flow_id given.
         include_source: Include source code snippets for each step. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_steps: Maximum steps to return; flow.total_steps reports the
             full count. Default: 50.
         max_source_lines: Total source lines across all steps when
             include_source is set. Default: 400.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_flow(
         flow_id=flow_id, flow_name=flow_name,
-        include_source=include_source, repo_root=root,
+        include_source=include_source, repo_root=root, data_dir=data_dir,
         max_steps=max_steps, max_source_lines=max_source_lines,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -546,6 +637,7 @@ def get_affected_flows_tool(
     changed_files: Optional[list[str]] = None,
     base: str = "HEAD~1",
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
     max_flows: int = 50,
 ) -> dict:
@@ -559,6 +651,10 @@ def get_affected_flows_tool(
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full step details, "minimal" for per-flow
             metadata only. Default: standard.
         max_flows: Maximum flows to return; total reports the full count.
@@ -567,10 +663,11 @@ def get_affected_flows_tool(
             because a standard flow costs ~980 tokens against ~18 minimal.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_affected_flows_func(
-        changed_files=changed_files, base=base, repo_root=root,
+        changed_files=changed_files, base=base, repo_root=root, data_dir=data_dir,
         detail_level=detail_level, max_flows=max_flows,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -579,6 +676,7 @@ def list_communities_tool(
     min_size: int = 0,
     detail_level: str = "standard",
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_results: int = 50,
     max_members: int = 10,
 ) -> dict:
@@ -595,6 +693,10 @@ def list_communities_tool(
                       "minimal" returns only name, size, and cohesion
                       per community.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_results: Maximum communities to return; total reports the full
             count. Default: 50.
         max_members: Maximum member names listed per community in standard
@@ -602,11 +704,12 @@ def list_communities_tool(
             count. Default: 10.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(list_communities_func(
-        repo_root=root, sort_by=sort_by, min_size=min_size,
+        repo_root=root, data_dir=data_dir, sort_by=sort_by, min_size=min_size,
         detail_level=detail_level, max_results=max_results,
         max_members=max_members,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -615,6 +718,7 @@ def get_community_tool(
     community_id: Optional[int] = None,
     include_members: bool = False,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_members: int = 25,
 ) -> dict:
     """Get detailed information about a single code community.
@@ -630,21 +734,27 @@ def get_community_tool(
         community_id: Database ID of the community.
         include_members: Include full member node details. Default: False.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_members: Maximum member entries to include; the community's
             size still reports its true member count and
             members_truncated marks the cut. Default: 25.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_community_func(
         community_name=community_name, community_id=community_id,
-        include_members=include_members, repo_root=root,
+        include_members=include_members, repo_root=root, data_dir=data_dir,
         max_members=max_members,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "minimal",
     max_results: int = 100,
     max_members: int = 10,
@@ -657,6 +767,10 @@ def get_architecture_overview_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "minimal" (default) drops community member lists
                       and aggregates cross-community edges to one row per
                       community pair (typical reduction: 600KB -> <5KB);
@@ -667,12 +781,13 @@ def get_architecture_overview_tool(
             Default: 10.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_architecture_overview_func(
-        repo_root=root,
+        repo_root=root, data_dir=data_dir,
         detail_level=detail_level,
         max_results=max_results,
         max_members=max_members,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -682,6 +797,7 @@ async def detect_changes_tool(
     include_source: bool = False,
     max_depth: int = 2,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
@@ -702,6 +818,10 @@ async def detect_changes_tool(
         include_source: Include source code snippets for changed functions. Default: False.
         max_depth: Impact radius depth for BFS traversal. Default: 2.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
         max_results: Maximum changed functions, test gaps, and changed files
@@ -712,14 +832,15 @@ async def detect_changes_tool(
             detail. Default: 20.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
 
     def _run() -> dict:
         return with_provenance(detect_changes_func(
             base=base, changed_files=changed_files,
             include_source=include_source, max_depth=max_depth,
-            repo_root=root, detail_level=detail_level,
+            repo_root=root, data_dir=data_dir, detail_level=detail_level,
             max_results=max_results, max_flows=max_flows,
-        ), root)
+        ), root, data_dir)
 
     coro = asyncio.to_thread(_run)
     tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
@@ -749,6 +870,7 @@ def refactor_tool(
     kind: Optional[str] = None,
     file_pattern: Optional[str] = None,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_results: int = 50,
     detail_level: str = "standard",
 ) -> dict:
@@ -772,6 +894,10 @@ def refactor_tool(
         kind: (dead_code) Optional filter: Function or Class.
         file_pattern: (dead_code) Filter by file path substring.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_results: Maximum edits/symbols/suggestions in the response;
             total reports the full count. The stored rename preview keeps
             every edit, so apply_refactor_tool still applies them all.
@@ -780,17 +906,19 @@ def refactor_tool(
             identifying fields only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(refactor_func(
         mode=mode, old_name=old_name, new_name=new_name,
-        kind=kind, file_pattern=file_pattern, repo_root=root,
+        kind=kind, file_pattern=file_pattern, repo_root=root, data_dir=data_dir,
         max_results=max_results, detail_level=detail_level,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 def apply_refactor_tool(
     refactor_id: str,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     dry_run: bool = False,
     max_diff_files: int = 25,
 ) -> dict:
@@ -806,6 +934,10 @@ def apply_refactor_tool(
     Args:
         refactor_id: The refactor ID from refactor_tool's response.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         dry_run: If True, return a unified diff of what would change
             without touching any files. The refactor_id remains valid so
             the same preview can be applied in a follow-up call without
@@ -815,15 +947,19 @@ def apply_refactor_tool(
             would_modify still lists every file. Default: 25.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
+    # This tool rewrites source files from a stored refactor plan and never
+    # opens the graph database, so data_dir only steers the provenance read.
     return with_provenance(apply_refactor_func(
         refactor_id=refactor_id, repo_root=root,
         dry_run=dry_run, max_diff_files=max_diff_files,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 async def generate_wiki_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     force: bool = False,
 ) -> dict:
     """Generate a markdown wiki from the code community structure.
@@ -838,14 +974,19 @@ async def generate_wiki_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         force: If True, regenerate all pages even if content unchanged. Default: False.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
 
     def _run() -> dict:
         return with_provenance(generate_wiki_func(
-            repo_root=root, force=force,
-        ), root)
+            repo_root=root, data_dir=data_dir, force=force,
+        ), root, data_dir)
 
     return await asyncio.to_thread(_run)
 
@@ -854,6 +995,7 @@ async def generate_wiki_tool(
 def get_wiki_page_tool(
     community_name: str,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_chars: int = 20000,
 ) -> dict:
     """Retrieve a specific wiki page by community name.
@@ -864,20 +1006,26 @@ def get_wiki_page_tool(
     Args:
         community_name: Community name to look up.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_chars: Maximum characters of page content to return;
             total_chars reports the real length. Default: 20000.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_wiki_page_func(
-        community_name=community_name, repo_root=root,
+        community_name=community_name, repo_root=root, data_dir=data_dir,
         max_chars=max_chars,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Find the most connected nodes in the codebase (architectural hotspots).
@@ -888,19 +1036,25 @@ def get_hub_nodes_tool(
     Args:
         top_n: Number of top hubs to return (capped at 100). Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and total_degree only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_hub_nodes_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+        repo_root=root, data_dir=data_dir, top_n=top_n, detail_level=detail_level,
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Find architectural chokepoints via betweenness centrality.
@@ -912,18 +1066,24 @@ def get_bridge_nodes_tool(
     Args:
         top_n: Number of top bridges to return (capped at 100). Default: 10.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full node data, "minimal" for name,
             kind, and betweenness only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_bridge_nodes_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+        repo_root=root, data_dir=data_dir, top_n=top_n, detail_level=detail_level,
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
 ) -> dict:
@@ -935,22 +1095,28 @@ def get_knowledge_gaps_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         max_per_category: Maximum entries per gap category; summary and
             total_gaps still report the untruncated counts. Default: 15.
         detail_level: "standard" for full gap records, "minimal" to drop
             file paths. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_knowledge_gaps_func(
-        repo_root=root, max_per_category=max_per_category,
+        repo_root=root, data_dir=data_dir, max_per_category=max_per_category,
         detail_level=detail_level,
-    ), root)
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
     detail_level: str = "standard",
 ) -> dict:
     """Find unexpected architectural coupling via composite surprise scoring.
@@ -962,18 +1128,24 @@ def get_surprising_connections_tool(
     Args:
         top_n: Number of top surprises to return (capped at 100). Default: 15.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
         detail_level: "standard" for full edge records, "minimal" for
             source, target, kind, and score only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_surprising_connections_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+        repo_root=root, data_dir=data_dir, top_n=top_n, detail_level=detail_level,
+    ), root, data_dir)
 
 
 @mcp.tool()
 def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
 
@@ -983,11 +1155,16 @@ def get_suggested_questions_tool(
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(get_suggested_questions_func(
-        repo_root=root,
-    ), root)
+        repo_root=root, data_dir=data_dir,
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -997,6 +1174,7 @@ def traverse_graph_tool(
     depth: int = 3,
     token_budget: int = 2000,
     repo_root: Optional[str] = None,
+    data_dir: Optional[str] = None,
 ) -> dict:
     """BFS/DFS traversal from best-matching node with token budget.
 
@@ -1012,13 +1190,18 @@ def traverse_graph_tool(
         token_budget: Approximate token limit for results.
             Default: 2000.
         repo_root: Repository root path. Auto-detected if omitted.
+        data_dir: Directory holding this repository's graph database.
+            Overrides the registry entry and CRG_DATA_DIR for this call
+            only, and writes no registry entry. Omit to keep the
+            existing resolution order.
     """
     root = _resolve_repo_root(repo_root)
+    data_dir = _resolve_data_dir(data_dir)
     return with_provenance(traverse_graph_func(
         query=query, mode=mode, depth=depth,
         token_budget=token_budget,
-        repo_root=root or "",
-    ), root)
+        repo_root=root or "", data_dir=data_dir,
+    ), root, data_dir)
 
 
 @mcp.tool()
@@ -1179,6 +1362,7 @@ def main(
     tools: str | None = None,
     auto_watch: bool = False,
     *,
+    data_dir: str | None = None,
     transport: str = "stdio",
     host: str | None = None,
     port: int | None = None,
@@ -1198,15 +1382,19 @@ def main(
         tools: Comma-separated list of tool names to expose.
             Falls back to ``CRG_TOOLS`` env var.  When unset, all
             tools are available.
+        data_dir: Default graph data directory for all tool calls, used
+            when a call passes no ``data_dir`` of its own. A client serving
+            several repositories should pass ``data_dir`` per call instead.
         auto_watch: Start filesystem watcher in a background daemon thread
             while the MCP server runs.
         transport: ``"stdio"`` (default) or ``"streamable-http"`` for local HTTP.
         host: Bind address when using HTTP (required for HTTP; set by CLI).
         port: Port when using HTTP (required for HTTP; set by CLI).
     """
-    global _default_repo_root
+    global _default_repo_root, _default_data_dir
     root = Path(repo_root) if repo_root else find_project_root()
     _default_repo_root = str(root)
+    _default_data_dir = str(Path(data_dir).expanduser().resolve()) if data_dir else None
     _apply_tool_filter(tools)
 
     previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
@@ -1214,7 +1402,7 @@ def main(
     watch_store: GraphStore | None = None
     try:
         if auto_watch:
-            watch_store = GraphStore(get_db_path(root))
+            watch_store = GraphStore(get_db_path(root, data_dir=_default_data_dir))
             thread = start_watch_thread(root, watch_store, daemon=True)
             if thread is None:
                 logger.warning("Auto-watch was requested but could not be started")

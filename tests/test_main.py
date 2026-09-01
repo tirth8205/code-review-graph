@@ -63,6 +63,160 @@ class TestResolveRepoRoot:
         assert crg_main._resolve_repo_root("/explicit") == "/explicit"
 
 
+class TestResolveDataDir:
+    """Precedence rules for _resolve_data_dir, mirroring _resolve_repo_root."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_default(self):
+        original = crg_main._default_data_dir
+        yield
+        crg_main._default_data_dir = original
+
+    def test_none_when_neither_is_set(self):
+        crg_main._default_data_dir = None
+        assert crg_main._resolve_data_dir(None) is None
+
+    def test_empty_string_treated_as_unset(self):
+        crg_main._default_data_dir = "/tmp/flag-data"
+        assert crg_main._resolve_data_dir("") == "/tmp/flag-data"
+
+    def test_flag_used_when_client_omits_data_dir(self):
+        crg_main._default_data_dir = "/tmp/flag-data"
+        assert crg_main._resolve_data_dir(None) == "/tmp/flag-data"
+
+    def test_client_arg_wins_over_flag(self):
+        crg_main._default_data_dir = "/tmp/flag-data"
+        assert crg_main._resolve_data_dir("/explicit") == "/explicit"
+
+    def test_client_arg_used_when_no_flag(self):
+        crg_main._default_data_dir = None
+        assert crg_main._resolve_data_dir("/explicit") == "/explicit"
+
+
+class TestDataDirToolSurface:
+    """Every graph-backed tool must expose ``data_dir`` beside ``repo_root``.
+
+    ``get_docs_section_tool`` is the documented exception: it serves
+    documentation files and never opens the graph database.
+    """
+
+    _NO_GRAPH_ACCESS = {"get_docs_section_tool"}
+
+    def _tool_signatures(self):
+        import inspect
+
+        for name in dir(crg_main):
+            if not name.endswith("_tool"):
+                continue
+            tool = getattr(crg_main, name)
+            fn = getattr(tool, "fn", None) or tool
+            if not callable(fn):
+                continue
+            yield name, inspect.signature(fn).parameters
+
+    def test_repo_root_tools_also_accept_data_dir(self):
+        missing = [
+            name
+            for name, params in self._tool_signatures()
+            if "repo_root" in params
+            and "data_dir" not in params
+            and name not in self._NO_GRAPH_ACCESS
+        ]
+        assert missing == [], f"tools accept repo_root but not data_dir: {missing}"
+
+    def test_data_dir_defaults_to_none_everywhere(self):
+        """A client that omits the argument must see unchanged behaviour."""
+        import inspect
+
+        for name, params in self._tool_signatures():
+            if "data_dir" in params:
+                assert params["data_dir"].default is None, name
+                assert params["data_dir"].annotation != inspect.Parameter.empty, name
+
+    def test_expected_tool_count_accepts_data_dir(self):
+        accepting = [n for n, p in self._tool_signatures() if "data_dir" in p]
+        assert len(accepting) == 27, sorted(accepting)
+
+
+class TestDataDirEndToEnd:
+    """A tool call reads the graph from the directory the call names."""
+
+    @staticmethod
+    def _seed_graph(db_path, func_name):
+        from code_review_graph.graph import GraphStore, NodeInfo
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with GraphStore(db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Function", name=func_name, file_path="app.py",
+                line_start=1, line_end=3, language="python",
+            ))
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_data_dir(self, monkeypatch):
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        monkeypatch.setattr(crg_main, "_default_data_dir", None)
+        monkeypatch.setattr(crg_main, "_default_repo_root", None)
+
+    def _stats(self, **kwargs):
+        tool = crg_main.list_graph_stats_tool
+        fn = getattr(tool, "fn", None) or tool
+        return fn(**kwargs)
+
+    def test_call_reads_graph_from_named_directory(self, tmp_path):
+        repo = tmp_path / "project"
+        (repo / ".git").mkdir(parents=True)
+        external = tmp_path / "graphs" / "project"
+        self._seed_graph(external / "graph.db", "lives_outside_the_repo")
+
+        result = self._stats(repo_root=str(repo), data_dir=str(external))
+
+        assert result["status"] == "ok"
+        assert result["total_nodes"] == 1
+        # The in-repo default must not have been created or consulted.
+        assert not (repo / ".code-review-graph" / "graph.db").exists()
+
+    def test_two_repos_in_one_session_stay_separate(self, tmp_path):
+        """The multi-repo case a single CRG_DATA_DIR cannot express."""
+        repos = {}
+        for name, node_count in (("alpha", 1), ("beta", 2)):
+            repo = tmp_path / name
+            (repo / ".git").mkdir(parents=True)
+            external = tmp_path / "graphs" / name
+            for i in range(node_count):
+                self._seed_graph(external / "graph.db", f"{name}_func_{i}")
+            repos[name] = (repo, external, node_count)
+
+        for name, (repo, external, node_count) in repos.items():
+            result = self._stats(repo_root=str(repo), data_dir=str(external))
+            assert result["total_nodes"] == node_count, name
+
+    def test_serve_flag_supplies_the_default(self, tmp_path, monkeypatch):
+        repo = tmp_path / "project"
+        (repo / ".git").mkdir(parents=True)
+        external = tmp_path / "graphs" / "project"
+        self._seed_graph(external / "graph.db", "from_the_serve_flag")
+        monkeypatch.setattr(crg_main, "_default_data_dir", str(external))
+
+        result = self._stats(repo_root=str(repo))
+
+        assert result["total_nodes"] == 1
+
+    def test_call_argument_overrides_the_serve_flag(self, tmp_path, monkeypatch):
+        repo = tmp_path / "project"
+        (repo / ".git").mkdir(parents=True)
+        flag_dir = tmp_path / "graphs" / "from-flag"
+        call_dir = tmp_path / "graphs" / "from-call"
+        self._seed_graph(flag_dir / "graph.db", "a")
+        for i in range(3):
+            self._seed_graph(call_dir / "graph.db", f"b{i}")
+        monkeypatch.setattr(crg_main, "_default_data_dir", str(flag_dir))
+
+        result = self._stats(repo_root=str(repo), data_dir=str(call_dir))
+
+        assert result["total_nodes"] == 3
+
+
 def test_docs_wrapper_falls_back_to_packaged_docs_with_resolved_repo(
     tmp_path, monkeypatch,
 ):
@@ -234,7 +388,7 @@ class TestLongRunningToolsAreAsync:
         def fake_impl(*args, **kwargs):
             return {"status": "ok", "impl": impl_name}
 
-        def fake_with_provenance(result, repo_root=None):
+        def fake_with_provenance(result, repo_root=None, data_dir=None):
             provenance_threads.append(threading.get_ident())
             return {**result, "_graph": {"updated_at": "worker"}}
 

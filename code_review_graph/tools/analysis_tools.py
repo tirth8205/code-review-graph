@@ -37,6 +37,7 @@ def _project(rows: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[s
 
 def get_hub_nodes_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     top_n: int = 10,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -58,7 +59,7 @@ def get_hub_nodes_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, _root = _get_store(repo_root or None, data_dir)
     try:
         hubs, total, truncated = _bounded(
             find_hub_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_HUB_NODES,
@@ -87,6 +88,7 @@ def get_hub_nodes_func(
 
 def get_bridge_nodes_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     top_n: int = 10,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -108,7 +110,7 @@ def get_bridge_nodes_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, _root = _get_store(repo_root or None, data_dir)
     try:
         bridges, total, truncated = _bounded(
             find_bridge_nodes(store, top_n=_FETCH_ALL), top_n, _MAX_BRIDGE_NODES,
@@ -137,6 +139,7 @@ def get_bridge_nodes_func(
 
 def get_knowledge_gaps_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -160,7 +163,7 @@ def get_knowledge_gaps_func(
     """
     _validate_positive_int(max_per_category, "max_per_category")
 
-    store, _root = _get_store(repo_root or None)
+    store, _root = _get_store(repo_root or None, data_dir)
     try:
         raw = find_knowledge_gaps(store)
         # Totals must come from the untruncated lists: the summary counts are
@@ -197,6 +200,7 @@ def get_knowledge_gaps_func(
 
 def get_surprising_connections_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     top_n: int = 15,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -217,7 +221,7 @@ def get_surprising_connections_func(
     """
     _validate_positive_int(top_n, "top_n")
 
-    store, _root = _get_store(repo_root or None)
+    store, _root = _get_store(repo_root or None, data_dir)
     try:
         surprises, total, truncated = _bounded(
             find_surprising_connections(store, top_n=_FETCH_ALL),
@@ -248,6 +252,7 @@ def get_surprising_connections_func(
 
 def get_suggested_questions_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
 ) -> dict[str, Any]:
     """Auto-generate review questions from graph analysis.
 
@@ -262,7 +267,7 @@ def get_suggested_questions_func(
     Args:
         repo_root: Repository root (auto-detected if omitted).
     """
-    store, _root = _get_store(repo_root or None)
+    store, _root = _get_store(repo_root or None, data_dir)
     try:
         questions = generate_suggested_questions(store)
         by_priority: dict[str, list[dict[str, Any]]] = {

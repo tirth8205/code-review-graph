@@ -167,7 +167,7 @@ class TestTools:
         store.commit()
         rebuild_fts_index(store)
 
-        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None: (store, tmp_path))
+        monkeypatch.setattr(query_mod, "_get_store", lambda repo_root=None, data_dir=None: (store, tmp_path))
         result = semantic_search_nodes("login")
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
@@ -869,7 +869,7 @@ class TestEmbedGraphProviderErrors:
         (tmp_path / ".code-review-graph").mkdir()
         store = MagicMock()
         monkeypatch.setattr(
-            docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
+            docs_module, "_get_store", lambda repo_root=None, data_dir=None: (store, tmp_path),
         )
         result = docs_module.embed_graph(
             repo_root=str(tmp_path), provider="moonbase",
@@ -909,7 +909,7 @@ class TestAnalysisToolsCloseStore:
         store = MagicMock()
         monkeypatch.setattr(
             analysis_module, "_get_store",
-            lambda repo_root=None: (store, tmp_path),
+            lambda repo_root=None, data_dir=None: (store, tmp_path),
         )
         monkeypatch.setattr(
             analysis_module, analysis_name, lambda *a, **k: ret,
@@ -927,7 +927,7 @@ class TestAnalysisToolsCloseStore:
         store = MagicMock()
         monkeypatch.setattr(
             analysis_module, "_get_store",
-            lambda repo_root=None: (store, tmp_path),
+            lambda repo_root=None, data_dir=None: (store, tmp_path),
         )
 
         def boom(*args, **kwargs):
@@ -1737,7 +1737,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
         monkeypatch.setattr(
             build_module,
             "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
+            lambda _repo_root, _data_dir=None: (self.store, Path("/repo")),
         )
         result = build_module.run_postprocess(
             flows=False,
@@ -2462,7 +2462,7 @@ def test_impact_radius_tool_exposes_best_first_scores(monkeypatch, tmp_path):
     store.commit()
 
     monkeypatch.setattr(
-        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
+        query_module, "_get_store", lambda _repo_root, _data_dir=None: (store, tmp_path),
     )
     monkeypatch.setattr(
         query_module,

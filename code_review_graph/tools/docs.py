@@ -27,6 +27,7 @@ _MAX_WIKI_CHARS = 80000
 
 def embed_graph(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     model: str | None = None,
     provider: str | None = None,
 ) -> dict[str, Any]:
@@ -61,9 +62,9 @@ def embed_graph(
     Returns:
         Number of nodes embedded and total embedding count.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
-        db_path = get_db_path(root)
+        db_path = get_db_path(root, data_dir=data_dir)
         try:
             emb_store = EmbeddingStore(db_path, provider=provider, model=model)
         except ValueError as exc:
@@ -204,6 +205,7 @@ def get_docs_section(
 
 def generate_wiki_func(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """Generate a markdown wiki from the community structure.
@@ -223,9 +225,9 @@ def generate_wiki_func(
     from ..incremental import get_data_dir
     from ..wiki import generate_wiki
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
-        wiki_dir = get_data_dir(root) / "wiki"
+        wiki_dir = get_data_dir(root, data_dir=data_dir) / "wiki"
         result = generate_wiki(store, wiki_dir, force=force)
         total = (
             result["pages_generated"]
@@ -257,6 +259,7 @@ def generate_wiki_func(
 def get_wiki_page_func(
     community_name: str,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     max_chars: int = 20000,
 ) -> dict[str, Any]:
     """Retrieve a specific wiki page by community name.
@@ -281,7 +284,7 @@ def get_wiki_page_func(
     _validate_positive_int(max_chars, "max_chars")
 
     root = _resolve_root(repo_root)
-    wiki_dir = get_data_dir(root) / "wiki"
+    wiki_dir = get_data_dir(root, data_dir=data_dir) / "wiki"
     content = get_wiki_page(wiki_dir, community_name)
     if content is None:
         return {

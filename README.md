@@ -463,6 +463,44 @@ full config reference and all available options.
 </details>
 
 <details>
+<summary><strong>Where the graph database lives</strong></summary>
+<br>
+
+By default the graph goes in `<repo>/.code-review-graph/graph.db`. Three things
+move it, and they are checked in this order:
+
+| What | Scope | Set by |
+|------|-------|--------|
+| `data_dir` argument | one tool call | an MCP client, or `serve --data-dir` as the default |
+| registry entry | one repo, permanently | `build`, `update`, `status`, … with `--data-dir` |
+| `CRG_DATA_DIR` | every repo in the process | environment variable |
+
+Move it when the working tree is a poor place for a SQLite file: a network
+share or Samba mount, an ephemeral container, a read-only checkout, or a
+sandbox that wipes the tree between runs.
+
+Reach for `data_dir` when one MCP server answers for several repositories that
+each need their own directory. `CRG_DATA_DIR` is a single path for the whole
+process, so it cannot express that, and a registry entry only exists once a CLI
+run has written one to `~/.code-review-graph/registry.json`.
+
+```jsonc
+// One server, per-call directories — no CLI bootstrap, no registry entry.
+{ "repo_root": "/repos/api",  "data_dir": "/var/graphs/api" }
+{ "repo_root": "/repos/web",  "data_dir": "/var/graphs/web" }
+```
+
+```bash
+# Or one default for a single-repo server.
+code-review-graph serve --repo /repos/api --data-dir /var/graphs/api
+```
+
+Passing `data_dir` writes no registry entry and changes nothing for any other
+repository. Omit it and resolution behaves exactly as it always has.
+
+</details>
+
+<details>
 <summary><strong>30 MCP tools</strong></summary>
 <br>
 
