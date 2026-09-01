@@ -2358,6 +2358,14 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         assert "export default" in content
 
+    def test_uses_current_returned_hooks_api(self):
+        """OpenCode plugins return hooks; the removed app.on API must not appear."""
+        content = _opencode_plugin_content()
+        assert "app.on(" not in content
+        assert "return {" in content
+        assert "event: async" in content
+        assert '"tool.execute.before": async' in content
+
     def test_hooks_file_edited_event(self):
         content = _opencode_plugin_content()
         assert '"file.edited"' in content
@@ -2378,6 +2386,9 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         assert "git" in content
         assert "commit" in content
+        assert 'input.tool === "bash"' in content
+        assert "output?.args?.command" in content
+        assert "ctx.$" not in content
 
     def test_all_handlers_have_try_catch(self):
         """Every event handler must use try/catch for graceful failure."""

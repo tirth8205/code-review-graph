@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenCode integration now returns the current hooks object instead of calling
+  the removed `app.on(...)` API, so file updates, session status, and
+  pre-commit analysis register again on current OpenCode releases.
+
 ## [2.3.8] - 2026-08-21
 
 ### Added
