@@ -370,7 +370,7 @@ class TestRefreshWiring:
             patch.object(
                 crg_main,
                 "with_provenance",
-                side_effect=lambda result, _root: result,
+                side_effect=lambda result, _root, _data_dir=None: result,
             ),
             patch.object(
                 crg_main,

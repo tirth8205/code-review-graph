@@ -57,7 +57,9 @@ def _read_live_git_head(root: Path) -> str | None:
     return head_sha or None
 
 
-def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
+def graph_provenance(
+    repo_root: str | None = None, data_dir: str | None = None,
+) -> dict[str, Any] | None:
     """Return best-effort build metadata for one repository's graph.
 
     The metadata read is deliberately read-only. Missing, incomplete, or
@@ -65,7 +67,7 @@ def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
     """
     try:
         root = _resolve_root(repo_root)
-        db_path = get_db_path(root, read_only=True)
+        db_path = get_db_path(root, read_only=True, data_dir=data_dir)
         if not db_path.exists():
             return None
 
@@ -122,11 +124,13 @@ def graph_provenance(repo_root: str | None = None) -> dict[str, Any] | None:
         return None
 
 
-def with_provenance(result: Any, repo_root: str | None = None) -> Any:
+def with_provenance(
+    result: Any, repo_root: str | None = None, data_dir: str | None = None,
+) -> Any:
     """Attach a ``_graph`` envelope without changing existing fields."""
     if not isinstance(result, dict) or "_graph" in result:
         return result
-    provenance = graph_provenance(repo_root)
+    provenance = graph_provenance(repo_root, data_dir)
     if provenance:
         result["_graph"] = provenance
     return result
@@ -205,14 +209,19 @@ def _resolve_root(repo_root: str | None = None) -> Path:
     return _validate_repo_root(Path(repo_root)) if repo_root else find_project_root()
 
 
-def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
+def _get_store(
+    repo_root: str | None = None, data_dir: str | None = None,
+) -> tuple[GraphStore, Path]:
     """Resolve repo root and open the graph store.
+
+    ``data_dir`` overrides where the graph database is read from and
+    written to for this call only; see :func:`~..incremental.get_data_dir`.
 
     Callers own the returned store and must close it (try/finally or
     context manager) to avoid leaking SQLite file descriptors.
     """
     root = _resolve_root(repo_root)
-    db_path = get_db_path(root)
+    db_path = get_db_path(root, data_dir=data_dir)
     return GraphStore(db_path), root
 
 

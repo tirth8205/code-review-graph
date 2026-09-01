@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every graph-backed MCP tool now takes an optional `data_dir`, naming where
+  that call reads and writes the graph database. Until now the only ways to
+  move the database off the working tree were `CRG_DATA_DIR`, which is one
+  path for the whole process, and a registry entry, which only exists after a
+  CLI run has written one to `~/.code-review-graph/registry.json`. Neither
+  serves an MCP client that answers for several repositories, each needing its
+  own directory, and a client that speaks only MCP could not create a registry
+  entry at all. `data_dir` is checked ahead of both, writes no registry entry,
+  and affects only the call that passes it. Omitting it leaves resolution
+  byte-identical to before. `get_docs_section_tool` is unchanged, as it serves
+  documentation files and never opens the database.
+- `serve --data-dir` and `mcp --data-dir` set the default for tool calls that
+  pass no `data_dir` of their own, for the common single-repository server.
+  Unlike `build --data-dir`, this writes no registry entry.
+
+### Fixed
+
+- `detect-changes --data-dir` now exists. `detect-changes` was already listed
+  in the CLI's data-dir commands and already resolved a read-only database path
+  from the flag, but its parser never defined it, so that branch was
+  unreachable.
+
 ## [2.3.8] - 2026-08-21
 
 ### Added

@@ -87,6 +87,7 @@ class TestServeCommand:
         mock_serve.assert_called_once_with(
             repo_root=str(Path("repo-root").resolve()),
             auto_watch=True,
+            data_dir=None,
             tools=None,
         )
 
@@ -104,7 +105,61 @@ class TestServeCommand:
         mock_serve.assert_called_once_with(
             repo_root=str(Path("repo-root").resolve()),
             auto_watch=False,
+            data_dir=None,
         )
+
+    def test_serve_forwards_data_dir(self, tmp_path):
+        """``serve --data-dir`` supplies the default for tool calls."""
+        external = tmp_path / "graphs"
+        argv = [
+            "code-review-graph",
+            "serve",
+            "--repo",
+            "repo-root",
+            "--data-dir",
+            str(external),
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.main.main") as mock_serve:
+                cli.main()
+
+        mock_serve.assert_called_once_with(
+            repo_root=str(Path("repo-root").resolve()),
+            auto_watch=False,
+            data_dir=str(external),
+            tools=None,
+        )
+
+    def test_serve_data_dir_writes_no_registry_entry(self, tmp_path):
+        """serve is not a data-dir command: it must not mutate the registry."""
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        external = tmp_path / "graphs"
+        argv = [
+            "code-review-graph", "serve",
+            "--repo", str(repo),
+            "--data-dir", str(external),
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.main.main"):
+                cli.main()
+
+        assert Registry().get_data_dir_for_repo(str(repo)) is None
+
+    def test_serve_http_forwards_data_dir(self, tmp_path):
+        external = tmp_path / "graphs"
+        argv = [
+            "code-review-graph", "serve", "--repo", "repo-root",
+            "--data-dir", str(external), "--http",
+        ]
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.main.main") as mock_serve:
+                cli.main()
+
+        assert mock_serve.call_args.kwargs["data_dir"] == str(external)
+        assert mock_serve.call_args.kwargs["transport"] == "streamable-http"
 
 
 class TestWatchInteraction:
@@ -499,6 +554,65 @@ class TestDetectChangesEndToEnd:
         savings = result["context_savings"]
         assert result["changed_functions"]
         assert savings["saved_percent"] < 100
+
+    def test_detect_changes_reads_graph_from_data_dir(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        """``detect-changes`` was listed in _data_dir_cmds without a flag.
+
+        The command already resolved a read-only db_path from
+        ``args.data_dir``, but its parser never defined ``--data-dir``, so
+        the branch was unreachable.
+        """
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+
+        repo = tmp_path / "repo"
+        src = repo / "src"
+        src.mkdir(parents=True)
+        app = src / "app.py"
+        app.write_text(
+            "def greet(name):\n"
+            "    return 'hello ' + name\n",
+            encoding="utf-8",
+        )
+        self._git(repo, "init", "-q")
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-q", "-m", "initial")
+
+        app.write_text(
+            "def greet(name):\n"
+            "    return ('hi ' + name).upper()\n",
+            encoding="utf-8",
+        )
+        self._git(repo, "add", ".")
+        self._git(repo, "commit", "-q", "-m", "change greet")
+
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+
+        external = tmp_path / "graphs" / "repo"
+        external.mkdir(parents=True)
+        store = GraphStore(external / "graph.db")
+        try:
+            full_build(repo, store)
+        finally:
+            store.close()
+
+        argv = [
+            "code-review-graph", "detect-changes",
+            "--repo", str(repo),
+            "--data-dir", str(external),
+        ]
+        with patch.object(sys, "argv", argv):
+            cli.main()
+
+        out = capsys.readouterr().out
+        result = json.loads(out[out.index("{"):])
+
+        assert "greet" in {f["name"] for f in result["changed_functions"]}
+        # Read-only: the in-repo default must not be materialized (#803).
+        assert not (repo / ".code-review-graph").exists()
 
 
 def test_explicit_monorepo_subproject_runs_a_real_graph_search(

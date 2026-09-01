@@ -531,6 +531,138 @@ class TestDataDirRegistry:
         assert result == data_dir.resolve()
 
 
+class TestDataDirExplicitOverride:
+    """An explicit ``data_dir`` argument outranks registry and env var.
+
+    ``CRG_DATA_DIR`` is one path for the whole process and a registry entry
+    is durable machine-global state, so neither can serve several
+    repositories from a single MCP server. The explicit argument names one
+    repository for the duration of one call.
+    """
+
+    def test_explicit_override_beats_registry(self, tmp_path, monkeypatch):
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        registry_dir = tmp_path / "registry-data"
+        explicit_dir = tmp_path / "explicit-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        Registry().set_data_dir(str(repo), str(registry_dir))
+
+        result = get_data_dir(repo, data_dir=str(explicit_dir))
+
+        assert result == explicit_dir.resolve()
+        assert result.is_dir()
+
+    def test_explicit_override_beats_env_var(self, tmp_path, monkeypatch):
+        from code_review_graph.incremental import get_data_dir
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        env_dir = tmp_path / "env-data"
+        explicit_dir = tmp_path / "explicit-data"
+
+        monkeypatch.setenv("CRG_DATA_DIR", str(env_dir))
+
+        result = get_data_dir(repo, data_dir=str(explicit_dir))
+
+        assert result == explicit_dir.resolve()
+        assert not env_dir.exists()
+
+    def test_explicit_override_writes_no_registry_entry(self, tmp_path, monkeypatch):
+        """The override is per call. It must not mutate global state."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        explicit_dir = tmp_path / "explicit-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        get_data_dir(repo, data_dir=str(explicit_dir))
+
+        assert Registry().get_data_dir_for_repo(str(repo)) is None
+
+    def test_explicit_override_creates_dir_and_gitignore(self, tmp_path, monkeypatch):
+        from code_review_graph.incremental import get_data_dir
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        explicit_dir = tmp_path / "nested" / "explicit-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        result = get_data_dir(repo, data_dir=str(explicit_dir))
+
+        assert result.is_dir()
+        assert (result / ".gitignore").read_text(encoding="utf-8").strip().endswith("*")
+
+    def test_explicit_override_read_only_creates_nothing(self, tmp_path, monkeypatch):
+        """Read-only resolution must not materialize the directory (#803)."""
+        from code_review_graph.incremental import get_data_dir
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        explicit_dir = tmp_path / "explicit-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        result = get_data_dir(repo, create=False, data_dir=str(explicit_dir))
+
+        assert result == explicit_dir.resolve()
+        assert not explicit_dir.exists()
+
+    def test_get_db_path_honors_explicit_override(self, tmp_path, monkeypatch):
+        from code_review_graph.incremental import get_db_path
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        explicit_dir = tmp_path / "explicit-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        result = get_db_path(repo, data_dir=str(explicit_dir))
+
+        assert result == explicit_dir.resolve() / "graph.db"
+
+    @pytest.mark.parametrize("blank", [None, "", "   "])
+    def test_blank_override_falls_through_to_existing_order(
+        self, tmp_path, monkeypatch, blank,
+    ):
+        """Omitting the argument must leave resolution exactly as it was."""
+        from code_review_graph.incremental import get_data_dir
+        from code_review_graph.registry import Registry
+
+        repo = tmp_path / "project"
+        repo.mkdir()
+        registry_dir = tmp_path / "registry-data"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        Registry().set_data_dir(str(repo), str(registry_dir))
+
+        assert get_data_dir(repo, data_dir=blank) == registry_dir.resolve()
+
+    def test_two_repos_resolve_to_their_own_directories(self, tmp_path, monkeypatch):
+        """The case CRG_DATA_DIR cannot express: one process, two repos."""
+        from code_review_graph.incremental import get_data_dir
+
+        repo_a = tmp_path / "repo-a"
+        repo_b = tmp_path / "repo-b"
+        repo_a.mkdir()
+        repo_b.mkdir()
+        dir_a = tmp_path / "graphs" / "repo-a"
+        dir_b = tmp_path / "graphs" / "repo-b"
+
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+
+        assert get_data_dir(repo_a, data_dir=str(dir_a)) == dir_a.resolve()
+        assert get_data_dir(repo_b, data_dir=str(dir_b)) == dir_b.resolve()
+
+
 class TestIsBinary:
     def test_text_file_is_not_binary(self, tmp_path):
         f = tmp_path / "text.py"

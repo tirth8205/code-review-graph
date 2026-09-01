@@ -1072,6 +1072,11 @@ def main() -> None:
     )
     detect_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     detect_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help="External directory holding the graph database for this repo",
+    )
+    detect_cmd.add_argument(
         "--churn",
         action="store_true",
         help="Add an opt-in change-frequency term to risk scores. Counts "
@@ -1236,6 +1241,14 @@ def main() -> None:
     )
     serve_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
     serve_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "Default graph database directory for tool calls that pass no "
+            "data_dir of their own. Writes no registry entry."
+        ),
+    )
+    serve_cmd.add_argument(
         "--auto-watch",
         action="store_true",
         help="Start filesystem watch in a daemon thread while MCP server runs",
@@ -1270,6 +1283,14 @@ def main() -> None:
 
     mcp_cmd = sub.add_parser("mcp", help="Alias for serve")
     mcp_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    mcp_cmd.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "Default graph database directory for tool calls that pass no "
+            "data_dir of their own. Writes no registry entry."
+        ),
+    )
     mcp_cmd.add_argument(
         "--auto-watch",
         action="store_true",
@@ -1422,15 +1443,23 @@ def main() -> None:
                 serve_main(
                     repo_root=args.repo,
                     auto_watch=auto_watch,
+                    data_dir=args.data_dir,
                     transport="streamable-http",
                     host=host,
                     port=port,
                     tools=args.tools,
                 )
             else:
-                serve_main(repo_root=args.repo, auto_watch=auto_watch, tools=args.tools)
+                serve_main(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    data_dir=args.data_dir,
+                    tools=args.tools,
+                )
         else:
-            serve_main(repo_root=args.repo, auto_watch=auto_watch)
+            serve_main(
+                repo_root=args.repo, auto_watch=auto_watch, data_dir=args.data_dir,
+            )
         return
 
     if args.command == "daemon":

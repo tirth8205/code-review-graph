@@ -26,6 +26,7 @@ _MAX_FLOW_SOURCE_LINES = 2000
 
 def list_flows(
     repo_root: str | None = None,
+    data_dir: str | None = None,
     sort_by: str = "criticality",
     limit: int = 50,
     kind: str | None = None,
@@ -52,7 +53,7 @@ def list_flows(
     """
     _validate_positive_int(limit, "limit")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         # Count every matching flow, then keep the bounded prefix — the same
         # "count all, return a prefix" contract query.py uses for max_results.
@@ -112,6 +113,7 @@ def get_flow(
     flow_name: str | None = None,
     include_source: bool = False,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     max_steps: int = 50,
     max_source_lines: int = 400,
 ) -> dict[str, Any]:
@@ -140,7 +142,7 @@ def get_flow(
     _validate_positive_int(max_steps, "max_steps")
     _validate_positive_int(max_source_lines, "max_source_lines")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         flow: dict | None = None
 

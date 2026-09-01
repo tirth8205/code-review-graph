@@ -220,7 +220,7 @@ class TestBoundedQueryResults:
 
         monkeypatch.setattr(store, "get_edges_by_target", materializing_lookup)
         monkeypatch.setattr(
-            query_module, "_get_store", lambda _repo_root: (store, root),
+            query_module, "_get_store", lambda _repo_root, _data_dir=None: (store, root),
         )
 
         result = query_graph(
@@ -422,7 +422,7 @@ def test_impact_minimal_reports_nodes_omitted(tmp_path, monkeypatch):
     store.commit()
 
     monkeypatch.setattr(
-        query_module, "_get_store", lambda _repo_root: (store, tmp_path),
+        query_module, "_get_store", lambda _repo_root, _data_dir=None: (store, tmp_path),
     )
     monkeypatch.setattr(
         query_module,
@@ -453,7 +453,9 @@ def test_mcp_query_wrapper_forwards_max_results(monkeypatch):
         main_module, "_resolve_repo_root", lambda repo_root=None: "/repo",
     )
     monkeypatch.setattr(
-        main_module, "with_provenance", lambda result, repo_root=None: result,
+        main_module,
+        "with_provenance",
+        lambda result, repo_root=None, data_dir=None: result,
     )
 
     tool = getattr(main_module.query_graph_tool, "fn", None)

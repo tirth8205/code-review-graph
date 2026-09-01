@@ -102,6 +102,7 @@ def get_review_context(
     include_source: bool = True,
     max_lines_per_file: int = 200,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
     max_results: int = 50,
@@ -138,7 +139,7 @@ def get_review_context(
     _validate_positive_int(max_files, "max_files")
     _validate_positive_int(max_lines_per_file, "max_lines_per_file")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         # Get impact radius first
         if changed_files is None:
@@ -427,6 +428,7 @@ def get_affected_flows_func(
     changed_files: list[str] | None = None,
     base: str = "HEAD~1",
     repo_root: str | None = None,
+    data_dir: str | None = None,
     detail_level: str = "standard",
     max_flows: int = 50,
 ) -> dict[str, Any]:
@@ -460,7 +462,7 @@ def get_affected_flows_func(
         ``max_flows``, the per-detail-level ceiling, or the step budget cut
         the response.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         if changed_files is None:
             changed_files = get_changed_files(root, base)
@@ -530,6 +532,7 @@ def detect_changes_func(
     include_source: bool = False,
     max_depth: int = 2,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     detail_level: str = "standard",
     max_results: int = 25,
     max_flows: int = 20,
@@ -566,7 +569,7 @@ def detect_changes_func(
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_flows, "max_flows")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         # Detect changed files if not provided.
         if changed_files is None:

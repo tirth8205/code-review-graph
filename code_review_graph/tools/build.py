@@ -465,6 +465,7 @@ def _compute_summaries(store: Any) -> None:
 def build_or_update_graph(
     full_rebuild: bool = False,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     base: str | None = None,
     postprocess: str = "full",
     recurse_submodules: bool | None = None,
@@ -500,7 +501,7 @@ def build_or_update_graph(
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
     """
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
@@ -576,6 +577,7 @@ def run_postprocess(
     communities: bool = True,
     fts: bool = True,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
 ) -> dict[str, Any]:
@@ -598,7 +600,7 @@ def run_postprocess(
     Returns:
         Summary of what was computed.
     """
-    store, _root = _get_store(repo_root)
+    store, _root = _get_store(repo_root, data_dir)
     result: dict[str, Any] = {"status": "ok"}
     warnings: list[str] = []
 

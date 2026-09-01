@@ -46,6 +46,7 @@ def refactor_func(
     kind: str | None = None,
     file_pattern: str | None = None,
     repo_root: str | None = None,
+    data_dir: str | None = None,
     max_results: int = 50,
     detail_level: str = "standard",
 ) -> dict[str, Any]:
@@ -85,7 +86,7 @@ def refactor_func(
         }
     _validate_positive_int(max_results, "max_results")
 
-    store, root = _get_store(repo_root)
+    store, root = _get_store(repo_root, data_dir)
     try:
         if mode == "rename":
             if not old_name or not new_name:
