@@ -530,13 +530,30 @@ def build_or_update_graph(
             }
         else:
             result = incremental_update(root, store, base=base_resolved)
+            if result["errors"]:
+                return {
+                    **result,
+                    "status": "error",
+                    "build_type": "incremental",
+                    "base_resolved": base_resolved,
+                    "summary": (
+                        f"Incremental update incomplete: {len(result['errors'])} "
+                        "file(s) failed; graph freshness was not advanced."
+                    ),
+                    "postprocess_level": postprocess,
+                }
             if result["files_updated"] == 0:
+                summary = (
+                    "No changes detected. Graph is up to date."
+                    if result.get("freshness_advanced")
+                    else "No graph changes detected. Freshness metadata was not advanced."
+                )
                 return {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
-                    "summary": "No changes detected. Graph is up to date.",
+                    "summary": summary,
                     "postprocess_level": postprocess,
                 }
             build_result = {

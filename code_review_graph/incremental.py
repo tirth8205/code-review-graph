@@ -769,8 +769,8 @@ def _decode_name_status_paths(output: bytes) -> list[str]:
     return paths
 
 
-def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
-    """Persist VCS branch/revision info into the graph metadata table."""
+def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> bool:
+    """Persist VCS branch/revision info and report whether its anchor was stored."""
     vcs = detect_vcs(repo_root)
     if vcs == "git":
         branch, sha = _git_branch_info(repo_root)
@@ -778,12 +778,15 @@ def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> None:
             store.set_metadata("git_branch", branch)
         if sha:
             store.set_metadata("git_head_sha", sha)
+            return True
     elif vcs == "svn":
         branch, rev = _svn_revision_info(repo_root)
         if branch:
             store.set_metadata("svn_branch", branch)
         if rev:
             store.set_metadata("svn_revision", rev)
+            return True
+    return False
 
 
 def _commit_object_exists(repo_root: Path, ref: str) -> bool:
@@ -835,19 +838,27 @@ def resolve_incremental_base(repo_root: Path, store: "GraphStore") -> str | None
     return None
 
 
-def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
+def get_changed_files(
+    repo_root: Path,
+    base: str = "HEAD~1",
+    *,
+    strict: bool = False,
+) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
     For SVN working copies the *base* parameter is ignored; modified/added/
     deleted files are detected from ``svn status``.  Pass an SVN revision
     range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
-    revision instead.
+    revision instead.  When *strict* is true, Git discovery failures raise
+    instead of being reported as an empty change list.
     """
     if detect_vcs(repo_root) == "svn":
         return _get_svn_changed_files(repo_root, base if _SAFE_SVN_REV.match(base) else None)
     # Git path
     if base.startswith("-") or not _SAFE_GIT_REF.fullmatch(base):
         logger.warning("Invalid git ref rejected: %s", base)
+        if strict:
+            raise RuntimeError(f"invalid git diff base: {base}")
         return []
     try:
         # --name-status (not --name-only): renames/copies must report BOTH
@@ -860,6 +871,10 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
+            if strict:
+                raise RuntimeError(
+                    f"git diff failed while discovering changed files (rc={result.returncode})"
+                )
             # Fallback: try diff against empty tree (initial commit)
             result = subprocess.run(
                 ["git", "diff", "--name-status", "-z", "--cached"],
@@ -872,8 +887,11 @@ def get_changed_files(repo_root: Path, base: str = "HEAD~1") -> list[str]:
             logger.warning("git diff failed while discovering changed files")
             return []
         return _decode_name_status_paths(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        if strict:
+            raise RuntimeError("git change discovery failed") from exc
         return []
+
 
 def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
     """Return changed files in an SVN working copy.
@@ -1334,7 +1352,8 @@ def full_build(
     store.set_metadata("last_build_type", "full")
     if not cpp_errors:
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
-    _store_vcs_metadata(repo_root, store)
+    if not errors:
+        _store_vcs_metadata(repo_root, store)
     store.commit()
 
     python_stats = _run_python_resolver(store)
@@ -1374,6 +1393,13 @@ def incremental_update(
         _assert_graph_matches_root(repo_root, store)
     parser = CodeParser(repo_root)
     ignore_patterns = _load_ignore_patterns(repo_root)
+    vcs = detect_vcs(repo_root)
+    stored_git_sha = store.get_metadata("git_head_sha") if vcs == "git" else None
+    authoritative_git_sync = (
+        changed_files is None
+        and bool(stored_git_sha)
+        and base == stored_git_sha
+    )
 
     if (
         store.get_metadata(_CPP_IDENTITY_METADATA_KEY) != CPP_IDENTITY_VERSION
@@ -1401,19 +1427,12 @@ def incremental_update(
 
     # Determine changed files
     if changed_files is None:
-        changed_files = get_changed_files(repo_root, base)
+        changed_files = get_changed_files(
+            repo_root,
+            base,
+            strict=authoritative_git_sync,
+        )
     stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
-
-    if not changed_files and not stale_files:
-        return {
-            "files_updated": 0,
-            "total_nodes": 0,
-            "total_edges": 0,
-            "changed_files": [],
-            "dependent_files": [],
-            "stale_files_removed": 0,
-            "errors": [],
-        }
 
     # Find dependent files (files that import from changed files)
     dependent_files: set[str] = set()
@@ -1504,12 +1523,6 @@ def incremental_update(
 
     removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
     files_updated = parsed_files + len(stale_files) + removed_files
-    if files_updated:
-        store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
-        store.set_metadata("last_build_type", "incremental")
-        store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
-        _store_vcs_metadata(repo_root, store)
-        store.commit()
 
     # Only re-run language-specific resolvers when the relevant files changed.
     python_changed = any(
@@ -1542,6 +1555,15 @@ def incremental_update(
     scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
 
+    freshness_advanced = False
+    if not errors and (files_updated or authoritative_git_sync):
+        store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
+        store.set_metadata("last_build_type", "incremental")
+        store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+        if authoritative_git_sync or (vcs == "svn" and files_updated):
+            freshness_advanced = _store_vcs_metadata(repo_root, store)
+        store.commit()
+
     return {
         "files_updated": files_updated,
         "total_nodes": total_nodes,
@@ -1550,6 +1572,7 @@ def incremental_update(
         "dependent_files": list(dependent_files),
         "stale_files_removed": len(stale_files),
         "errors": errors,
+        "freshness_advanced": freshness_advanced,
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,

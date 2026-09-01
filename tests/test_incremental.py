@@ -576,6 +576,15 @@ class TestGitOperations:
         assert "-z" in mock_run.call_args_list[1].args[0]
 
     @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_strict_failure_does_not_fallback(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=128, stdout=b"")
+
+        with pytest.raises(RuntimeError, match="git diff failed"):
+            get_changed_files(tmp_path, strict=True)
+
+        mock_run.assert_called_once()
+
+    @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_rejects_failed_fallback(self, mock_run, tmp_path):
         mock_run.side_effect = [
             MagicMock(returncode=128, stdout=b""),
