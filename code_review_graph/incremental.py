@@ -1805,7 +1805,6 @@ class _WatchSupervisor:
         self._handler: Any = None
         self._watches: dict[str, _WatchEntry] = {}
         self._shallow: set[str] = set()
-        self._live_threads: dict[int, threading.Thread] = {}
         self._repaired_roots: set[str] = set()
         self._degraded = False
         self._last_health_write = 0.0
@@ -2026,8 +2025,10 @@ class _WatchSupervisor:
         still the live watch for a directory that is still the same directory.
         Three things are deliberately not deaths:
 
-        * a thread never seen alive — an emitter caught between construction
-          and start is not a corpse;
+        * a thread that has never run — an emitter caught between construction
+          and start is not a corpse.  One that ran and stopped is one whether
+          or not a tick happened to see it alive, so a watch that failed the
+          moment it was registered still reports;
         * a thread whose watch we have already released, or whose root is gone.
           Both backends stop an emitter when its own root disappears, so a
           plain ``rm -rf lib/`` would otherwise exit the watcher, and the
@@ -2045,13 +2046,10 @@ class _WatchSupervisor:
         """
         dead: list[str] = []
         repaired: list[str] = []
-        still_present: dict[int, threading.Thread] = {}
         for thread, root in self._watchdog_threads():
-            key = id(thread)
             if thread.is_alive():
-                still_present[key] = thread
                 continue
-            if key not in self._live_threads:
+            if thread.ident is None:
                 continue
             if root is None:
                 dead.append(thread.name)
@@ -2088,7 +2086,6 @@ class _WatchSupervisor:
                 continue
             self._repaired_roots.add(root)
             repaired.append(root)
-        self._live_threads = still_present
         return dead, repaired
 
     # -- health reporting ------------------------------------------------
