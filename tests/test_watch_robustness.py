@@ -604,6 +604,26 @@ class TestObserverLiveness:
         assert supervisor.check_liveness() == ([], [])
         assert supervisor.check_liveness() == ([], [])
 
+    def test_emitter_that_dies_before_the_first_tick_is_reported(self, tmp_path):
+        """The registration shape: no tick ever saw this emitter alive.
+
+        inotify watch exhaustion — #811's own trigger — kills an emitter
+        between being scheduled and the first tick.  A check that can only
+        report a thread it once saw alive skips that one forever, so the
+        directory stays unwatched while ``crg-daemon status`` keeps saying
+        "alive".
+        """
+        supervisor, observer, watched, thread, gate = self._watched(tmp_path)
+        gate.set()
+        thread.join(timeout=5)
+
+        # The directory is untouched, so the first death buys one reschedule.
+        dead, repaired = supervisor.check_liveness()
+
+        assert dead == []
+        assert repaired == [str(watched)], "a watch that never came up went unnoticed"
+        assert observer.scheduled.count((str(watched), True)) == 2
+
     def test_unschedulable_observer_reports_no_deaths(self, tmp_path):
         """A mock or stub observer must not fake a death every tick."""
         supervisor = _WatchSupervisor(MagicMock(), tmp_path, [], health_path=None)
