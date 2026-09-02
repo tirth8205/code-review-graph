@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Watch mode now reports a filesystem emitter that stopped before any liveness
+  tick saw it alive. The check could only report a thread a previous tick had
+  recorded as alive, so a watch that failed the moment it was registered —
+  inotify watch exhaustion is exactly that failure — left its directory
+  unwatched forever while the watcher kept running and `crg-daemon status` kept
+  calling it healthy (#891).
+
 ## [2.3.8] - 2026-08-21
 
 ### Added
