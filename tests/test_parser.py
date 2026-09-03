@@ -264,6 +264,50 @@ class Plain:
         assert "os" in import_targets
         assert "pathlib" in import_targets
 
+    def test_parse_python_aliased_module_imports(self, tmp_path):
+        source = tmp_path / "aliases.py"
+        source.write_text(
+            "import b as B\nimport a.b as C\nimport x, y as z\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(source)
+
+        import_targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert import_targets == {"a.b", "b", "x", "y"}
+
+    def test_python_aliased_module_is_reported_by_queries(self, tmp_path):
+        from code_review_graph.tools.query import get_impact_radius, query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        target = tmp_path / "b.py"
+        target.write_text("def hi():\n    return 1\n", encoding="utf-8")
+        importer = tmp_path / "aliased.py"
+        importer.write_text("import b as B\nprint(B.hi())\n", encoding="utf-8")
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser(tmp_path)
+        for path in (target, importer):
+            nodes, edges = parser.parse_file(path)
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(target), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {entry["file"] for entry in result.get("results", [])}
+        assert importer.as_posix() in importers
+
+        impact = get_impact_radius(
+            changed_files=[str(target)], repo_root=str(tmp_path), max_depth=1
+        )
+        assert impact["status"] == "ok"
+        assert importer.as_posix() in impact["impacted_files"]
+
     def test_parse_python_calls(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
         calls = [e for e in edges if e.kind == "CALLS"]
