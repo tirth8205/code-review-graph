@@ -1321,6 +1321,17 @@ _SPRING_WEBFLUX_HTTP_VERBS = frozenset({"DELETE", "GET", "PATCH", "POST", "PUT"}
 _HTTP_REQUEST_METHODS = frozenset({
     "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
 })
+# Call-registration route verbs for JS/TS web frameworks (Express, Koa,
+# Fastify): ``app.get('/x', handler)`` / ``router.post('/x', handler)``.
+_JS_ROUTE_VERBS = frozenset({
+    "get", "post", "put", "delete", "patch", "head", "options", "all",
+})
+# Go router methods: net/http ``HandleFunc``/``Handle`` (any method), plus the
+# per-verb methods of gin/echo/chi (``r.GET('/x', h)``).
+_GO_ROUTE_VERBS = frozenset({
+    "Handle", "HandleFunc",
+    "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -9576,6 +9587,100 @@ class CodeParser:
         ))
         return True
 
+    _CALL_REG_STRING_TYPES = frozenset({
+        "string", "string_literal", "interpreted_string_literal",
+        "raw_string_literal",
+    })
+
+    def _call_registration_arguments(
+        self, invocation, language: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return ``(route, handler_name)`` for a call-registration route such
+        as ``app.get('/x', handler)`` or ``http.HandleFunc('/x', handler)``.
+
+        Only a literal string route (starting with ``/``) and a bare
+        identifier handler resolve here; inline function handlers are left for
+        a later pass because they are not their own graph nodes today.
+        """
+        arguments = invocation.child_by_field_name("arguments")
+        if arguments is None:
+            arguments = next(
+                (
+                    child for child in invocation.children
+                    if child.type in ("arguments", "argument_list")
+                ),
+                None,
+            )
+        if arguments is None:
+            return None, None
+        named = [child for child in arguments.children if child.is_named]
+        if len(named) < 2 or named[0].type not in self._CALL_REG_STRING_TYPES:
+            return None, None
+        literal = named[0].text.decode("utf-8", errors="replace")
+        route = literal[1:-1] if len(literal) >= 2 else ""
+        if not route.startswith("/"):
+            return None, None
+        handler = named[-1]
+        if handler.type != "identifier":
+            return None, None
+        return route, handler.text.decode("utf-8", errors="replace")
+
+    def _emit_call_registration_endpoint(
+        self,
+        invocation,
+        language: str,
+        http_method: str,
+        file_path: str,
+        enclosing_class: Optional[str],
+        defined_names: set[str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+    ) -> bool:
+        """Link a JS/Go call-registration HTTP route to its handler as an
+        ``Endpoint`` node + ``HANDLES`` edge, mirroring the Spring WebFlux
+        emitter so the query layer treats every framework uniformly.
+
+        The handler must be an identifier defined in this file; the resolved
+        qualified name matches the handler function node so ``handlers_of`` /
+        ``endpoints_for`` link them.
+        """
+        route, handler_name = self._call_registration_arguments(invocation, language)
+        if route is None or handler_name is None:
+            return False
+        if handler_name not in (defined_names or set()):
+            return False
+        handler_target = self._qualify(handler_name, file_path, enclosing_class)
+        line = invocation.start_point[0] + 1
+        style = "go_http" if language == "go" else "js_call"
+        endpoint_name = f"{handler_name}@{style}[{line}] {http_method} {route}"
+        endpoint_target = self._qualify(endpoint_name, file_path, enclosing_class)
+        metadata = {
+            "handler": handler_name,
+            "handler_qualified": handler_target,
+            "http_method": http_method,
+            "mapping_style": style,
+            "route": route,
+        }
+        nodes.append(NodeInfo(
+            kind="Endpoint",
+            name=endpoint_name,
+            file_path=file_path,
+            line_start=line,
+            line_end=invocation.end_point[0] + 1,
+            language=language,
+            parent_name=enclosing_class,
+            extra=metadata,
+        ))
+        edges.append(EdgeInfo(
+            kind="HANDLES",
+            source=handler_target,
+            target=endpoint_target,
+            file_path=file_path,
+            line=line,
+            extra=metadata,
+        ))
+        return True
+
     @staticmethod
     def _spring_schedule_kind(attributes: dict[str, str]) -> str:
         """Classify one Spring schedule by the trigger attribute it uses."""
@@ -10773,6 +10878,12 @@ class CodeParser:
                 member_call = self._get_js_member_call_name(child)
                 if member_call:
                     call_extra["member_call"] = member_call
+                    verb = member_call.rsplit(".", 1)[-1].lower()
+                    if verb in _JS_ROUTE_VERBS:
+                        self._emit_call_registration_endpoint(
+                            child, language, verb.upper(), file_path,
+                            enclosing_class, defined_names or set(), nodes, edges,
+                        )
             if (
                 language in self._TYPED_CALL_LANGUAGES
                 or language in ("cpp", "go", "rust")
@@ -10795,6 +10906,18 @@ class CodeParser:
                         call_extra["go_method_receiver"] = True
                 if language == "java" and child.type == "method_reference":
                     call_extra["call_syntax"] = "method_reference"
+                if (
+                    language == "go"
+                    and method_name in _GO_ROUTE_VERBS
+                ):
+                    http_method = (
+                        "ANY" if method_name in ("Handle", "HandleFunc")
+                        else method_name.upper()
+                    )
+                    self._emit_call_registration_endpoint(
+                        child, language, http_method, file_path,
+                        enclosing_class, defined_names or set(), nodes, edges,
+                    )
 
             if language == "java" and child.type == "method_invocation":
                 self._emit_spring_webflux_endpoint(
