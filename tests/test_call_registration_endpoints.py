@@ -102,3 +102,47 @@ obj.post('data', handler);
     nodes, _ = CodeParser().parse_bytes(tmp_path / "x.js", source)
     # obj.post('data', handler) has a non-slash route, so it is not an endpoint.
     assert [n for n in nodes if n.kind == "Endpoint"] == []
+
+
+JS_INLINE = b"""
+const app = require('express')();
+app.post('/run', (req, res) => { doThing(req.body.cmd); });
+app.get('/read', function (req, res) { res.send(readFileSync(req.query.p)); });
+"""
+
+GO_INLINE = b"""
+package main
+
+import "net/http"
+
+func main() {
+\thttp.HandleFunc("/x", func(w http.ResponseWriter, r *http.Request) {})
+}
+"""
+
+
+def test_inline_js_handlers_get_synthetic_nodes(tmp_path: Path) -> None:
+    path = tmp_path / "inline.js"
+    nodes, edges = CodeParser().parse_bytes(path, JS_INLINE)
+    endpoints = {(n.extra["http_method"], n.extra["route"])
+                 for n in nodes if n.kind == "Endpoint"}
+    assert endpoints == {("POST", "/run"), ("GET", "/read")}
+    synth = [n for n in nodes
+             if n.kind == "Function" and n.extra.get("synthetic_route_handler")]
+    assert len(synth) == 2
+    # every HANDLES source resolves to a node in this file (the synthetic
+    # handler), so the handler is addressable and analyzable.
+    node_qns = {f"{path.as_posix()}::{n.name}" for n in nodes}
+    handles = [e for e in edges if e.kind == "HANDLES"]
+    assert handles and all(e.source in node_qns for e in handles)
+
+
+def test_inline_go_handler_gets_synthetic_node(tmp_path: Path) -> None:
+    path = tmp_path / "srv.go"
+    nodes, _ = CodeParser().parse_bytes(path, GO_INLINE)
+    endpoints = {(n.extra["http_method"], n.extra["route"])
+                 for n in nodes if n.kind == "Endpoint"}
+    assert endpoints == {("ANY", "/x")}
+    synth = [n for n in nodes
+             if n.kind == "Function" and n.extra.get("synthetic_route_handler")]
+    assert len(synth) == 1

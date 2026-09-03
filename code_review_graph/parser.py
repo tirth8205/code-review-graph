@@ -9591,16 +9591,21 @@ class CodeParser:
         "string", "string_literal", "interpreted_string_literal",
         "raw_string_literal",
     })
+    # Inline function handlers: JS arrow/function expressions and Go closures.
+    _INLINE_HANDLER_TYPES = frozenset({
+        "arrow_function", "function_expression", "function",
+        "generator_function", "func_literal",
+    })
 
     def _call_registration_arguments(
         self, invocation, language: str,
-    ) -> tuple[Optional[str], Optional[str]]:
-        """Return ``(route, handler_name)`` for a call-registration route such
+    ) -> tuple[Optional[str], object]:
+        """Return ``(route, handler_node)`` for a call-registration route such
         as ``app.get('/x', handler)`` or ``http.HandleFunc('/x', handler)``.
 
-        Only a literal string route (starting with ``/``) and a bare
-        identifier handler resolve here; inline function handlers are left for
-        a later pass because they are not their own graph nodes today.
+        The route must be a literal string starting with ``/``; the handler is
+        the last argument, either a bare identifier (a named function) or an
+        inline function expression. Anything else does not resolve.
         """
         arguments = invocation.child_by_field_name("arguments")
         if arguments is None:
@@ -9621,9 +9626,9 @@ class CodeParser:
         if not route.startswith("/"):
             return None, None
         handler = named[-1]
-        if handler.type != "identifier":
-            return None, None
-        return route, handler.text.decode("utf-8", errors="replace")
+        if handler.type == "identifier" or handler.type in self._INLINE_HANDLER_TYPES:
+            return route, handler
+        return None, None
 
     def _emit_call_registration_endpoint(
         self,
@@ -9640,22 +9645,50 @@ class CodeParser:
         ``Endpoint`` node + ``HANDLES`` edge, mirroring the Spring WebFlux
         emitter so the query layer treats every framework uniformly.
 
-        The handler must be an identifier defined in this file; the resolved
-        qualified name matches the handler function node so ``handlers_of`` /
-        ``endpoints_for`` link them.
+        A named identifier handler resolves to its existing function node. An
+        inline function handler is not a node on its own, so a synthetic
+        ``Function`` node is emitted for it (spanning the inline body) and used
+        as the handler; this makes anonymous route handlers, the Express
+        majority, addressable and analyzable like named ones.
         """
-        route, handler_name = self._call_registration_arguments(invocation, language)
-        if route is None or handler_name is None:
-            return False
-        if handler_name not in (defined_names or set()):
-            return False
-        handler_target = self._qualify(handler_name, file_path, enclosing_class)
-        line = invocation.start_point[0] + 1
         style = "go_http" if language == "go" else "js_call"
-        endpoint_name = f"{handler_name}@{style}[{line}] {http_method} {route}"
+        route, handler = self._call_registration_arguments(invocation, language)
+        if route is None or handler is None:
+            return False
+
+        if handler.type == "identifier":
+            handler_name = handler.text.decode("utf-8", errors="replace")
+            if handler_name not in (defined_names or set()):
+                return False
+            handler_display = handler_name
+            handler_target = self._qualify(handler_name, file_path, enclosing_class)
+        else:
+            # Inline handler: synthesize a Function node for its body so the
+            # sink lines inside it resolve to a real, reachable node.
+            handler_line = handler.start_point[0] + 1
+            synth_name = f"handler@{style}[{handler_line}]"
+            handler_display = "handler"
+            handler_target = self._qualify(synth_name, file_path, enclosing_class)
+            nodes.append(NodeInfo(
+                kind="Function",
+                name=synth_name,
+                file_path=file_path,
+                line_start=handler_line,
+                line_end=handler.end_point[0] + 1,
+                language=language,
+                parent_name=enclosing_class,
+                extra={
+                    "synthetic_route_handler": True,
+                    "http_method": http_method,
+                    "route": route,
+                },
+            ))
+
+        line = invocation.start_point[0] + 1
+        endpoint_name = f"{handler_display}@{style}[{line}] {http_method} {route}"
         endpoint_target = self._qualify(endpoint_name, file_path, enclosing_class)
         metadata = {
-            "handler": handler_name,
+            "handler": handler_display,
             "handler_qualified": handler_target,
             "http_method": http_method,
             "mapping_style": style,
