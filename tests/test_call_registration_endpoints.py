@@ -146,3 +146,57 @@ def test_inline_go_handler_gets_synthetic_node(tmp_path: Path) -> None:
     synth = [n for n in nodes
              if n.kind == "Function" and n.extra.get("synthetic_route_handler")]
     assert len(synth) == 1
+
+
+OBJECT_CONFIG = b"""
+function getWidget(context, req, res) { return res.ok(); }
+router.get({ path: '/api/widget', validate: false }, getWidget);
+router.post({ path: '/api/create' }, async (context, req, res) => res.ok());
+"""
+
+DJANGO = b"""
+from django.urls import path, re_path
+
+def user_list(request): return None
+def user_detail(request): return None
+
+urlpatterns = [
+    path('users/', user_list, name='users'),
+    re_path(r'^users/(?P<pk>[0-9]+)/$', user_detail),
+]
+"""
+
+AIOHTTP_FLASK = b"""
+async def handle(request): return None
+def flask_view(): return None
+
+app.router.add_get('/x', handle)
+app.add_url_rule('/y', 'yname', flask_view)
+"""
+
+
+def test_object_config_routes(tmp_path: Path) -> None:
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "routes.ts", OBJECT_CONFIG)
+    endpoints = {(n.extra["http_method"], n.extra["route"])
+                 for n in nodes if n.kind == "Endpoint"}
+    assert endpoints == {("GET", "/api/widget"), ("POST", "/api/create")}
+
+
+def test_django_urlconf_routes(tmp_path: Path) -> None:
+    path_obj = tmp_path / "urls.py"
+    nodes, edges = CodeParser().parse_bytes(path_obj, DJANGO)
+    routes = {n.extra["route"] for n in nodes if n.kind == "Endpoint"}
+    assert routes == {"users/", "^users/(?P<pk>[0-9]+)/$"}
+    sources = {e.source for e in edges if e.kind == "HANDLES"}
+    assert sources == {
+        f"{path_obj.as_posix()}::user_list",
+        f"{path_obj.as_posix()}::user_detail",
+    }
+
+
+def test_python_add_routes(tmp_path: Path) -> None:
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "app.py", AIOHTTP_FLASK)
+    endpoints = {(n.extra["http_method"], n.extra["route"])
+                 for n in nodes if n.kind == "Endpoint"}
+    assert ("GET", "/x") in endpoints
+    assert ("ANY", "/y") in endpoints

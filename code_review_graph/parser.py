@@ -9594,18 +9594,75 @@ class CodeParser:
     # Inline function handlers: JS arrow/function expressions and Go closures.
     _INLINE_HANDLER_TYPES = frozenset({
         "arrow_function", "function_expression", "function",
-        "generator_function", "func_literal",
+        "generator_function", "func_literal", "lambda",
     })
+    # Object/dict config keys that carry a route path (Hapi/Kibana/Fastify).
+    _ROUTE_CONFIG_KEYS = frozenset({"path", "url", "route"})
+    _CALL_REG_OBJECT_TYPES = frozenset({"object", "dictionary"})
+    _CALL_REG_STYLE = {"go": "go_http", "python": "py_call", "php": "php_call"}
+
+    @staticmethod
+    def _string_literal_value(node) -> Optional[str]:
+        """Inner text of a string literal, stripping any prefix (r'', b'',
+        template quotes) and the surrounding quotes."""
+        text = node.text.decode("utf-8", errors="replace")
+        quote = next((c for c in text if c in "\"'`"), None)
+        if quote is None:
+            return None
+        start = text.index(quote)
+        end = text.rfind(quote)
+        return text[start + 1:end] if end > start else None
+
+    def _route_from_argument(self, node) -> Optional[str]:
+        """A route path from a string literal, or from an object/dict config
+        whose ``path``/``url``/``route`` key holds a string literal."""
+        if node.type in self._CALL_REG_STRING_TYPES:
+            return self._string_literal_value(node)
+        if node.type in self._CALL_REG_OBJECT_TYPES:
+            for pair in node.children:
+                if pair.type not in ("pair", "keyword_argument"):
+                    continue
+                key = pair.child_by_field_name("key") or pair.child_by_field_name("name")
+                value = pair.child_by_field_name("value")
+                if key is None or value is None:
+                    continue
+                kname = key.text.decode("utf-8", errors="replace").strip("'\"`")
+                if kname in self._ROUTE_CONFIG_KEYS and value.type in self._CALL_REG_STRING_TYPES:
+                    return self._string_literal_value(value)
+        return None
+
+    @staticmethod
+    def _python_route_signature(call_name: Optional[str]) -> tuple[Optional[str], bool]:
+        """``(http_method, require_slash)`` for a Python route-registration
+        callee, or ``(None, False)``. Django ``path``/``re_path``/``url`` map
+        any method and use slash-less routes; aiohttp/Flask ``add_*`` use
+        per-verb methods and slash routes."""
+        if not call_name:
+            return None, False
+        if call_name in ("path", "re_path", "url"):
+            return "ANY", False
+        if call_name in (
+            "add_get", "add_post", "add_put", "add_delete",
+            "add_patch", "add_head", "add_options",
+        ):
+            return call_name.split("_", 1)[1].upper(), True
+        if call_name in ("add_route", "add_view", "add_url_rule"):
+            return "ANY", True
+        return None, False
 
     def _call_registration_arguments(
-        self, invocation, language: str,
+        self, invocation, language: str, require_slash: bool = True,
     ) -> tuple[Optional[str], object]:
-        """Return ``(route, handler_node)`` for a call-registration route such
-        as ``app.get('/x', handler)`` or ``http.HandleFunc('/x', handler)``.
+        """Return ``(route, handler_node)`` for a call-registration route.
 
-        The route must be a literal string starting with ``/``; the handler is
-        the last argument, either a bare identifier (a named function) or an
-        inline function expression. Anything else does not resolve.
+        The route is the first positional argument, a literal string or an
+        object/dict config (Hapi/Kibana ``{path: '/x'}``). The handler is the
+        last positional argument, a named identifier, a dotted reference
+        (Django ``views.foo``), or an inline function. Keyword arguments (a
+        Django ``name=`` or a Flask ``methods=``) are not positional.
+        ``require_slash`` filters generic-verb frameworks (Express ``app.get``)
+        where a leading ``/`` distinguishes a route from ``cache.get('key')``;
+        it is off for framework-specific callees like Django ``path``.
         """
         arguments = invocation.child_by_field_name("arguments")
         if arguments is None:
@@ -9618,15 +9675,21 @@ class CodeParser:
             )
         if arguments is None:
             return None, None
-        named = [child for child in arguments.children if child.is_named]
-        if len(named) < 2 or named[0].type not in self._CALL_REG_STRING_TYPES:
+        positional = [
+            child for child in arguments.children
+            if child.is_named and child.type != "keyword_argument"
+        ]
+        if len(positional) < 2:
             return None, None
-        literal = named[0].text.decode("utf-8", errors="replace")
-        route = literal[1:-1] if len(literal) >= 2 else ""
-        if not route.startswith("/"):
+        route = self._route_from_argument(positional[0])
+        if route is None or (require_slash and not route.startswith("/")):
             return None, None
-        handler = named[-1]
-        if handler.type == "identifier" or handler.type in self._INLINE_HANDLER_TYPES:
+        handler = positional[-1]
+        if (
+            handler.type == "identifier"
+            or handler.type in self._INLINE_HANDLER_TYPES
+            or (language == "python" and handler.type == "attribute")
+        ):
             return route, handler
         return None, None
 
@@ -9640,24 +9703,29 @@ class CodeParser:
         defined_names: set[str],
         nodes: list[NodeInfo],
         edges: list[EdgeInfo],
+        require_slash: bool = True,
     ) -> bool:
-        """Link a JS/Go call-registration HTTP route to its handler as an
+        """Link a call-registration HTTP route to its handler as an
         ``Endpoint`` node + ``HANDLES`` edge, mirroring the Spring WebFlux
         emitter so the query layer treats every framework uniformly.
 
-        A named identifier handler resolves to its existing function node. An
-        inline function handler is not a node on its own, so a synthetic
-        ``Function`` node is emitted for it (spanning the inline body) and used
-        as the handler; this makes anonymous route handlers, the Express
-        majority, addressable and analyzable like named ones.
+        A named identifier or dotted handler resolves to its existing function
+        node. An inline function handler is not a node on its own, so a
+        synthetic ``Function`` node is emitted for it (spanning the inline
+        body); this makes anonymous route handlers, the Express majority,
+        addressable and analyzable like named ones.
         """
-        style = "go_http" if language == "go" else "js_call"
-        route, handler = self._call_registration_arguments(invocation, language)
+        style = self._CALL_REG_STYLE.get(language, "js_call")
+        route, handler = self._call_registration_arguments(
+            invocation, language, require_slash,
+        )
         if route is None or handler is None:
             return False
 
-        if handler.type == "identifier":
-            handler_name = handler.text.decode("utf-8", errors="replace")
+        if handler.type in ("identifier", "attribute"):
+            # A dotted reference (Django ``views.foo``) resolves by its last
+            # segment; same-file linkage only for now.
+            handler_name = handler.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
             if handler_name not in (defined_names or set()):
                 return False
             handler_display = handler_name
@@ -10917,6 +10985,14 @@ class CodeParser:
                             child, language, verb.upper(), file_path,
                             enclosing_class, defined_names or set(), nodes, edges,
                         )
+            if language == "python":
+                py_http, py_slash = self._python_route_signature(call_name)
+                if py_http is not None:
+                    self._emit_call_registration_endpoint(
+                        child, language, py_http, file_path,
+                        enclosing_class, defined_names or set(), nodes, edges,
+                        require_slash=py_slash,
+                    )
             if (
                 language in self._TYPED_CALL_LANGUAGES
                 or language in ("cpp", "go", "rust")
