@@ -9651,7 +9651,7 @@ class CodeParser:
         return None, False
 
     def _call_registration_arguments(
-        self, invocation, language: str, require_slash: bool = True,
+        self, invocation, language: str,
     ) -> tuple[Optional[str], object]:
         """Return ``(route, handler_node)`` for a call-registration route.
 
@@ -9659,10 +9659,8 @@ class CodeParser:
         object/dict config (Hapi/Kibana ``{path: '/x'}``). The handler is the
         last positional argument, a named identifier, a dotted reference
         (Django ``views.foo``), or an inline function. Keyword arguments (a
-        Django ``name=`` or a Flask ``methods=``) are not positional.
-        ``require_slash`` filters generic-verb frameworks (Express ``app.get``)
-        where a leading ``/`` distinguishes a route from ``cache.get('key')``;
-        it is off for framework-specific callees like Django ``path``.
+        Django ``name=`` or a Flask ``methods=``) are not positional. The
+        route is returned raw; the caller validates its shape.
         """
         arguments = invocation.child_by_field_name("arguments")
         if arguments is None:
@@ -9682,7 +9680,7 @@ class CodeParser:
         if len(positional) < 2:
             return None, None
         route = self._route_from_argument(positional[0])
-        if route is None or (require_slash and not route.startswith("/")):
+        if route is None:
             return None, None
         handler = positional[-1]
         if (
@@ -9716,10 +9714,16 @@ class CodeParser:
         addressable and analyzable like named ones.
         """
         style = self._CALL_REG_STYLE.get(language, "js_call")
-        route, handler = self._call_registration_arguments(
-            invocation, language, require_slash,
-        )
+        route, handler = self._call_registration_arguments(invocation, language)
         if route is None or handler is None:
+            return False
+
+        # Go 1.22 ServeMux patterns embed the method: "GET /info".
+        if language == "go" and http_method == "ANY":
+            match = re.match(r"^([A-Z]+)\s+(/.*)$", route)
+            if match:
+                http_method, route = match.group(1), match.group(2)
+        if require_slash and not route.startswith("/"):
             return False
 
         if handler.type in ("identifier", "attribute"):

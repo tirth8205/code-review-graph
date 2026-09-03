@@ -200,3 +200,27 @@ def test_python_add_routes(tmp_path: Path) -> None:
                  for n in nodes if n.kind == "Endpoint"}
     assert ("GET", "/x") in endpoints
     assert ("ANY", "/y") in endpoints
+
+
+GO_MUX = b"""
+package main
+
+import "net/http"
+
+func indexHandler(w http.ResponseWriter, r *http.Request) {}
+func resetHandler(w http.ResponseWriter, r *http.Request) {}
+
+func main() {
+\tmux := http.NewServeMux()
+\tmux.HandleFunc("GET /info", indexHandler)
+\tmux.HandleFunc("POST /reset-password", resetHandler)
+\tmux.HandleFunc("/legacy", indexHandler)
+}
+"""
+
+
+def test_go_method_prefixed_patterns(tmp_path: Path) -> None:
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "s.go", GO_MUX)
+    endpoints = {(n.extra["http_method"], n.extra["route"])
+                 for n in nodes if n.kind == "Endpoint"}
+    assert endpoints == {("GET", "/info"), ("POST", "/reset-password"), ("ANY", "/legacy")}
