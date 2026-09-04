@@ -484,6 +484,44 @@ class TestNewDirectoryAdoption:
         assert supervisor.watched_paths == [str(tmp_path)]
         assert adopted == [str(tmp_path / "services")]
 
+    def test_failed_promotion_keeps_existing_watches(self, tmp_path):
+        """A failed replacement must not leave a live observer blind."""
+        supervisor, observer = self._supervisor(tmp_path, max_schedules=2)
+        watched_before = supervisor.watched_paths
+        shallow_before = set(supervisor._shallow)
+        schedule = observer.schedule
+
+        def fail_recursive_root(handler, path, *, recursive=False, event_filter=None):
+            if path == str(tmp_path) and recursive:
+                raise OSError("watch limit reached")
+            return schedule(
+                handler,
+                path,
+                recursive=recursive,
+                event_filter=event_filter,
+            )
+
+        observer.schedule = fail_recursive_root
+        (tmp_path / "services").mkdir()
+
+        adopted, vanished = supervisor.sync_watches()
+
+        assert adopted == []
+        assert vanished == []
+        assert supervisor.watched_paths == watched_before
+        assert supervisor._shallow == shallow_before
+        assert observer.unscheduled == []
+        assert supervisor.degraded is False
+
+        observer.schedule = schedule
+        adopted, vanished = supervisor.sync_watches()
+
+        assert adopted == [str(tmp_path / "services")]
+        assert vanished == []
+        assert supervisor.watched_paths == [str(tmp_path)]
+        assert sorted(observer.unscheduled) == watched_before
+        assert supervisor.degraded is True
+
     def test_degraded_watchers_are_reported_as_partial(self, tmp_path):
         supervisor, _ = self._supervisor(tmp_path, max_schedules=2)
         supervisor._health_path = tmp_path / "health.json"
