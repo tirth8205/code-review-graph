@@ -1930,8 +1930,7 @@ class _WatchSupervisor:
             # Promoting the parent — often the repository root — hands every
             # ignored tree under it back to the OS, which is the condition
             # #811 is about.  It is the last resort, never the first.
-            self._promote_to_recursive(os.path.dirname(candidate))
-            return True
+            return self._promote_to_recursive(os.path.dirname(candidate))
         for path, recursive in plan:
             self._schedule(path, recursive=recursive)
         logger.info("Watching new directory %s (%d watch(es))", relative, len(plan))
@@ -1958,11 +1957,27 @@ class _WatchSupervisor:
         # One recursive watch still filters every other directory in the repo.
         return [(directory, True)]
 
-    def _promote_to_recursive(self, parent: str) -> None:
+    def _promote_to_recursive(self, parent: str) -> bool:
         """Trade filtering for coverage when the watch budget runs out."""
-        for path in [parent, *self._descendants_of(parent)]:
-            self._release_directory(path)
+        previous = self._watches.pop(parent, None)
+        if previous is None:
+            return False
+        was_shallow = parent in self._shallow
+        self._shallow.discard(parent)
         self._schedule(Path(parent), recursive=True)
+        if parent not in self._watches:
+            self._watches[parent] = previous
+            if was_shallow:
+                self._shallow.add(parent)
+            return False
+        _run_time_boxed(
+            lambda: self._observer.unschedule(previous.handle),
+            f"unschedule {parent}",
+            timeout=_WATCH_STOP_TIMEOUT,
+        )
+        self._repaired_roots.discard(parent)
+        for path in self._descendants_of(parent):
+            self._release_directory(path)
         self._degraded = True
         logger.warning(
             "Watch budget of %d reached; watching %s recursively instead — ignored "
@@ -1971,6 +1986,7 @@ class _WatchSupervisor:
             self._max_schedules,
             parent,
         )
+        return True
 
     def _release_directory(self, path: str) -> None:
         entry = self._watches.pop(path, None)
