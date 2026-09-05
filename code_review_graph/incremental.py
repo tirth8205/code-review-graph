@@ -2177,20 +2177,27 @@ def _create_watch_handler(
                 relative = candidate.relative_to(lexical_root)
             except ValueError:
                 return None
-            existing = candidate
-            while not existing.exists() and existing != lexical_root:
-                existing = existing.parent
             try:
+                existing = candidate
+                while not existing.exists() and existing != lexical_root:
+                    existing = existing.parent
                 existing.resolve().relative_to(resolved_root)
+                if any(
+                    component.is_symlink()
+                    for component in [
+                        lexical_root / Path(*relative.parts[:index])
+                        for index in range(1, len(relative.parts) + 1)
+                    ]
+                ):
+                    return None
             except ValueError:
                 return None
-            if any(
-                component.is_symlink()
-                for component in [
-                    lexical_root / Path(*relative.parts[:index])
-                    for index in range(1, len(relative.parts) + 1)
-                ]
-            ):
+            except OSError as exc:
+                # A path the OS cannot stat — a component past NAME_MAX, a
+                # broken mount — is nothing the graph can hold. Drop the event
+                # the way an ignored one is dropped instead of letting the error
+                # reach process() and end the watch loop (#897).
+                logger.debug("Skipping unstattable watch path %s: %s", path[:120], exc)
                 return None
             if _should_ignore(str(relative), ignore_patterns):
                 return None
