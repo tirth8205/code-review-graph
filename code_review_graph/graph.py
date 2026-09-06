@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import networkx as nx
@@ -632,8 +632,14 @@ class GraphStore:
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         candidate_cache: dict[str, list[tuple[str, str]]] = {}
         import_cache: dict[str, set[str]] = {}
+        # Same dotted-module evidence the endpoint resolver uses, for graphs
+        # queried before that pass has run. Built on first use: most queries
+        # never reach this fallback, and the index scans every .py path.
+        # See: #903
+        module_files: dict[str, str] | None = None
 
         def _candidate_for_context(name: str, context_file: str) -> str | None:
+            nonlocal module_files
             if name not in candidate_cache:
                 candidate_cache[name] = [
                     (candidate["qualified_name"], candidate["file_path"])
@@ -645,6 +651,8 @@ class GraphStore:
                     ).fetchall()
                 ]
             if context_file not in import_cache:
+                if module_files is None:
+                    module_files = self._python_module_file_index(conn)
                 imported_files: set[str] = set()
                 for imported in conn.execute(
                     "SELECT target_qualified FROM edges "
@@ -652,9 +660,13 @@ class GraphStore:
                     (context_file,),
                 ).fetchall():
                     target = imported["target_qualified"]
-                    imported_files.add(
+                    target_file = (
                         target.split("::", 1)[0] if "::" in target else target
                     )
+                    imported_files.add(target_file)
+                    resolved_module = module_files.get(target_file)
+                    if resolved_module:
+                        imported_files.add(resolved_module)
                 import_cache[context_file] = imported_files
             return self._select_evidence_backed_candidate(
                 candidate_cache[name],
@@ -715,6 +727,38 @@ class GraphStore:
             frontier = next_frontier
 
         return results
+
+    @staticmethod
+    def _python_module_file_index(conn: sqlite3.Connection) -> dict[str, str]:
+        """Map each dotted Python module to the one indexed file defining it.
+
+        Built from indexed ``.py`` paths rather than the filesystem, so it works
+        on a graph queried away from the source tree. A module maps to a file
+        only when exactly one file answers to it; ambiguous modules are dropped
+        so they cannot manufacture evidence. Matching is on whole path segments,
+        which keeps ``mypkg.core`` away from ``.../notmypkg/core.py``.
+        """
+        modules: dict[str, str | None] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE '%.py'"
+        ).fetchall():
+            file_path = row["file_path"]
+            path = PurePosixPath(file_path).with_suffix("")
+            # `.parts` leads with the root ("/"), which is never part of a
+            # module name.
+            segments = path.parts[1:] if path.is_absolute() else path.parts
+            if segments and segments[-1] == "__init__":
+                # `pkg/__init__.py` is imported as `pkg`, never `pkg.__init__`.
+                segments = segments[:-1]
+            for start in range(len(segments)):
+                module = ".".join(segments[start:])
+                if not module:
+                    continue
+                if modules.setdefault(module, file_path) != file_path:
+                    modules[module] = None
+        return {
+            module: path for module, path in modules.items() if path is not None
+        }
 
     @staticmethod
     def _select_evidence_backed_candidate(
@@ -1062,6 +1106,23 @@ class GraphStore:
                 expanded: set[str] = set()
                 for target in imported:
                     expanded |= namespace_files.get(target, set())
+                imported |= expanded
+
+        # Python imports the repository-suffix resolver could not map to a file
+        # keep their raw dotted module as the IMPORTS_FROM target — the standard
+        # `src` layout, or framework-mediated packages such as Odoo's
+        # `odoo.addons.*`. Path-keyed evidence can never match a dotted module,
+        # so map each dotted module back to the file that could define it. Only
+        # an unambiguous match counts: a module answered by two indexed files is
+        # no more evidence than a bare name. See: #903
+        module_files = self._python_module_file_index(conn)
+        if module_files:
+            for imported in import_targets.values():
+                expanded = set()
+                for target in imported:
+                    resolved_file = module_files.get(target)
+                    if resolved_file:
+                        expanded.add(resolved_file)
                 imported |= expanded
 
         resolved = 0

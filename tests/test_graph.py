@@ -1288,3 +1288,138 @@ class TestResolveBareEndpoints:
         self.store.commit()
 
         assert self.store.get_transitive_tests(hub_qn, max_depth=1) == []
+
+
+class TestPythonDottedModuleImportEvidence:
+    """Python imports that stay dotted must still back bare endpoints (#903).
+
+    ``_resolve_python_module_in_repo`` gives up when a module is not reachable
+    by walking up from the importing file — the standard ``src`` layout, and
+    any framework-mediated layout such as Odoo's ``odoo.addons.*``. The parser
+    then stores the raw dotted module as the ``IMPORTS_FROM`` target. Import
+    evidence is keyed by file path, so comparing a path against a dotted module
+    can never match: the bare-name fallback is skipped and ``tests_for``
+    silently reports covered code as uncovered.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _func(self, name: str, path: str, *, is_test: bool = False) -> str:
+        self.store.upsert_node(NodeInfo(
+            kind="Test" if is_test else "Function",
+            name=name,
+            file_path=path,
+            line_start=1,
+            line_end=5,
+            language="python",
+            is_test=is_test,
+        ))
+        return f"{path}::{name}"
+
+    def _edge(self, kind: str, source: str, target: str, file_path: str) -> None:
+        self.store.upsert_edge(EdgeInfo(
+            kind=kind,
+            source=source,
+            target=target,
+            file_path=file_path,
+            line=1,
+        ))
+
+    def _endpoints(self, kind: str) -> list[tuple[str, str]]:
+        rows = self.store._conn.execute(
+            "SELECT source_qualified, target_qualified FROM edges "
+            "WHERE kind = ? ORDER BY id",
+            (kind,),
+        ).fetchall()
+        return [
+            (row["source_qualified"], row["target_qualified"]) for row in rows
+        ]
+
+    def test_dotted_module_import_backs_bare_tested_by_source(self):
+        """`from mypkg.core import ...` under a src layout is import evidence."""
+        source_qn = self._func("compute_total", "/repo/src/mypkg/core.py")
+        test_file = "/repo/tests/test_core.py"
+        test_qn = self._func("test_totals", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "mypkg.core", test_file)
+        self._edge("TESTED_BY", "compute_total", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 1
+        assert self._endpoints("TESTED_BY") == [(source_qn, test_qn)]
+
+    def test_tests_for_finds_test_behind_dotted_module_import(self):
+        """The query path must see the coverage, not just the resolver."""
+        source_qn = self._func("compute_total", "/repo/src/mypkg/core.py")
+        test_file = "/repo/tests/test_core.py"
+        test_qn = self._func("test_totals", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "mypkg.core", test_file)
+        self._edge("TESTED_BY", "compute_total", test_qn, test_file)
+        self.store.commit()
+
+        results = self.store.get_transitive_tests(source_qn, max_depth=0)
+        assert [result["qualified_name"] for result in results] == [test_qn]
+
+    def test_package_import_maps_to_package_init(self):
+        """`import mypkg` resolves to `mypkg/__init__.py`, not `mypkg.__init__`."""
+        source_qn = self._func("boot", "/repo/src/mypkg/__init__.py")
+        test_file = "/repo/tests/test_boot.py"
+        test_qn = self._func("test_boot", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "mypkg", test_file)
+        self._edge("TESTED_BY", "boot", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 1
+        assert self._endpoints("TESTED_BY") == [(source_qn, test_qn)]
+
+    def test_ambiguous_dotted_module_stays_bare(self):
+        """Two files answering to one dotted module is not evidence.
+
+        Guards the failure mode the reporter measured: naive suffix matching
+        fabricated 20 of 326 resolutions on a real codebase.
+        """
+        self._func("compute_total", "/repo/src/mypkg/core.py")
+        self._func("compute_total", "/repo/vendor/mypkg/core.py")
+        test_file = "/repo/tests/test_core.py"
+        test_qn = self._func("test_totals", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "mypkg.core", test_file)
+        self._edge("TESTED_BY", "compute_total", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 0
+        assert self._endpoints("TESTED_BY") == [("compute_total", test_qn)]
+
+    def test_unrelated_dotted_module_is_not_evidence(self):
+        """A dotted module that matches no indexed file proves nothing."""
+        self._func("compute_total", "/repo/src/mypkg/core.py")
+        test_file = "/repo/tests/test_core.py"
+        test_qn = self._func("test_totals", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "thirdparty.helpers", test_file)
+        self._edge("TESTED_BY", "compute_total", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 0
+        assert self._endpoints("TESTED_BY") == [("compute_total", test_qn)]
+
+    def test_partial_segment_match_is_not_evidence(self):
+        """`pkg.core` must not match `.../otherpkg/core.py` on a suffix.
+
+        Matching must be on whole path segments; a substring match would
+        resolve `mypkg.core` against any file whose directory merely ends in
+        `mypkg`.
+        """
+        self._func("compute_total", "/repo/src/notmypkg/core.py")
+        test_file = "/repo/tests/test_core.py"
+        test_qn = self._func("test_totals", test_file, is_test=True)
+        self._edge("IMPORTS_FROM", test_file, "mypkg.core", test_file)
+        self._edge("TESTED_BY", "compute_total", test_qn, test_file)
+        self.store.commit()
+
+        assert self.store.resolve_bare_tested_by_sources() == 0
+        assert self._endpoints("TESTED_BY") == [("compute_total", test_qn)]
