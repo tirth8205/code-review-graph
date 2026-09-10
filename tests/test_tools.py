@@ -368,6 +368,39 @@ class TestQueryGraphCallTargetFallbacks:
         }
         assert {edge["kind"] for edge in result["edges"]} == {"REFERENCES"}
 
+    def test_references_to_includes_alias_imported_dependents(self, monkeypatch):
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        port_path = self.root / "port.ts"
+        consumer_path = self.root / "consumer.ts"
+        port_path.write_text(
+            "export interface PortSpec { id: string }\n",
+            encoding="utf-8",
+        )
+        # The specifier goes through a workspace alias the parser cannot
+        # follow, so the REFERENCES edge keeps a bare target name.
+        consumer_path.write_text(
+            "import type { PortSpec } from '@core/ports';\n"
+            "export function usePort(spec: PortSpec): string { return spec.id; }\n",
+            encoding="utf-8",
+        )
+        with GraphStore(self.db_path) as store:
+            build = full_build(self.root, store)
+            assert build["errors"] == []
+
+        result = query_graph(
+            pattern="references_to",
+            target=f"{port_path.as_posix()}::PortSpec",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        by_name = {node["name"]: node for node in result["results"]}
+        assert "usePort" in by_name, (
+            "alias-imported dependent dropped; a bare-target REFERENCES edge "
+            "must not read as absence"
+        )
+        assert by_name["usePort"]["target_resolution"] == "unresolved"
+
     def test_callees_of_includes_resolved_and_bare_target_callees(self):
         result = query_graph(
             pattern="callees_of",
