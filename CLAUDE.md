@@ -6,11 +6,11 @@
 
 ## Graph Tool Usage (Token-Efficient)
 When using code-review-graph MCP tools, follow these rules:
-1. First call: `get_minimal_context(task="<description>")` — costs ~100 tokens, gives you the full picture.
+1. Use `get_minimal_context(task="<description>")` when a starting map helps; skip it for a known target.
 2. All subsequent calls: use `detail_level="minimal"` unless you need more.
 3. Prefer `query_graph_tool` with a specific target over broad `list_*` calls.
-4. The `next_tool_suggestions` field in every response tells you the optimal next step.
-5. Target: ≤5 tool calls per task, ≤800 total tokens of graph context.
+4. Treat `next_tool_suggestions` as suggestions; choose follow-up work from the task and source evidence.
+5. Let evidence determine context size and tool calls; do not stop before required source inspection.
 
 ## Architecture
 
@@ -170,21 +170,21 @@ bd close <id>         # Complete work
 <!-- code-review-graph MCP tools -->
 ## MCP Tools: code-review-graph
 
-**This project has a knowledge graph. Start with the code-review-graph
-MCP tools to narrow scope, then read the source.** The graph is cheaper than scanning files and
-gives you structural context (callers, dependents, test coverage) that file search cannot.
+Use code-review-graph when callers, dependencies, or task scope are unclear.
+For a known target, read source or use focused file search directly. Graph setup is not a
+prerequisite; if the graph is unavailable or stale, continue with source inspection.
 
-### When to use graph tools FIRST
+### When graph tools help
 
-- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
-- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
-- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Exploring unfamiliar code**: `semantic_search_nodes_tool` or `query_graph_tool`
+- **Understanding impact**: `get_impact_radius_tool` for candidate dependents
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` for relevant context
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
 - **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
 ### Verify in the source
 
-- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
+- Use graph results when helpful. Do not change code from graph output alone.
 - For any non-trivial change, read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
@@ -207,8 +207,8 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 ### Workflow
 
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes_tool` for code review.
-3. Use `get_affected_flows_tool` to understand impact.
-4. Use `query_graph_tool` pattern="tests_for" to check coverage.
+1. Choose only the graph calls that answer the task's open questions.
+2. Use `detect_changes_tool` when change analysis helps a review.
+3. Use `get_affected_flows_tool` when execution-path impact is unclear.
+4. Use `query_graph_tool` pattern="tests_for" to find tests, then inspect their assertions.
 <!-- /code-review-graph MCP tools -->

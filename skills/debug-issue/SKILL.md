@@ -9,6 +9,8 @@ Use the knowledge graph to systematically trace and debug issues.
 
 ### Steps
 
+Choose the steps that resolve the task; skip known context or unavailable tools.
+
 1. Use `semantic_search_nodes_tool` to find code related to the issue.
 2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace call chains.
 3. Use `get_flow_tool` to see full execution paths through suspected areas.
@@ -22,7 +24,7 @@ Use the knowledge graph to systematically trace and debug issues.
 - Recent changes are the most common source of new issues.
 
 ## Token Efficiency Rules
-- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
-- Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
-- Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Use `get_minimal_context_tool(task="<your task>")` when you need a starting map; skip it for a known target.
+- Prefer `detail_level="minimal"` where supported; expand the specific results needed for the task.
+- Let evidence determine tool calls and context size; do not stop source inspection to meet a token or call target.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

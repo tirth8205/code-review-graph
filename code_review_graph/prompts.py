@@ -1,7 +1,7 @@
 """MCP prompt templates for Code Review Graph.
 
-Provides 5 pre-built prompt workflows, all enforcing token-efficient
-detail_level="minimal" first patterns with get_minimal_context entry point.
+Provides 5 pre-built prompt workflows with compact graph navigation when useful
+and source verification matched to the task.
 
 1. review_changes   - pre-commit review using detect_changes + affected_flows
 2. architecture_map - architecture docs using communities, flows, Mermaid
@@ -17,16 +17,18 @@ from fastmcp.prompts.prompt import Message
 _TOKEN_EFFICIENCY_PREAMBLE = (  # nosec B105 — prompt template, not a password
     """\
 ## Rules for Token-Efficient Graph Usage
-1. ALWAYS call `get_minimal_context` first with a task description.
-2. Use `detail_level="minimal"` on all tool calls unless the minimal output \
+1. Use `get_minimal_context` when a starting map helps; read source directly \
+for a known target or when the graph is unavailable or stale.
+2. Prefer `detail_level="minimal"` where supported unless the minimal output \
 is insufficient.
-3. Only escalate to `detail_level="standard"` or `"verbose"` for the specific \
+3. Escalate to `detail_level="standard"` or `"verbose"` for the specific \
 entities that need deeper inspection.
-4. Never request more than 3 tool calls per turn unless absolutely necessary.
+4. Let evidence determine tool calls and context size; do not stop source \
+inspection to meet a token or call target.
 5. Prefer targeted queries (query_graph with a specific symbol) over broad \
 scans (list_communities with full members).
-6. When reviewing changes: detect_changes(detail_level="minimal") → only \
-expand on high-risk items.
+6. Select only relevant workflow steps. Verify changed behavior and tests in \
+source; graph risk scores and suggested next calls are navigation aids.
 """
 )
 
@@ -51,7 +53,7 @@ def review_changes_prompt(base: str = "HEAD~1") -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         f"## Review Workflow\n"
-        f'1. Call `get_minimal_context(task="review changes against '
+        f'1. If a starting map helps, call `get_minimal_context(task="review changes against '
         f'{base}")` to get risk overview.\n'
         f'2. If risk is "low": call '
         f'`detect_changes(detail_level="minimal")` → report summary '
@@ -63,7 +65,7 @@ def review_changes_prompt(base: str = "HEAD~1") -> list[Message]:
         f'`query_graph(pattern="callers_of", target=<func>, '
         f'detail_level="minimal")`.\n'
         f'   c. Call `get_affected_flows(detail_level="minimal")` '
-        f"only if >3 changed functions.\n"
+        f"when execution-path impact needs investigation.\n"
         f"4. Summarize: risk level, what changed, test gaps, "
         f"specific improvements needed.\n\n"
         f"Do NOT call get_review_context unless you need source code "
@@ -76,13 +78,13 @@ def architecture_map_prompt() -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         "## Architecture Mapping Workflow\n"
-        '1. Call `get_minimal_context(task="map architecture")`.\n'
+        '1. If a starting map helps, call `get_minimal_context(task="map architecture")`.\n'
         '2. Call `get_architecture_overview(detail_level="minimal")` '
         "for community coupling summary.\n"
         '3. Call `list_flows(detail_level="minimal")` for critical '
         "flow names + criticality scores.\n"
         "4. Only call `get_community(name=<X>, "
-        'detail_level="standard")` for the 1-2 communities the user '
+        'detail_level="standard")` for the communities the user '
         "is most interested in.\n"
         "5. Produce a concise Mermaid diagram showing communities as "
         "boxes and key flows as arrows."
@@ -99,7 +101,7 @@ def debug_issue_prompt(description: str = "") -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         "## Debug Workflow\n"
-        f'1. Call `get_minimal_context(task="debug: '
+        f'1. If a starting map helps, call `get_minimal_context(task="debug: '
         f'{desc_part}")`.\n'
         "2. Call `semantic_search_nodes(query=<keywords from "
         'description>, detail_level="minimal", limit=5)`.\n'
@@ -119,7 +121,7 @@ def onboard_developer_prompt() -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         "## Onboarding Workflow\n"
-        '1. Call `get_minimal_context(task="onboard developer")`.\n'
+        '1. If a starting map helps, call `get_minimal_context(task="onboard developer")`.\n'
         "2. Call `list_graph_stats()` for technology overview.\n"
         '3. Call `get_architecture_overview(detail_level="minimal")` '
         "for the 30-second mental model.\n"
@@ -141,7 +143,7 @@ def pre_merge_check_prompt(base: str = "HEAD~1") -> list[Message]:
     return _user(
         f"{_TOKEN_EFFICIENCY_PREAMBLE}\n"
         "## Pre-Merge Check Workflow\n"
-        '1. Call `get_minimal_context(task="pre-merge check")`.\n'
+        '1. If a starting map helps, call `get_minimal_context(task="pre-merge check")`.\n'
         '2. Call `detect_changes(detail_level="minimal")` for risk '
         "score and test gaps.\n"
         "3. If risk > 0.4: call "
@@ -149,7 +151,7 @@ def pre_merge_check_prompt(base: str = "HEAD~1") -> list[Message]:
         "4. If test_gap_count > 0: call "
         '`query_graph(pattern="tests_for", '
         'target=<each untested function>, detail_level="minimal")` '
-        "for up to 3 functions.\n"
+        "for each relevant function.\n"
         '5. Call `refactor(mode="dead_code", '
         'detail_level="minimal")` to check for newly dead code.\n'
         "6. Only call `find_large_functions` or `get_impact_radius` "
