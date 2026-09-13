@@ -58,29 +58,23 @@ bd close <id>         # Complete work
 
 ## Session Completion
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+Finish the work authorized for this session. Read-only, review, and local-only tasks
+can be complete without commits or publication.
 
-**MANDATORY WORKFLOW:**
+1. Run the relevant quality gates when code changed, and report any remaining failures.
+2. Update or create tracker items only when the task includes that work.
+3. Commit and push when the user requested publication or the current task already
+   authorizes it. Check the branch, remote, and current state first; publish only the
+   task's changes. Reconcile base-branch changes only when needed for that delivery.
+4. Preserve unrelated changes, stashes, and branches. Remove only task-created
+   temporary artifacts within the authorized cleanup scope; do not clear stashes or
+   prune branches as routine session cleanup.
+5. Verify the requested result and hand off the actual local, commit, and remote state.
 
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   bd dolt push
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
+If authorized publication is blocked, diagnose the failure and complete independent
+work. Report the exact blocker and remaining delivery step; do not retry indefinitely
+or claim the work was published. Never imply that this section authorizes a push,
+tracker mutation, overwrite, or deletion that the task did not authorize.
 <!-- END BEADS INTEGRATION -->
 
 <!-- code-review-graph MCP tools -->
