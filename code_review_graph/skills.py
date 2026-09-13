@@ -880,6 +880,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Explore Codebase\n\n"
             "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
             "### Steps\n\n"
+            "Choose the steps that resolve the task; skip known context or unavailable tools.\n\n"
             "1. Run `list_graph_stats_tool` to see overall codebase metrics.\n"
             "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
             "3. Use `list_communities_tool` to find major modules, then `get_community_tool` "
@@ -893,12 +894,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `children_of` on a file to see all its functions and classes.\n"
             "- Use `find_large_functions_tool` to identify complex code.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
+            '- Use `get_minimal_context_tool(task="<your task>")` when you need '
+            "a starting map; skip it for a known target.\n"
+            '- Prefer `detail_level="minimal"` where supported; expand the specific '
+            "results needed for the task.\n"
+            "- Let evidence determine tool calls and context size; do not stop "
+            "source inspection to meet a token or call target.\n"
             "- Read the implementation and its tests before changing code. The graph "
             "narrows scope; it does not replace the source."
         ),
@@ -910,6 +911,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Review Changes\n\n"
             "Perform a thorough, risk-aware code review using the knowledge graph.\n\n"
             "### Steps\n\n"
+            "Choose the steps that resolve the task; skip known context or unavailable tools.\n\n"
             "1. Run `detect_changes_tool` to get risk-scored change analysis.\n"
             "2. Run `get_affected_flows_tool` to find impacted execution paths.\n"
             "3. For each high-risk function, run `query_graph_tool` with "
@@ -923,12 +925,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Suggested improvements\n"
             "- Overall merge recommendation\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
+            '- Use `get_minimal_context_tool(task="<your task>")` when you need '
+            "a starting map; skip it for a known target.\n"
+            '- Prefer `detail_level="minimal"` where supported; expand the specific '
+            "results needed for the task.\n"
+            "- Let evidence determine tool calls and context size; do not stop "
+            "source inspection to meet a token or call target.\n"
             "- Read the implementation and its tests before changing code. The graph "
             "narrows scope; it does not replace the source."
         ),
@@ -940,6 +942,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Debug Issue\n\n"
             "Use the knowledge graph to systematically trace and debug issues.\n\n"
             "### Steps\n\n"
+            "Choose the steps that resolve the task; skip known context or unavailable tools.\n\n"
             "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
             "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
             "call chains.\n"
@@ -951,12 +954,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Look at affected flows to find the entry point that triggers the bug.\n"
             "- Recent changes are the most common source of new issues.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
+            '- Use `get_minimal_context_tool(task="<your task>")` when you need '
+            "a starting map; skip it for a known target.\n"
+            '- Prefer `detail_level="minimal"` where supported; expand the specific '
+            "results needed for the task.\n"
+            "- Let evidence determine tool calls and context size; do not stop "
+            "source inspection to meet a token or call target.\n"
             "- Read the implementation and its tests before changing code. The graph "
             "narrows scope; it does not replace the source."
         ),
@@ -968,6 +971,7 @@ _SKILLS: dict[str, dict[str, str]] = {
             "## Refactor Safely\n\n"
             "Use the knowledge graph to plan and execute refactoring with confidence.\n\n"
             "### Steps\n\n"
+            "Choose the steps that resolve the task; skip known context or unavailable tools.\n\n"
             '1. Use `refactor_tool` with mode="suggest" for community-driven '
             "refactoring suggestions.\n"
             '2. Use `refactor_tool` with mode="dead_code" to find unreferenced code.\n'
@@ -981,12 +985,12 @@ _SKILLS: dict[str, dict[str, str]] = {
             "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
             "- Run `find_large_functions_tool` to identify decomposition targets.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
+            '- Use `get_minimal_context_tool(task="<your task>")` when you need '
+            "a starting map; skip it for a known target.\n"
+            '- Prefer `detail_level="minimal"` where supported; expand the specific '
+            "results needed for the task.\n"
+            "- Let evidence determine tool calls and context size; do not stop "
+            "source inspection to meet a token or call target.\n"
             "- Read the implementation and its tests before changing code. The graph "
             "narrows scope; it does not replace the source."
         ),
@@ -1348,13 +1352,13 @@ _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
 _CLAUDE_MD_SECTION_END_MARKER = "<!-- /code-review-graph MCP tools -->"
 
 # Shared across every platform instruction file so the wording stays identical.
-_INSTRUCTION_INTRO = """**This project has a knowledge graph. Start with the code-review-graph
-MCP tools to narrow scope, then read the source.** The graph is cheaper than scanning files and
-gives you structural context (callers, dependents, test coverage) that file search cannot."""
+_INSTRUCTION_INTRO = """Use code-review-graph when callers, dependencies, or task scope are unclear.
+For a known target, read source or use focused file search directly. Graph setup is not a
+prerequisite; if the graph is unavailable or stale, continue with source inspection."""
 
 _INSTRUCTION_GUARDRAILS = """### Verify in the source
 
-- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
+- Use graph results when helpful. Do not change code from graph output alone.
 - For any non-trivial change, read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
@@ -1367,11 +1371,11 @@ _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 
 {_INSTRUCTION_INTRO}
 
-### When to use graph tools FIRST
+### When graph tools help
 
-- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
-- **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
-- **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
+- **Exploring unfamiliar code**: `semantic_search_nodes_tool` or `query_graph_tool`
+- **Understanding impact**: `get_impact_radius_tool` for candidate dependents
+- **Code review**: `detect_changes_tool` + `get_review_context_tool` for relevant context
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
 - **Architecture questions**: `get_architecture_overview_tool` + `list_communities_tool`
 
@@ -1392,10 +1396,10 @@ _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 
 ### Workflow
 
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes_tool` for code review.
-3. Use `get_affected_flows_tool` to understand impact.
-4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
+1. Choose only the graph calls that answer the task's open questions.
+2. Use `detect_changes_tool` when change analysis helps a review.
+3. Use `get_affected_flows_tool` when execution-path impact is unclear.
+4. Use `query_graph_tool` pattern=\"tests_for\" to find tests, then inspect their assertions.
 {_CLAUDE_MD_SECTION_END_MARKER}
 """
 
@@ -1413,7 +1417,7 @@ description: >-
 
 {_INSTRUCTION_INTRO}
 
-### When to use graph tools FIRST
+### When graph tools help
 
 - **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool`
 - **Understanding impact**: `get_impact_radius_tool`
@@ -1438,10 +1442,10 @@ description: >-
 
 ### Workflow
 
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes_tool` for code review.
-3. Use `get_affected_flows_tool` to understand impact.
-4. Use `query_graph_tool` pattern=\"tests_for\" to check coverage.
+1. Choose only the graph calls that answer the task's open questions.
+2. Use `detect_changes_tool` when change analysis helps a review.
+3. Use `get_affected_flows_tool` when execution-path impact is unclear.
+4. Use `query_graph_tool` pattern=\"tests_for\" to find tests, then inspect their assertions.
 {_CLAUDE_MD_SECTION_END_MARKER}
 """
 

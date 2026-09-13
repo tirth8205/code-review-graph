@@ -7,16 +7,16 @@ Quick install: pip install code-review-graph
 Then: code-review-graph install && code-review-graph build
 First run: /code-review-graph:build-graph
 After that use only delta/pr commands.
-ALWAYS start with get_minimal_context_tool(task="your task") — returns ~100 tokens with risk, communities, flows, and suggested next tools.
+Use get_minimal_context_tool(task="your task") when you need a starting map. Read source directly for a known target or when the graph is unavailable or stale.
 Use detail_level="minimal" on all subsequent calls unless you need more detail.
 When present, context_savings is an estimated compact hint, not exact tokenization.
 </section>
 
 <section name="review-delta">
-1. Call get_minimal_context_tool(task="review changes") first.
+1. If a starting map helps, call get_minimal_context_tool(task="review changes").
 2. If risk is low: detect_changes_tool(detail_level="minimal") → report summary.
 3. If risk is medium/high: detect_changes_tool(detail_level="standard") → expand on high-risk items.
-Target: ≤5 tool calls, ≤800 tokens total context.
+Let evidence determine tool calls and context size. Inspect changed source and relevant tests before concluding, regardless of graph risk scores.
 </section>
 
 <section name="review-pr">
@@ -29,7 +29,7 @@ Core MCP tools: get_minimal_context_tool, detect_changes_tool, get_review_contex
 MCP prompts (5): review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check
 Skills: build-graph, debug-issue, explore-codebase, refactor-safely, review-changes, review-delta, review-pr
 CLI: code-review-graph [install|init|build|update|status|watch|visualize|serve|mcp|wiki|detect-changes|postprocess|embed|register|unregister|repos|eval|daemon]
-Token efficiency: Prefer detail_level="minimal" where available. Always call get_minimal_context_tool first. Some review/context tools return compact estimated context_savings metadata.
+Token efficiency: Prefer detail_level="minimal" where available. Use get_minimal_context_tool when a starting map helps. Some review/context tools return compact estimated context_savings metadata.
 
 Result bounds: every tool that returns a list is bounded. Defaults are small; pass the tool's cap parameter to widen up to its hard ceiling, or a smaller value to narrow. Truncation is never silent — the response reports the untruncated count (`total`, or a `*_total` field per list), sets `truncated: true`, and the summary line says how many of how many are shown.
 Cap parameters by tool: max_results (query_graph, get_review_context, detect_changes, list_communities, get_architecture_overview, refactor, cross_repo_search), max_flows (get_affected_flows, detect_changes), max_members (list_communities, get_community, get_architecture_overview), max_steps + max_source_lines (get_flow), max_per_category (get_knowledge_gaps), top_n (get_hub_nodes, get_bridge_nodes, get_surprising_connections), limit (list_flows, semantic_search_nodes, find_large_functions), max_files (get_review_context), max_chars (get_wiki_page), max_diff_files (apply_refactor).
@@ -67,9 +67,8 @@ Missing nodes: Check language support + ignore patterns. Use full_rebuild=True.
 Windows/WSL: Use forward slashes in paths. Ensure uv is on PATH in WSL.
 </section>
 
-**Instruction to AI coding agents (always follow):**
-When user asks anything about "code-review-graph", "how to use", "commands", "review-delta", etc.:
-1. Call get_docs_section_tool with the exact section name.
-2. Use ONLY that content + current graph state.
-3. Never include full docs or source code in your reasoning.
-This keeps documentation lookup compact and avoids loading broad reference files by default.
+**Documentation lookup:**
+For code-review-graph usage questions, read the relevant section or use
+get_docs_section_tool when it is available and the needed content is not already
+provided. Consult source when needed to verify behavior or resolve a discrepancy.
+Keep reads focused without making a graph call or token target a prerequisite.

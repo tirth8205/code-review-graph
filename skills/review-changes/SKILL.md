@@ -9,6 +9,8 @@ Perform a thorough, risk-aware code review using the knowledge graph.
 
 ### Steps
 
+Choose the steps that resolve the task; skip known context or unavailable tools.
+
 1. Run `detect_changes_tool` to get risk-scored change analysis.
 2. Run `get_affected_flows_tool` to find impacted execution paths.
 3. For each high-risk function, run `query_graph_tool` with pattern="tests_for" to check test coverage.
@@ -24,7 +26,7 @@ Provide findings grouped by risk level (high/medium/low) with:
 - Overall merge recommendation
 
 ## Token Efficiency Rules
-- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
-- Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
-- Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Use `get_minimal_context_tool(task="<your task>")` when you need a starting map; skip it for a known target.
+- Prefer `detail_level="minimal"` where supported; expand the specific results needed for the task.
+- Let evidence determine tool calls and context size; do not stop source inspection to meet a token or call target.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.
