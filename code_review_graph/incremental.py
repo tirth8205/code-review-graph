@@ -22,6 +22,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NamedTuple, Optional
 
+from .csharp_resolver import restore_csharp_references
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
 
@@ -77,6 +78,9 @@ logger = logging.getLogger(__name__)
 
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
+CSHARP_IDENTITY_VERSION = "5"  # Namespace/call context, static and generic-arity evidence.
+_CSHARP_IDENTITY_METADATA_KEY = "csharp_identity_version"
+_CSHARP_PENDING_METADATA_KEY = "csharp_identity_pending_files"
 
 
 def _run_python_resolver(store: GraphStore) -> Optional[dict]:
@@ -145,11 +149,11 @@ def _run_hcl_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
-def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
+def _run_scoped_resolver(store: GraphStore, repo_root: Path) -> Optional[dict]:
     """Resolve static/scoped ``Class::method`` calls without failing a build."""
     try:
         from .scoped_resolver import resolve_scoped_calls
-        return resolve_scoped_calls(store)
+        return resolve_scoped_calls(store, repo_root)
     except Exception as exc:  # noqa: BLE001 - best-effort post-pass
         logger.warning("Scoped call resolver failed: %s", exc)
         return None
@@ -1105,6 +1109,7 @@ def _reconcile_stale_files(
                 current_paths.add(stored_file)
     stale_files = sorted(stored_files - current_paths)
     if stale_files:
+        restore_csharp_references(store, stale_files)
         store.remove_files_permanently(stale_files)
     return stale_files
 
@@ -1334,6 +1339,12 @@ def full_build(
     store.set_metadata("last_build_type", "full")
     if not cpp_errors:
         store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+    # Record the attempted C# format and retry only failed files. Holding the
+    # entire version gate open for one bad file repeats a full build (#944).
+    store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+    store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+        error["file"] for error in errors if error["file"].endswith(".cs")
+    )))
     _store_vcs_metadata(repo_root, store)
     store.commit()
 
@@ -1343,7 +1354,7 @@ def full_build(
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
-    scoped_stats = _run_scoped_resolver(store)
+    scoped_stats = _run_scoped_resolver(store, repo_root)
 
     return {
         "files_parsed": len(files),
@@ -1402,6 +1413,20 @@ def incremental_update(
     # Determine changed files
     if changed_files is None:
         changed_files = get_changed_files(repo_root, base)
+    csharp_upgrade = (
+        store.get_metadata(_CSHARP_IDENTITY_METADATA_KEY) != CSHARP_IDENTITY_VERSION
+        and store.has_nodes_for_language("csharp")
+    )
+    pending_csharp = set(json.loads(store.get_metadata(_CSHARP_PENDING_METADATA_KEY) or "[]"))
+    if csharp_upgrade:
+        pending_csharp.update(
+            str(Path(row[0]).relative_to(repo_root))
+            for row in store._conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE language = 'csharp'",
+            )
+            if Path(row[0]).is_relative_to(repo_root)
+        )
+    changed_files = sorted(set(changed_files) | pending_csharp)
     stale_files = _reconcile_stale_files(repo_root, store) if reconcile_stale else []
 
     if not changed_files and not stale_files:
@@ -1452,7 +1477,10 @@ def incremental_update(
             raw = abs_path.read_bytes()
             fhash = hashlib.sha256(raw).hexdigest()
             existing_nodes = store.get_nodes_by_file(str(abs_path))
-            if existing_nodes and existing_nodes[0].file_hash == fhash:
+            if (
+                rel_path not in pending_csharp
+                and existing_nodes and existing_nodes[0].file_hash == fhash
+            ):
                 continue
         except (OSError, PermissionError):
             pass
@@ -1502,8 +1530,14 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
+    restore_csharp_references(store, sorted(missing_paths))
     removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
     files_updated = parsed_files + len(stale_files) + removed_files
+    if csharp_upgrade or pending_csharp or any(p.endswith(".cs") for p in all_files):
+        store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
+        store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
+            error["file"] for error in errors if error["file"].endswith(".cs")
+        )))
     if files_updated:
         store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
         store.set_metadata("last_build_type", "incremental")
@@ -1539,8 +1573,11 @@ def incremental_update(
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
-    scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
-    scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+    scoped_changed = any(
+        rp.endswith((".php", ".rs", ".cs", ".csproj"))
+        for rp in set(all_files) | set(stale_files) | missing_paths
+    )
+    scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
 
     return {
         "files_updated": files_updated,
@@ -1557,6 +1594,7 @@ def incremental_update(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        **({"identity_rebuild": True} if csharp_upgrade else {}),
     }
 
 

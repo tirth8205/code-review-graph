@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- C# declarations no longer collapse across namespaces, and calls no longer
+  bind to a type the caller cannot name. Qualified names now carry the
+  namespace and the complete containing-type path
+  (`/repo/Handlers.cs::App.Report.ExportHandler.Run`), and a dedicated
+  namespace-aware pass binds each call from its own lexical scope: `using`
+  directives are read at the byte offset of the namespace body that declares
+  them, so a reopened or file-scoped body cannot leak its imports elsewhere;
+  `global::` and namespace aliases keep their meaning; `Alias::Type` searches
+  only namespace aliases; and an unqualified call reaches a static method in
+  an enclosing type without crossing a nearer method group. File co-location
+  and short-name uniqueness are no longer treated as visibility evidence, so
+  an ambiguous or unsupported reference stays unresolved instead of pointing
+  at the wrong declaration. Overload selection, generic binding (#943),
+  inherited members and `using static` remain outside this change (#946, with
+  the nested-type identity needed by #934 and #937).
+- C# bindings are now re-evaluated on every update rather than fixed at first
+  parse. Each call keeps its raw reference, so a binding is revoked when the
+  usings or declarations behind it change, `TESTED_BY` mirrors move with their
+  call, and deleting a callee returns incoming calls to raw references so
+  recreating the declaration binds them again. A binding change marks flows
+  dirty and the next full postprocess retraces them, which keeps callers and
+  entry points outside the parsed files correct (#946).
+- C# generic declarations are keyed by arity, so a constructed receiver reaches
+  the declaration it names — `I<int>` binds to `I<T>`, `I` binds to the separate
+  `I`, and `Pair<int>` binds to neither when only `Pair<K, V>` is declared. The
+  receiver's spelling is retained on the call and the arity is read from the
+  syntax, so nested arguments and tuples count correctly. Type argument
+  substitution, constraints and overload selection remain out of scope (#946).
+- Existing C# graphs reparse once on the next incremental update to adopt the
+  new identities; a file that fails to parse is retried on its own instead of
+  holding the version gate open and repeating a full rebuild (#944). Graphs
+  that carry embeddings should re-run `code-review-graph embed` afterwards:
+  the renamed C# nodes leave their previous vectors orphaned until a refresh
+  purges them.
+
 ## [2.3.8] - 2026-08-21
 
 ### Added

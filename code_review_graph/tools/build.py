@@ -530,7 +530,9 @@ def build_or_update_graph(
             }
         else:
             result = incremental_update(root, store, base=base_resolved)
-            if result["files_updated"] == 0:
+            if result["files_updated"] == 0 and not (
+                postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+            ):
                 return {
                     **result,
                     "status": "ok",
