@@ -14,27 +14,25 @@ bd dolt push          # Push beads data to remote
 
 ## Non-Interactive Shell Commands
 
-**ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.
+Avoid prompts from interactive shell aliases without granting overwrite or deletion
+permission. Resolve the exact source and destination first, and check for collisions.
+Use `command` to bypass aliases and shell functions:
 
-Shell commands like `cp`, `mv`, and `rm` may be aliased to include `-i` (interactive) mode on some systems, causing the agent to hang indefinitely waiting for y/n input.
-
-**Use these forms instead:**
 ```bash
-# Force overwrite without prompting
-cp -f source dest           # NOT: cp source dest
-mv -f source dest           # NOT: mv source dest
-rm -f file                  # NOT: rm file
-
-# For recursive operations
-rm -rf directory            # NOT: rm -r directory
-cp -rf source dest          # NOT: cp -r source dest
+command cp source new-destination
+command mv source new-destination
+command rm task-created-temporary-file
 ```
 
-**Other commands that may prompt:**
-- `scp` - use `-o BatchMode=yes` for non-interactive
-- `ssh` - use `-o BatchMode=yes` to fail instead of prompting
-- `apt-get` - use `-y` flag
-- `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
+These commands can still overwrite or remove data: use them only when the operation
+and exact paths are authorized. Preserve an existing destination unless replacement
+is within scope. Use recursive or force flags only when necessary for that authorized
+operation, never as a blanket default. If an unexpected prompt or collision remains,
+stop that operation, inspect the cause, and continue independent work.
+
+For network commands, `ssh -o BatchMode=yes` and `scp -o BatchMode=yes` fail instead
+of waiting for authentication input. Install software only when the task authorizes
+it; non-interactive package-manager flags do not grant installation permission.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
 ## Beads Issue Tracker
