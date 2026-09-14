@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +47,10 @@ MAX_CONFIDENCE_CHARS = 140
 IMPACT_PATTERN = "impact_radius"
 
 _UPDATE_HINT = "run `code-review-graph update`"
+
+# Same budget, and the same knob, incremental.py gives its git calls. This one
+# only runs on an empty result, never on the hot path.
+_GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds
 _WHITESPACE = re.compile(r"\s+")
 
 
@@ -289,6 +294,83 @@ def _live_git_head(root: Path) -> str | None:
     return _read_live_git_head(root)
 
 
+def _untracked_sources(root: Path, store: GraphStore) -> int:
+    """Count source files git has never seen, which the index cannot contain.
+
+    ``update`` discovers changes through git, so a file that was never added
+    is absent from the graph however current the build is. Neither signal in
+    ``_staleness`` can see it: the build commit still matches HEAD, and a file
+    the graph holds no row for has no mtime to compare against. The gap is
+    widest exactly when it matters most, because the files an agent has just
+    written are the ones it is about to ask about.
+
+    "Source" is calibrated from the graph rather than a fixed extension list,
+    so a repo whose languages this build does not parse never reports a file
+    the index was never going to hold. ``--porcelain`` already honours
+    ``.gitignore``, so build output and vendored trees stay out.
+    """
+    indexed_suffixes = {Path(f).suffix for f in store.get_all_files() if Path(f).suffix}
+    if not indexed_suffixes:
+        return 0
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            capture_output=True,
+            cwd=str(root),
+            timeout=_GIT_TIMEOUT,
+            stdin=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return 0
+    if result.returncode != 0:
+        return 0
+    count = 0
+    for record in result.stdout.split(b"\0"):
+        # "?? <path>": only the untracked ones; everything else is already
+        # reachable through the diff that drives an incremental update.
+        if not record.startswith(b"?? ") or len(record) <= 3:
+            continue
+        if Path(os.fsdecode(record[3:])).suffix in indexed_suffixes:
+            count += 1
+    return count
+
+
+def _is_untracked_note(note: str) -> bool:
+    """Distinguish the untracked signal from the two commit/mtime ones.
+
+    An unresolved target on a stale graph is rewritten into wording about the
+    target; that rewrite would drop the file count, which is the actionable
+    part here.
+    """
+    return "untracked by git" in note
+
+
+def _untracked_note(count: int) -> str:
+    """Say the working tree holds source the index was never offered."""
+    return _interpolated(
+        "",
+        str(count),
+        " source file(s) are untracked by git and absent from the index, so "
+        "this 0 may be incomplete; `git add` them, then "
+        "`code-review-graph update`",
+    )
+
+
+def _settled(root: Path, store: GraphStore, verified: bool) -> tuple[str | None, bool]:
+    """Last check before a caller is allowed to treat the graph as current.
+
+    Reached from both places where the commit and mtime signals find nothing
+    wrong, including the early return taken when a graph carries no build
+    timestamp. Untracked source is the only remaining way for the index to be
+    missing content, so it has to be answered on every such path rather than
+    on the one that happens to have metadata.
+    """
+    untracked = _untracked_sources(root, store)
+    if untracked:
+        return _untracked_note(untracked), False
+    return None, verified
+
+
 def _staleness(
     store: GraphStore, root: Path, file_path: str | None,
 ) -> tuple[str | None, bool]:
@@ -312,7 +394,7 @@ def _staleness(
 
     built_at_raw = store.get_metadata("last_updated")
     if not built_at_raw or not file_path:
-        return None, commit_verified and not file_path
+        return _settled(root, store, commit_verified and not file_path)
     try:
         # Graphs store absolute or repo-relative paths depending on how they
         # were built, so anchor relative ones rather than stat-ing the CWD.
@@ -332,7 +414,10 @@ def _staleness(
             path.name,
             f" changed after the last build; {_UPDATE_HINT}",
         ), False
-    return None, commit_verified
+    # Last, so every message this function already produced is unchanged. It
+    # only fires where the two checks above found nothing wrong — which is
+    # precisely where the caller would otherwise claim a real absence.
+    return _settled(root, store, commit_verified)
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +448,8 @@ def empty_query_confidence(
                 )
             stale, _unused = _staleness(store, root, None)
             if stale:
-                return _bounded(unresolved_stale_note(target))
+                return _bounded(stale if _is_untracked_note(stale)
+                                else unresolved_stale_note(target))
             return _bounded(not_indexed_note(target))
 
         stale, current = _staleness(store, root, getattr(node, "file_path", None))
