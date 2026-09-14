@@ -1700,20 +1700,34 @@ def _plan_watch_paths(
     so an over-budget plan is retried at a shallower depth before falling back
     to the single recursive root watch.
     """
+    plan, _ = _plan_watch_paths_with_status(
+        repo_root, ignore_patterns, max_depth, max_schedules, split_threshold
+    )
+    return plan
+
+
+def _plan_watch_paths_with_status(
+    repo_root: Path,
+    ignore_patterns: list[str],
+    max_depth: int = _WATCH_PLAN_DEPTH,
+    max_schedules: int = _MAX_WATCH_SCHEDULES,
+    split_threshold: int = _WATCH_SPLIT_MIN_DIRS,
+) -> tuple[list[tuple[Path, bool]], bool]:
+    """Return the watch plan and whether the budget fallback was required."""
     cache: dict[Path, list[Path]] = {}
     for depth in range(max(1, max_depth), 0, -1):
         _, plan = _plan_watch_subtree(
             repo_root, repo_root, ignore_patterns, 0, depth, cache, split_threshold
         )
         if len(plan) <= max(1, max_schedules):
-            return plan
+            return plan, False
     logger.warning(
         "%s needs more than %d watches to skip its ignored trees; "
         "falling back to one recursive watch (raise CRG_MAX_WATCH_SCHEDULES to split it)",
         repo_root,
         max_schedules,
     )
-    return [(repo_root, True)]
+    return [(repo_root, True)], True
 
 
 def _run_time_boxed(operation: Callable[[], Any], description: str, timeout: float = 10.0) -> None:
@@ -1807,6 +1821,8 @@ class _WatchSupervisor:
         self._shallow: set[str] = set()
         self._live_threads: dict[int, threading.Thread] = {}
         self._repaired_roots: set[str] = set()
+        self._replan_requested = False
+        self._ignored_boundaries: dict[str, bool] = {}
         self._degraded = False
         self._last_health_write = 0.0
         self._last_health_state: tuple[bool, bool, tuple[str, ...]] | None = None
@@ -1831,13 +1847,15 @@ class _WatchSupervisor:
     def schedule_initial(self, handler: Any) -> None:
         """Schedule the planned watches for *handler*."""
         self._handler = handler
-        plan = _plan_watch_paths(
+        plan, fallback = _plan_watch_paths_with_status(
             self._repo_root,
             self._ignore_patterns,
             max_schedules=self._max_schedules,
         )
+        self._degraded = fallback
         for path, recursive in plan:
             self._schedule(path, recursive=recursive)
+        self._remember_ignored_boundaries()
         logger.info(
             "Watching %d path(s) under %s; ignored trees are never registered",
             len(self._watches),
@@ -1859,6 +1877,95 @@ class _WatchSupervisor:
         else:
             self._shallow.add(key)
 
+    def request_replan(self) -> None:
+        """Reconsider the plan after a directory change seen by watchdog."""
+        self._replan_requested = True
+
+    def _remember_ignored_boundaries(self) -> None:
+        boundaries: dict[str, bool] = {}
+        for parent in self._shallow:
+            for child in _watch_child_dirs(Path(parent)):
+                relative = Path(child).relative_to(self._repo_root).as_posix()
+                if _should_ignore(relative, self._ignore_patterns):
+                    boundaries[str(child)] = (
+                        _ignored_tree_weight(child, _WATCH_SPLIT_MIN_DIRS)
+                        >= _WATCH_SPLIT_MIN_DIRS
+                    )
+        self._ignored_boundaries = boundaries
+
+    def _replan_if_requested(self) -> None:
+        if not self._replan_requested:
+            return
+        self._replan_requested = False
+        plan, fallback = _plan_watch_paths_with_status(
+            self._repo_root,
+            self._ignore_patterns,
+            max_schedules=self._max_schedules,
+        )
+        desired = {str(path): recursive for path, recursive in plan}
+        current = {path: path not in self._shallow for path in self._watches}
+        provisional: list[tuple[str, Any, bool]] = []
+        try:
+            # Keep the current plan installed until every new or replacement
+            # registration succeeds.  A failed registration must not turn a
+            # working parent watch into a coverage gap for its descendants.
+            for planned_path, recursive in plan:
+                key = str(planned_path)
+                if key in current and desired[key] == current[key]:
+                    continue
+                if key in current and desired[key] != current[key]:
+                    continue
+                handle = self._observer.schedule(self._handler, key, recursive=recursive)
+                provisional.append((key, handle, recursive))
+            for planned_path, recursive in plan:
+                key = str(planned_path)
+                if key not in current or desired[key] == current[key]:
+                    continue
+                handle = self._observer.schedule(self._handler, key, recursive=recursive)
+                provisional.append((key, handle, recursive))
+        except OSError as exc:
+            logger.warning("Could not apply watch replan: %s", exc)
+            for key, handle, _ in provisional:
+                _run_time_boxed(
+                    lambda: self._observer.unschedule(handle),
+                    f"rollback watch registration {key}",
+                    timeout=_WATCH_STOP_TIMEOUT,
+                )
+            return
+
+        for current_path in current:
+            if current_path not in desired or desired[current_path] != current[current_path]:
+                self._release_directory(current_path)
+        for key, handle, recursive in provisional:
+            self._watches[key] = _WatchEntry(handle, _watch_identity(key))
+            if recursive:
+                self._shallow.discard(key)
+            else:
+                self._shallow.add(key)
+        if fallback:
+            self._degraded = True
+        self._remember_ignored_boundaries()
+
+    def _replace_watch(self, path: Path, *, recursive: bool) -> bool:
+        """Register a replacement before releasing the current watch."""
+        key = str(path)
+        entry = self._watches.get(key)
+        if entry is None:
+            self._schedule(path, recursive=recursive)
+            return key in self._watches
+        try:
+            handle = self._observer.schedule(self._handler, key, recursive=recursive)
+        except OSError as exc:
+            logger.warning("Could not replace watch on %s: %s", key, exc)
+            return False
+        self._release_directory(key)
+        self._watches[key] = _WatchEntry(handle, _watch_identity(key))
+        if recursive:
+            self._shallow.discard(key)
+        else:
+            self._shallow.add(key)
+        return True
+
     def sync_watches(self) -> tuple[list[str], list[str]]:
         """Reconcile the watches under every non-recursive watch.
 
@@ -1879,6 +1986,18 @@ class _WatchSupervisor:
             present = {
                 name for name, is_dir in _child_directories(Path(parent)) if is_dir
             }
+            for name in sorted(present):
+                candidate_path = Path(parent) / name
+                relative = candidate_path.relative_to(self._repo_root).as_posix()
+                if _should_ignore(relative, self._ignore_patterns):
+                    above_threshold = (
+                        _ignored_tree_weight(candidate_path, _WATCH_SPLIT_MIN_DIRS)
+                        >= _WATCH_SPLIT_MIN_DIRS
+                    )
+                    key = str(candidate_path)
+                    if self._ignored_boundaries.get(key, False) != above_threshold:
+                        self.request_replan()
+                    self._ignored_boundaries[key] = above_threshold
             for child in sorted(self._children_of(parent)):
                 if os.path.basename(child) not in present:
                     self._release_directory(child)
@@ -1895,11 +2014,12 @@ class _WatchSupervisor:
                     # A promotion replaced this parent with one recursive
                     # watch, which already covers everything below it.
                     break
-                candidate = os.path.join(parent, name)
-                if candidate in self._watches:
+                candidate_key = os.path.join(parent, name)
+                if candidate_key in self._watches:
                     continue
-                if self._adopt_directory(candidate):
-                    adopted.append(candidate)
+                if self._adopt_directory(candidate_key):
+                    adopted.append(candidate_key)
+        self._replan_if_requested()
         return adopted, vanished
 
     def _children_of(self, parent: str) -> list[str]:
@@ -2155,6 +2275,7 @@ def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
     on_files_updated: Optional[Callable],
+    on_directory_changed: Optional[Callable[[], None]] = None,
 ):
     """Create the debounced watchdog handler for one repository."""
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -2292,6 +2413,8 @@ def _create_watch_handler(
                 return
             if event.is_directory and event.event_type == "modified":
                 return
+            if event.is_directory and on_directory_changed is not None:
+                on_directory_changed()
             debouncer.handle_event(event)
 
         def start(self) -> None:
@@ -2414,7 +2537,9 @@ def watch(
         _raise_watch_postprocess_warnings(postprocess_result)
     observer = Observer()
     supervisor.attach(observer)
-    handler = _create_watch_handler(repo_root, store, on_files_updated)
+    handler = _create_watch_handler(
+        repo_root, store, on_files_updated, supervisor.request_replan
+    )
     supervisor.schedule_initial(handler)
     handler.start()
     observer.start()
