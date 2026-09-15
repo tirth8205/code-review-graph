@@ -553,3 +553,115 @@ def test_resolved_target_with_results_still_has_no_marker(repo):
 
     assert result["result_count"] >= 1
     assert "confidence" not in result
+
+
+# ---------------------------------------------------------------------------
+# The zero that only looks honest: source git has never seen
+#
+# An incremental update discovers changes through git, so a file that was
+# never added is absent from the index however current the build commit is.
+# Neither staleness signal can see it, which leaves the strongest sentence in
+# this module -- "a real absence" -- attached to a zero whose only missing
+# consumers are the files the agent has just written.
+# ---------------------------------------------------------------------------
+
+
+def _tracked_repo(root: Path) -> None:
+    """Replace the fixture's placeholder .git with a real repository.
+
+    Staging is enough: ``git status --porcelain`` reports an added file as
+    ``A``, not ``??``, so nothing here needs a commit -- or an identity to
+    make one with.
+    """
+    import shutil
+    import subprocess
+
+    shutil.rmtree(root / ".git")
+    for args in (["init", "-q"], ["add", "auth.py", "main.py"]):
+        subprocess.run(
+            ["git", *args], cwd=str(root), check=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+
+def _empty_query(repo: Path) -> dict:
+    auth = (repo / "auth.py").as_posix()
+    return query_graph(
+        pattern="inheritors_of", target=f"{auth}::login", repo_root=str(repo),
+    )
+
+
+def test_untracked_source_defeats_the_real_absence_claim(repo):
+    """Unseen source must withdraw the claim, and say how many files."""
+    _tracked_repo(repo)
+    (repo / "new_consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    result = _empty_query(repo)
+
+    assert result["result_count"] == 0
+    confidence = result["confidence"]
+    assert "real absence" not in confidence
+    assert "untracked by git" in confidence
+    assert "1 source file" in confidence
+
+
+def test_untracked_note_names_the_remedy_within_budget(repo):
+    """A marker an agent cannot act on is only noise."""
+    _tracked_repo(repo)
+    (repo / "new_consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    confidence = _empty_query(repo)["confidence"]
+
+    assert "git add" in confidence
+    assert len(confidence) <= MAX_CONFIDENCE_CHARS
+
+
+def test_untracked_non_source_is_not_counted(repo):
+    """Only extensions the graph actually indexes may raise the signal."""
+    _tracked_repo(repo)
+    (repo / "NOTES.md").write_text("scratch\n", encoding="utf-8")
+
+    confidence = _empty_query(repo)["confidence"]
+
+    assert "untracked" not in confidence
+    assert "is indexed" in confidence
+
+
+def test_gitignored_source_is_not_counted(repo):
+    """--porcelain honours .gitignore, so build output stays silent."""
+    _tracked_repo(repo)
+    (repo / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (repo / "build").mkdir()
+    (repo / "build" / "generated.py").write_text("x = 1\n", encoding="utf-8")
+
+    confidence = _empty_query(repo)["confidence"]
+
+    assert "untracked" not in confidence
+
+
+def test_untracked_source_adds_no_marker_to_a_nonempty_result(repo):
+    """Token budget guard: the new signal stays empty-result-only."""
+    _tracked_repo(repo)
+    (repo / "new_consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    result = query_graph(
+        pattern="callers_of",
+        target=f"{(repo / 'auth.py').as_posix()}::login",
+        repo_root=str(repo),
+    )
+
+    assert result["result_count"] >= 1
+    assert "confidence" not in result
+
+
+def test_untracked_source_outranks_the_not_indexed_wording(repo):
+    """An unresolved target with unseen source is a git problem, not a gap."""
+    _tracked_repo(repo)
+    (repo / "new_consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    result = query_graph(
+        pattern="callers_of", target="NoSuchSymbol", repo_root=str(repo),
+    )
+
+    assert "untracked by git" in result["confidence"]
+    assert "not indexed" not in result["confidence"]
