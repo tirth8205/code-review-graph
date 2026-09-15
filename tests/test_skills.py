@@ -312,6 +312,54 @@ class TestGenerateHooksConfig:
                         " is not shareable across collaborators"
                     )
 
+    def test_install_hooks_replaces_old_and_duplicate_hooks(self, tmp_path):
+        """Regression test for #558: install_hooks replaces old absolute-path and duplicate hooks."""
+        repo = tmp_path / "repo"
+        claude_dir = repo / ".claude"
+        claude_dir.mkdir(parents=True)
+        settings_file = claude_dir / "settings.json"
+
+        # Seed settings with an old-style absolute-path hook, a duplicate hook, and a user hook
+        old_crg_hook = {
+            "matcher": "Edit|Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "code-review-graph update --repo /old/absolute/path",
+                    "timeout": 30,
+                }
+            ],
+        }
+        user_hook = {
+            "matcher": "Edit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "echo 'user custom hook'",
+                    "timeout": 5,
+                }
+            ],
+        }
+        initial_settings = {
+            "hooks": {
+                "PostToolUse": [user_hook, old_crg_hook, old_crg_hook]
+            }
+        }
+        settings_file.write_text(json.dumps(initial_settings), encoding="utf-8")
+
+        # Run install_hooks
+        install_hooks(repo, platform="claude")
+
+        data = json.loads(settings_file.read_text(encoding="utf-8"))
+        post_hooks = data["hooks"]["PostToolUse"]
+
+        # Assert user_hook is preserved, all old CRG duplicates are purged, and 1 updated CRG hook exists
+        assert len(post_hooks) == 2
+        assert post_hooks[0] == user_hook
+        crg_cmd = post_hooks[1]["hooks"][0]["command"]
+        assert "/old/absolute/path" not in crg_cmd
+        assert "git rev-parse --show-toplevel" in crg_cmd
+
     def test_post_tool_use_matcher_excludes_bash(self):
         """Regression test for #549: Bash matcher fires on every shell command."""
         config = generate_hooks_config(Path("/repo"))

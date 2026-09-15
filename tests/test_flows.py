@@ -591,6 +591,21 @@ class TestFlows:
         new_flows = [f for f in after if f["name"] == "new_entry"]
         assert len(new_flows) == 1
 
+    def test_incremental_trace_flows_relative_vs_absolute_path_mismatch(self):
+        """Regression test for #569: relative vs absolute path mismatch in entry points."""
+        abs_b_path = str(Path("b.py").resolve())
+        self._add_func("abs_entry", path=abs_b_path)
+        self._add_func("abs_callee", path=abs_b_path)
+        self._add_call(f"{abs_b_path}::abs_entry", f"{abs_b_path}::abs_callee", abs_b_path)
+
+        # Pass relative path "b.py" to incremental_trace_flows while node file_path is absolute.
+        count = incremental_trace_flows(self.store, ["b.py"])
+        assert count >= 1
+
+        after = get_flows(self.store)
+        abs_flows = [f for f in after if f["name"] == "abs_entry"]
+        assert len(abs_flows) == 1
+
     def test_incremental_trace_flows_no_affected_flows(self):
         """When changed files have no existing flows, only new entry points are checked."""
         self._add_func("handler", path="routes.py")
