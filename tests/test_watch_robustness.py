@@ -314,6 +314,27 @@ class TestNewDirectoryAdoption:
         assert (str(created), True) in observer.scheduled
         assert (str(created), True) not in before
 
+    def test_failed_adoption_is_not_reported_as_adopted(self, tmp_path):
+        """An OS registration failure is lost coverage, not a successful adoption."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        before = list(supervisor.watched_paths)
+        created = tmp_path / "services"
+        created.mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            adopted, _ = supervisor.sync_watches()
+
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert adopted == []
+        assert supervisor.watched_paths == before
+        assert supervisor.degraded is True
+        assert health["degraded"] is True
+        assert health["failed_paths"] == [str(created)]
+
     def test_recreated_directory_is_watched_again(self, tmp_path):
         """`rm -rf src && mkdir src` must not leave src unwatched forever."""
         supervisor, observer = self._supervisor(tmp_path)

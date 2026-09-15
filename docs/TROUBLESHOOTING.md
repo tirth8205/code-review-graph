@@ -186,9 +186,10 @@ the age of the last event each watcher processed:
 - `stalled` — the process is up but its observer threads are not, so nothing
   is being indexed. Check `crg-daemon logs --repo ALIAS`, then
   `crg-daemon restart`
-- `partial` — the watcher ran out of watch slots and fell back to one recursive
-  watch. Still complete, just no longer filtering ignored trees; raise
-  `CRG_MAX_WATCH_SCHEDULES` to get the filtering back
+- `partial` — the watcher is running with reduced coverage. Its health file's
+  `failed_paths` lists directories the OS could not register; when that list is
+  empty, the watcher ran out of watch slots and fell back to one recursive
+  watch (raise `CRG_MAX_WATCH_SCHEDULES` to get the filtering back)
 - `unknown` — the watcher has not published health yet (it just started, or it
   predates this feature)
 - `dead` — the process itself exited; the daemon restarts these, with an

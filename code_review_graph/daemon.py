@@ -598,9 +598,8 @@ def clear_watch_health(repo_root: str | Path) -> None:
 def watcher_status(alive: bool, health: dict[str, Any] | None) -> str:
     """Summarise one watcher: ``dead``, ``stalled``, ``partial``, ``unknown``, ``ok``.
 
-    ``partial`` means the watcher ran out of watch budget and fell back to a
-    coarser recursive watch — still watching everything, but no longer
-    filtering ignored trees.
+    ``partial`` means the watcher has reduced coverage: either an OS watch
+    registration failed, or the watch budget forced a coarser recursive watch.
     """
     if not alive:
         return "dead"

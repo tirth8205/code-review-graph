@@ -205,12 +205,17 @@ def _handle_status(_args: argparse.Namespace) -> None:
         if degraded:
             print()
             print(
-                "  A partial watcher ran out of watch slots and fell back to one "
-                "recursive watch:"
+                "  A partial watcher is running with reduced coverage. The health "
+                "file's"
             )
             print(
-                "  still complete, but ignored trees are watched again. Raise "
-                "CRG_MAX_WATCH_SCHEDULES."
+                "  failed_paths field lists directories the OS could not register;"
+            )
+            print(
+                "  when it is empty, watch slots ran out and one recursive watch"
+            )
+            print(
+                "  replaced the filtered plan; raise CRG_MAX_WATCH_SCHEDULES then."
             )
     else:
         print(f"  {'Alias':<{alias_width}}  Path")
