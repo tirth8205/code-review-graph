@@ -142,6 +142,9 @@ skips = ["B101", "B404", "B603", "B607", "B608"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
+markers = [
+    "e2e: end-to-end runs of the public pipeline over a real repository tree",
+]
 
 [dependency-groups]
 dev = [
