@@ -129,9 +129,18 @@ bd close <id>         # Complete work
 ## Branching Model
 
 Three long-lived branches, one direction: feature PR → `staging` (default) → `testing` → `main` → tag → PyPI.
-Open every PR against `staging`. Never push to or open PRs against `testing` or `main`; those only
-receive promotion PRs, which the maintainer merges by hand with a merge commit. Full rules in
-CONTRIBUTING.md "Branching and promotion".
+
+- Open every PR against `staging`.
+- `staging` → `testing` is automatic: the `Promote to testing` workflow fast-forwards
+  `testing` once CI passes on `staging`.
+- Every push to `testing` runs the gauntlet (full matrix, e2e on three OSes, security
+  scan, and a coverage gate built on `detect_changes`). Gaps send the work back to
+  `staging` for more tests.
+- `testing` → `main` is **never** automatic and never done by an agent. Only the
+  maintainer opens and merges that pull request. Do not push to, merge into, or change
+  the protection of `testing` or `main`.
+
+Full rules in CONTRIBUTING.md "Branching and promotion".
 
 ## Session Completion
 

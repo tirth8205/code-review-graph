@@ -1,0 +1,207 @@
+# The soak that runs on `testing`, after a change has already passed CI on `staging`.
+#
+# It reruns everything CI runs, adds the slower suites CI skips, and then asks the
+# project's own analysis whether the change brought code that no test covers. When
+# anything fails, promotion stops here and an issue says what to add on `staging`.
+# When everything passes, an issue says `testing` is ready and names the one command
+# that opens the promotion pull request. Nothing here can write to `main`.
+name: Testing gauntlet
+
+on:
+  push:
+    branches: [testing]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testing-gauntlet
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: Full suite (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[dev]" pytest-cov
+      - run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+
+  e2e:
+    name: End to end (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[dev]"
+      - name: Run the end-to-end suite
+        shell: bash
+        run: |
+          set +e
+          pytest -m e2e -q
+          status=$?
+          # 5 means the marker selected nothing, which is not a failure.
+          if [ "$status" = "5" ]; then
+            echo "::notice::no tests carry the e2e marker yet"
+            exit 0
+          fi
+          exit "$status"
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: pip install bandit[toml]
+      - run: bandit -c pyproject.toml -r code_review_graph/ -q
+
+  test-gaps:
+    name: Test-coverage gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      gaps: ${{ steps.gate.outputs.gaps }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - run: pip install -e ".[dev]"
+      - name: Build the graph for this commit
+        run: code-review-graph build --repo .
+      - name: Look for changed functions with no test
+        id: gate
+        run: |
+          set +e
+          python scripts/test_gap_gate.py --repo . --base origin/main --out "$RUNNER_TEMP/test-gaps.md"
+          status=$?
+          set -e
+          if [ "$status" = "0" ]; then
+            echo "gaps=none" >> "$GITHUB_OUTPUT"
+            echo "### No uncovered changes" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$status" = "2" ]; then
+            echo "::error::the coverage analysis itself failed"
+            exit 1
+          fi
+          echo "gaps=found" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/test-gaps.md" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-gaps
+          path: ${{ runner.temp }}/test-gaps.md
+          if-no-files-found: ignore
+
+  verdict:
+    name: Promotion verdict
+    needs: [suite, e2e, security, test-gaps]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Decide and report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUITE: ${{ needs.suite.result }}
+          E2E: ${{ needs.e2e.result }}
+          SECURITY: ${{ needs.security.result }}
+          GAPS: ${{ needs.test-gaps.result }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="testing is ready to promote to main"
+          subject=$(git log -1 --format='%s' "$SHA")
+          if [ "$SUITE" = "success" ] && [ "$E2E" = "success" ] \
+             && [ "$SECURITY" = "success" ] && [ "$GAPS" = "success" ]; then
+            {
+              echo "\`testing\` is green at \`${SHA:0:7}\` ($subject)."
+              echo
+              echo "Full suite on 3.10 to 3.13, end to end on Linux, macOS and Windows,"
+              echo "security scan, and no changed function without a test."
+              echo
+              echo "Nothing is promoted automatically from here. To open the pull request"
+              echo "into \`main\`, run:"
+              echo
+              echo '```bash'
+              echo "gh pr create --base main --head testing --title \"Promote testing to main\""
+              echo '```'
+              echo
+              echo "Merging that pull request is the only way code reaches \`main\`, and only"
+              echo "you can do it."
+              echo
+              echo "Run: $RUN_URL"
+            } > body.md
+            state_label="ready-to-promote"
+          else
+            {
+              echo "\`testing\` is not promotable at \`${SHA:0:7}\` ($subject)."
+              echo
+              echo "| Stage | Result |"
+              echo "| --- | --- |"
+              echo "| Full suite | $SUITE |"
+              echo "| End to end | $E2E |"
+              echo "| Security | $SECURITY |"
+              echo "| Test coverage of changes | $GAPS |"
+              echo
+              if [ "$GAPS" != "success" ]; then
+                echo "If the coverage gate is the failure, the run summary lists every changed"
+                echo "function with no test. Add those tests on a branch off \`staging\`."
+                echo "Once they pass on \`staging\`, the change is promoted here again on its own."
+                echo
+              fi
+              echo "Run: $RUN_URL"
+            } > body.md
+            state_label="blocked"
+          fi
+          existing=$(gh issue list --state open --label promotion-status \
+            --json number --jq '.[0].number' || true)
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --title "$title" --body-file body.md \
+              --add-label "$state_label" >/dev/null
+            gh issue comment "$existing" --body "Updated for \`${SHA:0:7}\`: $state_label. $RUN_URL" >/dev/null
+          else
+            gh issue create --title "$title" --body-file body.md \
+              --label promotion-status --label "$state_label" >/dev/null
+          fi
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
