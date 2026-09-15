@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -2697,6 +2698,55 @@ class TestElixirParsing:
         }
         assert any(t.endswith("::Calculator.add") for t in function_targets)
         assert any(t.endswith("::Calculator.compute") for t in function_targets)
+
+    def test_guarded_functions_are_parsed_and_called(self, tmp_path):
+        path = tmp_path / "guarded.ex"
+        source = (
+            b"defmodule T do\n"
+            b"  def plain(x), do: x\n"
+            b"  def guarded(x) when is_binary(x), do: x\n"
+            b"  def caller(x) do\n"
+            b"    guarded(x)\n"
+            b"  end\n"
+            b"  def zero, do: :zero\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+
+        function_names = {node.name for node in nodes if node.kind == "Function"}
+        assert {"plain", "guarded", "caller", "zero"} <= function_names
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::T.caller")
+            and edge.target.endswith("::T.guarded")
+            for edge in edges
+        )
+
+    def test_multi_clause_functions_keep_the_full_graph_range(self, tmp_path):
+        path = tmp_path / "clauses.ex"
+        source = (
+            b"defmodule T do\n"
+            b"\n"
+            b"\n"
+            b"  def multi(0), do: :zero\n"
+            b"  def multi(n), do: n\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+        clauses = [
+            node for node in nodes
+            if node.kind == "Function" and node.name == "multi"
+        ]
+        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 4), (5, 5)]
+
+        with GraphStore(tmp_path / "clauses.db") as store:
+            store.store_file_nodes_edges(path, nodes, edges)
+            multi = store.get_node(f"{path.as_posix()}::T.multi")
+
+        assert multi is not None
+        assert (multi.line_start, multi.line_end) == (4, 5)
 
 
 class TestGDScriptParsing:
