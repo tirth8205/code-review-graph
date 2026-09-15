@@ -120,6 +120,12 @@ If you only need a language for your own repository, you may not need to change 
 3. Add a sample file in `tests/fixtures/`.
 4. Add parsing tests in `tests/test_multilang.py`.
 
+Robot Framework is a built-in structural fallback rather than a Tree-sitter
+grammar. Its `.robot` and `.resource` files are handled in `parser.py`, where
+tests, user keywords, keyword calls, and `Resource`/`Library`/`Variables`
+settings are extracted. Changes to this support should include focused tests
+for both extensions in `tests/test_parser.py`.
+
 ## Adding a Platform Target
 
 Every supported AI tool is permanent maintenance surface: its config path, schema, install merge, uninstall and tests have to keep working on every release. Some existing targets were merged without evidence that they worked in a released client, and those are the ones that break. New targets are held to the bar below.
