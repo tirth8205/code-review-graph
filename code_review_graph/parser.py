@@ -14896,6 +14896,19 @@ class CodeParser:
             if name_child is not None:
                 return name_child.text.decode("utf-8", errors="replace")
 
+        # Ruby: compact namespace declarations (``class Foo::Bar`` /
+        # ``module Foo::Bar``) put the name in a ``scope_resolution`` node, not
+        # a bare ``constant``, so the generic loop below misses them and
+        # _extract_classes drops the whole Class node. Take the rightmost
+        # ``constant`` so the emitted name matches the nested form
+        # (``module Foo`` + ``class Bar`` -> Class "Bar").
+        if language == "ruby" and node.type in ("class", "module"):
+            name_child = node.child_by_field_name("name")
+            if name_child is not None and name_child.type == "scope_resolution":
+                for sub in reversed(name_child.children):
+                    if sub.type == "constant":
+                        return sub.text.decode("utf-8", errors="replace")
+
         # Most built-in languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
         # function_declarator (e.g. virtual std::string get_name() = 0).

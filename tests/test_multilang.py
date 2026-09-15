@@ -1345,6 +1345,49 @@ class TestRubyParsing:
         assert any(t.endswith("UserRepository.save") for t in create_user_targets)
         assert any(t.endswith("new") for t in create_user_targets)
 
+    def test_compact_namespace_class_is_indexed(self, tmp_path):
+        """``class Foo::Bar`` must emit a Class node, like ``module Foo`` + ``class Bar``.
+
+        tree-sitter-ruby types the ``name`` field of a compact declaration as
+        ``scope_resolution`` rather than ``constant``. Without explicit
+        handling ``_get_name`` returns None, ``_extract_classes`` bails, and
+        the class vanishes while its methods are left orphaned. This is the
+        dominant declaration style in Rails codebases.
+        """
+        compact = tmp_path / "compact.rb"
+        compact.write_text(
+            "class Widgets::CompactStyle\n"
+            "  def render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        # Named after the rightmost constant, matching the nested form.
+        assert "CompactStyle" in classes
+
+        render = next(
+            n for n in nodes if n.kind == "Function" and n.name == "render"
+        )
+        assert render.parent_name == "CompactStyle"
+
+    def test_compact_namespace_module_is_indexed(self, tmp_path):
+        """``module Foo::Bar`` goes through the same scope_resolution path."""
+        compact = tmp_path / "compact_module.rb"
+        compact.write_text(
+            "module Widgets::Helpers\n"
+            "  def self.render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Helpers" in names
+
 
 class TestPHPParsing:
     def setup_method(self):
