@@ -7,9 +7,11 @@ Supports impact-radius queries and subgraph extraction.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -44,6 +46,9 @@ logger = logging.getLogger(__name__)
 # ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name.
 _JAVASCRIPT_LANGUAGE_FAMILY = ("javascript", "typescript", "tsx")
 _JAVASCRIPT_LANGUAGE_FAMILY_SET = frozenset(_JAVASCRIPT_LANGUAGE_FAMILY)
+_COLLISION_SUFFIX_RE = re.compile(
+    r"^[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$",
+)
 
 
 def _compatible_edge_languages(language: str) -> tuple[str, ...]:
@@ -228,10 +233,25 @@ class GraphStore:
 
     # --- Write operations ---
 
-    def upsert_node(self, node: NodeInfo, file_hash: str = "") -> int:
+    def upsert_node(
+        self,
+        node: NodeInfo,
+        file_hash: str = "",
+        qualified_name: str | None = None,
+    ) -> int:
         """Insert or update a node. Returns the node ID."""
+        node_id, _ = self._upsert_node(node, file_hash, qualified_name)
+        return node_id
+
+    def _upsert_node(
+        self,
+        node: NodeInfo,
+        file_hash: str = "",
+        qualified_name: str | None = None,
+    ) -> tuple[int, str]:
+        """Insert or update a node and return its ID and stored identity."""
         now = time.time()
-        qualified = self._make_qualified(node)
+        qualified = qualified_name or self._qualified_for_upsert(node)
         extra = json.dumps(node.extra) if node.extra else "{}"
 
         self._conn.execute(
@@ -260,11 +280,182 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
-        return row["id"]
+        return row["id"], qualified
+
+    def _qualified_for_upsert(self, node: NodeInfo) -> str:
+        """Return a stable identity, suffixing genuine same-file collisions."""
+        base = self._make_qualified(node)
+        rows = self._conn.execute(
+            "SELECT qualified_name, line_start FROM nodes "
+            "WHERE file_path = ? AND name = ? AND parent_name IS ? ORDER BY id",
+            (node.file_path, node.name, node.parent_name),
+        ).fetchall()
+
+        candidates = [
+            row for row in rows
+            if row["qualified_name"] == base
+            or self._is_collision_identity(base, row["qualified_name"])
+        ]
+        for row in candidates:
+            if row["line_start"] == node.line_start:
+                return row["qualified_name"]
+
+        if self.get_node(base) is None:
+            return base
+
+        semantic = self._semantic_disambiguator(node)
+        qualified_base = f"{base}:S{semantic}"
+        qualified = qualified_base
+        ordinal = 2
+        while self.get_node(qualified) is not None:
+            qualified = f"{qualified_base}:{ordinal}"
+            ordinal += 1
+        return qualified
+
+    @staticmethod
+    def _semantic_disambiguator(node: NodeInfo) -> str:
+        """Hash definition semantics that survive harmless source line shifts."""
+        payload = json.dumps(
+            GraphStore._semantic_signature(node),
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _semantic_signature(node: NodeInfo) -> tuple[Any, ...]:
+        """Return definition fields that identify a node across line shifts."""
+        return (
+            node.kind,
+            node.name,
+            node.parent_name,
+            node.language,
+            node.params,
+            node.return_type,
+            node.modifiers,
+            node.is_test,
+        )
+
+    @staticmethod
+    def _row_semantic_signature(row: sqlite3.Row) -> tuple[Any, ...]:
+        """Return the semantic signature stored for an existing node row."""
+        return (
+            row["kind"],
+            row["name"],
+            row["parent_name"],
+            row["language"] or "",
+            row["params"],
+            row["return_type"],
+            row["modifiers"],
+            bool(row["is_test"]),
+        )
+
+    @staticmethod
+    def _is_collision_identity(base: str, qualified_name: str) -> bool:
+        """Return whether *qualified_name* has this store's exact suffix shape.
+
+        Checking the full generated suffix avoids treating colon-bearing symbol
+        names, such as Objective-C selectors, as collision identities.
+        """
+        prefix = f"{base}:S"
+        if not qualified_name.startswith(prefix):
+            return False
+        return _COLLISION_SUFFIX_RE.fullmatch(qualified_name[len(prefix):]) is not None
+
+    def _plan_file_identities(
+        self, file_path: str, nodes: list[NodeInfo],
+    ) -> list[str]:
+        """Reconcile a replacement file's nodes with their previous identities.
+
+        Semantic matches keep their qualified name across collision-set reorder.
+        When definitions are semantically identical, the closest source location
+        preserves identity across harmless shifts, growth, and shrink transitions.
+        """
+        old_rows = self._conn.execute(
+            "SELECT id, kind, name, qualified_name, file_path, line_start, "
+            "line_end, language, parent_name, params, return_type, modifiers, "
+            "is_test FROM nodes WHERE file_path = ? ORDER BY id",
+            (file_path,),
+        ).fetchall()
+        old_by_base: dict[str, list[sqlite3.Row]] = {}
+        new_by_base: dict[str, list[int]] = {}
+        for index, node in enumerate(nodes):
+            new_by_base.setdefault(self._make_qualified(node), []).append(index)
+        for base in new_by_base:
+            old_by_base[base] = [
+                row
+                for row in old_rows
+                if row["qualified_name"] == base
+                or self._is_collision_identity(base, row["qualified_name"])
+            ]
+
+        planned: list[str | None] = [None] * len(nodes)
+        reserved = {row["qualified_name"] for row in old_rows}
+        assigned: set[str] = set()
+        for base, indices in new_by_base.items():
+            candidates = old_by_base[base]
+            used_old_ids: set[int] = set()
+            if len(indices) == 1 and len(candidates) == 1:
+                index = indices[0]
+                row = candidates[0]
+                planned[index] = row["qualified_name"]
+                assigned.add(row["qualified_name"])
+                used_old_ids.add(row["id"])
+
+            pairs: list[tuple[int, int, int, sqlite3.Row]] = []
+            for index in indices:
+                signature = self._semantic_signature(nodes[index])
+                for row in candidates:
+                    if self._row_semantic_signature(row) != signature:
+                        continue
+                    distance = abs(nodes[index].line_start - row["line_start"])
+                    pairs.append((distance, index, row["id"], row))
+
+            for _, index, row_id, row in sorted(pairs):
+                if planned[index] is not None or row_id in used_old_ids:
+                    continue
+                planned[index] = row["qualified_name"]
+                assigned.add(row["qualified_name"])
+                used_old_ids.add(row_id)
+
+            for index in indices:
+                if planned[index] is not None:
+                    continue
+                exact_location = [
+                    row
+                    for row in candidates
+                    if row["id"] not in used_old_ids
+                    and row["line_start"] == nodes[index].line_start
+                ]
+                if len(exact_location) == 1:
+                    row = exact_location[0]
+                    planned[index] = row["qualified_name"]
+                    assigned.add(row["qualified_name"])
+                    used_old_ids.add(row["id"])
+
+            for index in indices:
+                if planned[index] is not None:
+                    continue
+                if base not in reserved and base not in assigned:
+                    qualified = base
+                else:
+                    semantic = self._semantic_disambiguator(nodes[index])
+                    qualified_base = f"{base}:S{semantic}"
+                    qualified = qualified_base
+                    ordinal = 2
+                    while qualified in reserved or qualified in assigned:
+                        qualified = f"{qualified_base}:{ordinal}"
+                        ordinal += 1
+                planned[index] = qualified
+                assigned.add(qualified)
+
+        return [qualified for qualified in planned if qualified is not None]
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
         """Insert or update an edge."""
         now = time.time()
+        source = self._resolve_stored_identity(edge.source)
+        target = self._resolve_stored_identity(edge.target)
         extra_dict = edge.extra if edge.extra else {}
         confidence = float(extra_dict.get("confidence", 1.0))
         confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
@@ -275,7 +466,7 @@ class GraphStore:
             """SELECT id FROM edges
                WHERE kind=? AND source_qualified=? AND target_qualified=?
                      AND file_path=? AND line=?""",
-            (edge.kind, edge.source, edge.target, edge.file_path, edge.line),
+            (edge.kind, source, target, edge.file_path, edge.line),
         ).fetchone()
 
         if existing:
@@ -291,10 +482,34 @@ class GraphStore:
                (kind, source_qualified, target_qualified, file_path, line, extra,
                 confidence, confidence_tier, updated_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
+            (edge.kind, source, target, edge.file_path, edge.line, extra,
              confidence, confidence_tier, now),
         )
         return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def _resolve_stored_identity(self, qualified_name: str) -> str:
+        """Resolve a bare edge endpoint to one lone historical suffix."""
+        if self.get_node(qualified_name) is not None:
+            return qualified_name
+        lower = f"{qualified_name}:S"
+        upper = f"{qualified_name}:T"
+        rows = self._conn.execute(
+            "SELECT qualified_name FROM nodes "
+            "WHERE qualified_name >= ? AND qualified_name < ? "
+            "ORDER BY qualified_name",
+            (lower, upper),
+        )
+        matches = []
+        for row in rows:
+            candidate = row["qualified_name"]
+            if not self._is_collision_identity(qualified_name, candidate):
+                continue
+            matches.append(candidate)
+            if len(matches) == 2:
+                break
+        if len(matches) == 1:
+            return matches[0]
+        return qualified_name
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
@@ -362,11 +577,9 @@ class GraphStore:
         """Atomically replace all data for a file."""
         self._begin_immediate()
         try:
+            identities = self._plan_file_identities(file_path, nodes)
             self.remove_file_data(file_path)
-            for node in nodes:
-                self.upsert_node(node, file_hash=fhash)
-            for edge in edges:
-                self.upsert_edge(edge)
+            self._store_nodes_edges(nodes, edges, fhash, identities)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -380,16 +593,92 @@ class GraphStore:
         self._begin_immediate()
         try:
             for file_path, nodes, edges, fhash in batch:
+                identities = self._plan_file_identities(file_path, nodes)
                 self.remove_file_data(file_path)
-                for node in nodes:
-                    self.upsert_node(node, file_hash=fhash)
-                for edge in edges:
-                    self.upsert_edge(edge)
+                self._store_nodes_edges(nodes, edges, fhash, identities)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
         self._invalidate_cache()
+
+    def _store_nodes_edges(
+        self,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        file_hash: str,
+        qualified_names: list[str] | None = None,
+    ) -> None:
+        """Store one file's nodes and align edges with collision identities."""
+        identities: dict[str, list[tuple[NodeInfo, str]]] = {}
+        for index, node in enumerate(nodes):
+            qualified_name = qualified_names[index] if qualified_names is not None else None
+            node_id = self.upsert_node(
+                node,
+                file_hash=file_hash,
+                qualified_name=qualified_name,
+            )
+            if qualified_name is None:
+                row = self._conn.execute(
+                    "SELECT qualified_name FROM nodes WHERE id = ?", (node_id,),
+                ).fetchone()
+                qualified_name = row["qualified_name"]
+            qualified = qualified_name
+            identities.setdefault(self._make_qualified(node), []).append(
+                (node, qualified),
+            )
+
+        collisions = {
+            base: entries for base, entries in identities.items()
+            if len(entries) > 1
+        }
+        for edge in edges:
+            self.upsert_edge(self._align_edge_with_collisions(edge, collisions))
+
+    def _align_edge_with_collisions(
+        self,
+        edge: EdgeInfo,
+        collisions: dict[str, list[tuple[NodeInfo, str]]],
+    ) -> EdgeInfo:
+        """Point an edge at the colliding definition evidenced by its line."""
+        source = edge.source
+        source_candidates = collisions.get(source, [])
+        containing_sources = [
+            (node, qualified)
+            for node, qualified in source_candidates
+            if node.line_start <= edge.line <= node.line_end
+        ]
+        if containing_sources:
+            _, source = min(
+                containing_sources,
+                key=lambda item: item[0].line_end - item[0].line_start,
+            )
+
+        target = edge.target
+        target_candidates = collisions.get(target, [])
+        if edge.kind == "CONTAINS" and target_candidates:
+            starting_targets = [
+                qualified
+                for node, qualified in target_candidates
+                if node.line_start == edge.line
+            ]
+            if len(starting_targets) == 1:
+                target = starting_targets[0]
+        elif edge.source == edge.target and source != edge.source:
+            # A recursive call inside a collided definition resolves to that
+            # definition rather than the canonical first occurrence.
+            target = source
+
+        if source == edge.source and target == edge.target:
+            return edge
+        return EdgeInfo(
+            kind=edge.kind,
+            source=source,
+            target=target,
+            file_path=edge.file_path,
+            line=edge.line,
+            extra=edge.extra,
+        )
 
     def set_metadata(self, key: str, value: str) -> None:
         self._conn.execute(
