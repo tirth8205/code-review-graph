@@ -107,6 +107,91 @@ _RESTART_BACKOFF_BASE = float(os.environ.get("CRG_RESTART_BACKOFF", "30"))
 _RESTART_BACKOFF_MAX = float(os.environ.get("CRG_RESTART_BACKOFF_MAX", "900"))
 _RESTART_HEALTHY_SECONDS = float(os.environ.get("CRG_RESTART_HEALTHY_AFTER", "600"))
 
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+
+class _WindowsJob:
+    """Own watcher processes so Windows cannot orphan them on daemon exit."""
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        ctypes_api: Any = ctypes
+        self._ctypes: Any = ctypes_api
+        self._kernel32 = ctypes_api.WinDLL("kernel32", use_last_error=True)
+        kernel32 = self._kernel32
+        kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        )
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [(f"value_{index}", ctypes.c_ulonglong) for index in range(6)]
+
+        class BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("per_process_user_time_limit", ctypes.c_longlong),
+                ("per_job_user_time_limit", ctypes.c_longlong),
+                ("limit_flags", wintypes.DWORD),
+                ("minimum_working_set_size", ctypes.c_size_t),
+                ("maximum_working_set_size", ctypes.c_size_t),
+                ("active_process_limit", wintypes.DWORD),
+                ("affinity", ctypes.c_size_t),
+                ("priority_class", wintypes.DWORD),
+                ("scheduling_class", wintypes.DWORD),
+            ]
+
+        class ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("basic_limit_information", BasicLimitInformation),
+                ("io_info", IoCounters),
+                ("process_memory_limit", ctypes.c_size_t),
+                ("job_memory_limit", ctypes.c_size_t),
+                ("peak_process_memory_used", ctypes.c_size_t),
+                ("peak_job_memory_used", ctypes.c_size_t),
+            ]
+
+        self._handle = kernel32.CreateJobObjectW(None, None)
+        if not self._handle:
+            raise ctypes_api.WinError(ctypes_api.get_last_error())
+
+        limits = ExtendedLimitInformation()
+        limits.basic_limit_information.limit_flags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(
+            self._handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.byref(limits),
+            ctypes.sizeof(limits),
+        ):
+            error = ctypes_api.get_last_error()
+            kernel32.CloseHandle(self._handle)
+            raise ctypes_api.WinError(error)
+
+    def assign(self, proc: subprocess.Popen[bytes]) -> None:
+        """Assign *proc* to this job before it can outlive the daemon."""
+        process_handle = getattr(proc, "_handle", None)
+        if process_handle is None:
+            raise RuntimeError("Windows subprocess has no process handle")
+        if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
+            raise self._ctypes.WinError(self._ctypes.get_last_error())
+
+    def close(self) -> None:
+        """Release the job; kill-on-close handles abnormal daemon exits."""
+        if self._handle:
+            self._kernel32.CloseHandle(self._handle)
+            self._handle = None
+
 # ---------------------------------------------------------------------------
 # Dataclasses
 # ---------------------------------------------------------------------------
@@ -763,6 +848,9 @@ class WatchDaemon:
         self._health_stop: threading.Event = threading.Event()
         self._lock: threading.Lock = threading.Lock()
         self._restarts: dict[str, dict[str, float]] = {}
+        self._windows_job: _WindowsJob | None = (
+            _WindowsJob() if sys.platform == "win32" else None
+        )
 
     # ------------------------------------------------------------------
     # Public interface
@@ -807,19 +895,23 @@ class WatchDaemon:
 
     def stop(self) -> None:
         """Tear down the daemon: stop watchers, terminate children."""
-        self.stop_config_watcher()
-        self.stop_health_checker()
+        try:
+            self.stop_config_watcher()
+            self.stop_health_checker()
 
-        with self._lock:
-            for alias, proc in list(self._children.items()):
-                repo = self._current_repos.get(alias)
-                self._terminate_child(alias, proc, repo.path if repo else None)
-            self._children.clear()
+            with self._lock:
+                for alias, proc in list(self._children.items()):
+                    repo = self._current_repos.get(alias)
+                    self._terminate_child(alias, proc, repo.path if repo else None)
+                self._children.clear()
 
-        self._current_repos.clear()
-        self._clear_state()
-        clear_pid()
-        logger.info("Daemon stopped")
+            self._current_repos.clear()
+            self._clear_state()
+            clear_pid()
+            logger.info("Daemon stopped")
+        finally:
+            if self._windows_job is not None:
+                self._windows_job.close()
 
     def reconcile(self, new_config: DaemonConfig | None = None) -> None:
         """Reconcile running watchers with the (possibly updated) config.
@@ -1225,6 +1317,7 @@ class WatchDaemon:
             ]
 
         log_fd = open(log_path, "ab")  # noqa: SIM115
+        proc: subprocess.Popen[bytes] | None = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -1233,7 +1326,16 @@ class WatchDaemon:
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
             )
+            if self._windows_job is not None:
+                self._windows_job.assign(proc)
         except Exception:
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
             log_fd.close()
             logger.exception("Failed to start watcher for '%s'", repo.alias)
             return
