@@ -1,0 +1,80 @@
+# Automatic promotion: staging -> testing.
+#
+# Runs after CI finishes on a push to staging. If every CI job passed, testing is
+# fast-forwarded to that exact commit. Nothing is promoted to main here; that step
+# is a pull request the maintainer reviews and merges by hand.
+#
+# Requires the GitHub Actions app to be on the bypass list of the testing ruleset,
+# because testing otherwise accepts pull requests only.
+name: Promote to testing
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [staging]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-to-testing
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: staging
+
+      - name: Resolve the commit to promote
+        id: target
+        env:
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          sha="${RUN_SHA:-$(git rev-parse origin/staging)}"
+          # Only promote a commit that is still the tip of staging. A newer push
+          # will bring its own CI run and its own promotion.
+          tip=$(git rev-parse origin/staging)
+          if [ "$sha" != "$tip" ]; then
+            echo "::notice::$sha is no longer the tip of staging ($tip); skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git merge-base --is-ancestor "$sha" origin/testing; then
+            echo "::notice::testing already contains $sha; nothing to promote."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor origin/testing "$sha"; then
+            echo "::error::testing has commits staging does not contain. Promote by pull request instead."
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward testing
+        if: steps.target.outputs.skip == 'false'
+        env:
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git push origin "$SHA:refs/heads/testing"
+          echo "::notice::testing promoted to $SHA"
+          {
+            echo "### Promoted to \`testing\`"
+            echo
+            echo "Commit: \`$SHA\`"
+            echo
+            git log -1 --format='%s' "$SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
