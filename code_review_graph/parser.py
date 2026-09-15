@@ -8695,6 +8695,81 @@ class CodeParser:
         {"arrow_function", "function_expression", "function"},
     )
 
+    # Wrapper calls nest at most this deep before we give up: memo(forwardRef(fn)).
+    _JS_WRAPPER_MAX_DEPTH = 3
+
+    # Wrappers documented to return a component. A single function argument is not
+    # enough on its own to know that a call returns something CALLABLE:
+    # ``const result = evaluate(() => compute())`` has the same shape and returns a
+    # number, so treating it as a definition invents a `result` function and moves
+    # `compute`'s caller off the function that really makes the call. The name is
+    # what establishes it. A wrapper outside this set is simply not a definition
+    # here, which is the behaviour that predates wrapped components being indexed
+    # at all.
+    _JS_COMPONENT_WRAPPERS = frozenset({
+        "forwardRef", "memo", "observer", "withRouter", "withStyles", "withTheme",
+        "connect", "styled", "inject", "withTranslation", "withErrorBoundary",
+    })
+
+    def _js_wrapper_name(self, call_node) -> Optional[str]:
+        """The wrapper a call applies, or None when the callee is not a plain name.
+
+        ``memo(fn)`` and ``React.memo(fn)`` both answer ``memo``; the curried
+        ``styled(Base)(fn)`` and ``connect(map)(fn)`` answer through their own callee.
+        """
+        callee = call_node.children[0] if call_node.children else None
+        if callee is None:
+            return None
+        if callee.type == "call_expression":
+            return self._js_wrapper_name(callee)
+        if callee.type not in ("identifier", "member_expression"):
+            return None
+        return callee.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
+
+    def _js_wrapped_function(self, call_node, _depth: int = 0, chain=None):
+        """Return the function literal a component wrapper call receives, if any.
+
+        ``forwardRef(fn)``, ``memo(fn)``, ``observer(fn)``, ``withRouter(fn)`` and
+        ``styled(Base)(fn)`` all put the component's function inside a
+        ``call_expression`` instead of assigning it directly, and nested wrappers
+        (``memo(forwardRef(fn))``) are unwrapped.
+
+        Two things have to hold. The wrapper has to be one that returns a component
+        ({@link _JS_COMPONENT_WRAPPERS}), and it has to take the function as its ONLY
+        argument: a call that takes a callback among others is computing a value, and
+        ``useMemo(() => x, [dep])`` assigns whatever it returns rather than the
+        callback. Calls without a function argument (``createClient({...})``) return
+        None as well.
+
+        ``chain``, when given, collects every wrapper call traversed, outermost first.
+        Each of them runs where the declaration is, so the caller records them against
+        the enclosing function rather than against the component.
+        """
+        name = self._js_wrapper_name(call_node)
+        if name is None or name not in self._JS_COMPONENT_WRAPPERS:
+            return None
+        arguments = None
+        for sub in call_node.children:
+            if sub.type == "arguments":
+                arguments = sub
+                break
+        if arguments is None:
+            return None
+        args = arguments.named_children
+        if len(args) != 1:
+            return None
+        arg = args[0]
+        if arg.type in self._JS_FUNC_VALUE_TYPES:
+            if chain is not None:
+                chain.append(call_node)
+            return arg
+        if arg.type == "call_expression" and _depth < self._JS_WRAPPER_MAX_DEPTH:
+            inner = self._js_wrapped_function(arg, _depth + 1, chain)
+            if inner is not None and chain is not None:
+                chain.append(call_node)
+            return inner
+        return None
+
     def _extract_js_var_functions(
         self,
         child,
@@ -8715,11 +8790,19 @@ class CodeParser:
           const foo = () => {}
           let bar = function() {}
           export const baz = (x: number): string => x.toString()
+          export const Button = forwardRef((props, ref) => <button ref={ref} />)
 
         Returns True if at least one function was extracted from the
         declaration, so the caller can skip generic recursion.
         """
         handled = False
+        # Declarators this pass does not own. One declaration can mix them:
+        # `const Button = memo(() => paint()), token = nextToken()` defines a
+        # component and calls a function, and the call belongs to whatever function
+        # encloses the declaration. The caller skips its generic recursion over the
+        # whole declaration once anything here is extracted, so what is left has to
+        # be walked here or it is lost.
+        unowned = []
         for declarator in child.children:
             if declarator.type != "variable_declarator":
                 continue
@@ -8727,13 +8810,29 @@ class CodeParser:
             # Find identifier and function value
             var_name = None
             func_node = None
+            # The component's own body. For a wrapped component that is the function
+            # the wrapper receives, NOT the declarator: the wrapper call itself runs
+            # where the declaration is, not inside the component it produces.
+            walk_node = None
+            wrapper_calls = []
             for sub in declarator.children:
                 if sub.type == "identifier" and var_name is None:
                     var_name = sub.text.decode("utf-8", errors="replace")
                 elif sub.type in self._JS_FUNC_VALUE_TYPES:
                     func_node = sub
+                    walk_node = sub
+                elif sub.type == "call_expression":
+                    # Higher-order wrappers (forwardRef, memo, observer, ...) hide
+                    # the component's function inside the call's arguments.
+                    chain = []
+                    wrapped = self._js_wrapped_function(sub, chain=chain)
+                    if wrapped is not None:
+                        func_node = wrapped
+                        walk_node = wrapped
+                        wrapper_calls = chain
 
             if not var_name or not func_node:
+                unowned.append(declarator)
                 continue
 
             is_test = _is_test_function(var_name, file_path)
@@ -8768,18 +8867,38 @@ class CodeParser:
 
             # Recurse into the function body for calls
             self._extract_from_tree(
-                func_node, source, language, file_path, nodes, edges,
+                walk_node or func_node, source, language, file_path, nodes, edges,
                 enclosing_class=enclosing_class,
                 enclosing_func=var_name,
                 import_map=import_map,
                 defined_names=defined_names,
                 _depth=_depth + 1,
             )
+            for wrapper_call in wrapper_calls:
+                # `memo(...)` and any wrapper it nests are called where the
+                # declaration is, so the edges belong to the enclosing function.
+                # Recorded through the call extractor rather than by walking the
+                # node, which would descend into the wrapped function again and
+                # credit its calls to the enclosing function as well.
+                self._extract_calls(
+                    wrapper_call, source, language, file_path, nodes, edges,
+                    enclosing_class, enclosing_func, import_map, defined_names,
+                    _depth + 1,
+                )
             handled = True
 
         if not handled:
             # Not a function assignment — let generic recursion handle it
             return False
+        for declarator in unowned:
+            self._extract_from_tree(
+                declarator, source, language, file_path, nodes, edges,
+                enclosing_class=enclosing_class,
+                enclosing_func=enclosing_func,
+                import_map=import_map,
+                defined_names=defined_names,
+                _depth=_depth + 1,
+            )
         return True
 
     def _extract_js_field_function(
