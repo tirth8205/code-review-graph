@@ -30,8 +30,14 @@ def _lock() -> dict:
         return tomllib.load(f)
 
 
+# Extras that exist for contributors, not users: [all] must NOT drag them in.
+# "dev" is the lint/type/test toolchain; "browser-test" is Playwright, whose
+# tests also need a ~150 MB Chromium download fetched out of band.
+CONTRIBUTOR_EXTRAS = {"dev", "browser-test"}
+
+
 def test_all_extra_covers_every_optional_group():
-    """[all] must reference every optional group except dev, per README's
+    """[all] must reference every runtime optional group, per README's
     "All optional dependencies" claim (issue #534)."""
     optional = _pyproject()["project"]["optional-dependencies"]
     referenced = {
@@ -39,8 +45,16 @@ def test_all_extra_covers_every_optional_group():
         for req in optional["all"]
         if req.startswith("code-review-graph[")
     }
-    expected = set(optional) - {"all", "dev"}
+    expected = set(optional) - {"all"} - CONTRIBUTOR_EXTRAS
     assert referenced == expected
+
+
+def test_all_extra_excludes_contributor_only_extras():
+    """Installing [all] must never pull in the test toolchains."""
+    optional = _pyproject()["project"]["optional-dependencies"]
+    for extra in CONTRIBUTOR_EXTRAS:
+        assert extra in optional, f"{extra} extra is missing from pyproject.toml"
+        assert f"code-review-graph[{extra}]" not in optional["all"]
 
 
 def test_all_extra_contains_only_self_referential_extras():

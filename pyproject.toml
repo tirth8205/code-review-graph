@@ -86,6 +86,15 @@ dev = [
     "ruff>=0.3.0,<1",
     "tomli>=2.0; python_version < '3.11'",
 ]
+# Real-browser tests for the generated visualization page
+# (tests/test_visualization_browser.py, `pytest -m browser`). Deliberately
+# NOT part of "all": it pulls a ~150 MB Chromium download that nothing at
+# runtime needs, and the browser build has to be fetched separately with
+# `python -m playwright install chromium`.
+browser-test = [
+    "playwright>=1.45,<2",
+    "pytest-playwright>=0.5,<1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["code_review_graph"]
@@ -142,6 +151,12 @@ skips = ["B101", "B404", "B603", "B607", "B608"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
+# Browser tests are opt-in: they need the "browser-test" extra and a
+# Chromium build (`python -m playwright install chromium`). CI runs them in
+# the separate "viz-browser" job; the coverage job excludes them.
+markers = [
+    "browser: drives the generated visualization page in a real headless browser",
+]
 
 [dependency-groups]
 dev = [

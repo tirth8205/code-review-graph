@@ -92,8 +92,36 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev]" pytest-cov
+      # -m "not browser" keeps tests/test_visualization_browser.py out of this
+      # job: it needs the "browser-test" extra and a Chromium build, and runs
+      # in the separate "viz-browser" job below. Without the marker filter the
+      # module is collected here and skipped via importorskip, which would make
+      # the coverage run quietly depend on Playwright being absent.
       - name: Run tests with coverage
-        run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+        run: >-
+          pytest --tb=short -q -m "not browser"
+          --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+
+  viz-browser:
+    name: Visualization browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev,browser-test]"
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      # No coverage flag: this job runs a handful of end-to-end page tests and
+      # would fail the 65% floor on its own.
+      - name: Run browser tests
+        run: pytest -m browser -q
 
   google-embeddings:
     name: Google embeddings (${{ matrix.extra }})
