@@ -583,6 +583,17 @@ export CRG_OPENAI_BATCH_SIZE=100                        # lower for gateways wit
 The cloud-egress warning is auto-skipped when the base URL points to localhost
 (`127.0.0.1`, `localhost`, `0.0.0.0`, `::1`).
 
+[OrcaRouter](https://www.orcarouter.ai) also serves the OpenAI-compatible
+`/v1/embeddings` endpoint; point the openai provider at it:
+
+```bash
+export CRG_OPENAI_BASE_URL=https://api.orcarouter.ai/v1
+export CRG_OPENAI_API_KEY=$ORCAROUTER_API_KEY
+export CRG_OPENAI_MODEL=openai/text-embedding-3-small
+export CRG_ACCEPT_CLOUD_EMBEDDINGS=1
+code-review-graph embed --provider openai
+```
+
 Voyage embeddings need no extra install. Set `VOYAGE_API_KEY` and pass
 `provider="voyage"` to `embed_graph`; the default model is `voyage-code-3`:
 
