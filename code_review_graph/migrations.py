@@ -238,6 +238,30 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
     logger.info("Migration v9: added edge confidence columns")
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """v10: Add the indexed ``nodes.symbol`` column used by tail lookups.
+
+    ``symbol`` holds the portion of ``qualified_name`` after the first ``::``.
+    Storing it lets a dotted-target lookup be an indexed equality test; the
+    previous ``substr(qualified_name, -n)`` predicate could not use any index
+    and scanned the whole table on every dotted symbol query.
+    """
+    if not _has_column(conn, "nodes", "symbol"):
+        conn.execute("ALTER TABLE nodes ADD COLUMN symbol TEXT")
+    # instr() returns 0 when "::" is absent, in which case the qualified name
+    # is already a bare symbol. Mirrors graph._symbol_of.
+    conn.execute(
+        "UPDATE nodes SET symbol = CASE "
+        "WHEN instr(qualified_name, '::') > 0 "
+        "THEN substr(qualified_name, instr(qualified_name, '::') + 2) "
+        "ELSE qualified_name END"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_nodes_symbol ON nodes(symbol)"
+    )
+    logger.info("Migration v10: added indexed nodes.symbol column")
+
+
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
@@ -251,6 +275,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     7: _migrate_v7,
     8: _migrate_v8,
     9: _migrate_v9,
+    10: _migrate_v10,
 }
 
 LATEST_VERSION = max(MIGRATIONS.keys())

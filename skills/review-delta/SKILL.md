@@ -6,41 +6,20 @@ argument-hint: "[file or function name]"
 
 # Review Delta
 
-Perform a focused, token-efficient code review of only the changed code and its blast radius.
-
-**Token optimization:** Before starting, call `get_docs_section_tool(section_name="review-delta")` for the optimized workflow. Use ONLY changed nodes + 2-hop neighbors in context.
+Review only the changed code and its blast radius.
 
 ## Steps
 
-1. **Ensure the graph is current** by calling `build_or_update_graph_tool()` (incremental update).
+1. Call `get_minimal_context_tool(task="review changes")`. If it returns `status: not_ready`, call `build_or_update_graph_tool()` and continue.
+2. Call `detect_changes_tool(detail_level="minimal")` for risk-scored changed functions, test gaps and affected flows. Changes come from `git diff` against `HEAD~1`; if the argument names a file, pass it in `changed_files`.
+3. Call `get_review_context_tool(detail_level="minimal")` when you need source snippets for the changed areas and `review_guidance` (untested functions, wide blast radius, inheritance changes).
+4. For each untested high-risk function, confirm with `query_graph_tool(pattern="tests_for", target="<function>")`.
+5. Use `detail_level="standard"` only for a high-risk item the minimal output leaves unclear. Do not load whole files unless a snippet is not enough.
 
-2. **Get review context** by calling `get_review_context_tool()`. This returns:
-   - Changed files (auto-detected from git diff)
-   - Impacted nodes and files (blast radius)
-   - Source code snippets for changed areas
-   - Review guidance (test coverage gaps, wide impact warnings, inheritance concerns)
+## Report
 
-3. **Analyze the blast radius** by reviewing the `impacted_nodes` and `impacted_files` in the context. Focus on:
-   - Functions whose callers changed (may need signature/behavior verification)
-   - Classes with inheritance changes (Liskov substitution concerns)
-   - Files with many dependents (high-risk changes)
-
-4. **Perform the review** using the context. For each changed file:
-   - Review the source snippet for correctness, style, and potential bugs
-   - Check if impacted callers/dependents need updates
-   - Verify test coverage using `query_graph_tool(pattern="tests_for", target=<function_name>)`
-   - Flag any untested changed functions
-
-5. **Report findings** in a structured format:
-   - **Summary**: One-line overview of the changes
-   - **Risk level**: Low / Medium / High (based on blast radius)
-   - **Issues found**: Bugs, style issues, missing tests
-   - **Blast radius**: List of impacted files/functions
-   - **Recommendations**: Actionable suggestions
-
-## Advantages Over Full-Repo Review
-
-- Only sends changed + impacted code to the model (5-10x fewer tokens)
-- Automatically identifies blast radius without manual file searching
-- Provides structural context (who calls what, inheritance chains)
-- Flags untested functions automatically
+- Summary: one line
+- Risk: low, medium or high, from the blast radius
+- Issues: bugs, missing tests, style
+- Blast radius: impacted files and functions
+- Recommendations

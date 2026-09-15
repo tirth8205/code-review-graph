@@ -2,6 +2,126 @@
 
 ## [Unreleased]
 
+### Added
+
+- `cross_repo_search_tool` accepts `repos`, a list of registry aliases or
+  folder names, to search only part of the registry. Names that match no
+  entry come back in `unknown` and names that match several entries in
+  `ambiguous`; both lists are bounded like every other list (#915).
+- `query_graph_tool` resolves dotted targets such as
+  `Details.QueryHandler.Handle` through an indexed `nodes.symbol` column.
+  This is schema version 10; existing databases migrate on open and the
+  VS Code extension accepts the new version (#942, #934).
+- `update` and `build_or_update_graph_tool` report files that failed to
+  parse: the status is `partial`, the summary names the files and the CLI
+  prints a warning on stderr. A failed file keeps its previous graph rows
+  (#952).
+- `CRG_HOOK_WORKTREES=1` keeps the generated pre-commit hook active inside
+  a linked Git worktree (#953).
+
+### Changed
+
+- Hints, `next_tool_suggestions`, the prompt templates and the generated
+  instruction blocks name the registered tools (`detect_changes_tool`, not
+  `detect_changes`), so agents are no longer told to call tools that do
+  not exist (#821).
+- `detect_changes`, `get_review_context`, `get_affected_flows`,
+  `get_impact_radius`, `get_minimal_context` and `update --brief` resolve a
+  branch ref to its merge base with `HEAD`, matching GitHub's "Files
+  changed" view on divergent branches. Commit IDs and revision expressions
+  are used as given, and a shallow clone that cannot resolve the merge base
+  falls back to the ref (#847).
+- Per-file node and edge writes, bare-endpoint resolution and signature
+  computation run as batched statements in a single transaction each,
+  instead of one autocommitted row at a time, which cuts build time on
+  large graphs (#858, #721).
+- The generated pre-commit hook skips automatic checks in a linked
+  worktree, so a commit there cannot silently create a second graph for
+  another branch. Detection uses the git directory's `commondir` file and
+  needs only `git rev-parse --absolute-git-dir` (Git 2.13). Reinstall
+  upgrades the exact hook block written by earlier releases (#953).
+
+### Fixed
+
+- Freshness metadata follows what was stored. A no-op `update` that
+  confirms `HEAD` advances the Git anchor, so queries after a commit no
+  longer carry a stale-graph caveat, and a file that fails to parse no
+  longer holds the anchor back for the files that did parse (#952).
+- `update` compares stored hashes with the files on disk, so a change that
+  was indexed and then reverted is re-parsed even when the Git diff is
+  empty. Each indexed file is still read only once per update, and binary
+  checks read only the first 8 KB (#860).
+- Failed C++ identity migrations are retried file by file instead of
+  rebuilding files that migrated correctly, and a file that failed and was
+  then ignored is dropped from the pending set instead of making every
+  later update report "Identity migration pending for ignored file" and
+  stopping `watch` from starting (#944).
+- The Spring and Temporal resolvers take interface implementors only from
+  Java, Kotlin and Scala classes, so Go struct embeddings are no longer
+  mistaken for Java implementations while Kotlin and Scala implementors
+  keep resolving (#834).
+- Go embedded structs and interface composition produce `INHERITS` edges
+  again, including grouped `type (...)` declarations and generic embedded
+  types (#834).
+- tsconfig path aliases probe `.mts` and `.cts` targets, `.mts` and `.cts`
+  files are indexed as TypeScript in full builds, and `.mjs` and `.cjs`
+  import specifiers resolve to `.mts` and `.cts` sources before falling
+  back to `.ts` and `.tsx` (#874).
+- `forget` and `dead-code` resolve the database the way the other
+  read-only commands do, without creating graph state when none exists,
+  and still migrate a legacy top-level `.code-review-graph.db` instead of
+  reporting "No graph found" (#874).
+- C, C++ and Bash grammar probes put the parent interpreter's
+  `tree_sitter_language_pack` location on the child's path, so grammars
+  installed in a venv or with `pip install --user` are no longer reported
+  missing, and probe failures carry an install hint (#810, #807).
+- Go methods whose receiver type carries a comment or parentheses are
+  attached to their type (#872).
+- Kotlin import names are read from the AST, including `as` aliases, and
+  wildcard imports no longer produce an entry (#873).
+- PHP `include`, `include_once`, `require` and `require_once` with a
+  literal path create import edges. Dynamic paths are not evaluated, and
+  the empty-result caveat says so (#875, #819).
+- Python `import a.b as c` is extracted as an import of `a.b` (#955).
+- `get_all_files` no longer fails on malformed `extra` JSON left behind by
+  a killed writer (#870, #864).
+- Dotted Python module imports (`src` layouts, `odoo.addons.*`) count as
+  evidence when resolving bare call targets, both in post-processing and
+  in `query_graph` (#960, #903).
+- Embedding runs enumerate nodes directly instead of through stored file
+  paths, so legacy stores with non-canonical paths are embedded, and
+  `embed_graph_tool` no longer reports semantic search as active when
+  nothing was embedded (#962).
+- `inheritors_of` marks results found by bare name with
+  `inferred_by: "bare_name"` when several classes or types share that name
+  (#966).
+- `references_to` includes dependents whose import specifier the parser
+  could not resolve (npm workspace alias, tsconfig path mapping), marked
+  `target_resolution: "unresolved"`, when the bare name identifies exactly
+  one node (#969).
+- Source files are read as UTF-8 regardless of the system locale in review
+  and flow snippets and in the eval runner (#928).
+- Watch mode drops events on paths the OS cannot stat instead of ending
+  the watch loop (#959, #897).
+- Watch mode reloads ignore rules when `.code-review-graphignore` or a
+  build manifest changes, removes newly ignored files from the graph,
+  indexes newly included ones, and keeps a source file created at a path
+  previously inferred as build output (#909).
+- Incremental reconciliation refuses a graph whose File markers only partly
+  overlap the requested root, so files of a parent or sibling repository
+  are not deleted (#909).
+- Legacy graph paths are purged by their stored spelling, so normalising
+  them cannot delete a different current row (#911).
+- When promotion to a recursive watch fails, the existing watches are kept
+  and the health file reports `degraded` (#927).
+- A watcher thread that dies before the first liveness tick is detected
+  (#891).
+- `crg-daemon stop` keeps the PID file until the process has exited and
+  exits non-zero if it is still running (#958).
+- The Qoder skills are bundled in the wheel, so `install --platform qoder`
+  works from a pip install and never copies the target project's own
+  `skills/` directory (#909).
+
 ## [2.3.8] - 2026-08-21
 
 ### Added

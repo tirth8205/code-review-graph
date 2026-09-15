@@ -58,6 +58,9 @@ htmlcov/
 # mypy
 .mypy_cache/
 
+# ruff
+.ruff_cache/
+
 # Excalidraw source files (PNGs are tracked, sources are not)
 *.excalidraw
 diagrams/export_pngs.mjs
@@ -93,9 +96,5 @@ SCALING_AND_TOKEN_EFFICIENCY_PLAN.md
 .dolt/
 .beads-credential-key
 
-# Local-only pending files (temporary — revisit before tracking)
+# Local tool configuration
 .codex/
-2026-06-10-194632-local-command-caveatcaveat-the-messages-below.txt
-OC3_TECHNICAL_CONTRIBUTION.md
-OC3_TECHNICAL_CONTRIBUTION.pdf
-PRESENTATION_BRIEF.md

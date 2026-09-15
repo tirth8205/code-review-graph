@@ -10,6 +10,7 @@ import ast
 import hashlib
 import html
 import importlib
+import importlib.util
 import json
 import logging
 import math
@@ -472,6 +473,60 @@ def _parser_load_timeout_seconds() -> float:
     return timeout
 
 
+def _parser_probe_env() -> dict[str, str]:
+    """Build the environment for a disposable grammar-load probe.
+
+    The probe runs in a child interpreter so a hanging or crashing native
+    grammar cannot take down the parent. The child must still be able to
+    import the same ``tree_sitter_language_pack`` the parent can see
+    (venv site-packages, ``pip install --user``, or a non-standard
+    ``sys.path`` entry). Isolated mode (``python -I``) is intentionally
+    avoided for this reason (#760, #807).
+    """
+    env = os.environ.copy()
+    try:
+        spec = importlib.util.find_spec("tree_sitter_language_pack")
+    except (ImportError, OSError, ValueError):
+        return env
+    module_file = spec.origin if spec is not None else None
+    if not module_file:
+        return env
+    pack_parent = str(Path(module_file).resolve().parent.parent)
+    existing = env.get("PYTHONPATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if pack_parent not in parts:
+        env["PYTHONPATH"] = (
+            os.pathsep.join([pack_parent, *parts]) if parts else pack_parent
+        )
+    return env
+
+
+def _install_hint_for_probe_failure(detail: str) -> str | None:
+    """Return installable guidance for common probe failure modes."""
+    lowered = detail.lower()
+    if "tree_sitter_language_pack" in lowered and (
+        "modulenotfounderror" in lowered
+        or "no module named" in lowered
+        or "import error" in lowered
+        or "importerror" in lowered
+    ):
+        return (
+            "Install tree-sitter-language-pack for the same Python that runs "
+            "code-review-graph: pip install 'tree-sitter-language-pack>=0.3.0,<1'"
+        )
+    if (
+        "could not find language library" in lowered
+        or "lookuperror" in lowered
+    ):
+        return (
+            "This grammar may be missing from the installed "
+            "tree-sitter-language-pack; upgrade it "
+            "(pip install -U 'tree-sitter-language-pack>=0.3.0,<1') "
+            "or rebuild its native extensions"
+        )
+    return None
+
+
 def _run_parser_load_probe(grammar: str, timeout_seconds: float) -> bool:
     """Probe one native grammar in a disposable interpreter process."""
     code = (
@@ -487,6 +542,7 @@ def _run_parser_load_probe(grammar: str, timeout_seconds: float) -> bool:
             stderr=subprocess.PIPE,
             timeout=timeout_seconds,
             check=False,
+            env=_parser_probe_env(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         _PARSER_PROBE_FAILURE_DETAILS[grammar] = str(exc)
@@ -533,11 +589,20 @@ def _parser_load_probe_succeeds(
         if not result:
             detail = _PARSER_PROBE_FAILURE_DETAILS.get(grammar)
             if detail:
-                logger.warning(
-                    "Skipping unavailable tree-sitter parser for %s: %s",
-                    grammar,
-                    detail,
-                )
+                hint = _install_hint_for_probe_failure(detail)
+                if hint:
+                    logger.warning(
+                        "Skipping unavailable tree-sitter parser for %s: %s. %s",
+                        grammar,
+                        detail,
+                        hint,
+                    )
+                else:
+                    logger.warning(
+                        "Skipping unavailable tree-sitter parser for %s: %s",
+                        grammar,
+                        detail,
+                    )
             else:
                 logger.warning(
                     "Skipping unavailable tree-sitter parser for %s",
@@ -717,6 +782,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".js": "javascript",
     ".jsx": "javascript",
     ".ts": "typescript",
+    ".mts": "typescript",
+    ".cts": "typescript",
     ".tsx": "tsx",
     ".go": "go",
     ".rs": "rust",
@@ -1086,7 +1153,13 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "perl": ["use_statement", "require_expression"],
     "kotlin": ["import_header"],
     "swift": ["import_declaration"],
-    "php": ["namespace_use_declaration"],
+    "php": [
+        "namespace_use_declaration",
+        "include_expression",
+        "include_once_expression",
+        "require_expression",
+        "require_once_expression",
+    ],
     "scala": ["import_declaration"],
     "solidity": ["import_directive"],
     # Dart: import_or_export wraps library_import > import_specification > configurable_uri
@@ -10166,6 +10239,19 @@ class CodeParser:
 
         Returns True if the child was handled (class with a name found).
         """
+        if language == "go" and child.type == "type_declaration" and any(
+            part.type == "(" for part in child.children
+        ):
+            # A grouped declaration owns several independent types. Extract
+            # each spec so later embeddings cannot attach to the first type.
+            for spec in child.named_children:
+                if spec.type == "type_spec":
+                    self._extract_classes(
+                        spec, source, language, file_path, nodes, edges,
+                        enclosing_class, import_map, defined_names, _depth,
+                    )
+            return True
+
         name = self._get_name(child, language, "class")
         if not name:
             return False
@@ -13488,7 +13574,29 @@ class CodeParser:
                         if module_name and real_name and alias:
                             import_map[alias] = f"{module_name}.{real_name}"
 
-        elif language in ("java", "kotlin"):
+        elif language == "kotlin":
+            module = None
+            alias = None
+            wildcard = False
+            for child in node.children:
+                if child.type == "identifier":
+                    module = child.text.decode("utf-8", errors="replace")
+                elif child.type == "wildcard_import":
+                    wildcard = True
+                elif child.type == "import_alias":
+                    alias = next(
+                        (
+                            part.text.decode("utf-8", errors="replace")
+                            for part in child.children
+                            if part.type == "type_identifier"
+                        ),
+                        None,
+                    )
+            if module and not wildcard:
+                local_name = alias or module.rsplit(".", 1)[-1]
+                import_map[local_name] = module
+
+        elif language == "java":
             text = node.text.decode("utf-8", errors="replace").strip()
             if not text.startswith("import "):
                 return
@@ -13654,7 +13762,9 @@ class CodeParser:
             if module.startswith("."):
                 # Relative import — resolve from caller's directory
                 base = caller_dir / module
-                extensions = [".ts", ".tsx", ".js", ".jsx", ".vue"]
+                extensions = [
+                    ".ts", ".tsx", ".js", ".jsx", ".vue", ".mts", ".cts",
+                ]
                 # Try exact path first (might already have extension)
                 if base.is_file():
                     return str(base.resolve())
@@ -13672,8 +13782,14 @@ class CodeParser:
                         return str(target.resolve())
                 # ESM/NodeNext writes `./foo.js` for a file that is `foo.ts` on
                 # disk; only here does replacing the suffix become correct.
-                if base.suffix in (".js", ".jsx", ".mjs", ".cjs"):
-                    for ext in (".ts", ".tsx"):
+                suffix_substitutions = {
+                    ".js": (".ts", ".tsx", ".jsx"),
+                    ".jsx": (".ts", ".tsx"),
+                    ".mjs": (".mts", ".ts", ".tsx"),
+                    ".cjs": (".cts", ".ts", ".tsx"),
+                }
+                if base.suffix in suffix_substitutions:
+                    for ext in suffix_substitutions[base.suffix]:
                         target = base.with_suffix(ext)
                         if target.is_file():
                             return str(target.resolve())
@@ -13775,6 +13891,18 @@ class CodeParser:
                 current = current.parent
 
         elif language == "php":
+            # Literal include paths are filesystem paths, not PHP namespaces.
+            # Preserve absolute paths and explicit relative traversal instead
+            # of stripping the root or searching ancestor namespace roots.
+            if "/" in module or module.endswith(".php"):
+                try:
+                    boundary = self._php_repository_boundary(caller_dir)
+                    target = (caller_dir / module).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    return None
+                if boundary is not None and _path_is_within(target, boundary) and target.is_file():
+                    return str(target)
+                return None
             composer_resolved = self._resolve_php_composer_module(
                 module, caller_dir,
             )
@@ -13788,7 +13916,12 @@ class CodeParser:
             # ``.../App/Foo``) resolve; vendor/global classes (``\Exception``)
             # and ``use function`` / ``use const`` targets with no matching
             # file stay unresolved and keep the bare FQN, like JDK imports.
-            rel_path = module.replace("\\", "/").lstrip("/") + ".php"
+            normalized_module = module.replace("\\", "/").lstrip("/")
+            rel_path = (
+                normalized_module
+                if normalized_module.endswith(".php")
+                else normalized_module + ".php"
+            )
             try:
                 boundary = self._php_repository_boundary(caller_dir)
                 current = caller_dir.resolve()
@@ -14796,9 +14929,15 @@ class CodeParser:
         )
         receiver_type = parameter.child_by_field_name("type") if parameter else None
         while receiver_type is not None and receiver_type.type in {
-            "generic_type", "pointer_type",
+            "generic_type", "pointer_type", "parenthesized_type",
         }:
-            receiver_type = next(iter(receiver_type.named_children), None)
+            receiver_type = next(
+                (
+                    child for child in receiver_type.named_children
+                    if child.type != "comment"
+                ),
+                None,
+            )
         if receiver_type is None or receiver_type.type != "type_identifier":
             return None
         return receiver_type.text.decode("utf-8", errors="replace")
@@ -15396,16 +15535,39 @@ class CodeParser:
                                 if ident.type == "identifier":
                                     bases.append(ident.text.decode("utf-8", errors="replace"))
         elif language == "go":
-            # Embedded structs / interface composition
-            for child in node.children:
-                if child.type == "type_spec":
-                    for sub in child.children:
-                        if sub.type in ("struct_type", "interface_type"):
-                            for field_node in sub.children:
-                                if field_node.type == "field_declaration_list":
-                                    for f in field_node.children:
-                                        if f.type == "type_identifier":
-                                            bases.append(f.text.decode("utf-8", errors="replace"))
+            spec = node if node.type == "type_spec" else next(
+                (child for child in node.named_children if child.type == "type_spec"),
+                None,
+            )
+            body = spec.child_by_field_name("type") if spec is not None else None
+            embedded_types: list = []
+            if body is not None and body.type == "struct_type":
+                for fields in body.named_children:
+                    if fields.type != "field_declaration_list":
+                        continue
+                    for field in fields.named_children:
+                        if (
+                            field.type == "field_declaration"
+                            and field.child_by_field_name("name") is None
+                        ):
+                            # The optional '*' and tag are siblings of the
+                            # type; named fields are composition, not embedding.
+                            embedded_types.append(field.child_by_field_name("type"))
+            elif body is not None and body.type == "interface_type":
+                for element in body.named_children:
+                    if element.type != "type_elem":
+                        continue
+                    types = [part for part in element.named_children if part.type != "comment"]
+                    # A union is a constraint, not a list of embedded bases.
+                    if len(types) == 1:
+                        embedded_types.append(types[0])
+            for embedded in embedded_types:
+                if embedded is not None and embedded.type == "generic_type":
+                    # Link to the declared type, just as generic Go receivers
+                    # do. Keep package qualification; arguments are not bases.
+                    embedded = embedded.child_by_field_name("type")
+                if embedded is not None and embedded.type in ("type_identifier", "qualified_type"):
+                    bases.append(embedded.text.decode("utf-8", errors="replace"))
         elif language == "dart":
             # class Foo extends Bar with Mixin implements Iface { ... }
             # AST: superclass contains type_identifier (base) and mixins (with clause);
@@ -15501,6 +15663,13 @@ class CodeParser:
                 for child in node.children:
                     if child.type == "dotted_name":
                         imports.append(child.text.decode("utf-8", errors="replace"))
+                    elif child.type == "aliased_import":
+                        for imported in child.children:
+                            if imported.type == "dotted_name":
+                                imports.append(
+                                    imported.text.decode("utf-8", errors="replace")
+                                )
+                                break
         elif language in ("javascript", "typescript", "tsx"):
             # import ... from 'module'
             for child in node.children:
@@ -15708,6 +15877,27 @@ class CodeParser:
                     if txt and txt != "extends":
                         imports.append(txt)
         elif language == "php":
+            include_types = {
+                "include_expression",
+                "include_once_expression",
+                "require_expression",
+                "require_once_expression",
+            }
+            if node.type in include_types:
+                for child in node.children:
+                    # A double-quoted literal uses encapsed_string even with
+                    # no interpolation. Variables and escapes need evaluation.
+                    if child.type == "string" or (
+                        child.type == "encapsed_string"
+                        and all(part.type == "string_content" for part in child.named_children)
+                    ):
+                        value = child.text.decode(
+                            "utf-8", errors="replace",
+                        ).strip("'\"")
+                        if value:
+                            imports.append(value)
+                return imports
+
             # ``namespace_use_declaration`` covers several shapes:
             #   use A\B\C;            use A\B\C as D;
             #   use function A\b;     use const A\B;

@@ -677,6 +677,20 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+def _warn_failed_files(result: dict) -> None:
+    """Report files that failed to parse; their previous graph rows are kept."""
+    failed = result.get("errors") or []
+    if not failed:
+        return
+    names = ", ".join(str(item.get("file", "?")) for item in failed[:5])
+    extra = f" (+{len(failed) - 5} more)" if len(failed) > 5 else ""
+    print(
+        f"Warning: {len(failed)} file(s) failed to parse and were not updated: "
+        f"{names}{extra}",
+        file=sys.stderr,
+    )
+
+
 def main() -> None:
     """Main CLI entry point."""
     _configure_utf8_stdio()
@@ -1063,7 +1077,11 @@ def main() -> None:
         help="Analyze change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
-    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument(
+        "--base",
+        default="HEAD~1",
+        help="Git diff base (branch refs use their merge base with HEAD; default: HEAD~1)",
+    )
     detect_cmd.add_argument(
         "--brief",
         action="store_true",
@@ -1699,7 +1717,7 @@ def main() -> None:
     if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command in _read_only_db_cmds:
+    if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
@@ -1806,6 +1824,9 @@ def main() -> None:
                 sys.exit(1)
             finally:
                 logging.disable(previous_disable)
+            if result.get("status") == "error":
+                print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+                sys.exit(1)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
             if not args.quiet:
@@ -1826,6 +1847,7 @@ def main() -> None:
                         f"{nodes} nodes, {edges} edges"
                         f" (postprocess={pp})"
                     )
+            _warn_failed_files(result)
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.
@@ -1841,11 +1863,16 @@ def main() -> None:
                 from .incremental import (
                     get_changed_files,
                     get_staged_and_unstaged,
+                    resolve_review_base,
                 )
 
                 # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept).
-                brief_base = result.get("base_resolved") or "HEAD~1"
+                # None by default now, which get_changed_files cannot accept),
+                # then apply the same merge-base rule as detect-changes so a
+                # branch ref scopes the summary to this branch's own commits.
+                brief_base = resolve_review_base(
+                    repo_root, result.get("base_resolved") or "HEAD~1"
+                )
                 changed = get_changed_files(repo_root, brief_base)
                 if not changed:
                     changed = get_staged_and_unstaged(repo_root)
@@ -2084,9 +2111,9 @@ def main() -> None:
                 attach_context_savings,
                 estimate_file_tokens,
             )
-            from .incremental import get_changed_files, get_staged_and_unstaged
+            from .incremental import get_changed_files, get_staged_and_unstaged, resolve_review_base
 
-            base = args.base
+            base = resolve_review_base(repo_root, args.base)
             changed = get_changed_files(repo_root, base)
             if not changed:
                 changed = get_staged_and_unstaged(repo_root)

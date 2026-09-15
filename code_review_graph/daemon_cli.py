@@ -69,6 +69,7 @@ def _handle_stop(_args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(f"Stopping daemon (PID {pid})...")
+    stopped = False
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -83,6 +84,7 @@ def _handle_stop(_args: argparse.Namespace) -> None:
         # Wait up to 5 seconds for process to die.
         for _ in range(50):
             if not pid_alive(pid):
+                stopped = True
                 break
             time.sleep(0.1)
         else:
@@ -91,9 +93,21 @@ def _handle_stop(_args: argparse.Namespace) -> None:
             try:
                 os.kill(pid, force_signal)
             except ProcessLookupError:
-                pass
+                stopped = True
+            else:
+                # Signal delivery does not prove that the process has exited.
+                for _ in range(50):
+                    if not pid_alive(pid):
+                        stopped = True
+                        break
+                    time.sleep(0.1)
     finally:
-        clear_pid()
+        if stopped:
+            clear_pid()
+
+    if not stopped:
+        print(f"Error: Daemon PID {pid} is still running; refusing to clear its PID file.")
+        sys.exit(1)
 
     print("Daemon stopped.")
 

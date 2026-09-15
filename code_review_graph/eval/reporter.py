@@ -75,7 +75,7 @@ def _read_csvs(results_dir: Path, prefix: str) -> list[dict[str, str]]:
     """Read all CSV files matching a prefix from the results directory."""
     rows: list[dict[str, str]] = []
     for p in sorted(results_dir.glob(f"*_{prefix}_*.csv")):
-        with open(p, newline="") as f:
+        with open(p, encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
             rows.extend(reader)
     return rows

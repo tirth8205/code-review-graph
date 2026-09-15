@@ -15,7 +15,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import networkx as nx
@@ -39,6 +39,12 @@ from .parser import EdgeInfo, NodeInfo, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
+# Maximum rows bound into a single executemany() call for batched writes.
+# Chunking keeps peak memory bounded, while the surrounding transaction and
+# single commit mean SQLite performs one WAL commit/checkpoint per batch job
+# instead of one per row (issue #721).
+_UPDATE_BATCH = 50_000
+
 # These are the canonical language values stored for the JavaScript ecosystem.
 # JSX files are stored as ``javascript`` and Astro files as ``typescript`` by
 # ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name.
@@ -52,6 +58,16 @@ def _compatible_edge_languages(language: str) -> tuple[str, ...]:
     if normalized in _JAVASCRIPT_LANGUAGE_FAMILY_SET:
         return _JAVASCRIPT_LANGUAGE_FAMILY
     return (language,)
+
+
+def _symbol_of(qualified_name: str) -> str:
+    """Return the symbol portion of a qualified name (after the first "::").
+
+    ``src/app.py::Handler.process`` → ``Handler.process``. A qualified name
+    without a path component is already a bare symbol.
+    """
+    _, sep, symbol = qualified_name.partition("::")
+    return symbol if sep else qualified_name
 
 
 def _bridge_qualified_name(qualified_name: str) -> str:
@@ -88,6 +104,13 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_test INTEGER DEFAULT 0,
     file_hash TEXT,
     extra TEXT DEFAULT '{}',
+    -- Symbol portion of qualified_name (everything after the first "::").
+    -- Stored so a dotted-tail lookup is an indexed equality test instead of a
+    -- substr() scan over every node; see search_nodes_by_qualified_tail.
+    -- idx_nodes_symbol is created by migration v10, not here: _init_schema runs
+    -- before run_migrations, so indexing a column this CREATE TABLE cannot add
+    -- to an existing table would break every pre-existing database on open.
+    symbol TEXT,
     updated_at REAL NOT NULL
 );
 
@@ -238,8 +261,8 @@ class GraphStore:
             """INSERT INTO nodes
                (kind, name, qualified_name, file_path, line_start, line_end,
                 language, parent_name, params, return_type, modifiers, is_test,
-                file_hash, extra, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                file_hash, extra, symbol, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(qualified_name) DO UPDATE SET
                  kind=excluded.kind, name=excluded.name,
                  file_path=excluded.file_path, line_start=excluded.line_start,
@@ -247,14 +270,15 @@ class GraphStore:
                  parent_name=excluded.parent_name, params=excluded.params,
                  return_type=excluded.return_type, modifiers=excluded.modifiers,
                  is_test=excluded.is_test, file_hash=excluded.file_hash,
-                 extra=excluded.extra, updated_at=excluded.updated_at
+                 extra=excluded.extra, symbol=excluded.symbol,
+                 updated_at=excluded.updated_at
             """,
             (
                 node.kind, node.name, qualified, node.file_path,
                 node.line_start, node.line_end, node.language,
                 node.parent_name, node.params, node.return_type,
                 node.modifiers, int(node.is_test), file_hash,
-                extra, now,
+                extra, _symbol_of(qualified), now,
             ),
         )
         row = self._conn.execute(
@@ -307,9 +331,17 @@ class GraphStore:
         """Remove one deleted file and every graph reference to its nodes."""
         return self.remove_files_permanently([file_path])
 
-    def remove_files_permanently(self, file_paths: list[str]) -> int:
-        """Atomically remove deleted files and graph references to their nodes."""
-        file_paths = [normalize_file_path(p) for p in file_paths]
+    def remove_files_permanently(
+        self, file_paths: list[str], *, stored_paths: bool = False,
+    ) -> int:
+        """Atomically remove deleted files and graph references to their nodes.
+
+        Reconciliation passes exact inventory spellings with ``stored_paths``.
+        Normalising legacy rows would miss them and could delete a different,
+        current row that already uses the canonical spelling (#911).
+        """
+        if not stored_paths:
+            file_paths = [normalize_file_path(p) for p in file_paths]
         changed = 0
         has_embeddings = self._conn.execute(
             "SELECT 1 FROM sqlite_master "
@@ -362,11 +394,7 @@ class GraphStore:
         """Atomically replace all data for a file."""
         self._begin_immediate()
         try:
-            self.remove_file_data(file_path)
-            for node in nodes:
-                self.upsert_node(node, file_hash=fhash)
-            for edge in edges:
-                self.upsert_edge(edge)
+            self._replace_file_data(file_path, nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -380,15 +408,92 @@ class GraphStore:
         self._begin_immediate()
         try:
             for file_path, nodes, edges, fhash in batch:
-                self.remove_file_data(file_path)
-                for node in nodes:
-                    self.upsert_node(node, file_hash=fhash)
-                for edge in edges:
-                    self.upsert_edge(edge)
+                self._replace_file_data(file_path, nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
+        self._invalidate_cache()
+
+    def _replace_file_data(
+        self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
+    ) -> None:
+        """Delete and re-insert one file's nodes/edges with batched statements.
+
+        The previous implementation ran :meth:`upsert_node` /
+        :meth:`upsert_edge` once per symbol, i.e. a SELECT + INSERT (or
+        SELECT + UPDATE) round trip for every row. On large graphs (10^5+
+        nodes, 10^6+ edges) that per-row Python/SQLite round trip dominates
+        the whole build and can take tens of minutes (issue #721). This bulk
+        path deduplicates rows in Python and inserts everything with
+        ``executemany``, so each statement is prepared once and the file
+        lands in a single transaction.
+
+        Must be called inside an open transaction (BEGIN IMMEDIATE).
+        """
+        normalized = normalize_file_path(file_path)
+        self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (normalized,))
+        self._conn.execute("DELETE FROM edges WHERE file_path = ?", (normalized,))
+
+        now = time.time()
+        if nodes:
+            # ON CONFLICT(qualified_name) keeps the same upsert semantics as
+            # upsert_node(): duplicate qualified names end up as one row with
+            # the last batch entry's values.
+            node_rows: list[tuple] = []
+            for node in nodes:
+                qualified = self._make_qualified(node)
+                extra = json.dumps(node.extra) if node.extra else "{}"
+                node_rows.append((
+                    node.kind, node.name, qualified, node.file_path,
+                    node.line_start, node.line_end, node.language,
+                    node.parent_name, node.params, node.return_type,
+                    node.modifiers, int(node.is_test), fhash,
+                    extra, _symbol_of(qualified), now,
+                ))
+            self._conn.executemany(
+                """INSERT INTO nodes
+                   (kind, name, qualified_name, file_path, line_start, line_end,
+                    language, parent_name, params, return_type, modifiers, is_test,
+                    file_hash, extra, symbol, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(qualified_name) DO UPDATE SET
+                     kind=excluded.kind, name=excluded.name,
+                     file_path=excluded.file_path, line_start=excluded.line_start,
+                     line_end=excluded.line_end, language=excluded.language,
+                     parent_name=excluded.parent_name, params=excluded.params,
+                     return_type=excluded.return_type, modifiers=excluded.modifiers,
+                     is_test=excluded.is_test, file_hash=excluded.file_hash,
+                     extra=excluded.extra, symbol=excluded.symbol,
+                     updated_at=excluded.updated_at
+                """,
+                node_rows,
+            )
+        if edges:
+            # upsert_edge() collapsed duplicate call sites (same kind, source,
+            # target, file, line) into a single row carrying the *last*
+            # extra/confidence values. Replicate that collapse in Python so a
+            # plain INSERT batch is safe — the file's previous rows were
+            # deleted above and an identical edge cannot come from another
+            # file (file_path is part of the identity).
+            edge_by_site: dict[tuple[str, str, str, str, int], tuple] = {}
+            for edge in edges:
+                extra_dict = edge.extra if edge.extra else {}
+                confidence = float(extra_dict.get("confidence", 1.0))
+                confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
+                extra = json.dumps(extra_dict)
+                site = (edge.kind, edge.source, edge.target, edge.file_path, edge.line)
+                edge_by_site[site] = (
+                    edge.kind, edge.source, edge.target, edge.file_path, edge.line,
+                    extra, confidence, confidence_tier, now,
+                )
+            self._conn.executemany(
+                """INSERT INTO edges
+                   (kind, source_qualified, target_qualified, file_path, line, extra,
+                    confidence, confidence_tier, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                list(edge_by_site.values()),
+            )
         self._invalidate_cache()
 
     def set_metadata(self, key: str, value: str) -> None:
@@ -632,8 +737,14 @@ class GraphStore:
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         candidate_cache: dict[str, list[tuple[str, str]]] = {}
         import_cache: dict[str, set[str]] = {}
+        # Same dotted-module evidence the endpoint resolver uses, for graphs
+        # queried before that pass has run. Built on first use: most queries
+        # never reach this fallback, and the index scans every .py path.
+        # See: #903
+        module_files: dict[str, str] | None = None
 
         def _candidate_for_context(name: str, context_file: str) -> str | None:
+            nonlocal module_files
             if name not in candidate_cache:
                 candidate_cache[name] = [
                     (candidate["qualified_name"], candidate["file_path"])
@@ -645,6 +756,8 @@ class GraphStore:
                     ).fetchall()
                 ]
             if context_file not in import_cache:
+                if module_files is None:
+                    module_files = self._python_module_file_index(conn)
                 imported_files: set[str] = set()
                 for imported in conn.execute(
                     "SELECT target_qualified FROM edges "
@@ -652,9 +765,13 @@ class GraphStore:
                     (context_file,),
                 ).fetchall():
                     target = imported["target_qualified"]
-                    imported_files.add(
+                    target_file = (
                         target.split("::", 1)[0] if "::" in target else target
                     )
+                    imported_files.add(target_file)
+                    resolved_module = module_files.get(target_file)
+                    if resolved_module:
+                        imported_files.add(resolved_module)
                 import_cache[context_file] = imported_files
             return self._select_evidence_backed_candidate(
                 candidate_cache[name],
@@ -717,6 +834,38 @@ class GraphStore:
         return results
 
     @staticmethod
+    def _python_module_file_index(conn: sqlite3.Connection) -> dict[str, str]:
+        """Map each dotted Python module to the one indexed file defining it.
+
+        Built from indexed ``.py`` paths rather than the filesystem, so it works
+        on a graph queried away from the source tree. A module maps to a file
+        only when exactly one file answers to it; ambiguous modules are dropped
+        so they cannot manufacture evidence. Matching is on whole path segments,
+        which keeps ``mypkg.core`` away from ``.../notmypkg/core.py``.
+        """
+        modules: dict[str, str | None] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE '%.py'"
+        ).fetchall():
+            file_path = row["file_path"]
+            path = PurePosixPath(file_path).with_suffix("")
+            # `.parts` leads with the root ("/"), which is never part of a
+            # module name.
+            segments = path.parts[1:] if path.is_absolute() else path.parts
+            if segments and segments[-1] == "__init__":
+                # `pkg/__init__.py` is imported as `pkg`, never `pkg.__init__`.
+                segments = segments[:-1]
+            for start in range(len(segments)):
+                module = ".".join(segments[start:])
+                if not module:
+                    continue
+                if modules.setdefault(module, file_path) != file_path:
+                    modules[module] = None
+        return {
+            module: path for module, path in modules.items() if path is not None
+        }
+
+    @staticmethod
     def _select_evidence_backed_candidate(
         candidates: list[tuple[str, str]],
         context_file: str,
@@ -772,7 +921,10 @@ class GraphStore:
             candidates_by_name.setdefault(candidate["name"], []).append(candidate)
 
         resolved = 0
-        changed = False
+        # Collect every mutation and apply them in one transaction at the end
+        # (see below); the previous loop autocommitted per row (issue #721).
+        call_updates: list[tuple[str, str, int]] = []
+        mirror_updates: list[tuple[str, str, int]] = []
 
         def sync_tested_by(
             call_edge: sqlite3.Row,
@@ -780,9 +932,8 @@ class GraphStore:
             source_qualified: str,
             desired_extra: dict,
             serialized_extra: str,
-        ) -> bool:
+        ) -> None:
             """Keep parser-generated TESTED_BY mirrors aligned with CALLS."""
-            changed_mirror = False
             mirrors = self._conn.execute(
                 "SELECT id, source_qualified, extra FROM edges "
                 "WHERE kind = 'TESTED_BY' AND target_qualified = ? "
@@ -814,12 +965,9 @@ class GraphStore:
                     and mirror_extra == desired_extra
                 ):
                     continue
-                self._conn.execute(
-                    "UPDATE edges SET source_qualified = ?, extra = ? WHERE id = ?",
+                mirror_updates.append(
                     (source_qualified, serialized_extra, mirror["id"]),
                 )
-                changed_mirror = True
-            return changed_mirror
 
         for edge in rows:
             try:
@@ -877,20 +1025,17 @@ class GraphStore:
                 ):
                     extra.pop(key, None)
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
+                if (
                     edge["target_qualified"] != candidates[0]
                     or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
+                ):
+                    call_updates.append(
                         (candidates[0], serialized_extra, edge["id"]),
                     )
                     resolved += 1
-                mirror_changed = sync_tested_by(
+                sync_tested_by(
                     edge, target, candidates[0], extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
             elif len(candidates) > 1:
                 for key in (
                     "unresolved_targets",
@@ -905,19 +1050,11 @@ class GraphStore:
                     "ambiguous_targets_truncated": len(candidates) > 20,
                 })
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
-                    edge["target_qualified"] != target
-                    or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-                        (target, serialized_extra, edge["id"]),
-                    )
-                mirror_changed = sync_tested_by(
+                if edge["target_qualified"] != target or previous_extra != extra:
+                    call_updates.append((target, serialized_extra, edge["id"]))
+                sync_tested_by(
                     edge, target, target, extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
             else:
                 extra["cpp_scoped_target"] = target
                 for key in (
@@ -932,22 +1069,36 @@ class GraphStore:
                     "unresolved_targets_truncated": False,
                 })
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
-                    edge["target_qualified"] != target
-                    or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-                        (target, serialized_extra, edge["id"]),
-                    )
-                mirror_changed = sync_tested_by(
+                if edge["target_qualified"] != target or previous_extra != extra:
+                    call_updates.append((target, serialized_extra, edge["id"]))
+                sync_tested_by(
                     edge, target, target, extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
 
-        if changed:
-            self._conn.commit()
+        if call_updates or mirror_updates:
+            # Same batching rationale as _resolve_bare_endpoints: one prepared
+            # statement, one transaction, one commit/checkpoint instead of one
+            # autocommitted UPDATE (+ fsync) per edge (issue #721).
+            self._begin_immediate()
+            try:
+                call_sql = (
+                    "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(call_updates), _UPDATE_BATCH):
+                    self._conn.executemany(
+                        call_sql, call_updates[start:start + _UPDATE_BATCH]
+                    )
+                mirror_sql = (
+                    "UPDATE edges SET source_qualified = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(mirror_updates), _UPDATE_BATCH):
+                    self._conn.executemany(
+                        mirror_sql, mirror_updates[start:start + _UPDATE_BATCH]
+                    )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
         return resolved
 
     def resolve_bare_tested_by_sources(self) -> int:
@@ -967,29 +1118,46 @@ class GraphStore:
         if endpoint == "target_qualified":
             raw_key = "bare_call_target"
             endpoint_column = "target_qualified"
+            bare_condition = (
+                "target_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_call_target\"%'"
+            )
             select_sql = (
                 "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? "
-                "AND (target_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_call_target\"%')"
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
             )
         elif endpoint == "source_qualified":
             raw_key = "bare_tested_by_source"
             endpoint_column = "source_qualified"
+            bare_condition = (
+                "source_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_tested_by_source\"%'"
+            )
             select_sql = (
                 "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? "
-                "AND (source_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_tested_by_source\"%')"
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
             )
         else:
             raise ValueError(f"Invalid edge endpoint column: {endpoint!r}")
 
         conn = self._conn
 
-        bare_edges = conn.execute(select_sql, (kind,)).fetchall()
-        if not bare_edges:
+        # Cheap no-op guard: avoid materialising the full candidate set when
+        # nothing needs resolving. EXISTS stops at the first matching row, so
+        # the common case exits immediately while the empty case pays a single
+        # scan instead of materialising an empty list (issue #721).
+        has_bare = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM edges WHERE kind = ? AND ("
+            + bare_condition
+            + "))",
+            (kind,),
+        ).fetchone()[0]
+        if not has_bare:
             return 0
+
+        # Stream candidate rows lazily instead of materialising the full set
+        # into memory (millions of rows on large graphs, issue #721).
+        bare_edges = conn.execute(select_sql, (kind,))
 
         # bare_name -> [(qualified_name, defining_file)]
         node_lookup: dict[str, list[tuple[str, str]]] = {}
@@ -1064,8 +1232,27 @@ class GraphStore:
                     expanded |= namespace_files.get(target, set())
                 imported |= expanded
 
+        # Python imports the repository-suffix resolver could not map to a file
+        # keep their raw dotted module as the IMPORTS_FROM target — the standard
+        # `src` layout, or framework-mediated packages such as Odoo's
+        # `odoo.addons.*`. Path-keyed evidence can never match a dotted module,
+        # so map each dotted module back to the file that could define it. Only
+        # an unambiguous match counts: a module answered by two indexed files is
+        # no more evidence than a bare name. See: #903
+        module_files = self._python_module_file_index(conn)
+        if module_files:
+            for imported in import_targets.values():
+                expanded = set()
+                for target in imported:
+                    resolved_file = module_files.get(target)
+                    if resolved_file:
+                        expanded.add(resolved_file)
+                imported |= expanded
+
         resolved = 0
-        changed = False
+        # Collect every mutation, then apply them in one transaction at the
+        # end of the loop (see below).
+        updates: list[tuple[str, str, int]] = []
         for edge in bare_edges:
             try:
                 edge_extra = json.loads(edge["extra"] or "{}")
@@ -1162,16 +1349,30 @@ class GraphStore:
                 and edge_extra == desired_extra
             ):
                 continue
-            conn.execute(
-                f"UPDATE edges SET {endpoint_column} = ?, extra = ? WHERE id = ?",
-                (desired_endpoint, serialized_extra, edge["id"]),
-            )
-            changed = True
+            updates.append((desired_endpoint, serialized_extra, edge["id"]))
             if len(supported) == 1 and edge[endpoint] != desired_endpoint:
                 resolved += 1
 
-        if changed:
-            conn.commit()
+        bare_edges.close()
+
+        if updates:
+            # Apply every mutation as one prepared statement inside a single
+            # transaction. The previous code relied on autocommit
+            # (isolation_level=None), so each row became its own WAL commit +
+            # fsync — effectively a hang once a graph has 10^5+ bare edges
+            # (issue #721). Chunked executemany keeps peak memory bounded
+            # while preserving a single commit/checkpoint.
+            self._begin_immediate()
+            try:
+                update_sql = (
+                    f"UPDATE edges SET {endpoint_column} = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(updates), _UPDATE_BATCH):
+                    conn.executemany(update_sql, updates[start:start + _UPDATE_BATCH])
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
         if resolved:
             endpoint_label = (
                 "sources" if endpoint == "source_qualified" else "targets"
@@ -1190,14 +1391,31 @@ class GraphStore:
         # every represented path so those orphans can be purged, while explicit
         # virtual nodes (such as Spring Event markers) remain outside the file
         # inventory and are managed by their owning resolver.
+        # A killed writer can leave extra='' (or truncated text), which makes
+        # json_extract raise SQLite 'malformed JSON' and crash every caller of
+        # get_all_files. json_valid gates the extraction, and the truthiness
+        # comparison keeps extra='{"virtual": false}' visible instead of
+        # making the node immortal to reconciliation (#864).
         rows = self._conn.execute(
             "SELECT file_path FROM nodes "
-            "WHERE json_extract(extra, '$.virtual') IS NULL "
+            "WHERE extra IS NULL "
+            "OR json_valid(extra) = 0 "
+            "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1 "
             "UNION "
             "SELECT file_path FROM edges "
             "ORDER BY file_path"
         ).fetchall()
         return [r["file_path"] for r in rows]
+
+    def get_file_hashes(self) -> dict[str, str]:
+        """Return indexed file paths mapped to the hash last stored for each file."""
+        rows = self._conn.execute(
+            "SELECT file_path, file_hash FROM nodes WHERE kind = 'File'"
+        ).fetchall()
+        return {
+            normalize_file_path(row["file_path"]): row["file_hash"] or ""
+            for row in rows
+        }
 
     def get_file_marker_paths(self) -> list[str]:
         """Return paths that have authoritative File nodes.
@@ -1209,6 +1427,30 @@ class GraphStore:
             "SELECT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
         ).fetchall()
         return [row["file_path"] for row in rows]
+
+    def search_nodes_by_qualified_tail(
+        self, tail: str, limit: int = 20,
+    ) -> list[GraphNode]:
+        """Return nodes whose qualified symbol portion exactly matches *tail*.
+
+        Both predicates are indexed equality tests (``idx_nodes_symbol`` and the
+        ``qualified_name`` unique index), so this stays a bounded lookup rather
+        than a scan of every node on large graphs.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE symbol = ? OR qualified_name = ? LIMIT ?",
+            (tail, tail, limit),
+        ).fetchall()
+        return [self._row_to_node(row) for row in rows]
+
+    def count_nodes_by_qualified_tail(self, tail: str) -> int:
+        """Count nodes whose qualified symbol portion exactly matches *tail*."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM nodes "
+            "WHERE symbol = ? OR qualified_name = ?",
+            (tail, tail),
+        ).fetchone()
+        return int(row["count"])
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
         """Keyword search across node names.
@@ -1883,6 +2125,32 @@ class GraphStore:
             "UPDATE nodes SET signature = ? WHERE id = ?",
             (signature, node_id),
         )
+
+    def update_node_signatures(self, signature_rows: list[tuple[str, int]]) -> None:
+        """Bulk-set ``signature`` for many nodes in one transaction.
+
+        Hot paths (postprocessing, review builds) should use this instead of
+        looping :meth:`update_node_signature`: the per-row loop autocommits
+        one UPDATE per node (``isolation_level=None``), i.e. one WAL commit +
+        fsync per row, which dominates runtime on graphs with 10^5+ nodes
+        (issue #721).
+
+        Args:
+            signature_rows: ``(signature, node_id)`` pairs.
+        """
+        if not signature_rows:
+            return
+        self._begin_immediate()
+        try:
+            for start in range(0, len(signature_rows), _UPDATE_BATCH):
+                self._conn.executemany(
+                    "UPDATE nodes SET signature = ? WHERE id = ?",
+                    signature_rows[start:start + _UPDATE_BATCH],
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def get_all_community_ids(self) -> dict[str, int | None]:
         """Return a mapping of *all* qualified names to their community_id.

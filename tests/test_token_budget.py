@@ -462,8 +462,14 @@ BUDGETS: dict[str, dict[str, Any]] = {
     },
     "cross_repo_search_tool": {
         "no_repo_root": True,
+        # Without a registered repo the tool short-circuits on the empty
+        # registry and never reaches the code this budget is meant to bind.
+        "needs_registry": True,
         "default": {"query": "helper"},
-        "worst": {"query": "helper", "limit": HUGE, "max_results": HUGE},
+        "worst": {
+            "query": "helper", "limit": HUGE, "max_results": HUGE,
+            "repos": "FLOOD_NAMES",
+        },
         "default_max": 4_000,
         "worst_max": 30_000,
     },
@@ -480,6 +486,21 @@ def _pick_row(repo: dict[str, Any], sql: str, column: int) -> Any:
     with GraphStore(Path(repo["root"]) / ".code-review-graph" / "graph.db") as store:
         rows = store._conn.execute(sql).fetchall()
     return rows[0][column] if rows else None
+
+
+_FIXTURE_ALIAS = "budget-fixture"
+
+
+def _register_fixture(repo: dict[str, Any]) -> None:
+    """Put the fixture repo in the (temp) registry for the registry tools.
+
+    ``tests/conftest.py`` points ``CRG_HOME`` at an empty directory, so a
+    registry tool called from here otherwise returns the "no repositories
+    registered" short-circuit and measures none of its own bounds.
+    """
+    from code_review_graph.registry import Registry
+
+    Registry().register(repo["root"], alias=_FIXTURE_ALIAS)
 
 
 _FLOW_SQL = "SELECT id FROM flows ORDER BY node_count DESC LIMIT 1"
@@ -504,6 +525,11 @@ def _resolve_kwargs(kwargs: dict[str, Any], repo: dict[str, Any]) -> dict[str, A
             resolved[key] = _pick_row(repo, _COMMUNITY_SQL, 1)
         elif value == "REFACTOR_ID":
             resolved[key] = repo["refactor_id"]
+        elif value == "FLOOD_NAMES":
+            # One name that resolves plus a flood that does not: the only
+            # caller-supplied list this tool echoes back, so the ceiling has
+            # to hold against it, not just against the result set.
+            resolved[key] = [_FIXTURE_ALIAS] + ["z" * 200] * 500
         else:
             resolved[key] = value
     return resolved
@@ -514,6 +540,8 @@ def _call(name: str, spec: dict[str, Any], kwargs: dict[str, Any],
     """Invoke one registered tool with fixture-resolved arguments."""
     tool = getattr(crg_main, spec.get("tool", name))
     func = getattr(tool, "fn", tool)
+    if spec.get("needs_registry"):
+        _register_fixture(repo)
     call_kwargs = _resolve_kwargs(kwargs, repo)
     if not spec.get("no_repo_root"):
         call_kwargs["repo_root"] = repo["root"]

@@ -255,6 +255,26 @@ func (b *Box[T]) Pointer() {}
             if edge.kind == "CONTAINS" and edge.source.endswith("::Box")
         } == {"Box.Value", "Box.Pointer"}
 
+    def test_receiver_type_unwrap_skips_comments_and_parentheses(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("receiver_shapes.go"),
+            b"""package sample
+type Box[T any] struct{}
+func (b * /*receiver comment */ Box[T]) Commented() {}
+func (b (Box[T])) Parenthesized() {}
+""",
+        )
+
+        parents = {
+            node.name: node.parent_name
+            for node in nodes
+            if node.kind == "Function"
+        }
+        assert parents == {
+            "Commented": "Box",
+            "Parenthesized": "Box",
+        }
+
 
 class TestRustParsing:
     def setup_method(self):

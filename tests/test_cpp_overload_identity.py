@@ -714,7 +714,8 @@ def test_failed_cpp_identity_upgrade_remains_pending_and_retries(tmp_path: Path)
         ):
             retried = incremental_update(tmp_path, store, changed_files=[])
 
-        assert retried["identity_rebuild"] is True
+        assert retried.get("identity_rebuild") is None
+        assert retried["files_updated"] == 1
         assert retried["errors"] == []
         assert store.get_metadata("cpp_identity_version") == CPP_IDENTITY_VERSION
         assert store.get_node(legacy_qn) is None

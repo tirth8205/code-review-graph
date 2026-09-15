@@ -100,6 +100,7 @@ def _run_postprocess(
     stage_started = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
+        signature_rows: list[tuple[str, int]] = []
         for row in rows:
             node_id, name, kind, params, ret = (
                 row[0],
@@ -116,8 +117,10 @@ def _run_postprocess(
                 sig = f"class {name}"
             else:
                 sig = name
-            store.update_node_signature(node_id, sig[:512])
-        store.commit()
+            signature_rows.append((sig[:512], node_id))
+        # Single transaction via executemany instead of one autocommitted
+        # UPDATE per node (issue #721).
+        store.update_node_signatures(signature_rows)
         build_result["signatures_updated"] = True
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
@@ -517,40 +520,70 @@ def build_or_update_graph(
 
         if full_rebuild:
             result = full_build(root, store, recurse_submodules)
+            failed = [str(item.get("file", "?")) for item in result["errors"]]
+            summary = (
+                f"Full build complete: parsed {result['files_parsed']} files, "
+                f"created {result['total_nodes']} nodes and "
+                f"{result['total_edges']} edges."
+            )
+            if failed:
+                summary += f" {len(failed)} file(s) failed to parse: {failed}."
             build_result = {
                 **result,
-                "status": "ok",
+                "status": "partial" if failed else "ok",
                 "build_type": "full",
                 "base_resolved": None,
-                "summary": (
-                    f"Full build complete: parsed {result['files_parsed']} files, "
-                    f"created {result['total_nodes']} nodes and "
-                    f"{result['total_edges']} edges."
-                ),
+                "summary": summary,
             }
         else:
-            result = incremental_update(root, store, base=base_resolved)
-            if result["files_updated"] == 0:
+            try:
+                result = incremental_update(root, store, base=base_resolved)
+            except RuntimeError as exc:
+                # Change discovery or root validation failed before anything was
+                # stored; report it the way every other failure is reported.
+                return {
+                    "status": "error",
+                    "build_type": "incremental",
+                    "base_resolved": base_resolved,
+                    "files_updated": 0,
+                    "errors": [],
+                    "error": str(exc),
+                    "summary": f"Incremental update failed: {exc}",
+                    "postprocess_level": postprocess,
+                }
+            failed = [str(item.get("file", "?")) for item in result["errors"]]
+            if result["files_updated"] == 0 and not failed:
+                summary = (
+                    "No changes detected. Graph is up to date."
+                    if result.get("freshness_advanced")
+                    else "No graph changes detected. Freshness metadata was not advanced."
+                )
                 return {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
-                    "summary": "No changes detected. Graph is up to date.",
+                    "summary": summary,
                     "postprocess_level": postprocess,
                 }
+            summary = (
+                f"Incremental update: {result['files_updated']} files re-parsed, "
+                f"{result['total_nodes']} nodes and "
+                f"{result['total_edges']} edges updated. "
+                f"Changed: {result['changed_files']}. "
+                f"Dependents also updated: {result['dependent_files']}."
+            )
+            if failed:
+                summary += (
+                    f" {len(failed)} file(s) failed to parse and keep their "
+                    f"previous graph rows: {failed}."
+                )
             build_result = {
                 **result,
-                "status": "ok",
+                "status": "partial" if failed else "ok",
                 "build_type": "incremental",
                 "base_resolved": base_resolved,
-                "summary": (
-                    f"Incremental update: {result['files_updated']} files re-parsed, "
-                    f"{result['total_nodes']} nodes and "
-                    f"{result['total_edges']} edges updated. "
-                    f"Changed: {result['changed_files']}. "
-                    f"Dependents also updated: {result['dependent_files']}."
-                ),
+                "summary": summary,
             }
 
         # Pass changed_files for incremental flow/community detection
@@ -618,6 +651,7 @@ def run_postprocess(
 
         try:
             rows = store.get_nodes_without_signature()
+            signature_rows: list[tuple[str, int]] = []
             for row in rows:
                 node_id, name, kind, params, ret = (
                     row[0],
@@ -634,8 +668,10 @@ def run_postprocess(
                     sig = f"class {name}"
                 else:
                     sig = name
-                store.update_node_signature(node_id, sig[:512])
-            store.commit()
+                signature_rows.append((sig[:512], node_id))
+            # Single transaction via executemany instead of one autocommitted
+            # UPDATE per node (issue #721).
+            store.update_node_signatures(signature_rows)
             result["signatures_updated"] = True
         except (sqlite3.OperationalError, TypeError, KeyError) as e:
             logger.warning("Signature computation failed: %s", e)

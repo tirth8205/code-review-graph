@@ -11,7 +11,11 @@ from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
-from ..incremental import get_changed_files, get_staged_and_unstaged
+from ..incremental import (
+    get_changed_files,
+    get_staged_and_unstaged,
+    resolve_review_base,
+)
 from ..parser import normalize_file_path
 from ._common import (
     _bounded,
@@ -142,6 +146,7 @@ def get_review_context(
     try:
         # Get impact radius first
         if changed_files is None:
+            base = resolve_review_base(root, base)
             changed_files = get_changed_files(root, base)
             if not changed_files:
                 changed_files = get_staged_and_unstaged(root)
@@ -200,9 +205,9 @@ def get_review_context(
                 "key_entities": key_entities,
                 "test_gaps": test_gap_count,
                 "next_tool_suggestions": [
-                    "detect_changes",
-                    "get_affected_flows",
-                    "get_impact_radius",
+                    "detect_changes_tool",
+                    "get_affected_flows_tool",
+                    "get_impact_radius_tool",
                 ],
             }
             attach_context_savings(result, original_tokens=original_tokens)
@@ -261,7 +266,7 @@ def get_review_context(
                 full_path = root / rel_path
                 if full_path.is_file():
                     try:
-                        lines = full_path.read_text(
+                        lines = full_path.read_text(encoding="utf-8",
                             errors="replace"
                         ).splitlines()
                         allowed = min(per_file, budget)
@@ -463,6 +468,7 @@ def get_affected_flows_func(
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
+            base = resolve_review_base(root, base)
             changed_files = get_changed_files(root, base)
             if not changed_files:
                 changed_files = get_staged_and_unstaged(root)
@@ -473,6 +479,7 @@ def get_affected_flows_func(
                 "summary": "No changed files detected.",
                 "affected_flows": [],
                 "total": 0,
+                "truncated": False,
             }
 
         # Convert to absolute paths for graph lookup. Graph identity uses
@@ -510,7 +517,7 @@ def get_affected_flows_func(
             "truncated": truncated,
         }
         out["_hints"] = generate_hints(
-            "get_affected_flows", out, get_session()
+            "get_affected_flows_tool", out, get_session()
         )
         return out
     except Exception as exc:
@@ -568,6 +575,7 @@ def detect_changes_func(
 
     store, root = _get_store(repo_root)
     try:
+        base = resolve_review_base(root, base)
         # Detect changed files if not provided.
         if changed_files is None:
             changed_files = get_changed_files(root, base)
@@ -622,7 +630,7 @@ def detect_changes_func(
                     file_path = Path(fp)
                     if file_path.is_file():
                         try:
-                            lines = file_path.read_text(
+                            lines = file_path.read_text(encoding="utf-8",
                                 errors="replace"
                             ).splitlines()
                             start = max(0, ls - 1)
@@ -689,7 +697,7 @@ def detect_changes_func(
                 "truncated": any_cut,
             }
         result["_hints"] = generate_hints(
-            "detect_changes", result, get_session()
+            "detect_changes_tool", result, get_session()
         )
         attach_context_savings(result, original_tokens=original_tokens)
         return result

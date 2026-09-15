@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -878,29 +879,25 @@ _SKILLS: dict[str, dict[str, str]] = {
         "description": "Navigate and understand codebase structure using the knowledge graph",
         "body": (
             "## Explore Codebase\n\n"
-            "Use the code-review-graph MCP tools to explore and understand the codebase.\n\n"
+            "Use the code-review-graph MCP tools to find your way around the codebase.\n\n"
             "### Steps\n\n"
-            "1. Run `list_graph_stats_tool` to see overall codebase metrics.\n"
-            "2. Run `get_architecture_overview_tool` for high-level community structure.\n"
-            "3. Use `list_communities_tool` to find major modules, then `get_community_tool` "
-            "for details.\n"
-            "4. Use `semantic_search_nodes_tool` to find specific functions or classes.\n"
-            "5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, "
-            "`imports_of` to trace relationships.\n"
-            "6. Use `list_flows_tool` and `get_flow_tool` to understand execution paths.\n\n"
-            "### Tips\n\n"
-            "- Start broad (stats, architecture) then narrow down to specific areas.\n"
-            "- Use `children_of` on a file to see all its functions and classes.\n"
-            "- Use `find_large_functions_tool` to identify complex code.\n\n"
+            "1. Call `get_architecture_overview_tool` for the community structure. Call "
+            "`list_communities_tool`, then `get_community_tool`, only for the modules you need.\n"
+            "2. Call `semantic_search_nodes_tool` to find a function or class by name or keyword.\n"
+            "3. Call `query_graph_tool` with `callers_of`, `callees_of` or `imports_of` to trace "
+            "relationships. `children_of` on a file lists its functions and classes.\n"
+            "4. Call `list_flows_tool`, then `get_flow_tool` for one flow, to follow an execution "
+            "path.\n"
+            "5. Call `find_large_functions_tool` to find oversized functions.\n"
+            "6. Call `list_graph_stats_tool` only when you need node, edge and language counts.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
-            "- Read the implementation and its tests before changing code. The graph "
-            "narrows scope; it does not replace the source."
+            '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
+            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
+            "minimal is not enough.\n"
+            "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
+            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Read the implementation and its tests before changing code. The graph narrows "
+            "scope; it does not replace the source."
         ),
     },
     "review-changes.md": {
@@ -908,29 +905,27 @@ _SKILLS: dict[str, dict[str, str]] = {
         "description": "Perform a structured code review using change detection and impact",
         "body": (
             "## Review Changes\n\n"
-            "Perform a thorough, risk-aware code review using the knowledge graph.\n\n"
+            "Review a change set with risk scores and blast radius from the knowledge graph.\n\n"
             "### Steps\n\n"
-            "1. Run `detect_changes_tool` to get risk-scored change analysis.\n"
-            "2. Run `get_affected_flows_tool` to find impacted execution paths.\n"
-            "3. For each high-risk function, run `query_graph_tool` with "
-            'pattern="tests_for" to check test coverage.\n'
-            "4. Run `get_impact_radius_tool` to understand the blast radius.\n"
-            "5. For any untested changes, suggest specific test cases.\n\n"
+            "1. Call `detect_changes_tool` for risk-scored changed functions, test gaps and "
+            "affected flows.\n"
+            "2. Call `get_affected_flows_tool` only when you need the steps of an affected flow.\n"
+            '3. For each high-risk function, call `query_graph_tool` with `pattern="tests_for"` '
+            "to check test coverage.\n"
+            "4. Call `get_impact_radius_tool` when the blast radius is not clear from step 1.\n"
+            "5. Suggest specific test cases for untested changes.\n\n"
             "### Output Format\n\n"
-            "Provide findings grouped by risk level (high/medium/low) with:\n"
-            "- What changed and why it matters\n"
-            "- Test coverage status\n"
-            "- Suggested improvements\n"
-            "- Overall merge recommendation\n\n"
+            "Group findings by risk level (high, medium, low). For each finding give what changed "
+            "and why it matters, its test coverage, and the suggested fix. End with a merge "
+            "recommendation.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
-            "- Read the implementation and its tests before changing code. The graph "
-            "narrows scope; it does not replace the source."
+            '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
+            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
+            "minimal is not enough.\n"
+            "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
+            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Read the implementation and its tests before changing code. The graph narrows "
+            "scope; it does not replace the source."
         ),
     },
     "debug-issue.md": {
@@ -938,27 +933,24 @@ _SKILLS: dict[str, dict[str, str]] = {
         "description": "Systematically debug issues using graph-powered code navigation",
         "body": (
             "## Debug Issue\n\n"
-            "Use the knowledge graph to systematically trace and debug issues.\n\n"
+            "Trace a bug through the knowledge graph before reading source.\n\n"
             "### Steps\n\n"
-            "1. Use `semantic_search_nodes_tool` to find code related to the issue.\n"
-            "2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace "
-            "call chains.\n"
-            "3. Use `get_flow_tool` to see full execution paths through suspected areas.\n"
-            "4. Run `detect_changes_tool` to check if recent changes caused the issue.\n"
-            "5. Use `get_impact_radius_tool` on suspected files to see what else is affected.\n\n"
-            "### Tips\n\n"
-            "- Check both callers and callees to understand the full context.\n"
-            "- Look at affected flows to find the entry point that triggers the bug.\n"
-            "- Recent changes are the most common source of new issues.\n\n"
+            "1. Call `semantic_search_nodes_tool` to find code related to the issue.\n"
+            "2. Call `query_graph_tool` with `callers_of` and `callees_of` to trace the call "
+            "chain in both directions.\n"
+            "3. Call `get_flow_tool` for the execution path that reaches the suspect code. Its "
+            "entry point is where the bug is triggered.\n"
+            "4. Call `detect_changes_tool` to check whether a recent change caused the issue.\n"
+            "5. Call `get_impact_radius_tool` on the suspect files to see what a fix would "
+            "affect.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
-            "- Read the implementation and its tests before changing code. The graph "
-            "narrows scope; it does not replace the source."
+            '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
+            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
+            "minimal is not enough.\n"
+            "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
+            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Read the implementation and its tests before changing code. The graph narrows "
+            "scope; it does not replace the source."
         ),
     },
     "refactor-safely.md": {
@@ -966,29 +958,26 @@ _SKILLS: dict[str, dict[str, str]] = {
         "description": "Plan and execute safe refactoring using dependency analysis",
         "body": (
             "## Refactor Safely\n\n"
-            "Use the knowledge graph to plan and execute refactoring with confidence.\n\n"
+            "Plan a refactor from the dependency graph and apply renames from a preview.\n\n"
             "### Steps\n\n"
-            '1. Use `refactor_tool` with mode="suggest" for community-driven '
-            "refactoring suggestions.\n"
-            '2. Use `refactor_tool` with mode="dead_code" to find unreferenced code.\n'
-            '3. For renames, use `refactor_tool` with mode="rename" to preview all '
-            "affected locations.\n"
-            "4. Use `apply_refactor_tool` with the refactor_id to apply renames.\n"
-            "5. After changes, run `detect_changes_tool` to verify the refactoring impact.\n\n"
-            "### Safety Checks\n\n"
-            "- Always preview before applying (rename mode gives you an edit list).\n"
-            "- Check `get_impact_radius_tool` before major refactors.\n"
-            "- Use `get_affected_flows_tool` to ensure no critical paths are broken.\n"
-            "- Run `find_large_functions_tool` to identify decomposition targets.\n\n"
+            '1. Call `refactor_tool` with `mode="suggest"` for refactoring candidates, or '
+            '`mode="dead_code"` for unreferenced code.\n'
+            '2. For a rename, call `refactor_tool` with `mode="rename"`, `old_name` and '
+            "`new_name`. Check the returned edit list before applying.\n"
+            "3. Call `apply_refactor_tool` with the returned `refactor_id` to apply the rename.\n"
+            "4. Before a large refactor, call `get_impact_radius_tool` and "
+            "`get_affected_flows_tool` to see the dependents and critical paths involved.\n"
+            "5. Call `find_large_functions_tool` to find functions worth splitting.\n"
+            "6. After the change, call `detect_changes_tool` to confirm the impact matches the "
+            "plan.\n\n"
             "## Token Efficiency Rules\n"
-            '- Start with `get_minimal_context_tool(task="<your task>")` '
-            "before other graph tools.\n"
-            '- Use `detail_level="minimal"` on all calls. Only escalate to '
-            '"standard" when minimal is insufficient.\n'
-            "- Target: complete any review/debug/refactor task in ≤5 tool calls "
-            "and ≤800 total output tokens.\n"
-            "- Read the implementation and its tests before changing code. The graph "
-            "narrows scope; it does not replace the source."
+            '- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.\n'
+            '- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when '
+            "minimal is not enough.\n"
+            "- Prefer a targeted `query_graph_tool` call over a broad listing call.\n"
+            "- Budget: about five tool calls and 800 tokens of graph output per task.\n"
+            "- Read the implementation and its tests before changing code. The graph narrows "
+            "scope; it does not replace the source."
         ),
     },
 }
@@ -1147,14 +1136,37 @@ def install_git_hook(repo_root: Path) -> Path | None:
     one — the hook is appended, not overwritten, preserving any hooks
     already there. Falls back to the legacy ``.git/hooks`` resolution when
     git itself is unavailable. Returns None when no hooks directory can be
-    determined.
+    determined. Exact generated legacy blocks are upgraded in place. The
+    installed hook skips automatic checks in linked worktrees, where an
+    implicit update could build a duplicate graph for a different branch;
+    ``CRG_HOOK_WORKTREES=1`` opts a worktree back in. Detection relies only
+    on ``git rev-parse --absolute-git-dir`` (Git 2.13), not on newer options.
     """
-    script = """\
+    legacy_script = """\
 #!/bin/sh
 # Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
 if command -v code-review-graph >/dev/null 2>&1; then
     code-review-graph update || true
     code-review-graph detect-changes --brief || true
+fi
+"""
+    script = """\
+#!/bin/sh
+# Installed by code-review-graph. Remove this file to disable pre-commit graph checks.
+if command -v code-review-graph >/dev/null 2>&1; then
+    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
+    crg_hook_root=$(git rev-parse --show-toplevel 2>/dev/null) || crg_hook_root=""
+    if [ -z "$crg_hook_git_dir" ] || [ -z "$crg_hook_root" ]; then
+        echo "code-review-graph: skipping automatic checks; cannot determine the Git worktree." >&2
+    elif [ -f "$crg_hook_git_dir/commondir" ] && [ "$CRG_HOOK_WORKTREES" != "1" ]; then
+        # Only a linked worktree's git dir carries a commondir file (Git 2.5+),
+        # so this needs no rev-parse options newer than --absolute-git-dir.
+        echo "code-review-graph: skipping automatic checks in a linked worktree;" \\
+            "set CRG_HOOK_WORKTREES=1 to keep a graph for this worktree too." >&2
+    else
+        code-review-graph update --repo "$crg_hook_root" || true
+        code-review-graph detect-changes --brief --repo "$crg_hook_root" || true
+    fi
 fi
 """
     marker = "code-review-graph detect-changes"
@@ -1192,8 +1204,13 @@ fi
     if hook_path.exists():
         existing = hook_path.read_text(encoding="utf-8")
         if marker in existing:
-            return hook_path
-        hook_path.write_text(existing.rstrip("\n") + "\n" + script, encoding="utf-8")
+            # Upgrade only the exact block emitted by older CRG releases;
+            # custom hook logic and surrounding user commands remain intact.
+            if legacy_script not in existing:
+                return hook_path
+            hook_path.write_text(existing.replace(legacy_script, script), encoding="utf-8")
+        else:
+            hook_path.write_text(existing.rstrip("\n") + "\n" + script, encoding="utf-8")
     else:
         hook_path.write_text(script, encoding="utf-8")
 
@@ -2026,10 +2043,11 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
     """Install skills to Qoder's project-level skills directory.
 
     Qoder expects skills in .qoder/skills/{skillName}/SKILL.md format within the project.
-    This function copies the project's skills/ directory contents to that location.
+    Loads the shipped skills from package resources. Source checkouts use their
+    own top-level skills/ directory when wheel resources are not present.
 
     Args:
-        repo_root: Repository root directory (where the skills/ folder is located).
+        repo_root: Target repository root directory.
 
     Returns:
         Path to the Qoder skills directory, or None if installation failed.
@@ -2038,17 +2056,20 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
     qoder_skills_dir = repo_root / ".qoder" / "skills"
     qoder_skills_dir.mkdir(parents=True, exist_ok=True)
 
-    # Source skills directory in the project
-    source_skills_dir = repo_root / "skills"
-    if not source_skills_dir.exists():
-        logger.warning("No skills/ directory found in %s", repo_root)
+    source_skills_dir = resources.files("code_review_graph").joinpath("_bundled_skills")
+    if not source_skills_dir.is_dir():
+        # Editable installs keep the same files beside the source package. Never
+        # treat the target project's unrelated skills as CRG's bundled workflows.
+        source_skills_dir = Path(__file__).resolve().parent.parent / "skills"
+    if not source_skills_dir.is_dir():
+        logger.warning("Bundled code-review-graph skills are unavailable.")
         return None
 
     installed_count = 0
     for skill_dir in source_skills_dir.iterdir():
         if skill_dir.is_dir():
             skill_file = skill_dir / "SKILL.md"
-            if skill_file.exists():
+            if skill_file.is_file():
                 target_dir = qoder_skills_dir / skill_dir.name
                 target_dir.mkdir(parents=True, exist_ok=True)
                 target_file = target_dir / "SKILL.md"

@@ -368,6 +368,52 @@ class TestQueryGraphCallTargetFallbacks:
         }
         assert {edge["kind"] for edge in result["edges"]} == {"REFERENCES"}
 
+    @pytest.mark.parametrize("detail_level", ["standard", "minimal"])
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_references_to_includes_alias_imported_dependents(
+        self, monkeypatch, detail_level, ambiguous,
+    ):
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        port_path = self.root / "port.ts"
+        consumer_path = self.root / "consumer.ts"
+        port_path.write_text(
+            "export interface PortSpec { id: string }\n",
+            encoding="utf-8",
+        )
+        if ambiguous:
+            (self.root / "other_port.ts").write_text(
+                "export interface PortSpec { other: string }\n",
+                encoding="utf-8",
+            )
+        # The specifier goes through a workspace alias the parser cannot
+        # follow, so the REFERENCES edge keeps a bare target name.
+        consumer_path.write_text(
+            "import type { PortSpec } from '@core/ports';\n"
+            "export function usePort(spec: PortSpec): string { return spec.id; }\n",
+            encoding="utf-8",
+        )
+        with GraphStore(self.db_path) as store:
+            build = full_build(self.root, store)
+            assert build["errors"] == []
+
+        result = query_graph(
+            pattern="references_to",
+            target=f"{port_path.as_posix()}::PortSpec",
+            repo_root=str(self.root),
+            detail_level=detail_level,
+        )
+
+        assert result["status"] == "ok"
+        by_name = {node["name"]: node for node in result["results"]}
+        if ambiguous:
+            assert "usePort" not in by_name
+            return
+        assert "usePort" in by_name, (
+            "alias-imported dependent dropped; a bare-target REFERENCES edge "
+            "must not read as absence"
+        )
+        assert by_name["usePort"]["target_resolution"] == "unresolved"
+
     def test_callees_of_includes_resolved_and_bare_target_callees(self):
         result = query_graph(
             pattern="callees_of",
@@ -430,7 +476,8 @@ class TestQueryGraphCallTargetFallbacks:
         assert "tsxCaller" in names
         assert "apexCaller" not in names
 
-    def test_inheritors_of_bare_fallback_uses_js_family_without_apex(self):
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_inheritors_of_bare_fallback_uses_js_family_without_apex(self, ambiguous):
         """Bare INHERITS/IMPLEMENTS edges stay inside the JS language family."""
         base_file = (self.root / "base.js").as_posix()
         ts_file = (self.root / "child.ts").as_posix()
@@ -440,6 +487,15 @@ class TestQueryGraphCallTargetFallbacks:
             store.upsert_node(NodeInfo(
                 kind="Class", name="BaseWidget", file_path=base_file,
                 line_start=1, line_end=8, language="javascript",
+            ))
+            # Only a compatible type declaration should cause an ambiguity marker.
+            store.upsert_node(NodeInfo(
+                kind="Class", name="BaseWidget", file_path=apex_file,
+                line_start=1, line_end=8, language="apex",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Type" if ambiguous else "Function", name="BaseWidget", file_path=ts_file,
+                line_start=1, line_end=8, language="typescript",
             ))
             store.upsert_node(NodeInfo(
                 kind="Class", name="TsChild", file_path=ts_file,
@@ -487,6 +543,10 @@ class TestQueryGraphCallTargetFallbacks:
             "TsChild",
             "JsxImplementer",
         }
+        assert all(
+            item.get("inferred_by") == ("bare_name" if ambiguous else None)
+            for item in result["results"]
+        )
 
     def test_inheritors_of_bare_dart_class_ignores_member_matches(
         self,
@@ -519,6 +579,216 @@ class TestQueryGraphCallTargetFallbacks:
 
         assert result["status"] == "ok"
         assert {item["name"] for item in result["results"]} == {"Dog"}
+        assert all("inferred_by" not in item for item in result["results"])
+
+    @staticmethod
+    def _build_repo(tmp_path, monkeypatch, files):
+        for relative, source in files.items():
+            path = tmp_path / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        (tmp_path / ".code-review-graph").mkdir()
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            assert full_build(tmp_path, store)["errors"] == []
+
+    @pytest.mark.parametrize(
+        "base_source,other_source,child_source,extra_files",
+        [
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace B; public class Child : PlainBase {}",
+                {}, id="different-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace C; using A; public class Child : PlainBase {}",
+                {}, id="ordinary-using",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace C; public class Child : PlainBase {}",
+                {"Usings.cs": "global using A;"}, id="global-using",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "using PlainBase = A.PlainBase; namespace C; "
+                "public class Child : PlainBase {}",
+                {}, id="type-alias",
+            ),
+            pytest.param(
+                "namespace A.Models; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A.C { using Models; public class Child : PlainBase {} }",
+                {}, id="relative-using",
+            ),
+            pytest.param(
+                "public class PlainBase {} namespace Unrelated { class Marker {} }",
+                "namespace B; public class PlainBase {}",
+                "namespace C; public class Child : PlainBase {}",
+                {}, id="global-base-with-unrelated-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A.Sub; public class Child : PlainBase {}",
+                {}, id="enclosing-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace A.Sub; public class PlainBase {}",
+                "namespace A.Sub; public class Child : PlainBase {}",
+                {}, id="nearer-base-shadows-outer-base",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A { class Marker {} } "
+                "namespace B { public class Child : PlainBase {} }",
+                {}, id="unrelated-namespace-in-child-file",
+            ),
+            pytest.param(
+                "namespace A { public class PlainBase {} } "
+                "namespace B { public class Child : PlainBase {} }",
+                "namespace B; public class PlainBase {}",
+                "", {}, id="same-file-does-not-prove-binding",
+            ),
+        ],
+    )
+    def test_inheritors_of_caveats_ambiguous_bases_without_guessing_visibility(
+        self, tmp_path, monkeypatch, base_source, other_source, child_source, extra_files,
+    ):
+        """#940: file namespaces/imports prove neither binding nor absence."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "Base.cs": base_source,
+            "Other.cs": other_source,
+            "Child.cs": child_source,
+            **extra_files,
+        })
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", f"{(tmp_path / 'Base.cs').as_posix()}::PlainBase",
+                str(tmp_path), detail_level=detail_level,
+            )
+            assert result["status"] == "ok"
+            assert result["result_count"] == 1
+            assert result["results_omitted"] == 0
+            assert {item["name"]: item.get("inferred_by") for item in result["results"]} == {
+                "Child": "bare_name",
+            }
+
+    @pytest.mark.parametrize("with_import", [False, True])
+    def test_inheritors_of_caveats_java_package_matches_even_with_an_import(
+        self, tmp_path, monkeypatch, with_import,
+    ):
+        """Retain both candidates; an imported file does not prove type binding."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "ja/JBase.java": "package ja; public class JBase {}",
+            "ja/JSub.java": "package ja; public class JSub extends JBase {}",
+            "jb/JBase.java": "package jb; public class JBase {}",
+            "jc/Child.java": (
+                "package jc; " + ("import ja.JBase; " if with_import else "import jb.JBase; ")
+                + "public class Child extends JBase {}"
+            ),
+        })
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", f"{(tmp_path / 'ja' / 'JBase.java').as_posix()}::JBase",
+                str(tmp_path), detail_level=detail_level,
+            )
+            assert {item["name"]: item.get("inferred_by") for item in result["results"]} == {
+                "JSub": "bare_name", "Child": "bare_name",
+            }
+
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_inheritors_of_streams_bare_matches_and_keeps_counts(
+        self, monkeypatch, ambiguous,
+    ):
+        """The result cap must also bound live edges, for either declaration count."""
+        import weakref
+
+        with GraphStore(self.db_path) as store:
+            for name in ("Base", "Other.Base") if ambiguous else ("Base",):
+                store.upsert_node(NodeInfo(
+                    kind="Class", name="Base", file_path=self.target_file,
+                    parent_name="Other" if name == "Other.Base" else None,
+                    language="objc", line_start=1, line_end=2,
+                ))
+            for index in range(6):
+                name = f"Child{index}"
+                store.upsert_node(NodeInfo(
+                    kind="Class", name=name, file_path=self.cross_file,
+                    language="objc", line_start=1, line_end=2,
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="INHERITS" if index < 3 else "IMPLEMENTS",
+                    source=f"{self.cross_file}::{name}", target="Base",
+                    file_path=self.cross_file, line=1,
+                ))
+            store.commit()
+
+        original = GraphStore.iter_edges_by_target_name
+
+        def bounded_edges(store, *args, **kwargs):
+            previous = None
+            for edge in original(store, *args, **kwargs):
+                yield edge
+                # The consumer may hold the current edge, but must release its predecessor.
+                if previous is not None:
+                    assert previous() is None, "bare matches are being retained"
+                previous = weakref.ref(edge)
+
+        monkeypatch.setattr(GraphStore, "iter_edges_by_target_name", bounded_edges)
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", f"{self.target_file}::Base", str(self.root),
+                detail_level=detail_level, max_results=1,
+            )
+            assert result["result_count"] == 6
+            assert result["results_omitted"] == 5
+            assert len(result["results"]) == 1
+            assert result["results"][0].get("inferred_by") == (
+                "bare_name" if ambiguous else None
+            )
+            if detail_level == "standard":
+                assert len(result["edges"]) == 1
+                assert result["edges"][0]["source"] == result["results"][0]["qualified_name"]
+
+    @pytest.mark.parametrize("resolved", [False, True])
+    def test_inheritors_of_preserves_exact_and_single_declaration_matches(
+        self, tmp_path, monkeypatch, resolved,
+    ):
+        """The mitigation changes only ambiguous bare-name fallback responses."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "Solo.java": "public class Solo {}\n",
+            "SoloChild.java": "public class SoloChild extends Solo {}\n",
+        })
+        target = f"{(tmp_path / 'Solo.java').as_posix()}::Solo"
+        if resolved:
+            with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+                store.upsert_node(NodeInfo(
+                    kind="Class", name="Solo", file_path=(tmp_path / "Other.java").as_posix(),
+                    language="java", line_start=1, line_end=1,
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="INHERITS",
+                    source=f"{(tmp_path / 'SoloChild.java').as_posix()}::SoloChild",
+                    target=target, file_path=(tmp_path / "SoloChild.java").as_posix(), line=1,
+                ))
+                store.commit()
+
+        result = query_graph(
+            pattern="inheritors_of",
+            target=target,
+            repo_root=str(tmp_path),
+        )
+
+        assert {item["name"] for item in result["results"]} == {"SoloChild"}
+        assert all("inferred_by" not in item for item in result["results"])
 
 
 def _seed_repo_relative_graph(root: Path) -> None:
@@ -2089,6 +2359,30 @@ class TestGetMinimalContext:
         assert result["status"] == "ok"
         assert "summary" in result
         assert "next_tool_suggestions" in result
+
+    def test_review_base_is_shared_by_probe_discovery_and_analysis(self, monkeypatch):
+        import code_review_graph.tools.context as context_module
+
+        resolve = MagicMock(return_value="merge-base-sha")
+        has_changes = MagicMock(return_value=True)
+        get_changed = MagicMock(return_value=["app.py"])
+        analyze = MagicMock(return_value={"risk_score": 0.2, "changed_functions": []})
+        monkeypatch.setattr(context_module, "resolve_review_base", resolve)
+        monkeypatch.setattr(context_module, "_has_git_changes", has_changes)
+        monkeypatch.setattr("code_review_graph.incremental.get_changed_files", get_changed)
+        monkeypatch.setattr("code_review_graph.changes.analyze_changes", analyze)
+
+        result = context_module.get_minimal_context(
+            task="review changes",
+            repo_root=str(self.root),
+            base="origin/main",
+        )
+
+        assert result["status"] == "ok"
+        resolve.assert_called_once_with(self.root.resolve(), "origin/main")
+        has_changes.assert_called_once_with(self.root.resolve(), "merge-base-sha")
+        get_changed.assert_called_once_with(self.root.resolve(), "merge-base-sha")
+        assert analyze.call_args.kwargs["base"] == "merge-base-sha"
 
     def test_missing_graph_returns_not_ready_without_creating_database(self, tmp_path):
         from code_review_graph.tools.context import get_minimal_context

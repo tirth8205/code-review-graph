@@ -82,8 +82,8 @@ class TestStopWaitLoopEdges:
         clear.assert_called_once()
         assert "force-stopping" not in capsys.readouterr().out
 
-    def test_wait_loop_crash_still_clears_pid(self):
-        """An unexpected error from the liveness probe must not leave a stale PID file."""
+    def test_wait_loop_crash_keeps_pid_file(self):
+        """An unknown liveness result must not remove the PID file."""
         with (
             patch("code_review_graph.daemon.is_daemon_running", return_value=True),
             patch("code_review_graph.daemon.read_pid", return_value=PID),
@@ -98,7 +98,7 @@ class TestStopWaitLoopEdges:
         ):
             _handle_stop(MagicMock())
 
-        clear.assert_called_once()
+        clear.assert_not_called()
 
 
 class TestForcedStopEdges:
@@ -107,7 +107,10 @@ class TestForcedStopEdges:
         with (
             patch("code_review_graph.daemon.is_daemon_running", return_value=True),
             patch("code_review_graph.daemon.read_pid", return_value=PID),
-            patch("code_review_graph.daemon.pid_alive", return_value=True),
+            patch(
+                "code_review_graph.daemon.pid_alive",
+                side_effect=[True] * 50 + [False],
+            ),
             patch("code_review_graph.daemon.clear_pid") as clear,
             patch("code_review_graph.daemon_cli.signal", _win_signal()),
             patch("code_review_graph.daemon_cli.os.kill") as kill,
@@ -129,7 +132,10 @@ class TestForcedStopEdges:
         with (
             patch("code_review_graph.daemon.is_daemon_running", return_value=True),
             patch("code_review_graph.daemon.read_pid", return_value=PID),
-            patch("code_review_graph.daemon.pid_alive", return_value=True),
+            patch(
+                "code_review_graph.daemon.pid_alive",
+                side_effect=[True] * 50 + [False],
+            ),
             patch("code_review_graph.daemon.clear_pid") as clear,
             patch(
                 "code_review_graph.daemon_cli.os.kill",
@@ -150,7 +156,10 @@ class TestRestartInterleavings:
         with (
             patch("code_review_graph.daemon.is_daemon_running", return_value=True),
             patch("code_review_graph.daemon.read_pid", return_value=PID),
-            patch("code_review_graph.daemon.pid_alive", return_value=True),
+            patch(
+                "code_review_graph.daemon.pid_alive",
+                side_effect=[True] * 50 + [False],
+            ),
             patch("code_review_graph.daemon.clear_pid") as clear,
             patch("code_review_graph.daemon_cli.signal", _win_signal()),
             patch("code_review_graph.daemon_cli.os.kill") as kill,
@@ -164,7 +173,7 @@ class TestRestartInterleavings:
         start.assert_called_once_with(args)
 
     def test_restart_aborts_start_when_forced_stop_fails(self):
-        """A hard escalation failure aborts the restart but still clears the PID file."""
+        """A hard escalation failure aborts the restart and retains the PID file."""
         with (
             patch("code_review_graph.daemon.is_daemon_running", return_value=True),
             patch("code_review_graph.daemon.read_pid", return_value=PID),
@@ -181,7 +190,7 @@ class TestRestartInterleavings:
             _handle_restart(MagicMock())
 
         start.assert_not_called()
-        clear.assert_called_once()
+        clear.assert_not_called()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX real-process integration")
@@ -230,6 +239,8 @@ class TestStopRealProcess:
             assert proc.stdout is not None
             assert proc.stdout.readline().strip() == b"ready"
             write_pid(proc.pid)
+            reaper = threading.Thread(target=proc.wait, daemon=True)
+            reaper.start()
 
             # Shrink the 5s wait to ~0.5s of real polling.
             with patch(
@@ -239,6 +250,7 @@ class TestStopRealProcess:
                 _handle_stop(MagicMock())
 
             proc.wait(timeout=10)
+            reaper.join(timeout=10)
             assert proc.returncode == -signal.SIGKILL
             assert not default_pid_path().exists()
             assert "force-stopping" in capsys.readouterr().out
