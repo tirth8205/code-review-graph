@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
+from .constants import _int_env
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
 from .parser import normalize_file_path
@@ -31,7 +32,7 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "__construct", "__init__", "__destruct",
 })
 
-_GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
+_GIT_TIMEOUT = _int_env("CRG_GIT_TIMEOUT", 30)  # seconds, configurable
 
 _SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\-]+$")
 _SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
@@ -462,7 +463,7 @@ def analyze_changes(
     ]
 
     # Cap to prevent O(N*M) query explosion on large PRs.
-    _max_funcs = int(os.environ.get("CRG_MAX_CHANGED_FUNCS", "500"))
+    _max_funcs = _int_env("CRG_MAX_CHANGED_FUNCS", 500)
     funcs_truncated = len(changed_funcs) > _max_funcs
     if funcs_truncated:
         changed_funcs = changed_funcs[:_max_funcs]
