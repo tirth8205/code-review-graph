@@ -10293,6 +10293,9 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
             if import_map is not None:
+                java_package = import_map.get(_JAVA_PACKAGE_KEY, "")
+                if java_package:
+                    extra["java_package"] = java_package
                 request_prefixes: list[str] = []
                 for annotation in self._java_annotations_named(
                     child,

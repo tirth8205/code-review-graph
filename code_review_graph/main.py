@@ -268,6 +268,8 @@ def query_graph_tool(
     - triggered_by: Find schedulers or other triggers that invoke the target
     - publishers_of: Find methods that publish an event
     - listeners_of: Find methods that listen for an event
+    - advises: Find methods an AOP advice targets via its pointcut
+    - advised_by: Find AOP advice methods that intercept the target
     - handlers_of: Find methods that handle an endpoint
     - endpoints_for: Find endpoints handled by a method
     - consumers_of: Find classes that consume a Spring configuration property

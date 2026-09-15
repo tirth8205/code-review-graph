@@ -1705,7 +1705,18 @@ class GraphStore:
             "SELECT qn, 1.0 FROM _impact_seeds"
         )
 
-        candidate_sql = """
+        # AOP-derived CALLS edges (advice -> target, tagged extra.aop_resolved)
+        # do not follow the plain CALLS impact policy: an advice is not
+        # "called by" the method it wraps, so target->source propagation
+        # would answer "the target changed, is the aspect impacted" and miss
+        # the relationship that matters — "the advice changed, what does it
+        # impact". Force these edges to always propagate source->target
+        # (advice -> its targets) regardless of CALLS' registered direction.
+        # See aop_resolver.py's module docstring and PR #916 review.
+        aop_direction_case = (
+            "CASE WHEN e.extra LIKE ? THEN ? ELSE COALESCE(p.direction, ?) END"
+        )
+        candidate_sql = f"""
         INSERT INTO _impact_next (node_qn, score)
         SELECT node_qn, MAX(score)
         FROM (
@@ -1714,25 +1725,30 @@ class GraphStore:
             FROM _impact_frontier f
             JOIN edges e ON e.source_qualified = f.node_qn
             LEFT JOIN _impact_policies p ON p.kind = e.kind
-            WHERE COALESCE(p.direction, ?) = ?
+            WHERE {aop_direction_case} = ?
             UNION ALL
             SELECT e.source_qualified AS node_qn,
                    f.score * COALESCE(p.weight, ?) * ? AS score
             FROM _impact_frontier f
             JOIN edges e ON e.target_qualified = f.node_qn
             LEFT JOIN _impact_policies p ON p.kind = e.kind
-            WHERE COALESCE(p.direction, ?) = ?
+            WHERE {aop_direction_case} = ?
         ) candidates
         WHERE score > ?
         GROUP BY node_qn
         """
+        _aop_extra_like = '%"aop_resolved"%'
         candidate_params = (
             IMPACT_DEFAULT_EDGE_WEIGHT,
             IMPACT_DEPTH_DECAY,
+            _aop_extra_like,
+            IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_DIRECTION,
             IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_WEIGHT,
             IMPACT_DEPTH_DECAY,
+            _aop_extra_like,
+            IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_DIRECTION,
             IMPACT_DIRECTION_INCOMING,
             IMPACT_SCORE_FLOOR,
@@ -2433,9 +2449,15 @@ class GraphStore:
                 if candidate_weight > existing_weight:
                     data["kind"] = kind
 
-                direction = IMPACT_EDGE_DIRECTIONS.get(
-                    kind, IMPACT_DEFAULT_EDGE_DIRECTION,
-                )
+                # AOP-derived CALLS edges always propagate source->target
+                # (advice -> target), overriding CALLS' registered direction
+                # — see the matching comment in get_impact_radius_sql.
+                if '"aop_resolved"' in (r["extra"] or ""):
+                    direction = IMPACT_DIRECTION_OUTGOING
+                else:
+                    direction = IMPACT_EDGE_DIRECTIONS.get(
+                        kind, IMPACT_DEFAULT_EDGE_DIRECTION,
+                    )
                 if direction != IMPACT_DIRECTION_NONE:
                     weight_key = f"impact_{direction}_weight"
                     data[weight_key] = max(

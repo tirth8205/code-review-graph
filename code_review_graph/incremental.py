@@ -149,6 +149,18 @@ def _run_spring_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_aop_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Spring AOP advice-to-target call resolver, swallowing any
+    failure so build never fails because of it. Returns stats or None on error.
+    """
+    try:
+        from .aop_resolver import resolve_aop_advice
+        return resolve_aop_advice(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("AOP resolver failed: %s", exc)
+        return None
+
+
 def _run_spring_event_resolver(store: GraphStore) -> Optional[dict]:
     """Run the Spring application-event resolver without failing a build."""
     try:
@@ -1517,6 +1529,7 @@ def full_build(
     python_stats = _run_python_resolver(store)
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
+    aop_stats = _run_aop_resolver(store)
     spring_event_stats = _run_spring_event_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
@@ -1531,6 +1544,7 @@ def full_build(
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
@@ -1778,6 +1792,7 @@ def incremental_update(
         for path in set(all_files) | set(stale_files) | missing_paths
     )
     spring_stats = _run_spring_resolver(store) if spring_changed else None
+    aop_stats = _run_aop_resolver(store) if spring_changed else None
     spring_event_stats = (
         _run_spring_event_resolver(store) if spring_changed else None
     )
@@ -1816,6 +1831,7 @@ def incremental_update(
         "python_resolution": python_stats,
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
+        "aop_resolution": aop_stats,
         "event_resolution": spring_event_stats,
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,

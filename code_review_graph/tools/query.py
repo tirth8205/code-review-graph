@@ -53,6 +53,8 @@ _QUERY_PATTERNS = {
     "triggered_by": "Find schedulers or other triggers that invoke a method",
     "publishers_of": "Find methods that publish an event",
     "listeners_of": "Find methods that listen for an event",
+    "advises": "Find methods an AOP advice targets via its pointcut",
+    "advised_by": "Find AOP advice methods that intercept a given method",
     "handlers_of": "Find methods that handle an endpoint",
     "endpoints_for": "Find endpoints handled by a method",
     "consumers_of": "Find classes that consume a Spring configuration property",
@@ -274,7 +276,8 @@ def query_graph(
         pattern: Query pattern. One of: callers_of, references_to, callees_of,
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
-                 handlers_of, endpoints_for, consumers_of, file_summary.
+                 handlers_of, endpoints_for, consumers_of, advises, advised_by,
+                 file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -715,6 +718,26 @@ def query_graph(
                 source = store.get_node(edge.source_qualified)
                 if source:
                     add_result(node_to_dict(source), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "advises":
+            for edge in store.get_edges_by_source(qn):
+                if edge.kind != "CALLS" or not edge.extra.get("aop_resolved"):
+                    continue
+                target_node = store.get_node(edge.target_qualified)
+                if target_node:
+                    add_result(node_to_dict(target_node), edge)
+                else:
+                    edges_out.append(edge_to_dict(edge))
+
+        elif pattern == "advised_by":
+            for edge in store.get_edges_by_target(qn):
+                if edge.kind != "CALLS" or not edge.extra.get("aop_resolved"):
+                    continue
+                advice_node = store.get_node(edge.source_qualified)
+                if advice_node:
+                    add_result(node_to_dict(advice_node), edge)
                 else:
                     edges_out.append(edge_to_dict(edge))
 
