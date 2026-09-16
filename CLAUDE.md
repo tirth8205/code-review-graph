@@ -92,6 +92,7 @@ uv run code-review-graph --help             # full command list
 - Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`.
 - Windows: `test_windows_compat.py`, `test_windows_path_identity.py`.
 - Docs and GitHub Action: `test_documentation.py`, `test_action_render.py`.
+- Promotion coverage gate: `test_gap_gate.py` (`scripts/test_gap_gate.py` plus the gap-scan accuracy rules in `changes.py` and `parser.py`).
 - `tests/fixtures/`: sample files per supported language.
 
 ## CI Pipeline

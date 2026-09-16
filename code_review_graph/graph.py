@@ -740,24 +740,15 @@ class GraphStore:
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         candidate_cache: dict[str, list[tuple[str, str]]] = {}
         import_cache: dict[str, set[str]] = {}
+        reexport_cache: dict[str, set[str]] = {}
         # Same dotted-module evidence the endpoint resolver uses, for graphs
         # queried before that pass has run. Built on first use: most queries
         # never reach this fallback, and the index scans every .py path.
         # See: #903
         module_files: dict[str, str] | None = None
 
-        def _candidate_for_context(name: str, context_file: str) -> str | None:
+        def _imports_of(context_file: str) -> set[str]:
             nonlocal module_files
-            if name not in candidate_cache:
-                candidate_cache[name] = [
-                    (candidate["qualified_name"], candidate["file_path"])
-                    for candidate in conn.execute(
-                        "SELECT qualified_name, file_path FROM nodes "
-                        "WHERE name = ? "
-                        "AND kind IN ('Function', 'Test', 'Class')",
-                        (name,),
-                    ).fetchall()
-                ]
             if context_file not in import_cache:
                 if module_files is None:
                     module_files = self._python_module_file_index(conn)
@@ -776,10 +767,49 @@ class GraphStore:
                     if resolved_module:
                         imported_files.add(resolved_module)
                 import_cache[context_file] = imported_files
+            return import_cache[context_file]
+
+        def _reexports_of(context_file: str) -> set[str]:
+            """One further import hop, through the files *context_file* imports.
+
+            ``from code_review_graph.tools import detect_changes_func`` records
+            an import of ``tools/__init__.py``; the definition is in
+            ``tools/review.py``, which ``__init__`` re-exports. Without this
+            hop the direct-evidence check finds no supported candidate and the
+            function reads as untested. The hop is one level deep and is only
+            consulted when the direct evidence is inconclusive, so it can add
+            resolution where there was none but never overrule a direct
+            match. See: #996
+            """
+            if context_file not in reexport_cache:
+                widened: set[str] = set()
+                for imported_file in _imports_of(context_file):
+                    widened |= _imports_of(imported_file)
+                reexport_cache[context_file] = widened
+            return reexport_cache[context_file]
+
+        def _candidate_for_context(name: str, context_file: str) -> str | None:
+            if name not in candidate_cache:
+                candidate_cache[name] = [
+                    (candidate["qualified_name"], candidate["file_path"])
+                    for candidate in conn.execute(
+                        "SELECT qualified_name, file_path FROM nodes "
+                        "WHERE name = ? "
+                        "AND kind IN ('Function', 'Test', 'Class')",
+                        (name,),
+                    ).fetchall()
+                ]
+            direct = self._select_evidence_backed_candidate(
+                candidate_cache[name],
+                context_file,
+                _imports_of(context_file),
+            )
+            if direct is not None:
+                return direct
             return self._select_evidence_backed_candidate(
                 candidate_cache[name],
                 context_file,
-                import_cache[context_file],
+                _imports_of(context_file) | _reexports_of(context_file),
             )
 
         for row in conn.execute(

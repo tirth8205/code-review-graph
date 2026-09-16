@@ -22,7 +22,7 @@ import threading
 from bisect import bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath
 from typing import Any, NamedTuple, Optional
 
 try:
@@ -1970,6 +1970,65 @@ def _is_test_function(
     return False
 
 
+def _is_test_class(name: str, file_path: str, decorators: tuple[str, ...] = ()) -> bool:
+    """A class is test code if it lives in a test file or carries a test
+    annotation.
+
+    Deliberately narrower than :func:`_is_test_function`: the name patterns are
+    not consulted outside a test path. ``^Test`` matches production names such
+    as ``TestHarness`` or ``TestRunner``, and mis-marking one of those hides a
+    real production class from the coverage gate. Location and an explicit
+    framework annotation are the only evidence trusted here. See: #996
+    """
+    if _is_test_file(file_path):
+        return True
+    if decorators and any(d in _TEST_ANNOTATIONS for d in decorators):
+        return True
+    return False
+
+
+def repo_relative_path(file_path: str, repo_root: Optional[Path]) -> str:
+    """Return *file_path* relative to *repo_root*, or unchanged when it is not
+    under it.
+
+    ``_is_test_file`` searches for substrings such as ``test_``, so it answers
+    "yes" for any ``.py`` file under a checkout whose own directory name
+    contains ``test_`` — a CI workspace or a pytest ``tmp_path``. Everything
+    that asks "is this a test file?" for a gating decision should ask about
+    the path inside the repository, not the path on the machine.
+    """
+    if repo_root is None:
+        return file_path
+    try:
+        return PurePosixPath(
+            Path(file_path).resolve().relative_to(repo_root)
+        ).as_posix()
+    except (ValueError, OSError):
+        return file_path
+
+
+def _mark_test_classes(nodes: list[NodeInfo], repo_root: Optional[Path] = None) -> None:
+    """Set ``is_test`` on Class nodes that are test code.
+
+    Every ``kind="Class"`` construction site in this module would otherwise
+    have to remember the flag, and none of the tree-sitter ones did: a graph
+    built from this repository carried 36 ``TestX`` classes with ``is_test=0``,
+    which ``changes.py`` then reported as changed production code with no test.
+    Applying it once, after extraction, covers every language and every future
+    extractor. See: #996
+    """
+    for node in nodes:
+        if node.kind != "Class" or node.is_test:
+            continue
+        decorators: tuple[str, ...] = ()
+        raw = node.extra.get("decorators") if node.extra else None
+        if isinstance(raw, (list, tuple)):
+            decorators = tuple(str(d) for d in raw)
+        path = repo_relative_path(node.file_path, repo_root)
+        if _is_test_class(node.name, path, decorators):
+            node.is_test = True
+
+
 # Documentation summaries are stored in ``NodeInfo.extra`` so the graph
 # schema remains backward compatible.  A hard cap keeps parser metadata and
 # semantic-search input bounded even when a source file contains a very long
@@ -2738,6 +2797,17 @@ class CodeParser:
         return self.parse_bytes(path, source)
 
     def parse_bytes(self, path: Path, source: bytes) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse pre-read bytes, then normalize test markers on the result.
+
+        The extraction itself lives in :meth:`_extract_bytes`; this wrapper is
+        the one place every language path funnels through, so it is where
+        ``is_test`` is settled for Class nodes. See: #996
+        """
+        nodes, edges = self._extract_bytes(path, source)
+        _mark_test_classes(nodes, self._repo_root)
+        return nodes, edges
+
+    def _extract_bytes(self, path: Path, source: bytes) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Parse pre-read bytes and return extracted nodes and edges.
 
         This avoids re-reading the file from disk, eliminating TOCTOU gaps
