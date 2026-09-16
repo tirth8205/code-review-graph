@@ -72,7 +72,7 @@ If some files fail to parse, the build or update result has status `partial` and
 ```
 /code-review-graph:review-delta
 ```
-Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 65x fewer tokens per question (median; range 36x to 376x) than reading the whole corpus. See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
+Reviews the files changed since the last commit plus their graph-derived impact radius. Review and impact responses carry a compact `context_savings` estimate. Across the 6 benchmark repositories, graph queries use about 6x fewer tokens per question (median of 18 questions; range 3.5x to 60x) than a grep-and-read agent, and about 50x fewer (median; range 31x to 326x) than reading the whole corpus — the latter an upper bound no real agent pays. See the [README benchmarks](../README.md#benchmarks) and [REPRODUCING.md](REPRODUCING.md).
 
 ### 3. Review a PR
 ```
@@ -142,7 +142,7 @@ Then use `cross_repo_search_tool` to search every registered repository, or pass
 
 ## Context Savings
 
-Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-result-committed) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
+Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead. `saved_tokens` and `saved_percent` are signed, so the panel prints `Cost more:` instead of `Saved:` when that happens.
 
 The evaluation runner produces the benchmark numbers quoted in the README:
 

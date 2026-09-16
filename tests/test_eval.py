@@ -1315,3 +1315,140 @@ def test_clone_or_update_refuses_directory_inside_another_repo(tmp_path):
     ).stdout.strip()
     assert head_after == head_before, "enclosing repository was checked out"
     assert (outer / "tracked.txt").read_text() == "second"
+
+
+# ---------------------------------------------------------------------------
+# Headline arithmetic: ratio of averages, never average of ratios
+# ---------------------------------------------------------------------------
+
+def _hit_costing(n_tokens: int) -> dict:
+    """A fake search hit whose ``estimate_tokens(str(hit))`` is exactly n."""
+    overhead = len(str({"qualified_name": "x", "pad": ""}))
+    return {"qualified_name": "x", "pad": "y" * (n_tokens * 4 - overhead)}
+
+
+
+def test_standalone_benchmark_ratio_reproduces_from_its_own_columns():
+    """The quoted ratio must equal naive_corpus_tokens / avg_graph_tokens.
+
+    Regression for the inflated README table: averaging the per-question
+    ratios gave code-review-graph 68.1x where its own published columns
+    (208,821 / 3,190) give 65.5x. x -> naive/x is convex, so the mean of
+    ratios is always the larger number, and every row was overstated by
+    3-13%.
+    """
+    from code_review_graph.token_benchmark import run_token_benchmark
+
+    naive = 208_821
+    graph_tokens = [1_000, 2_000, 3_000, 4_000, 5_950]  # mean 3,190
+
+    class _FakeCursor:
+        def fetchone(self):
+            return (1,)  # pretend the vector index is populated
+
+    class _FakeConn:
+        def execute(self, sql, *args):
+            return _FakeCursor()
+
+    class _FakeStore:
+        _conn = _FakeConn()
+
+        def get_edges_by_source(self, qualified_name):
+            return []
+
+    monkey_hits = iter(graph_tokens)
+
+    import code_review_graph.token_benchmark as tb
+
+    real_search = tb.hybrid_search
+    real_naive = tb.compute_naive_tokens
+    try:
+        tb.compute_naive_tokens = lambda repo_root: naive
+        tb.hybrid_search = lambda store, q, limit=5: [_hit_costing(next(monkey_hits))]
+        out = run_token_benchmark(
+            _FakeStore(), Path("."), questions=["q1", "q2", "q3", "q4", "q5"],
+        )
+    finally:
+        tb.hybrid_search = real_search
+        tb.compute_naive_tokens = real_naive
+
+    avg_graph = out["avg_graph_tokens"]
+    assert avg_graph == 3190
+    # The published pair must be self-consistent: dividing the two integers
+    # the function returns has to give the ratio it returns.
+    assert out["average_reduction_ratio"] == round(naive / avg_graph, 1) == 65.5
+
+    mean_of_ratios = sum(r["reduction_ratio"] for r in out["per_question"]) / 5
+    assert mean_of_ratios > out["average_reduction_ratio"]
+
+
+def test_standalone_benchmark_excludes_questions_with_no_hits():
+    """A question the search could not answer is not a zero-cost answer."""
+    from code_review_graph.token_benchmark import run_token_benchmark
+
+    class _FakeCursor:
+        def fetchone(self):
+            return (1,)  # pretend the vector index is populated
+
+    class _FakeConn:
+        def execute(self, sql, *args):
+            return _FakeCursor()
+
+    class _FakeStore:
+        _conn = _FakeConn()
+
+        def get_edges_by_source(self, qualified_name):
+            return []
+
+    import code_review_graph.token_benchmark as tb
+
+    real_search = tb.hybrid_search
+    real_naive = tb.compute_naive_tokens
+    try:
+        tb.compute_naive_tokens = lambda repo_root: 10_000
+        tb.hybrid_search = lambda store, q, limit=5: (
+            [] if q == "miss" else [_hit_costing(100)]
+        )
+        out = run_token_benchmark(_FakeStore(), Path("."), questions=["hit", "miss"])
+    finally:
+        tb.hybrid_search = real_search
+        tb.compute_naive_tokens = real_naive
+
+    assert out["answered_questions"] == 1
+    assert out["unanswered_questions"] == 1
+    # The miss does not halve avg_graph_tokens into a doubled "win".
+    assert out["average_reduction_ratio"] == round(10_000 / out["avg_graph_tokens"], 1)
+
+
+def test_token_efficiency_pooled_ratio_is_totals_not_mean_of_ratios():
+    from code_review_graph.eval.benchmarks import token_efficiency
+
+    rows = [
+        {"status": "ok", "naive_tokens": 1000, "graph_tokens": 100,
+         "naive_to_graph_ratio": 10.0},
+        {"status": "ok", "naive_tokens": 1000, "graph_tokens": 1000,
+         "naive_to_graph_ratio": 1.0},
+        {"status": "error", "naive_tokens": 5, "graph_tokens": "",
+         "naive_to_graph_ratio": ""},
+    ]
+    agg = token_efficiency.aggregate(rows)
+
+    assert agg["total_naive_tokens"] == 2000
+    assert agg["total_graph_tokens"] == 1100
+    assert agg["pooled_naive_to_graph_ratio"] == 1.8       # 2000 / 1100
+    assert agg["pooled_naive_to_graph_ratio"] < 5.5        # the mean of ratios
+
+
+def test_agent_baseline_pooled_ratio_is_totals_not_mean_of_ratios():
+    from code_review_graph.eval.benchmarks import agent_baseline
+
+    rows = [
+        {"status": "ok", "baseline_tokens": 1000, "graph_tokens": 100,
+         "baseline_to_graph_ratio": 10.0},
+        {"status": "ok", "baseline_tokens": 1000, "graph_tokens": 1000,
+         "baseline_to_graph_ratio": 1.0},
+    ]
+    agg = agent_baseline.aggregate(rows)
+
+    assert agg["pooled_baseline_to_graph_ratio"] == 1.8
+    assert agg["median_baseline_to_graph_ratio"] == 5.5

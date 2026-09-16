@@ -1,0 +1,4 @@
+repo,query,expected,rank,reciprocal_rank
+code-review-graph,GraphStore nodes,code_review_graph/graph.py::GraphStore,2,0.5
+code-review-graph,parse AST,code_review_graph/parser.py::CodeParser,1,1.0
+code-review-graph,full build,code_review_graph/incremental.py::full_build,1,1.0

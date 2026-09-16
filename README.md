@@ -49,7 +49,7 @@
 AI coding tools often re-read large parts of a codebase to review a change. `code-review-graph` builds a structural map of the code with [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), keeps it updated incrementally, and serves compact context over [MCP](https://modelcontextprotocol.io/), so the assistant reads only the files a change touches.
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: reading flask's whole corpus costs 143,594 tokens, a graph answer costs 2,196 (71.0x fewer)" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: reading flask's whole corpus costs 143,594 tokens, a graph answer costs 2,712 (52.9x fewer) — a whole-corpus upper bound, not the typical agent" width="85%" />
 </p>
 
 ---
@@ -127,10 +127,10 @@ Hooks, the pre-commit hook and watch mode trigger incremental updates. The updat
 
 ### Whole codebase or targeted answer?
 
-Instead of feeding a whole corpus to the model, the graph returns a slice shaped to the question. On this repository, 208,821 source tokens become ~3,190 tokens per question.
+Instead of feeding a whole corpus to the model, the graph returns a slice shaped to the question. On this repository, 208,821 source tokens become ~2,547 tokens per question — 82x fewer. That comparison is an **upper bound**: it assumes an agent with no graph reads every source file. A real agent greps and reads the best-matching files, and against that baseline the measured saving is about **6x** (see [Benchmarks](#benchmarks)).
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph repo: 208,821 source tokens funnel down to ~3,190 token graph responses, 68x fewer tokens per question" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph repo: 208,821 source tokens funnel down to ~2,547 token graph responses, 82x fewer tokens per question against a whole-corpus upper bound" width="80%" />
 </p>
 
 ### Language coverage and notebooks
@@ -189,35 +189,64 @@ See [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) for inputs, risk levels and c
 ## Benchmarks
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 repositories: ~65x median per-question token reduction (376x max), 0.69 average impact F1 against graph-derived ground truth" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 repositories: about 6x median per-question token reduction against a grep-and-read agent, 0.69 average impact F1 against graph-derived ground truth" width="85%" />
 </p>
 
-The median per-question token reduction across the 6 repositories is about **65x** (whole-corpus baseline vs graph query). The **376x** maximum is one repository (fastapi, the largest corpus), not the typical result.
+**Headline: about 6x fewer tokens per question than a grep-and-read agent.** That is the median of 18 questions across the 6 repositories (range 3.5x to 60x), measured by the `agent_baseline` benchmark against the baseline a real agent actually pays: grep the corpus for the question's identifiers, read the top 3 matching files.
 
-All numbers come from the evaluation runner against 6 open-source repositories (13 commits). Every config pins an upstream SHA, Leiden runs with a fixed seed, and embeddings are deterministic on CPU, so two runs on different machines produce the same numbers. The reproduction recipe is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md). A weekly report-only run on the two smallest configs lives in [`.github/workflows/eval.yml`](.github/workflows/eval.yml).
+Reading *every* file in the repository instead costs about **50x** the graph query (median; range 31x to 326x). That is an upper bound no real agent pays, and it is reported below as one, not as the headline.
+
+All numbers come from the evaluation runner against 6 open-source repositories (13 commits, 18 agent questions, 11 multi-hop tasks), **re-measured 2026-09-16** on the current `staging`. Every config pins an upstream SHA, Leiden runs with a fixed seed, and embeddings are deterministic on CPU, so two runs on different machines produce the same numbers. The reproduction recipe is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md). A weekly report-only run on the two smallest configs lives in [`.github/workflows/eval.yml`](.github/workflows/eval.yml).
+
+Every ratio below is a ratio of the two columns printed next to it. Divide them yourself and you get the quoted number.
 
 <details>
-<summary><strong>Token efficiency: ~65x median per-question reduction (range 36x to 376x; whole-corpus vs graph query)</strong></summary>
+<summary><strong>Agent baseline (headline): ~6x median vs grep-and-read (range 3.5x to 60x)</strong></summary>
 <br>
 
-For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, and so on), the graph returns ~2,000 to 3,500 tokens of search hits plus neighbour edges instead of every source file. The table averages the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
+The `agent_baseline` benchmark models an agent without the graph: derive identifier-shaped search terms from the question, grep the corpus in pure Python, read the top 3 files by match count. The graph side is 5 hybrid-search hits plus up to 5 neighbour edges per hit. Three questions per repository, listed as `agent_questions:` in each config.
+
+| Repo | Questions | baseline_tokens | graph_tokens | Pooled | Median |
+|------|----------:|----------------:|-------------:|-------:|-------:|
+| fastapi | 3 | 475,680 | 11,488 | **41.4x** | 50.5x |
+| flask | 3 | 82,834 | 9,880 | **8.4x** | 6.8x |
+| code-review-graph | 3 | 78,403 | 11,590 | **6.8x** | 6.8x |
+| gin | 3 | 75,772 | 11,517 | **6.6x** | 5.7x |
+| httpx | 3 | 78,521 | 15,018 | **5.2x** | 5.6x |
+| express | 3 | 51,258 | 12,571 | **4.1x** | 3.8x |
+| **All** | **18** | **842,468** | **72,064** | **11.7x** | **5.9x** |
+
+> Captured 2026-09-16 from clean clones at the pinned SHAs (crg 2.3.8, Python 3.13.12, sentence-transformers 5.6.1, local `all-MiniLM-L6-v2`, `CRG_LEIDEN_SEED=42`, macOS arm64). All 18 rows are `status=ok`. Per-question rows: `evaluate/results/<repo>_agent_baseline_2026-09-16.csv`. This is the first published capture of this benchmark.
+
+The headline quotes the **median (5.9x, rounded to "about 6x")**, not the pooled 11.7x. Pooling sums tokens across repositories, so fastapi — whose three questions alone contribute 476k of the 842k baseline tokens — sets the pooled figure almost single-handedly. The median describes the question you are likely to ask; the pooled figure describes the corpus mix in this particular sample.
+
+</details>
+
+<details>
+<summary><strong>Whole-corpus upper bound: ~50x median per-question reduction (range 31x to 326x)</strong></summary>
+<br>
+
+This compares a graph answer with reading every source file in the repository. **No real agent does that**, so read this as a ceiling. For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, and so on), the graph returns ~2,500 to 4,500 tokens of search hits plus neighbour edges. The table averages the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
 
 | Repo | Snapshot SHA | naive_corpus_tokens | avg graph_tokens | Reduction |
 |------|---|-----------------:|----------------:|----------:|
-| fastapi | `22381558` | 948,793 | 2,653 | **375.6x** |
-| flask | `a29f88ce` | 143,594 | 2,196 | **71.0x** |
-| code-review-graph | `84bde354` | 208,821 | 3,190 | **68.1x** |
-| gin | `5c00df8a` | 166,868 | 2,766 | **61.9x** |
-| httpx | `b55d4635` | 142,356 | 2,661 | **60.6x** |
-| express | `b4ab7d65` | 136,052 | 3,936 | **36.0x** |
+| fastapi | `22381558` | 948,793 | 2,914 | **325.6x** |
+| code-review-graph | `84bde354` | 208,821 | 2,547 | **82.0x** |
+| flask | `a29f88ce` | 143,594 | 2,712 | **52.9x** |
+| gin | `5c00df8a` | 166,868 | 3,521 | **47.4x** |
+| httpx | `b55d4635` | 142,356 | 3,411 | **41.7x** |
+| express | `b4ab7d65` | 136,052 | 4,422 | **30.8x** |
 
-> Captured 2026-08-02 from clean clones at the pinned SHAs (crg 2.3.7, local `all-MiniLM-L6-v2` embeddings). These numbers are lower than the 2026-05-25 capture they replace: node embedding text became richer, so `avg graph_tokens` rose in every repo. fastapi is measured at its current pin `22381558` rather than the retired `0227991a`.
+> Captured 2026-09-16, same environment as above. All 5 questions were answered in all 6 repositories. Range 30.8x to 325.6x; the two middle repos are gin (47.4x) and flask (52.9x), so the median is 50.15x.
 
-The whole-corpus baseline is an upper bound no real agent pays; an agent greps for identifiers and reads the best-matching files. The `agent_baseline` eval benchmark measures that case (a pure-Python grep over the corpus, top-3 files by match count, token-counted against the graph query cost). It writes `evaluate/results/<repo>_agent_baseline_<date>.csv`; no canonical capture has been published yet.
+Two things changed since the 2026-08-02 capture that quoted 36x to 376x with a 65x median:
+>
+> 1. **The arithmetic was wrong.** `average_reduction_ratio` averaged the per-question ratios instead of dividing `naive_corpus_tokens` by the average `graph_tokens`. Because `x -> naive/x` is convex, the mean of ratios is always the larger number, so every published row was overstated — by 2.6% (gin) up to 13.3% (httpx). code-review-graph was quoted as 68.1x where its own columns give 65.5x; httpx as 60.6x where its columns give 53.5x. Fixed in `code_review_graph/token_benchmark.py`; the ratio is now a ratio of averages and reproduces from the two columns beside it.
+> 2. **The graph changed.** The relative-import fix on `staging` altered edge counts, so the neighbour-edge text attached to each search hit changed size — up in flask, gin and httpx, down in code-review-graph.
 
-The formal `token_efficiency` benchmark measures a different scenario, the full `get_review_context()` JSON against only the changed-file content of a commit, and reports ratios below 1 for small commits because the response carries impact-radius edges and source snippets. The two benchmarks answer different questions; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what).
+The formal `token_efficiency` benchmark measures a different scenario, the full `get_review_context()` JSON against only the changed-file content of a commit. On the 2026-09-16 capture its median is **0.6x** and its pooled ratio **2.1x** across 13 commits: for a small commit the graph response is larger than the diff it describes, because it carries impact-radius edges and source snippets. That is a real cost, and it is quoted here rather than omitted. The two benchmarks answer different questions; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what).
 
-Review and impact tools attach a compact `context_savings` estimate to their responses. The CLI shows the same figures in the `Token Savings` panel (see Usage below) and `--verify` compares them with OpenAI's `cl100k_base` tokenizer. Calibration across 222 sample files puts the estimate within about 1% of real tokens in aggregate ([data](docs/REPRODUCING.md#calibration-result-committed)).
+Review and impact tools attach a compact `context_savings` estimate to their responses. The CLI shows the same figures in the `Token Savings` panel (see Usage below) and `--verify` compares them with OpenAI's `cl100k_base` tokenizer. Calibration across 222 sample files puts the estimate within about 1% of real tokens in aggregate ([data](docs/REPRODUCING.md#calibration-table)). The panel reports a **loss** as readily as a saving: on a small single-file change the graph response can cost more than the file it replaces, and the panel prints `Cost more:` when it does.
 
 </details>
 
@@ -237,7 +266,26 @@ Blast-radius analysis recovers every file in the ground truth on all 13 evaluati
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **Average** | **13** | **0.693** | **0.546** | **1.000** |
 
-The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-08-02 capture co-change mode returned `predicted_files = 0` on every graded commit, so it is not yet a usable measurement and no co-change number is quoted.
+> Re-measured 2026-09-16 on the current `staging`. Every figure is unchanged from the 2026-08-02 capture, to three decimal places. Rows: `evaluate/results/<repo>_impact_accuracy_2026-09-16.csv`.
+
+The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-09-16 capture co-change mode again returned `predicted_files = 0` on every graded commit, so it is not yet a usable measurement and no co-change number is quoted.
+
+</details>
+
+<details>
+<summary><strong>Multi-hop retrieval: 0.727 average, down from 0.909 (a regression)</strong></summary>
+<br>
+
+11 hand-written two-step tasks: `hybrid_search(nl_query)` to find an anchor node, then one `query_graph` hop. A task scores 1.0 only when the anchor is in the top-k *and* every expected neighbour comes back.
+
+| Capture | Score | Tasks passed |
+|---|---:|---|
+| 2026-05-25 | 0.909 | 10 of 11 |
+| **2026-09-16** | **0.727** | **8 of 11** |
+
+Two tasks that passed in May now fail, and both fail at the *search* step, not the traversal step: the anchor fell out of the top 10. `flask-dispatch-callers` moved from rank 3 to rank 14, and `httpx-async-request-tests` from rank 7 to rank 18. The third failure (`fastapi-get-dependant-callers`) failed in May too. The cause is a larger, better-connected graph after the relative-import fix: more nodes compete for the same top-10 window and the embedding similarities re-rank. Every traversal that ran returned `neighbor_recall = 1.0`.
+
+This is a regression, published as one. It is tracked in [Limitations](#limitations) below.
 
 </details>
 
@@ -245,23 +293,24 @@ The benchmark also runs a **co-change mode**: the predictor is seeded with one c
 <summary><strong>Build stats</strong></summary>
 <br>
 
-From the same 2026-08-02 clean-room build. Embedding counts are lower than node counts because File nodes are not embedded.
+From the same 2026-09-16 clean-room build. Embedding counts are lower than node counts because File nodes are not embedded.
 
 | Repo | Nodes | Edges | Embeddings |
 |------|------:|------:|-----------:|
-| fastapi | 6,287 | 32,036 | 5,159 |
+| fastapi | 6,287 | 32,613 | 5,159 |
 | express | 1,990 | 19,492 | 1,849 |
-| gin | 1,589 | 17,237 | 1,491 |
-| code-review-graph | 1,446 | 9,094 | 1,354 |
-| flask | 1,415 | 8,259 | 1,329 |
-| httpx | 1,263 | 8,236 | 1,193 |
+| gin | 1,591 | 17,266 | 1,493 |
+| code-review-graph | 1,446 | 9,103 | 1,354 |
+| flask | 1,415 | 8,378 | 1,329 |
+| httpx | 1,263 | 8,333 | 1,193 |
 
 </details>
 
 ### Limitations
 
 - **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. The co-change mode is not yet a usable measurement.
-- **Small single-file changes.** Graph context can exceed a plain file read for trivial edits. The overhead is the structural metadata that makes multi-file analysis possible.
+- **Multi-hop retrieval regressed.** 0.909 to 0.727 between the 2026-05-25 and 2026-09-16 captures. Both new failures are search-ranking misses: the anchor node fell out of the top 10 as the graph grew.
+- **Small single-file changes.** Graph context can exceed a plain file read for trivial edits — the `token_efficiency` benchmark measures a median of 0.6x across 13 commits, meaning the graph response is usually *larger* than the diff. The overhead is the structural metadata that makes multi-file analysis possible, and the `Token Savings` panel reports it as a loss when it happens.
 - **Search ranking.** Keyword search usually finds the right result near the top, but ranking needs work. Express queries can return no hits because of module-pattern naming.
 - **Flow detection.** Entry-point detection is strongest for Python and PHP/Laravel. JavaScript and Go flow detection needs work.
 - **Precision vs recall.** Impact analysis is conservative. It flags files that might be affected, which means false positives in large dependency graphs.
@@ -286,8 +335,8 @@ From the same 2026-08-02 clean-room build. Embedding counts are lower than node 
 | **Edge confidence** | Three-tier confidence (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, SVG, JSON |
-| **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
-| **Estimated context savings** | `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) on review, impact, detect-changes and architecture responses |
+| **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question; `eval/benchmarks/agent_baseline.py` measures the realistic grep-and-read baseline |
+| **Estimated context savings** | `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) on review, impact, detect-changes and architecture responses. Signed: negative means the graph response cost more than the baseline |
 | **Community auto-split** | Communities above 25% of the graph are split recursively with Leiden |
 | **Execution flows** | Call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Leiden clustering with resolution scaled to graph size |
@@ -374,12 +423,25 @@ Both commands print the same panel showing how many tokens the graph saved compa
 └──────────────────────────────────────────────────────────────┘
 ```
 
+The panel can report a **loss**, and does. Graph context has a fixed overhead, so on a small enough change it costs more than the file it replaces. Adding one 4-line function to a 100-byte Python file measures:
+
+```text
+┌─────────────────────── Token Savings ────────────────────────┐
+│ Full context would be:         25 tokens                     │
+│ Graph context used:           798 tokens                     │
+│ Cost more:                    773 tokens (~3092% over)       │
+│ Breakdown: Functions 259 · Tests 208 · Risk 259 · Other 72   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+Before 2026-09-16 this case printed `Saved: 0 tokens (~0%)`: `context_savings.py` clamped the saving at zero, so the panel was structurally incapable of showing a loss. `saved_tokens` and `saved_percent` are now signed, in the MCP JSON as well as in the panel.
+
 | Command | What it does | When to use |
 |---|---|---|
 | `detect-changes --brief` | Read-only. Queries the existing graph for the current changes and prints the panel. | Most of the time; hooks or `crg-daemon` keep the graph fresh. |
 | `update --brief` | Re-parses the changed files into the graph first, then prints the same panel. | After a rebase, a large change set, or whenever the graph may be stale. |
 
-Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-result-committed).
+Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table).
 
 The same `context_savings` metadata is attached to the JSON responses of the `get_impact_radius`, `get_review_context`, `detect_changes` and `get_architecture_overview` MCP tools.
 

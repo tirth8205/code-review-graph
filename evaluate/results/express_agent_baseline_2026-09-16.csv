@@ -1,0 +1,4 @@
+repo,question,terms,files_matched,top_files,baseline_tokens,graph_tokens,baseline_to_graph_ratio,status,error
+express,How does app.handle process the middleware stack,app.handle process middleware stack,3,test/app.use.js;test/Router.js;test/app.router.js,14951,2568,5.8,ok,
+express,Where does res.send write the response body,res.send write response body,3,lib/response.js;test/express.raw.js;test/res.sendFile.js,16257,4692,3.5,ok,
+express,How does createApplication initialize an app,createapplication initialize app,3,test/app.router.js;test/express.urlencoded.js;test/express.json.js,20050,5311,3.8,ok,

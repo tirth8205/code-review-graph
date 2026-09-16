@@ -42,7 +42,7 @@
 AI 编码工具在审查任务中可能会反复读取代码库的大量内容。`code-review-graph` 解决了这个问题。它使用 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) 构建代码的结构化映射，增量跟踪变更，并通过 [MCP](https://modelcontextprotocol.io/) 为 AI 助手提供精准的上下文，使其只读取真正需要的内容。
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：读完 flask 的全部源码需要 143,594 个 token，而图给出的回答只需 2,196 个——减少 71.0 倍" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="Token 问题：读完 flask 的全部源码需要 143,594 个 token，而图给出的回答只需 2,712 个——减少 52.9 倍。整库基线是上限，真实 agent 不会这样读" width="85%" />
 </p>
 
 ---
@@ -78,7 +78,7 @@ code-review-graph install --platform kiro         # 仅配置 Kiro
 Build the code review graph for this project
 ```
 
-首次构建在 500 个文件的项目上大约需要 10 秒。此后，可通过 watch 模式以及支持的平台钩子自动更新图。
+构建时间随仓库规模增长：约 3,000 个文件的仓库冷启动构建约 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。此后，可通过 watch 模式以及支持的平台钩子自动更新图。
 
 ---
 
@@ -102,9 +102,9 @@ Build the code review graph for this project
   <img src="diagrams/diagram3_blast_radius.png" alt="影响半径可视化：展示 login() 的变更如何传播到调用者、依赖项和测试" width="70%" />
 </p>
 
-### 增量更新，不到 2 秒
+### 增量更新
 
-启用钩子或 watch 模式后，文件保存和受支持的提交钩子会触发增量更新。图对变更文件做差异比较，沿着图自身的 import 与调用边找到相关依赖，并且只重新解析 SHA-256 哈希确实发生变化的文件。一个 2,900 文件的项目重新索引不到 2 秒。
+启用钩子或 watch 模式后，文件保存和受支持的提交钩子会触发增量更新。图对变更文件做差异比较，沿着图自身的 import 与调用边找到相关依赖，并且只重新解析 SHA-256 哈希确实发生变化的文件。在约 3,000 个文件的项目（django）上，修改两个文件后走钩子路径重新索引约 2.5 秒，其中约 1.4 秒是进程启动开销。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="增量更新流程：钩子或 watch 更新触发 git diff，通过图的边找到依赖项，仅重新解析 SHA-256 哈希发生变化的文件" width="90%" />
@@ -112,10 +112,10 @@ Build the code review graph for this project
 
 ### 整个代码库，还是有的放矢的回答？
 
-仓库越大，token 浪费越让人心疼。图不会把整个语料交给模型，而是只返回与回答相关的那一部分：在本仓库中，208,821 个源码 token 会缩减为每个问题约 3,190 个 token。
+仓库越大，token 浪费越让人心疼。图不会把整个语料交给模型，而是只返回与回答相关的那一部分：在本仓库中，208,821 个源码 token 会缩减为每个问题约 2,547 个 token，即减少 82 倍。该对比是**上限**：它假设没有图的 agent 会读取每一个源文件。真实 agent 会先 grep 再只读最匹配的文件；与那个基线相比，实测节省约 **6 倍**。
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 仓库：208,821 个源码 token 收敛为约 3,190 token 的图响应——每个问题的 token 减少 68 倍" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 仓库：208,821 个源码 token 收敛为约 2,547 token 的图响应——相对整库上限，每个问题的 token 减少 82 倍" width="80%" />
 </p>
 
 ### 广泛语言覆盖 + Jupyter 笔记本
@@ -131,10 +131,14 @@ Build the code review graph for this project
 ## 基准测试
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="对 6 个真实仓库的基准测试：每个问题的 token 减少中位数约 65 倍（最高 376 倍），对图生成的基准答案平均 F1 为 0.71" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="对 6 个真实仓库的基准测试：相对 grep-and-read agent，每个问题的 token 减少中位数约 6 倍；对图生成的基准答案平均 F1 为 0.69" width="85%" />
 </p>
 
-所有数据来自针对 6 个真实开源仓库（共 13 次提交）的自动化评估。可通过 `code-review-graph eval --all` 复现。完整基准测试数据请参阅[英文 README](README.md)。
+**头条数字：相对一个 grep-and-read agent，每个问题的 token 减少中位数约 6 倍**（18 个问题、6 个仓库，范围 3.5 倍到 60 倍）。
+
+若改为读取仓库里的**每一个**文件，比值约为 **50 倍**（中位数，范围 31 倍到 326 倍）。那是真实 agent 不会付出的上限，因此只作为上限引用，不作为头条。
+
+所有数据来自针对 6 个真实开源仓库（13 次提交、18 个 agent 问题、11 个多跳任务）的自动化评估，**于 2026-09-16 在当前 `staging` 上重新测量**。可通过 `code-review-graph eval --embed` 复现。完整基准测试数据请参阅[英文 README](README.md)。
 
 ---
 
@@ -142,7 +146,7 @@ Build the code review graph for this project
 
 | 功能 | 说明 |
 |------|------|
-| **增量更新** | 仅重新解析变更文件，后续更新不到 2 秒完成 |
+| **增量更新** | 仅重新解析哈希变化的文件；约 3,000 个文件的仓库上，两个文件的修改走钩子路径约 2.5 秒 |
 | **广泛语言覆盖 + 笔记本** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed as TypeScript, Jupyter/Databricks (.ipynb) |
 | **影响半径分析** | 展示某次变更可能影响的函数、类和文件 |
 | **自动更新钩子** | 每次文件编辑和 git 提交时自动更新图，无需手动干预 |

@@ -58,13 +58,15 @@ directory and language, not the function body.
 
 The benchmark that shows the difference is multi-hop retrieval: natural-language
 query, anchor node, then one hop (`callers_of`, `tests_for`, ...). CRG scores
-0.909 across 11 tasks on 6 repositories (see [REPRODUCING.md](REPRODUCING.md)).
-Similarity retrieval has no second hop.
+**0.727** across 11 tasks on 6 repositories on the 2026-09-16 capture, down from
+0.909 on 2026-05-25 (see [REPRODUCING.md](REPRODUCING.md) for the per-task table
+and the regression). Similarity retrieval has no second hop.
 
 **Where RAG-style search is better:** conceptual questions over prose, comments
 and docs ("where is rate limiting discussed?"). CRG's own keyword ranking is a
-known weakness (MRR 0.35; see the limitations in the
-[README](../README.md#benchmarks)).
+known weakness on module-pattern names (2026-09-16: MRR 0.847 over the 18
+`search_queries` in the eval configs, with one outright miss — express
+`"request"`; rows in `evaluate/results/<repo>_search_quality_2026-09-16.csv`).
 
 ## Why not just grep?
 
@@ -92,9 +94,11 @@ of grep, read and reasoning:
 The graph also persists. Agentic search re-derives the same structure every
 session.
 
-One caveat on the numbers: the whole-corpus token-reduction figures (about 65x
-median, 36x to 376x range) compare a graph response with reading the whole
-corpus, not with a skilled agentic-grep session (see
+One caveat on the numbers: the whole-corpus token-reduction figures (about 50x
+median, 31x to 326x range) compare a graph response with reading the whole
+corpus, not with a skilled agentic-grep session. Against a grep-and-read agent —
+which is what this section is about — the measured median is **about 6x**
+(`agent_baseline`, 18 questions, range 3.5x to 60x; see
 [REPRODUCING.md](REPRODUCING.md) for what each benchmark measures). For
 single-hop lookups in a small repository, grep is cheap and good.
 
@@ -187,9 +191,11 @@ If any step fails, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
   most of the repository in context, and for trivial diffs the structural
   response can cost more tokens than it saves (see
   [When should I not use it?](#when-should-i-not-use-it)).
-- A few hundred files and up: the six evaluation repositories (express,
-  fastapi, flask, gin, httpx and code-review-graph) show 36x to 376x reductions
-  on whole-corpus questions, with the caveat above about the baseline.
+- A few hundred files and up: across the six evaluation repositories (express,
+  fastapi, flask, gin, httpx and code-review-graph) a graph answer is about 6x
+  cheaper than a grep-and-read agent (median of 18 questions, range 3.5x to
+  60x), and 31x to 326x cheaper than reading the whole corpus — the latter
+  being an upper bound no real agent pays.
 - Multi-thousand-file repositories and monorepos: the strongest case. No agent
   can read the corpus per question (FastAPI alone is about 950k tokens of
   source), and incremental updates keep the graph current.

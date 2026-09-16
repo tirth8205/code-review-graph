@@ -1,0 +1,4 @@
+repo,question,terms,files_matched,top_files,baseline_tokens,graph_tokens,baseline_to_graph_ratio,status,error
+httpx,How does Client.request send an HTTP request,client.request send http request,3,httpx/_client.py;tests/models/test_url.py;tests/client/test_redirects.py,27419,4904,5.6,ok,
+httpx,Where are Response headers parsed and decoded,response headers parsed decoded,3,tests/models/test_responses.py;httpx/_client.py;tests/client/test_redirects.py,28302,5071,5.6,ok,
+httpx,How does BaseClient build request URLs,baseclient build request urls,3,httpx/_client.py;tests/models/test_requests.py;tests/test_content.py,22800,5043,4.5,ok,

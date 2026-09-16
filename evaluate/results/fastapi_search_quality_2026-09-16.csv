@@ -1,0 +1,4 @@
+repo,query,expected,rank,reciprocal_rank
+fastapi,FastAPI application,fastapi/applications.py::FastAPI,1,1.0
+fastapi,APIRoute routing,fastapi/routing.py::APIRoute,1,1.0
+fastapi,Depends injection,fastapi/params.py::Depends,1,1.0

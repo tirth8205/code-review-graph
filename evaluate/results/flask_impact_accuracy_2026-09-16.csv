@@ -1,0 +1,5 @@
+repo,commit,ground_truth_mode,seed_file,predicted_files,actual_files,true_positives,precision,recall,f1,status,error
+flask,fbb6f0bc4c60a0bada0e03c3480d0ccf30a3c1df,graph-derived (circular — upper bound),,33,10,10,0.303,1.0,0.465,ok,
+flask,fbb6f0bc4c60a0bada0e03c3480d0ccf30a3c1df,"co-change (same commit, seed excluded)",CHANGES.rst,0,9,0,0.0,0.0,0.0,ok,
+flask,a29f88ce6f2f9843bd6fcbbfce1390a2071965d6,graph-derived (circular — upper bound),,6,4,4,0.667,1.0,0.8,ok,
+flask,a29f88ce6f2f9843bd6fcbbfce1390a2071965d6,"co-change (same commit, seed excluded)",docs/patterns/streaming.rst,0,3,0,0.0,0.0,0.0,ok,

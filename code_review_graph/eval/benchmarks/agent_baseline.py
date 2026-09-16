@@ -186,6 +186,8 @@ def aggregate(results: list[dict]) -> dict:
     """Aggregate over rows where both sides of the comparison exist."""
     ok = [r for r in results if r.get("status") == "ok"]
     ratios = [float(r["baseline_to_graph_ratio"]) for r in ok]
+    baseline_total = sum(int(r.get("baseline_tokens") or 0) for r in ok)
+    graph_total = sum(int(r.get("graph_tokens") or 0) for r in ok)
     no_graph = sum(1 for r in results if r.get("status") == "no_graph_results")
     return {
         "total_rows": len(results),
@@ -203,7 +205,13 @@ def aggregate(results: list[dict]) -> dict:
         "median_baseline_to_graph_ratio": (
             round(statistics.median(ratios), 1) if ratios else None
         ),
-        "mean_baseline_to_graph_ratio": (
-            round(statistics.mean(ratios), 1) if ratios else None
+        # Ratio of totals, not mean of per-row ratios: mean(a_i/b_i) is
+        # convex in b and overstates the pooled a/b that a reader computes
+        # from the published columns. The median stays because it is a
+        # legitimate order statistic, not an average of ratios.
+        "pooled_baseline_to_graph_ratio": (
+            round(baseline_total / graph_total, 1) if graph_total > 0 else None
         ),
+        "total_baseline_tokens": baseline_total,
+        "total_graph_tokens": graph_total,
     }

@@ -42,7 +42,7 @@
 AIコーディングツールはレビュータスクでコードベースの大きな範囲を読み直しがちです。`code-review-graph` はその問題を解決します。[Tree-sitter](https://tree-sitter.github.io/tree-sitter/) でコードの構造マップを構築し、変更を差分で追跡し、[MCP](https://modelcontextprotocol.io/) を通じてAIアシスタントに必要最小限のコンテキストだけを提供します。
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="トークン問題：flaskのコーパス全体を読むと143,594トークン、グラフからの回答は2,196トークン — 71.0分の1" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="トークン問題：flaskのコーパス全体を読むと143,594トークン、グラフからの回答は2,712トークン — 52.9分の1。コーパス全体という基準は上限であり、実際のエージェントはそこまで読まない" width="85%" />
 </p>
 
 ---
@@ -78,7 +78,7 @@ Python 3.10以上が必要です。最良の体験のためには [uv](https://d
 Build the code review graph for this project
 ```
 
-初回ビルドは500ファイルのプロジェクトで約10秒です。以降はwatchモードや対応しているプラットフォームフックでグラフを自動更新できます。
+ビルド時間はリポジトリ規模に比例します。約3,000ファイルのリポジトリのコールドビルドで約40秒でした（[実測](docs/REPRODUCING.md#incremental-update-latency)）。以降はwatchモードや対応しているプラットフォームフックでグラフを自動更新できます。
 
 ---
 
@@ -102,9 +102,9 @@ Build the code review graph for this project
   <img src="diagrams/diagram3_blast_radius.png" alt="影響範囲の可視化：login()への変更が呼び出し元、依存先、テストにどう伝播するか" width="70%" />
 </p>
 
-### 2秒以内のインクリメンタル更新
+### インクリメンタル更新
 
-フックまたはwatchモードを有効にすると、ファイル保存や対応しているコミットフックでインクリメンタル更新が起動します。グラフは変更ファイルの差分を取り、グラフ自身のインポート／呼び出しエッジから依存先を特定し、SHA-256ハッシュが実際に変化したファイルだけを再解析します。2,900ファイルのプロジェクトでも2秒以内で再インデックスが完了します。
+フックまたはwatchモードを有効にすると、ファイル保存や対応しているコミットフックでインクリメンタル更新が起動します。グラフは変更ファイルの差分を取り、グラフ自身のインポート／呼び出しエッジから依存先を特定し、SHA-256ハッシュが実際に変化したファイルだけを再解析します。約3,000ファイルのプロジェクト（django）で2ファイルを編集した場合、フックが通る経路での再インデックスは約2.5秒、うち約1.4秒はプロセス起動コストです。
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="インクリメンタル更新フロー：フックまたはwatch更新がgit diffを起動し、グラフのエッジから依存先を検出、SHA-256ハッシュが変化したファイルだけを再解析" width="90%" />
@@ -112,10 +112,10 @@ Build the code review graph for this project
 
 ### コードベース全体か、狙いを定めた回答か
 
-リポジトリが大きいほどトークンの無駄は深刻になります。グラフはコーパス全体をモデルに渡すのではなく、回答に必要な部分だけを返します。このリポジトリでは208,821のソーストークンが、質問あたり約3,190トークンになります。
+リポジトリが大きいほどトークンの無駄は深刻になります。グラフはコーパス全体をモデルに渡すのではなく、回答に必要な部分だけを返します。このリポジトリでは208,821のソーストークンが、質問あたり約2,547トークン、つまり82分の1になります。この比較は**上限**です。グラフを持たないエージェントが全ソースファイルを読む前提だからです。実際のエージェントはgrepして最も一致するファイルだけを読みます。その基準に対する実測値は約**6分の1**です。
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graphリポジトリ：208,821のソーストークンが約3,190トークンのグラフ回答に収束 — 質問あたりのトークンは68分の1" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graphリポジトリ：208,821のソーストークンが約2,547トークンのグラフ回答に収束 — コーパス全体という上限に対して質問あたり82分の1" width="80%" />
 </p>
 
 ### 幅広い言語対応 + Jupyterノートブック
@@ -131,10 +131,14 @@ Build the code review graph for this project
 ## ベンチマーク
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="6つの実リポジトリでのベンチマーク：質問あたりのトークン削減率は中央値で約65倍（最大376倍）、グラフ由来の正解データに対する平均F1は0.71" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="6つの実リポジトリでのベンチマーク：grep-and-readエージェントに対する質問あたりのトークン削減率は中央値で約6倍、グラフ由来の正解データに対する平均F1は0.69" width="85%" />
 </p>
 
-すべての数値は6つの実際のオープンソースリポジトリ（合計13コミット）に対する自動評価ランナーの結果です。`code-review-graph eval --all` で再現可能です。完全な再現手順と正規の数値は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) をご覧ください。
+**主要な数値：grep-and-readエージェントに対し、質問あたりのトークンは中央値で約6分の1**（6リポジトリ18問、範囲3.5倍〜60倍）。
+
+リポジトリの**全ファイル**を読む場合との比は約**50倍**（中央値、範囲31倍〜326倍）です。これは実際のエージェントが払わない上限であり、上限としてのみ引用します。
+
+すべての数値は6つの実際のオープンソースリポジトリ（13コミット、18のエージェント質問、11の多段タスク）に対する自動評価ランナーの結果で、**2026-09-16に現在の `staging` で再測定**しました。`code-review-graph eval --embed` で再現可能です。完全な再現手順と正規の数値は [`docs/REPRODUCING.md`](docs/REPRODUCING.md) をご覧ください。
 
 > 詳細なベンチマーク結果（トークン効率、影響精度、ビルド性能、既知の制限事項）については [英語版README](README.md) を参照してください。
 
@@ -144,7 +148,7 @@ Build the code review graph for this project
 
 | 機能 | 詳細 |
 |------|------|
-| **インクリメンタル更新** | 変更されたファイルのみを再解析。更新は2秒以内に完了。 |
+| **インクリメンタル更新** | ハッシュが変わったファイルのみを再解析。約3,000ファイルのリポジトリで2ファイル編集のフック経路は約2.5秒。 |
 | **幅広い言語対応 + ノートブック** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed as TypeScript, Jupyter/Databricks (.ipynb) |
 | **影響範囲分析** | 変更によって影響を受ける可能性のある関数、クラス、ファイルを表示 |
 | **自動更新フック** | ファイル編集やgitコミットのたびに手動操作なしでグラフを更新 |

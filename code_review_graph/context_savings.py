@@ -73,7 +73,13 @@ def estimate_context_savings(
     if baseline <= 0:
         return None
 
-    saved = max(0, baseline - returned)
+    # A panel that clamps at zero can only ever report a win. Graph context
+    # genuinely costs more than a plain file read on small single-file edits
+    # (the structural metadata that makes multi-file analysis possible is
+    # not free), and clamping hid exactly the cases a reader most needs to
+    # see. ``saved_tokens``/``saved_percent`` are therefore signed: negative
+    # means the graph response was larger than the baseline it replaced.
+    saved = baseline - returned
     percent = round((saved / baseline) * 100) if baseline else 0
     return {
         "estimated": True,
@@ -103,11 +109,21 @@ def attach_context_savings(
 
 
 def format_context_savings(estimate: dict[str, Any] | None) -> str | None:
-    """Format a one-line human summary for CLI output."""
+    """Format a one-line human summary for CLI output.
+
+    Negative ``saved_tokens`` is a real outcome, not an error: it means the
+    graph response cost more than the baseline it replaced. Say so in words
+    rather than printing a minus sign inside "saved".
+    """
     if not estimate:
         return None
     saved = int(estimate.get("saved_tokens", 0))
     percent = int(estimate.get("saved_percent", 0))
+    if saved < 0:
+        return (
+            f"Estimated context cost: ~{-saved:,} tokens more than "
+            f"the baseline (~{-percent}%)"
+        )
     return f"Estimated context saved: ~{saved:,} tokens (~{percent}%)"
 
 
@@ -188,7 +204,9 @@ def verify_with_tiktoken(
         )
         graph_real = len(enc.encode(text))
 
-    saved = max(0, naive_real - graph_real)
+    # Signed, for the same reason as estimate_context_savings: the verified
+    # row exists to check the estimate, so it must be able to show a loss.
+    saved = naive_real - graph_real
     pct = round(saved * 100 / naive_real) if naive_real > 0 else 0
     return {
         "verified_baseline": naive_real,
@@ -247,12 +265,15 @@ def format_context_savings_panel(
     saved = int(estimate.get("saved_tokens", 0))
     percent = int(estimate.get("saved_percent", 0))
 
-    # Derive baseline + returned from saved+percent if not provided
+    # Derive baseline + returned from saved+percent if not provided.
+    # ``saved`` may be negative (the graph response cost more than the
+    # baseline); percent carries the same sign, so the division still
+    # recovers a positive baseline.
     if original_tokens is None:
-        if percent > 0:
+        if percent != 0:
             original_tokens = int(round(saved * 100 / percent))
         else:
-            original_tokens = saved
+            original_tokens = abs(saved)
     if returned_tokens is None:
         returned_tokens = max(0, (original_tokens or 0) - saved)
 
@@ -275,15 +296,24 @@ def format_context_savings_panel(
     inner_lines: list[str] = [
         f"Full context would be:  {original_tokens:>9,} tokens",
         f"Graph context used:     {returned_tokens:>9,} tokens",
-        f"Saved:                  {saved:>9,} tokens (~{percent}%)",
     ]
+    if saved < 0:
+        inner_lines.append(
+            f"Cost more:              {-saved:>9,} tokens (~{-percent}% over)"
+        )
+    else:
+        inner_lines.append(
+            f"Saved:                  {saved:>9,} tokens (~{percent}%)"
+        )
     if verified:
         vb = verified["verified_baseline"]
         vr = verified["verified_returned"]
         vs = verified["verified_saved"]
         vp = verified["verified_percent"]
+        label = "Verified cost more:" if vs < 0 else "Verified (tiktoken):"
+        suffix = "% over" if vs < 0 else "%"
         inner_lines.append(
-            f"Verified (tiktoken):    {vs:>9,} tokens (~{vp}%)  "
+            f"{label:<24}{abs(vs):>9,} tokens (~{abs(vp)}{suffix})  "
             f"[{vb:,} → {vr:,}]"
         )
     if breakdown:

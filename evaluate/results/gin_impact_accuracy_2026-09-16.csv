@@ -1,0 +1,7 @@
+repo,commit,ground_truth_mode,seed_file,predicted_files,actual_files,true_positives,precision,recall,f1,status,error
+gin,052d1a79aafe3f04078a2716f8e77d4340308383,graph-derived (circular — upper bound),,12,5,5,0.417,1.0,0.588,ok,
+gin,052d1a79aafe3f04078a2716f8e77d4340308383,"co-change (same commit, seed excluded)",context.go,0,4,0,0.0,0.0,0.0,ok,
+gin,472d086af2acd924cb4b9d7be0525f7d790f69bc,graph-derived (circular — upper bound),,5,2,2,0.4,1.0,0.571,ok,
+gin,472d086af2acd924cb4b9d7be0525f7d790f69bc,"co-change (same commit, seed excluded)",tree.go,0,1,0,0.0,0.0,0.0,ok,
+gin,5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a,graph-derived (circular — upper bound),,4,2,2,0.5,1.0,0.667,ok,
+gin,5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a,"co-change (same commit, seed excluded)",render/data.go,0,1,0,0.0,0.0,0.0,ok,

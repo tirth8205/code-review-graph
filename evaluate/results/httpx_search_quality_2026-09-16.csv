@@ -1,0 +1,4 @@
+repo,query,expected,rank,reciprocal_rank
+httpx,Client request,httpx/_client.py::Client,1,1.0
+httpx,Response headers,httpx/_models.py::Response,4,0.25
+httpx,BaseClient,httpx/_client.py::BaseClient,1,1.0

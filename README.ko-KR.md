@@ -42,7 +42,7 @@
 AI 코딩 도구는 리뷰 작업에서 코드베이스의 큰 부분을 반복해서 읽게 될 수 있습니다. `code-review-graph`는 이 문제를 해결합니다. [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)로 코드의 구조적 맵을 구축하고, 변경 사항을 점진적으로 추적하며, [MCP](https://modelcontextprotocol.io/)를 통해 AI 어시스턴트에게 정확한 컨텍스트를 제공하여 필요한 부분만 읽도록 합니다.
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="토큰 문제: flask 코퍼스 전체를 읽으면 143,594 토큰, 그래프 응답은 2,196 토큰 — 71.0배 적음" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="토큰 문제: flask 코퍼스 전체를 읽으면 143,594 토큰, 그래프 응답은 2,712 토큰 — 52.9배 적음. 코퍼스 전체 기준선은 상한이며 실제 에이전트는 그렇게 읽지 않음" width="85%" />
 </p>
 
 ---
@@ -78,7 +78,7 @@ Python 3.10 이상이 필요합니다. 최상의 경험을 위해 [uv](https://d
 Build the code review graph for this project
 ```
 
-초기 빌드는 500개 파일 프로젝트 기준 약 10초가 소요됩니다. 이후에는 watch 모드와 지원되는 플랫폼 훅으로 그래프를 자동 업데이트할 수 있습니다.
+빌드 시간은 저장소 크기에 비례합니다. 약 3,000개 파일 저장소의 콜드 빌드는 약 40초였습니다([실측](docs/REPRODUCING.md#incremental-update-latency)). 이후에는 watch 모드와 지원되는 플랫폼 훅으로 그래프를 자동 업데이트할 수 있습니다.
 
 ---
 
@@ -102,9 +102,9 @@ Build the code review graph for this project
   <img src="diagrams/diagram3_blast_radius.png" alt="login() 변경이 호출자, 의존 대상, 테스트로 전파되는 영향 범위 시각화" width="70%" />
 </p>
 
-### 2초 미만의 점진적 업데이트
+### 점진적 업데이트
 
-훅 또는 watch 모드를 사용하면 파일 저장과 지원되는 커밋 훅에서 점진적 업데이트가 실행됩니다. 그래프는 변경된 파일을 비교하고, 그래프 자체의 import·호출 엣지를 따라 의존 대상을 찾으며, SHA-256 해시가 실제로 바뀐 파일만 다시 파싱합니다. 2,900개 파일 프로젝트의 재인덱싱이 2초 이내에 완료됩니다.
+훅 또는 watch 모드를 사용하면 파일 저장과 지원되는 커밋 훅에서 점진적 업데이트가 실행됩니다. 그래프는 변경된 파일을 비교하고, 그래프 자체의 import·호출 엣지를 따라 의존 대상을 찾으며, SHA-256 해시가 실제로 바뀐 파일만 다시 파싱합니다. 약 3,000개 파일 프로젝트(django)에서 두 파일을 수정하면 훅 경로 재인덱싱이 약 2.5초 걸리며, 그중 약 1.4초는 프로세스 기동 비용입니다.
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="점진적 업데이트 흐름: 훅 또는 watch 업데이트가 git diff를 실행하고, 그래프 엣지로 의존 대상을 찾은 뒤, SHA-256 해시가 바뀐 파일만 다시 파싱" width="90%" />
@@ -112,10 +112,10 @@ Build the code review graph for this project
 
 ### 코드베이스 전체인가, 겨냥한 답변인가
 
-저장소가 클수록 토큰 낭비는 더 뼈아픕니다. 그래프는 코퍼스 전체를 모델에 넘기는 대신 답변에 필요한 부분만 돌려줍니다. 이 저장소에서는 208,821개의 소스 토큰이 질문당 약 3,190 토큰이 됩니다.
+저장소가 클수록 토큰 낭비는 더 뼈아픕니다. 그래프는 코퍼스 전체를 모델에 넘기는 대신 답변에 필요한 부분만 돌려줍니다. 이 저장소에서는 208,821개의 소스 토큰이 질문당 약 2,547 토큰, 즉 82배 적은 양이 됩니다. 이 비교는 **상한**입니다. 그래프가 없는 에이전트가 모든 소스 파일을 읽는다고 가정하기 때문입니다. 실제 에이전트는 grep 후 가장 잘 맞는 파일만 읽으며, 그 기준선 대비 실측 절감은 약 **6배**입니다.
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 저장소: 208,821개의 소스 토큰이 약 3,190 토큰의 그래프 응답으로 수렴 — 질문당 토큰 68배 감소" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph 저장소: 208,821개의 소스 토큰이 약 2,547 토큰의 그래프 응답으로 수렴 — 코퍼스 전체 상한 대비 질문당 82배 감소" width="80%" />
 </p>
 
 ### 폭넓은 언어 지원 + Jupyter 노트북
@@ -131,10 +131,14 @@ Build the code review graph for this project
 ## 벤치마크
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="6개 실제 저장소 벤치마크: 질문당 토큰 감소 중앙값 약 65배(최대 376배), 그래프 기반 정답 데이터 대비 평균 F1 0.71" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="6개 실제 저장소 벤치마크: grep-and-read 에이전트 대비 질문당 토큰 감소 중앙값 약 6배, 그래프 기반 정답 데이터 대비 평균 F1 0.69" width="85%" />
 </p>
 
-모든 수치는 6개 실제 오픈소스 저장소(총 13개 커밋)에 대한 자동화된 평가 실행 결과입니다. `code-review-graph eval --all`로 재현할 수 있습니다. 전체 재현 절차와 기준 수치는 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)에 있습니다.
+**헤드라인: grep-and-read 에이전트 대비 질문당 토큰 중앙값 약 6배 감소**(6개 저장소 18개 질문, 범위 3.5배~60배).
+
+저장소의 **모든** 파일을 읽는 경우와 비교하면 약 **50배**(중앙값, 범위 31배~326배)입니다. 이는 실제 에이전트가 치르지 않는 상한이며, 헤드라인이 아니라 상한으로만 인용합니다.
+
+모든 수치는 6개 실제 오픈소스 저장소(13개 커밋, 18개 에이전트 질문, 11개 멀티홉 태스크)에 대한 자동화된 평가 실행 결과이며, **2026-09-16에 현재 `staging`에서 재측정**했습니다. `code-review-graph eval --embed`로 재현할 수 있습니다. 전체 재현 절차와 기준 수치는 [`docs/REPRODUCING.md`](docs/REPRODUCING.md)에 있습니다.
 
 전체 벤치마크 결과는 [영문 README](README.md#benchmarks)를 참조하세요.
 
@@ -144,7 +148,7 @@ Build the code review graph for this project
 
 | 기능 | 세부 사항 |
 |------|-----------|
-| **점진적 업데이트** | 변경된 파일만 다시 파싱합니다. 이후 업데이트는 2초 이내에 완료됩니다. |
+| **점진적 업데이트** | 해시가 바뀐 파일만 다시 파싱합니다. 약 3,000개 파일 저장소에서 두 파일 수정은 훅 경로 기준 약 2.5초입니다. |
 | **폭넓은 언어 지원 + 노트북** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Vue/Svelte SFCs, Astro files parsed as TypeScript, Jupyter/Databricks (.ipynb) |
 | **영향 범위 분석** | 변경에 의해 영향 받을 가능성이 있는 함수, 클래스, 파일을 보여줍니다 |
 | **자동 업데이트 훅** | 수동 개입 없이 파일 편집 및 git 커밋마다 그래프가 업데이트됩니다 |

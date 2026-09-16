@@ -1,0 +1,4 @@
+repo,question,terms,files_matched,top_files,baseline_tokens,graph_tokens,baseline_to_graph_ratio,status,error
+fastapi,How does include_router register routes on the application,include_router register routes application,3,tests/test_include_router_defaults_overrides.py;tests/test_application.py;tests/test_generate_unique_id_function.py,132479,5301,25.0,ok,
+fastapi,Where does APIRoute build its route handler,apiroute build route handler,3,fastapi/routing.py;tests/test_include_router_defaults_overrides.py;fastapi/applications.py,192817,3211,60.0,ok,
+fastapi,How does solve_dependencies resolve Depends parameters,solve_dependencies resolve depends parameters,3,tests/test_include_router_defaults_overrides.py;tests/test_dependency_overrides.py;fastapi/routing.py,150384,2976,50.5,ok,

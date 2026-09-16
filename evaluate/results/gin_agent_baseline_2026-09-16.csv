@@ -1,0 +1,4 @@
+repo,question,terms,files_matched,top_files,baseline_tokens,graph_tokens,baseline_to_graph_ratio,status,error
+gin,How does Engine.ServeHTTP route an incoming request,engine.servehttp route incoming request,3,context_test.go;routes_test.go;gin_test.go,40433,4076,9.9,ok,
+gin,Where does Context.Next advance the middleware chain,context.next advance middleware chain,3,gin_test.go;gin.go;middleware_test.go,14654,3812,3.8,ok,
+gin,How does the node tree match wildcard routes,node tree match wildcard routes,3,tree_test.go;tree.go;gin.go,20685,3629,5.7,ok,

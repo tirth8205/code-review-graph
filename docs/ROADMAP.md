@@ -20,8 +20,8 @@ Releases after v2.3.6 are listed in [CHANGELOG.md](../CHANGELOG.md).
 - `--verify` flag cross-checks the displayed savings against OpenAI's `cl100k_base` tokenizer; the calibration table in `docs/REPRODUCING.md` puts the estimate within about 1% of real tokens in aggregate
 - `code-review-graph embed` subcommand for explicit embedding generation
 - Deterministic eval pipeline: pinned upstream SHAs in every config, full clones with `returncode` checks, fixed-seed Leiden community detection (`CRG_LEIDEN_SEED`)
-- `multi_hop_retrieval` benchmark: 11 curated two-step tool-chain tasks; average score 0.909
-- Richer embedding text and identifier-aware search boost lift multi-hop accuracy from 0.545 to 0.909
+- `multi_hop_retrieval` benchmark: 11 curated two-step tool-chain tasks; average score 0.909 at the time of that release (0.727 on the current 2026-09-16 capture — see `docs/REPRODUCING.md`)
+- Richer embedding text and identifier-aware search boost lifted multi-hop accuracy from 0.545 to 0.909 in that release
 - Path normalisation fix in the eval pipeline; test-gap dedup in the brief summary
 - `docs/REPRODUCING.md`: end-to-end recipe with canonical numbers and the tiktoken calibration table
 - Demo GIF (`diagrams/context-savings-demo.gif`) showing both CLI surfaces and `--verify`

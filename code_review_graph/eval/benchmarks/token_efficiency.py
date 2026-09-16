@@ -130,6 +130,8 @@ def aggregate(results: list[dict]) -> dict:
     """
     ok = [r for r in results if r.get("status") == "ok"]
     ratios = [float(r["naive_to_graph_ratio"]) for r in ok]
+    naive_total = sum(int(r.get("naive_tokens") or 0) for r in ok)
+    graph_total = sum(int(r.get("graph_tokens") or 0) for r in ok)
     return {
         "total_rows": len(results),
         "ok_rows": len(ok),
@@ -137,7 +139,14 @@ def aggregate(results: list[dict]) -> dict:
         "median_naive_to_graph_ratio": (
             round(statistics.median(ratios), 1) if ratios else None
         ),
-        "mean_naive_to_graph_ratio": (
-            round(statistics.mean(ratios), 1) if ratios else None
+        # Ratio of totals, not mean of per-row ratios. mean(a_i/b_i) is
+        # convex in b and always overstates the pooled a/b it is printed
+        # next to, so a reader who divides the two published columns gets a
+        # smaller number than the quoted one. Publish the number that
+        # reproduces from the columns.
+        "pooled_naive_to_graph_ratio": (
+            round(naive_total / graph_total, 1) if graph_total > 0 else None
         ),
+        "total_naive_tokens": naive_total,
+        "total_graph_tokens": graph_total,
     }

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Generate 9 Excalidraw diagrams for code-review-graph Medium article.
+"""Generate 9 Excalidraw diagrams for code-review-graph.
 
-All statistics match repo benchmarks exactly. No invented features or numbers.
+Every statistic here is copied from the canonical-numbers block in
+``docs/REPRODUCING.md`` (capture 2026-09-16). No invented features or numbers.
+When a benchmark is re-captured, update this file in the same commit -- the
+PNGs in ``diagrams/`` are exported by hand from the generated ``.excalidraw``
+files, so they lag until someone re-exports them.
 """
 
 import json
@@ -142,7 +146,7 @@ def d1():
 
     # Red badge
     els.append(R(295, 565, 250, 48, bg=RED_BG, fs="solid", sc=RED))
-    els.append(TC(LC, 575, "125,022 tokens", 22, sc=RED))
+    els.append(TC(LC, 575, "143,594 tokens", 22, sc=RED))
 
     # Impact detection
     els.append(TC(LC, 630, "Impact detection: unknown", 16, sc=GRY))
@@ -181,14 +185,14 @@ def d1():
 
     # Green badge
     els.append(R(1295, 565, 250, 48, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(RC, 575, "1,986 tokens", 22, sc=GRN))
+    els.append(TC(RC, 575, "2,712 tokens", 22, sc=GRN))
 
     # Impact detection
-    els.append(TC(RC, 630, "100% recall on impact detection", 16, sc=GRN))
+    els.append(TC(RC, 630, "recall 1.0 (graph-derived upper bound)", 15, sc=GRN))
 
     # ── BOTTOM BANNER ──
     els.append(R(600, 700, 640, 52, bg=BLU_BG, fs="solid", sc=BLU))
-    els.append(TC(920, 710, "71.4\u00d7 fewer tokens \u00b7 100% impact recall (flask)", 22, sc=BLU))
+    els.append(TC(920, 710, "52.9\u00d7 fewer than reading all of flask (upper bound)", 20, sc=BLU))
 
     return els
 
@@ -380,7 +384,7 @@ def d4():
     els.append(TC(step_cx, y4+35, "Graph updated \u2713", 14, sc=GRN))
     # Badge
     els.append(R(sx+sw+18, y4+8, 140, 42, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(sx+sw+88, y4+17, "< 2 seconds", 17, sc=GRN))
+    els.append(TC(sx+sw+88, y4+17, "~2.5 seconds", 17, sc=GRN))
 
     # Right panel: skipped files
     skip_x, skip_y = 810, 120
@@ -402,24 +406,26 @@ def d5():
     els.append(TC(800, 15, "Benchmarks Across Real Repos", 36))
 
     # Header: range number left, quality badge right
-    els.append(TC(500, 75, "38\u00d7 \u2013 528\u00d7", 64, sc=BLU))
-    els.append(TC(500, 160, "fewer tokens across 6 tested repos", 20, sc=GRY))
+    els.append(TC(500, 75, "\u22486\u00d7 median", 64, sc=BLU))
+    els.append(TC(500, 160, "vs a grep-and-read agent (18 questions, 6 repos)", 18, sc=GRY))
 
     els.append(R(820, 85, 340, 80, bg=GRN_BG, fs="solid", sc=GRN))
-    els.append(TC(990, 100, "100% recall, 0.71 F1", 22, sc=GRN))
+    els.append(TC(990, 100, "0.69 F1, recall 1.0 (circular)", 20, sc=GRN))
     els.append(TC(990, 132, "on impact detection (13 commits)", 14, sc=GRN))
 
     # 3 repo cards \u2014 naive_corpus_tokens \u2192 avg graph_tokens across 5 questions
     # Pinned SHAs: gin@5c00df8a, flask@a29f88ce, fastapi@0227991a
+    # agent_baseline, 2026-09-16: grep top-3 files vs graph query, pooled
+    # over the 3 questions in each config. See docs/REPRODUCING.md.
     cards = [
-        {"name":"gin",     "files":"Go web framework",   "red":"92\u00d7",
-         "tok":"166,868 \u2192 1,990 tokens",
+        {"name":"express",  "files":"JS web framework",     "red":"4.1\u00d7",
+         "tok":"51,258 \u2192 12,571 tokens",
          "c":BLU, "bg":BLU_BG},
-        {"name":"flask",   "files":"Python web framework",      "red":"71\u00d7",
-         "tok":"125,022 \u2192 1,986 tokens",
+        {"name":"flask",    "files":"Python web framework", "red":"8.4\u00d7",
+         "tok":"82,834 \u2192 9,880 tokens",
          "c":ORG, "bg":ORG_BG},
-        {"name":"fastapi", "files":"Python web framework",   "red":"528\u00d7",
-         "tok":"951,071 \u2192 2,169 tokens",
+        {"name":"fastapi",  "files":"Python web framework", "red":"41.4\u00d7",
+         "tok":"475,680 \u2192 11,488 tokens",
          "c":GRN, "bg":GRN_BG},
     ]
     cw, ch = 370, 200
@@ -467,7 +473,7 @@ def d6():
 
     gcx = gx + (cols*gapx)/2
     els.append(TC(gcx, gy-35, "code-review-graph", 22, sc=DRK))
-    els.append(TC(gcx, gy+rows*gapy+8,  "1,326 nodes",     16, sc=GRY))
+    els.append(TC(gcx, gy+rows*gapy+8,  "1,446 nodes",     16, sc=GRY))
     els.append(TC(gcx, gy+rows*gapy+30, "208,821 source tokens", 14, sc=RED))
 
     # ── CENTER: funnel (rounded rect) ──
@@ -498,13 +504,13 @@ def d6():
     lbl_x = rf_x + file_w + 20
     els.append(T(lbl_x, rf_y,    "Graph answer",    17, sc=GRN))
     els.append(T(lbl_x, rf_y+22, "5 hits + edges",  14, sc=GRN))
-    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~2,495 tokens",  16, sc=GRN))
+    els.append(T(lbl_x, rf_y + 4*file_gap + 5,  "~2,547 tokens",  16, sc=GRN))
     els.append(T(lbl_x, rf_y + 4*file_gap + 26, "avg over 5 questions",   12, sc=GRN))
 
     # Big number at bottom
-    els.append(TC(550, 400, "93\u00d7", 80, sc=BLU))
+    els.append(TC(550, 400, "82\u00d7", 80, sc=BLU))
     els.append(TC(550, 490, "fewer tokens per question", 24, sc=BLU))
-    els.append(TC(550, 525, "answer-shaped context, not file dumps", 18, sc=GRY))
+    els.append(TC(550, 525, "vs reading every file \u2014 an upper bound", 18, sc=GRY))
 
     return els
 

@@ -1,0 +1,4 @@
+repo,question,terms,files_matched,top_files,baseline_tokens,graph_tokens,baseline_to_graph_ratio,status,error
+flask,How does dispatch_request route an incoming HTTP request,dispatch_request route incoming http request,3,tests/test_basic.py;src/flask/app.py;src/flask/sansio/scaffold.py,36555,2664,13.7,ok,
+flask,Where is the AppContext pushed and popped,appcontext pushed popped,3,src/flask/ctx.py;src/flask/app.py;tests/test_signals.py,20692,3438,6.0,ok,
+flask,How does create_logger configure application logging,create_logger configure application logging,3,src/flask/sansio/app.py;src/flask/app.py;tests/test_logging.py,25587,3778,6.8,ok,
