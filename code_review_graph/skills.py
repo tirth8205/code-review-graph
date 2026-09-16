@@ -1219,6 +1219,65 @@ fi
     return hook_path
 
 
+# Command shapes that code-review-graph itself installs. Matching these
+# instead of the bare "code-review-graph" substring avoids purging a
+# user-defined hook that merely mentions the tool (e.g. an echo/comment or a
+# custom wrapper) while still catching every generated and legacy CRG command,
+# including stale absolute-path forms like "/opt/venv/bin/code-review-graph
+# update --repo /old/path".
+_CRG_COMMAND_MARKERS = (
+    "code-review-graph update",
+    "code-review-graph status",
+    "code-review-graph detect-changes",
+)
+
+
+def _is_crg_command(command: Any) -> bool:
+    """Return True if ``command`` is a code-review-graph-installed command."""
+    if not isinstance(command, str):
+        return False
+    return any(marker in command for marker in _CRG_COMMAND_MARKERS)
+
+
+def _strip_owned_hooks(entry: Any) -> Any | None:
+    """Remove code-review-graph-owned commands from a single hook entry.
+
+    Returns the entry (a copy when modified) with only CRG-owned inner hooks
+    removed, so sibling user commands in a mixed entry survive. Returns
+    ``None`` when nothing user-owned remains and the whole entry should be
+    dropped.
+    """
+    if not isinstance(entry, dict):
+        # Preserve anything we do not recognise as a CRG entry.
+        return entry
+
+    inner_hooks = entry.get("hooks")
+    if isinstance(inner_hooks, list):
+        kept = [
+            inner
+            for inner in inner_hooks
+            if not (isinstance(inner, dict) and _is_crg_command(inner.get("command")))
+        ]
+        if not kept:
+            # Every inner hook was CRG-owned. Keep the entry only if it also
+            # carries a non-CRG top-level command; otherwise drop it entirely.
+            if entry.get("command") is not None and not _is_crg_command(entry.get("command")):
+                new_entry = dict(entry)
+                new_entry["hooks"] = kept
+                return new_entry
+            return None
+        if len(kept) != len(inner_hooks):
+            new_entry = dict(entry)
+            new_entry["hooks"] = kept
+            return new_entry
+        return entry
+
+    # Flat entry with no nested hooks array.
+    if _is_crg_command(entry.get("command")):
+        return None
+    return entry
+
+
 def _merge_hooks_into_settings(
     settings_dir: Path,
     hooks_config: dict[str, Any],
@@ -1243,9 +1302,31 @@ def _merge_hooks_into_settings(
         existing_hooks = {}
 
     merged_hooks = dict(existing_hooks)
+
+    # Purge code-review-graph-owned hooks from every existing event, not only
+    # the events we are about to re-emit. This clears accumulated duplicates,
+    # stale absolute-path entries, and orphaned hooks parked under event names
+    # the generator no longer emits (e.g. the legacy "PreCommit"). Sibling
+    # user commands in a mixed entry are preserved (#558).
+    for hook_name in list(merged_hooks.keys()):
+        entries = merged_hooks[hook_name]
+        if not isinstance(entries, list):
+            continue
+        cleaned = [
+            stripped for e in entries if (stripped := _strip_owned_hooks(e)) is not None
+        ]
+        if not cleaned and entries:
+            # Every entry was CRG-owned — drop the now-orphaned event. An
+            # already-empty user list is left untouched.
+            del merged_hooks[hook_name]
+        else:
+            merged_hooks[hook_name] = cleaned
+
+    # Append the freshly generated hooks, avoiding exact duplicates.
     for hook_name, hook_entries in hooks_config.get("hooks", {}).items():
-        if isinstance(merged_hooks.get(hook_name), list):
-            merged_list = list(merged_hooks[hook_name])
+        existing_list = merged_hooks.get(hook_name)
+        if isinstance(existing_list, list):
+            merged_list = list(existing_list)
             for entry in hook_entries:
                 if entry not in merged_list:
                     merged_list.append(entry)
