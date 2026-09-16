@@ -75,7 +75,13 @@ max_depth: int = 2               # Hops in graph
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
+max_results: int = 100           # Impacted nodes (max 500), changed nodes,
+                                 # edges and impacted files (max 200 each)
 ```
+Standard detail reports `total_changed`, `total_edges`, `total_impacted_files`
+and a matching `*_omitted` count for every capped list, so a truncated result
+is never silently short. File paths, qualified names and edge endpoints are
+relative to the `repo_root` field, which carries the absolute prefix once.
 Responses may include estimated `context_savings` metadata.
 
 #### `query_graph_tool`
