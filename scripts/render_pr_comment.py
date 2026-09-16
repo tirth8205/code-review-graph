@@ -72,7 +72,9 @@ def relativize_path(value: Any) -> str:
       1. ``GITHUB_WORKSPACE`` prefix (set by Actions ``checkout``).
       2. The ``<repo>/<repo>/`` doubled-segment that Actions uses under
          ``/work/`` (derived from ``GITHUB_REPOSITORY`` when present).
-      3. Otherwise return the input untouched — never guess-mangle a path.
+      3. The current working directory, for running this script by hand
+         outside CI — an exact prefix match, not a guess.
+      4. Otherwise return the input untouched — never guess-mangle a path.
     """
     text = str(value)
     path_part, sep, symbol = text.partition("::")
@@ -102,6 +104,19 @@ def _strip_workspace_prefix(path_part: str) -> str | None:
         idx = path_part.find(marker)
         if idx != -1:
             return path_part[idx + len(marker):]
+
+    # Outside CI neither variable is set, and a dry run of the action
+    # ("does the comment look right?") rendered every symbol as a full
+    # absolute path, truncated mid-string by the table's cell limit. The
+    # working directory is where the graph was just built, so an exact
+    # prefix match against it is the same kind of match as GITHUB_WORKSPACE,
+    # not a guess.
+    try:
+        cwd = os.getcwd().rstrip("/")
+    except OSError:  # pragma: no cover - deleted working directory
+        return None
+    if cwd and cwd != "/" and path_part.startswith(cwd + "/"):
+        return path_part[len(cwd) + 1:]
 
     return None
 

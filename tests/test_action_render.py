@@ -113,12 +113,29 @@ def test_relativize_falls_back_to_repo_segment_without_env(monkeypatch):
     assert out == "scripts/render_pr_comment.py::main"
 
 
-def test_relativize_no_env_no_match_returns_input(monkeypatch):
+def test_relativize_no_env_no_match_returns_input(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.chdir(tmp_path)
     # Nothing to strip against; render the path as-is rather than mangling it.
     weird = "/opt/build/some/place/file.py::fn"
     assert render.relativize_path(weird) == weird
+
+
+def test_relativize_falls_back_to_cwd_outside_ci(monkeypatch, tmp_path):
+    """A hand-run dry run must not print full absolute paths.
+
+    Outside CI neither GITHUB_ variable is set, and every symbol rendered as
+    an absolute path truncated mid-string by the table's cell limit.
+    """
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.chdir(tmp_path)
+    root = str(tmp_path.resolve())
+    assert render.relativize_path(f"{root}/pkg/auth.py::login") == (
+        "pkg/auth.py::login"
+    )
+    assert render.relativize_path(f"{root}/pkg/auth.py") == "pkg/auth.py"
 
 
 def test_relativize_handles_none_and_question_mark(monkeypatch):
