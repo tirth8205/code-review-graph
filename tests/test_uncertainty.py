@@ -187,7 +187,7 @@ def test_builtin_skip_branch_is_left_alone(repo):
         ("typescript", "callers_of", "REFERENCES"),
         ("tsx", "importers_of", "npm-aliased"),
         ("typescript", "endpoints_for", "route registration"),
-        ("java", "callers_of", "aop advice"),
+        ("java", "callers_of", "aop pointcuts"),
         ("go", "inheritors_of", "structural"),
         ("csharp", "tests_for", "di-container"),
         ("python", "callers_of", "getattr"),
