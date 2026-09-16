@@ -251,8 +251,10 @@ symbols, test gaps, and a token-savings line. The analysis job is
 unprivileged and a separate `workflow_run` job posts the comment, so PR code
 never runs with write permissions.
 
-**Measured.** On the runner: incremental `update` 7.7 s, `detect-changes`
-0.3 s, render 0.1 s.
+**Measured** by running the Action's own commands locally against the django
+graph, not on a runner: incremental `update` 7.7 s, `detect-changes` 0.3 s,
+render 0.1 s. The runner adds a `pip install` and a graph cache restore on top
+of that.
 
 **Fallback.** To render the comment locally without CI:
 
@@ -304,8 +306,8 @@ conservative: it reports what *could* be affected through a reference edge, not
 what *is*, so on a hub file it over-reports, and dynamic dispatch, reflection,
 string-keyed dispatch tables and runtime monkey-patching are invisible to it
 entirely. Flow detection is reliable for Python and PHP/Laravel entry points
-and weak for JavaScript and Go; the README quotes 33% overall flow recall. It
-is not a linter, a type checker or a bug finder, and it will not tell an agent
+and weak for JavaScript and Go ([FAQ.md](FAQ.md) puts overall flow recall at
+33%; that figure was not re-measured for this script). It is not a linter, a type checker or a bug finder, and it will not tell an agent
 that a change is wrong — it tells the agent where to look, which is a smaller
 claim and the one it can actually keep. On a repository under a few hundred
 files, or for a one-line change, reading the files directly is cheaper and you
