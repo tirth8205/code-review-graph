@@ -47,6 +47,23 @@ curl -sI https://pypi.org/simple/code-review-graph/ | head -1   # for pip
 curl -sI https://d3js.org/d3.v7.min.js | head -1                # not required, see step 5
 ```
 
+**Read the `.mcp.json` that `install` writes, and warm whatever it points at.**
+On a machine with `uv` on PATH it writes `uvx code-review-graph serve`, which
+runs the *published* release out of a uv-managed cache rather than the venv you
+just created. That is fine and takes 1.7 s once the cache is warm, but on a
+cold cache it is a PyPI download at the exact moment the agent first calls a
+tool. Run it once the night before:
+
+```bash
+cat .mcp.json                      # see which command it chose
+uvx code-review-graph --version    # warm the cache, if it chose uvx
+```
+
+To pin the demo to the venv you built instead, edit `.mcp.json` so `command`
+is the absolute path to `~/demo/venv/bin/python` with `args` of
+`["-m", "code_review_graph", "serve"]` — the same shape `install` writes on a
+machine without `uv`.
+
 ---
 
 ## The ten minutes
@@ -335,6 +352,10 @@ should say so.
   queries whose words do not appear in the code will miss.
 - The GitHub Action installs code-review-graph from PyPI, so it analyses with
   the published release, not with the branch under review.
+- `install` prefers `uvx code-review-graph serve` when `uv` is on PATH, so the
+  MCP server an editor launches is the published release from a uv cache, not
+  the environment you installed into. Deliberate, but surprising if you expect
+  the venv, and a cold cache means a PyPI fetch on the first tool call.
 - File-level results still show absolute paths in a few tools (for example the
   `name` field of File nodes in search results). Impact analysis was fixed in
   this version; the others have not been swept yet.
