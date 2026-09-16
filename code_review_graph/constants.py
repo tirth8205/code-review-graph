@@ -40,10 +40,31 @@ SECURITY_KEYWORDS: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 # Configurable limits (override via environment variables)
 # ---------------------------------------------------------------------------
-MAX_IMPACT_NODES = int(os.environ.get("CRG_MAX_IMPACT_NODES", "500"))
-MAX_IMPACT_DEPTH = int(os.environ.get("CRG_MAX_IMPACT_DEPTH", "2"))
-MAX_BFS_DEPTH = int(os.environ.get("CRG_MAX_BFS_DEPTH", "15"))
-MAX_SEARCH_RESULTS = int(os.environ.get("CRG_MAX_SEARCH_RESULTS", "20"))
+
+def _int_env(name: str, default: int) -> int:
+    """Read an integer environment variable, treating empty/unset as default.
+
+    An empty string (``VAR=``) is the same as unset for practical purposes —
+    shell wrappers and CI templates often expand to nothing. Invalid values
+    produce a named warning and fall back to the default instead of killing
+    the process at import time (#912).
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        import logging
+        logging.getLogger(__name__).warning(
+            "%s=%r is not an integer; using %d", name, raw, default
+        )
+        return default
+
+MAX_IMPACT_NODES = _int_env("CRG_MAX_IMPACT_NODES", 500)
+MAX_IMPACT_DEPTH = _int_env("CRG_MAX_IMPACT_DEPTH", 2)
+MAX_BFS_DEPTH = _int_env("CRG_MAX_BFS_DEPTH", 15)
+MAX_SEARCH_RESULTS = _int_env("CRG_MAX_SEARCH_RESULTS", 20)
 
 # Impact traversal engine: "sql" (bounded SQLite relaxation) or "networkx".
 BFS_ENGINE = os.environ.get("CRG_BFS_ENGINE", "sql")
