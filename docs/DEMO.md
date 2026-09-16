@@ -2,8 +2,10 @@
 
 A script for demoing code-review-graph on stage. Every command below was run
 end to end on a machine that had never seen the tool, against a fresh clone of
-[django](https://github.com/django/django) at `8cbdd4a`. Every number is
-measured, not estimated, and the machine is named next to it.
+[django](https://github.com/django/django) at `8cbdd4a`. Every timing and size
+below came off that run. Token counts are the one exception: they are the
+project's `chars / 4` estimate, labelled "estimated" wherever they appear, for
+the reason given under the headline numbers.
 
 **Measurement machine.** Apple M-series laptop, macOS 27, SSD, Python 3.14.5
 (Homebrew), warm home network. django at depth-60 clone: 3,005 parsed files.
@@ -253,7 +255,7 @@ never runs with write permissions.
 
 **Measured** by running the Action's own commands locally against the django
 graph, not on a runner: incremental `update` 7.7 s, `detect-changes` 0.3 s,
-render 0.1 s. The runner adds a `pip install` and a graph cache restore on top
+render 0.04 s. The runner adds a `pip install` and a graph cache restore on top
 of that.
 
 **Fallback.** To render the comment locally without CI:
@@ -267,12 +269,19 @@ cat /tmp/c.md
 Run it from the repository root — the renderer strips the working-directory
 prefix so the output matches what CI produces.
 
+**One red herring to expect.** If you push twice in quick succession, the
+earlier `PR Review Comment` run fails with *"PR head does not match the
+analyzed commit; refusing to comment"* and leaves a red X in the Actions tab.
+That is the guard working: the comment job refuses to post an analysis of a
+commit that is no longer the PR head. Only the latest run's comment lands. Do
+not debug it on stage.
+
 ---
 
 ## The honest headline numbers
 
-Everything here was measured on the machine described at the top. Nothing is
-extrapolated.
+Everything here came off the run described at the top. Nothing is
+extrapolated, and nothing is a target restated as a result.
 
 | Claim | Measured |
 |---|---|
