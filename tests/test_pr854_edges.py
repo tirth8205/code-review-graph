@@ -119,14 +119,14 @@ class TestExemptListEdges:
         assert "  - 0 test gap(s)" in result["summary"]
         assert "Untested:" not in result["summary"]
 
-    def test_exempt_nodes_still_counted_as_changed_and_risk_scored(self):
-        """Exemption only affects the gap list, not changed_functions."""
+    def test_exempt_nodes_still_counted_as_changed_without_gap_risk(self):
+        """Exemption affects gaps and their risk penalty, not changed_functions."""
         self._add_node("setUp", path="only.py", line_start=1, line_end=5)
 
         result = self._analyze("only.py", 1, 5)
         changed_names = {n["name"] for n in result["changed_functions"]}
         assert "setUp" in changed_names
-        assert result["risk_score"] > 0.0
+        assert result["risk_score"] == 0.0
         assert "  - 1 changed function(s)/class(es)" in result["summary"]
 
     def test_exempt_name_with_existing_coverage_stays_out(self):
