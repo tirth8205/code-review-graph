@@ -179,6 +179,29 @@ def rrf_merge(*result_lists: list[tuple[int, float]], k: int = 60) -> list[tuple
 # ---------------------------------------------------------------------------
 
 
+# Query text is split on anything that is not an identifier character, and
+# each piece is re-quoted, so no FTS5 operator or quote from the caller can
+# survive into the MATCH expression.
+_FTS_TERM_RE = re.compile(r"[A-Za-z0-9_.]+")
+
+# A long sentence would otherwise build an unbounded MATCH expression.
+_FTS_MAX_TERMS = 12
+
+# Below this length a prefix match ("do" -> do*) is mostly noise.
+_FTS_MIN_PREFIX_LEN = 3
+
+
+def _fts_terms(query: str) -> list[str]:
+    """Split a query into individually quoted, prefix-matched FTS5 terms."""
+    terms: list[str] = []
+    for word in _FTS_TERM_RE.findall(query)[:_FTS_MAX_TERMS]:
+        quoted = '"' + word.replace('"', '""') + '"'
+        terms.append(
+            f"{quoted}*" if len(word) >= _FTS_MIN_PREFIX_LEN else quoted
+        )
+    return terms
+
+
 def _fts_search(
     conn: sqlite3.Connection,
     query: str,
@@ -186,23 +209,43 @@ def _fts_search(
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
+    The query is tried as an AND of its terms first, then as an OR. It used
+    to be wrapped in one pair of quotes, which makes FTS5 read it as a
+    *phrase*: every word had to appear adjacent and in order. On django that
+    turned "password hashing" into zero results while "hash password"
+    returned five -- the index holds both words, just never side by side. AND
+    of the same two terms finds ``make_password`` and ``verify_password``,
+    and the OR retry keeps a full sentence ("database connection pooling")
+    from returning nothing at all.
+
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
     """
-    # Sanitize: wrap in double quotes to prevent FTS5 operator injection
-    safe_query = '"' + query.replace('"', '""') + '"'
+    terms = _fts_terms(query)
+    if terms:
+        expressions = [" AND ".join(terms)]
+        if len(terms) > 1:
+            expressions.append(" OR ".join(terms))
+    else:
+        # Nothing identifier-shaped in the query (punctuation, CJK text):
+        # fall back to the original quoted-phrase form.
+        expressions = ['"' + query.replace('"', '""') + '"']
 
-    try:
-        rows = conn.execute(
-            "SELECT rowid, rank FROM nodes_fts WHERE nodes_fts MATCH ? "
-            "ORDER BY rank LIMIT ?",
-            (safe_query, limit),
-        ).fetchall()
-        # FTS5 rank is negative BM25 (lower = better), negate for consistency
-        return [(row[0], -row[1]) for row in rows]
-    except sqlite3.OperationalError as e:
-        logger.warning("FTS5 search failed: %s", e)
-        return []
+    for expression in expressions:
+        try:
+            rows = conn.execute(
+                "SELECT rowid, rank FROM nodes_fts WHERE nodes_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (expression, limit),
+            ).fetchall()
+        except sqlite3.OperationalError as e:
+            logger.warning("FTS5 search failed: %s", e)
+            return []
+        if rows:
+            # FTS5 rank is negative BM25 (lower = better), negate for
+            # consistency.
+            return [(row[0], -row[1]) for row in rows]
+    return []
 
 
 # ---------------------------------------------------------------------------

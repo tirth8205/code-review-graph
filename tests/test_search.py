@@ -339,3 +339,64 @@ class TestHybridSearch:
         # Verify search still works after double-rebuild.
         results = hybrid_search(self.store, "auth")
         assert isinstance(results, list)
+
+
+class TestMultiWordQueries:
+    """Multi-word queries must not be treated as adjacency phrases.
+
+    ``_fts_search`` used to wrap the whole query in one pair of quotes, which
+    makes FTS5 read it as a phrase: every word had to appear side by side and
+    in order. Measured on django: "password hashing" returned zero results
+    while "hash password" returned five, from an index that holds both words.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+        for name, path in (
+            ("make_password", "hashers.py"),
+            ("check_password", "hashers.py"),
+            ("render_template", "loader.py"),
+        ):
+            self.store.upsert_node(
+                NodeInfo(
+                    kind="Function", name=name, file_path=path,
+                    line_start=1, line_end=5, language="python",
+                ),
+                file_hash="abc123",
+            )
+        self.store._conn.commit()
+        rebuild_fts_index(self.store)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def test_words_need_not_be_adjacent(self):
+        """Words separated in the indexed text still match."""
+        names = {r["name"] for r in hybrid_search(self.store, "password hashers")}
+        assert "make_password" in names
+
+    def test_word_order_does_not_change_the_result_set(self):
+        """"password hashing" and "hashing password" must agree."""
+        forward = {r["name"] for r in hybrid_search(self.store, "password hashing")}
+        reverse = {r["name"] for r in hybrid_search(self.store, "hashing password")}
+        assert forward == reverse
+        assert "make_password" in forward
+
+    def test_a_sentence_degrades_to_partial_matches(self):
+        """An unmatched word must not zero out the whole query."""
+        names = {
+            r["name"]
+            for r in hybrid_search(self.store, "how are passwords stored")
+        }
+        assert names, "an OR retry should still surface the password helpers"
+        assert {"make_password", "check_password"} & names
+
+    def test_fts_operators_in_the_query_are_literal(self):
+        """Caller text must never reach FTS5 as an operator."""
+        for hostile in ('password OR "', "password NEAR(", "password*)", '"'):
+            # The contract is "does not raise and does not error", not a
+            # particular result set.
+            assert isinstance(hybrid_search(self.store, hostile), list)
