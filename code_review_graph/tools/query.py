@@ -468,6 +468,13 @@ def query_graph(
                         continue
                     if cpp_overload_count > 1:
                         continue
+                    # A bare target plus a matching name is not evidence that
+                    # this node was called: `some_dict.get(...)` writes the
+                    # target `get`. Where the parser recorded what the
+                    # receiver is, hold the fallback to the same rule the
+                    # endpoint resolver applies. See: #997
+                    if not store.receiver_evidence_admits(e.extra, node):
+                        continue
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
@@ -504,6 +511,7 @@ def query_graph(
                     if (
                         "ambiguous_targets" in e.extra
                         or e.source_qualified in seen_reference_sources
+                        or not store.receiver_evidence_admits(e.extra, node)
                     ):
                         continue
                     source = store.get_node(e.source_qualified)

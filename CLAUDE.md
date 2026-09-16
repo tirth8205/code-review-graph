@@ -92,6 +92,7 @@ uv run code-review-graph --help             # full command list
 - Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`.
 - Windows: `test_windows_compat.py`, `test_windows_path_identity.py`.
 - Docs and GitHub Action: `test_documentation.py`, `test_action_render.py`.
+- Promotion coverage gate: `test_gap_gate.py` (`scripts/test_gap_gate.py` plus the gap-scan accuracy rules in `changes.py` and `parser.py`).
 - `tests/fixtures/`: sample files per supported language.
 
 ## CI Pipeline
@@ -134,8 +135,8 @@ Three long-lived branches, one direction: feature PR → `staging` (default) →
 - `staging` → `testing` is automatic: the `Promote to testing` workflow fast-forwards
   `testing` once CI passes on `staging`.
 - Every push to `testing` runs the gauntlet (full matrix, e2e on three OSes, security
-  scan, and a coverage gate built on `detect_changes`). Gaps send the work back to
-  `staging` for more tests.
+  scan). A coverage report built on `detect_changes` lists changed functions no test
+  calls; it is advisory and does not gate the verdict. See CONTRIBUTING.md for why.
 - `testing` → `main` is **never** automatic and never done by an agent. Only the
   maintainer opens and merges that pull request. Do not push to, merge into, or change
   the protection of `testing` or `main`.

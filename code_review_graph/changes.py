@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,7 @@ from typing import Any
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
-from .parser import normalize_file_path
+from .parser import _is_test_file, normalize_file_path, repo_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,67 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "setup_method", "teardown_method", "setUpClass", "tearDownClass",
     "__construct", "__init__", "__destruct",
 })
+
+def _has_test_coverage(store: GraphStore, node: GraphNode) -> bool:
+    """True when the graph can name at least one test that exercises *node*.
+
+    Two lookups, cheapest first:
+
+    1. ``TESTED_BY`` edges stored under the node's own qualified name. These
+       are stored as source=production, target=test by the parser, so a
+       changed production function finds its tests by source. See: #515
+    2. :meth:`GraphStore.get_transitive_tests` at depth 0, which adds the
+       evidence-gated bare-name fallback and, for a class, the coverage of the
+       methods it contains. Without it a function whose ``TESTED_BY`` edge is
+       still stored under a bare source — because the test reached it through
+       a package re-export, which endpoint resolution does not follow — is
+       reported untested while having tests. ``detect_changes_func`` itself
+       was one. See: #996
+
+    Depth 0 keeps this to *direct* coverage: a function is not counted as
+    tested merely because something it calls has a test.
+    """
+    tested = store.get_edges_by_source(node.qualified_name)
+    if any(e.kind == "TESTED_BY" for e in tested):
+        return True
+    try:
+        return bool(store.get_transitive_tests(node.qualified_name, max_depth=0))
+    except sqlite3.Error as exc:  # pragma: no cover - defensive
+        logger.warning("test coverage fallback failed for %s: %s",
+                       node.qualified_name, exc)
+        return False
+
+
+def _nested_in_a_changed_function(nodes: list[GraphNode]) -> set[str]:
+    """Qualified names of *nodes* defined inside another changed function.
+
+    A closure cannot have a test of its own: nothing outside its enclosing
+    function can call it. Listing ``walk``, ``record`` and ``bind`` as changed
+    functions with no test is four rows for one problem, and the enclosing
+    function is in the same changed set — any line inside the closure is
+    inside the parent's range too — so the gap is still reported once, against
+    the name a reviewer can actually write a test for. Only nodes whose parent
+    is itself in *nodes* are dropped, so nothing disappears. See: #996
+    """
+    by_file: dict[str, list[GraphNode]] = {}
+    for node in nodes:
+        by_file.setdefault(node.file_path, []).append(node)
+
+    nested: set[str] = set()
+    for group in by_file.values():
+        if len(group) < 2:
+            continue
+        enclosers = [n for n in group if n.kind in ("Function", "Test")]
+        for node in group:
+            for other in enclosers:
+                if other.qualified_name == node.qualified_name:
+                    continue
+                if (other.line_start < node.line_start
+                        and other.line_end >= node.line_end):
+                    nested.add(node.qualified_name)
+                    break
+    return nested
+
 
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
 
@@ -491,17 +553,22 @@ def analyze_changes(
     affected = get_affected_flows(store, changed_files)
 
     # Detect test gaps: changed functions without TESTED_BY edges.
+    #
+    # A node living in a test file is test code whatever the parser recorded:
+    # a conftest fixture, a helper, an old graph row written before Class
+    # nodes carried ``is_test``. Reporting those as changed production code
+    # with no test made 80 of 212 rows on a release-sized diff noise. See: #996
+    gap_root = Path(repo_root).resolve() if repo_root else None
+    nested = _nested_in_a_changed_function(changed_funcs)
     test_gaps: list[dict[str, Any]] = []
     for node in changed_funcs:
-        if node.is_test:
+        if node.is_test or _is_test_file(repo_relative_path(node.file_path, gap_root)):
             continue
         if node.name in _TEST_GAP_EXEMPT_NAMES:
             continue
-        # TESTED_BY edges are stored as source=production, target=test by the
-        # parser, so a changed production function finds its tests by source.
-        # See: #515
-        tested = store.get_edges_by_source(node.qualified_name)
-        if not any(e.kind == "TESTED_BY" for e in tested):
+        if node.qualified_name in nested:
+            continue
+        if not _has_test_coverage(store, node):
             test_gaps.append({
                 "name": _sanitize_name(node.name),
                 "qualified_name": _sanitize_name(node.qualified_name),

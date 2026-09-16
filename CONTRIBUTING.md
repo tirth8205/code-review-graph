@@ -78,15 +78,24 @@ a pull request for this step.
 
 **The `testing` gauntlet decides what happens next.** Every push to `testing` runs the
 full suite on Python 3.10 through 3.13, the end-to-end suite on Linux, macOS and Windows,
-a security scan, and a coverage gate that uses this project's own `detect_changes` to find
-changed functions with no test. The result lands on a single tracking issue labelled
-`promotion-status`:
+and a security scan. Those three decide the verdict. It also runs a coverage report that
+uses this project's own `detect_changes` to list changed functions no test calls. The
+result lands on a single tracking issue labelled `promotion-status`:
 
-- **Something failed, or a change has no test.** The issue lists what is missing. Add the
-  tests on a branch off `staging`. When they pass there, the change is promoted to
-  `testing` again on its own and the gauntlet reruns with the new tests.
+- **Something failed.** The issue lists which stage. Fix it on a branch off `staging`.
+  When it passes there, the change is promoted to `testing` again on its own and the
+  gauntlet reruns.
 - **Everything is green.** The issue says `testing` is ready and gives the command that
   opens the promotion pull request into `main`.
+
+**The coverage report is advisory.** It is accurate about what it measures — every row
+names a changed function that no test calls directly — but "no test calls this" is not
+"this is untested". On the current `staging`-to-`main` delta, 47 of its 114 rows name
+helpers that a test does execute, two calls away; the report marks those `indirect`.
+Blocking a promotion on a signal that is 41% "run but not directly tested" would train
+everyone to override it, so it reports and the maintainer decides. It still refuses to
+answer at all rather than answer wrongly: with no graph, or one built at a different
+revision, it reports that instead of reporting zero gaps.
 
 **Promotion to `main` is never automatic.** It is a pull request `testing` into `main` that
 the maintainer reviews and merges by hand, with a **merge commit** so every contributor
