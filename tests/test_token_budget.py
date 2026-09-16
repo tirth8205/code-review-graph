@@ -54,6 +54,7 @@ from code_review_graph import main as crg_main
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.tools import analysis_tools, community_tools, review
+from code_review_graph.tools import query as query_mod
 from code_review_graph.tools import refactor_tools as refactor_mod
 
 try:  # pragma: no cover - exercised only when tiktoken is installed
@@ -189,9 +190,6 @@ HUGE = 10**6
 # Tools whose result lists live in code_review_graph/tools/query.py. That
 # module is owned elsewhere and its unbounded worst cases are reported, not
 # fixed, by this change:
-#   * get_impact_radius  -- changed_nodes and edges ignore max_results
-#     (3.4M tokens on a whole-repo diff), and max_results is not even
-#     exposed on the MCP tool signature.
 #   * find_large_functions -- limit is neither validated nor capped
 #     (737k tokens at limit=10**6).
 #   * traverse_graph -- token_budget is neither validated nor capped
@@ -199,8 +197,14 @@ HUGE = 10**6
 #   * semantic_search_nodes -- limit is neither validated nor capped.
 # Their *default* budgets are still asserted below; only the worst case is
 # skipped, so a regression in normal use is still caught here.
+#
+# ``get_impact_radius`` used to be in this set: its changed_nodes, edges and
+# impacted_files lists all ignored max_results, which was not even exposed on
+# the MCP tool. Measured on this fixture before the caps: 456,345 tokens for
+# a whole-repo diff at depth 5 (2,814 edges, 1,020 changed nodes). It now has
+# a real worst-case ceiling below, and tests/test_impact_payload.py pins the
+# cap and repo-relative-path behaviour directly.
 QUERY_OWNED_UNBOUNDED = {
-    "get_impact_radius_tool",
     "find_large_functions_tool",
     "traverse_graph_tool",
     "semantic_search_nodes_tool",
@@ -238,12 +242,14 @@ BUDGETS: dict[str, dict[str, Any]] = {
     },
     "get_impact_radius_tool": {
         "default": {"changed_files": "LEAF"},
-        "worst": {"changed_files": "ALL", "max_depth": 5},
-        # Higher than it should be: changed_nodes and edges ignore
-        # max_results in query.py, so even a single-file default grows with
-        # the graph. Reported, not fixed here.
-        "default_max": 12_000,
-        "worst_max": None,  # see QUERY_OWNED_UNBOUNDED
+        "worst": {
+            "changed_files": "ALL", "max_depth": 5, "max_results": HUGE,
+        },
+        # Measured on this fixture: 1,972 tokens default (4,382 before the
+        # caps), 20,513 worst (456,345 before). Both carry the usual ~2x
+        # headroom over the measurement.
+        "default_max": 4_000,
+        "worst_max": 40_000,
     },
     "query_graph_tool": {
         "default": {"pattern": "callers_of", "target": "helper_0_0_0"},
@@ -661,6 +667,12 @@ def test_caps_actually_bind_on_the_fixture_graph(repo):
 # can be masked by its own headroom, and a length assertion silently passes
 # once the ceiling exceeds what the fixture can produce.
 MAX_CEILINGS = {
+    "query._MAX_IMPACT_NODES": (query_mod._MAX_IMPACT_NODES, 500),
+    "query._MAX_IMPACT_CHANGED_NODES": (
+        query_mod._MAX_IMPACT_CHANGED_NODES, 200,
+    ),
+    "query._MAX_IMPACT_EDGES": (query_mod._MAX_IMPACT_EDGES, 200),
+    "query._MAX_IMPACT_FILES": (query_mod._MAX_IMPACT_FILES, 200),
     "community_tools._MAX_MEMBERS": (community_tools._MAX_MEMBERS, 25),
     "community_tools._MAX_COMMUNITIES": (community_tools._MAX_COMMUNITIES, 200),
     "community_tools._MAX_CROSS_EDGES": (community_tools._MAX_CROSS_EDGES, 200),

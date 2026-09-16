@@ -306,7 +306,10 @@ class Plain:
             changed_files=[str(target)], repo_root=str(tmp_path), max_depth=1
         )
         assert impact["status"] == "ok"
-        assert importer.as_posix() in impact["impacted_files"]
+        # Impact paths are repo-relative; the absolute prefix is reported
+        # once, as ``repo_root``.
+        assert impact["repo_root"] == str(tmp_path)
+        assert importer.name in impact["impacted_files"]
 
     def test_parse_python_calls(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")

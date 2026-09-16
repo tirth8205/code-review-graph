@@ -225,11 +225,15 @@ def get_impact_radius_tool(
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    max_results: int = 100,
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
     Shows which functions, classes, and files are impacted by changes.
     Auto-detects changed files from git if not specified.
+
+    Standard detail reports every list's total and omitted count, and file
+    paths come back relative to the ``repo_root`` field.
 
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
@@ -237,11 +241,14 @@ def get_impact_radius_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        max_results: Maximum impacted nodes, changed nodes, connecting edges
+            and impacted files to return. Default: 100.
     """
     root = _resolve_repo_root(repo_root)
     return with_provenance(get_impact_radius(
         changed_files=changed_files, max_depth=max_depth,
         repo_root=root, base=base, detail_level=detail_level,
+        max_results=max_results,
     ), root)
 
 

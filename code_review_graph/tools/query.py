@@ -32,13 +32,28 @@ from ..uncertainty import (
     empty_query_confidence,
     empty_search_confidence,
 )
-from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
+from ._common import (
+    _BUILTIN_CALL_NAMES,
+    _get_store,
+    _resolve_graph_file_paths,
+    to_repo_relative,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tool 2: get_impact_radius
 # ---------------------------------------------------------------------------
+
+# Hard ceilings for the standard-detail impact response. ``max_results``
+# clamps below these; nothing raises above them. Before they existed the
+# standard branch emitted every connecting edge, every changed node and every
+# impacted file with no cap at all, so one call on a single changed django
+# file returned 410,834 estimated tokens. See tests/test_impact_payload.py.
+_MAX_IMPACT_NODES = 500
+_MAX_IMPACT_CHANGED_NODES = 200
+_MAX_IMPACT_EDGES = 200
+_MAX_IMPACT_FILES = 200
 
 _QUERY_PATTERNS = {
     "callers_of": "Find all functions that call a given function",
@@ -123,6 +138,74 @@ def _rank_disambiguation_candidates(
     return [node_to_dict(node) for node in sorted(candidates, key=score)]
 
 
+def _repo_prefix(root: Path) -> str:
+    """The absolute prefix that graph identifiers carry, with its separator."""
+    return f"{normalize_file_path(root).rstrip('/')}/"
+
+
+def _strip_repo_prefix(value: Any, prefix: str) -> Any:
+    """Drop ``prefix`` from a graph identifier that starts with it.
+
+    Qualified names are ``<file path>::<symbol>`` and File nodes carry the
+    path as their name, so the same prefix is repeated across every node and
+    every edge endpoint. Only an exact prefix match is rewritten: a bare
+    symbol name is left alone, including PHP namespace names whose
+    backslashes a path normalizer would mangle.
+    """
+    if isinstance(value, str) and value.startswith(prefix):
+        return value[len(prefix):] or value
+    return value
+
+
+def _relative_node_dict(node: GraphNode, root: Path, prefix: str) -> dict[str, Any]:
+    """Serialize a node with every path made relative to the repo root."""
+    data = node_to_dict(node)
+    data["file_path"] = to_repo_relative(data.get("file_path"), root)
+    for key in ("name", "qualified_name", "parent_name"):
+        data[key] = _strip_repo_prefix(data.get(key), prefix)
+    return data
+
+
+def _relative_edge_dict(edge: Any, root: Path, prefix: str) -> dict[str, Any]:
+    """Serialize an edge with every path made relative to the repo root."""
+    data = edge_to_dict(edge)
+    data["file_path"] = to_repo_relative(data.get("file_path"), root)
+    for key in ("source", "target"):
+        data[key] = _strip_repo_prefix(data.get(key), prefix)
+    for key in ("ambiguous_targets", "unresolved_targets"):
+        targets = data.get(key)
+        if isinstance(targets, list):
+            data[key] = [_strip_repo_prefix(t, prefix) for t in targets]
+    return data
+
+
+def _rank_impact_edges(
+    edges: list[Any], endpoint_scores: dict[str, float], limit: int,
+) -> list[Any]:
+    """Keep the ``limit`` edges closest to the change, strongest first.
+
+    An edge is only as interesting as its most-impacted endpoint, so ranking
+    by ``max(score(source), score(target))`` keeps the edges that explain why
+    the top-scoring impacted nodes are in the result and drops the periphery
+    first. Ties break on stable identity fields so the same graph always
+    yields the same prefix.
+    """
+    def rank(edge: Any) -> tuple[float, str, str, str, int]:
+        best = max(
+            endpoint_scores.get(edge.source_qualified, 0.0),
+            endpoint_scores.get(edge.target_qualified, 0.0),
+        )
+        return (
+            -best,
+            edge.kind or "",
+            edge.source_qualified or "",
+            edge.target_qualified or "",
+            edge.line or 0,
+        )
+
+    return sorted(edges, key=rank)[:limit]
+
+
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
@@ -137,14 +220,18 @@ def get_impact_radius(
         changed_files: Explicit list of changed file paths (relative to repo root).
                        If omitted, auto-detects from git diff.
         max_depth: How many hops to traverse in the graph (default: 2).
-        max_results: Maximum impacted nodes to return (default: 500).
+        max_results: Maximum impacted nodes to return (default: 500). Also
+            clamps changed nodes, connecting edges and impacted files, each
+            under its own hard ceiling.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         detail_level: "standard" (full output) or "minimal" (summary only).
 
     Returns:
         Changed nodes, impacted nodes, impacted files, connecting edges,
-        plus ``truncated`` flag and ``total_impacted`` count.
+        plus ``truncated`` flag and ``total_impacted`` count. Standard detail
+        reports every list's total and omitted count, and emits every
+        ``file_path`` relative to ``repo_root``, which appears once.
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
@@ -171,33 +258,73 @@ def get_impact_radius(
         # Resolve user-facing paths to the file paths stored in the graph.
         original_tokens = estimate_file_tokens(root, changed_files)
         abs_files = _resolve_graph_file_paths(store, root, changed_files)
+        node_cap = min(max_results, _MAX_IMPACT_NODES)
         result = store.get_impact_radius(
-            abs_files, max_depth=max_depth, max_nodes=max_results
+            abs_files, max_depth=max_depth, max_nodes=node_cap
         )
 
         impact_scores = result.get("impact_scores", {})
-        changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
+        prefix = _repo_prefix(root)
+        all_changed = result["changed_nodes"]
+        total_changed = len(all_changed)
+        changed_cap = min(max_results, _MAX_IMPACT_CHANGED_NODES)
+        changed_dicts = [
+            _relative_node_dict(n, root, prefix) for n in all_changed[:changed_cap]
+        ]
         impacted_dicts = []
         for node in result["impacted_nodes"]:
-            node_dict = node_to_dict(node)
+            node_dict = _relative_node_dict(node, root, prefix)
             score = impact_scores.get(node.qualified_name)
             if score is not None:
                 node_dict["impact_score"] = score
             impacted_dicts.append(node_dict)
-        edge_dicts = [edge_to_dict(e) for e in result["edges"]]
+
+        # Edges were the single largest term in this response: the store
+        # returns every edge among the seed and impacted sets, which on a
+        # real repository is thousands of rows nobody reads.
+        all_edges = result["edges"]
+        total_edges = len(all_edges)
+        edge_cap = min(max_results, _MAX_IMPACT_EDGES)
+        endpoint_scores: dict[str, float] = {
+            n.qualified_name: 1.0 for n in all_changed
+        }
+        endpoint_scores.update(impact_scores)
+        edge_dicts = [
+            _relative_edge_dict(e, root, prefix)
+            for e in _rank_impact_edges(all_edges, endpoint_scores, edge_cap)
+        ]
+
+        all_impacted_files = [
+            to_repo_relative(path, root) for path in result["impacted_files"]
+        ]
+        total_impacted_files = len(all_impacted_files)
+        file_cap = min(max_results, _MAX_IMPACT_FILES)
+        impacted_files = sorted(all_impacted_files)[:file_cap]
+
         truncated = result["truncated"]
         total_impacted = result["total_impacted"]
+        lists_truncated = (
+            truncated
+            or total_changed > len(changed_dicts)
+            or total_edges > len(edge_dicts)
+            or total_impacted_files > len(impacted_files)
+        )
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
-            f"  - {len(changed_dicts)} nodes directly changed",
+            f"  - {total_changed} nodes directly changed",
             f"  - {len(impacted_dicts)} nodes impacted (within {max_depth} hops)",
-            f"  - {len(result['impacted_files'])} additional files affected",
+            f"  - {total_impacted_files} additional files affected",
         ]
         if truncated:
             summary_parts.append(
                 f"  - Results truncated: showing {len(impacted_dicts)}"
                 f" of {total_impacted} impacted nodes"
+            )
+        if total_edges > len(edge_dicts):
+            summary_parts.append(
+                f"  - Edges truncated: showing {len(edge_dicts)}"
+                f" of {total_edges} connecting edges"
             )
 
         # "Nothing is impacted" and "nothing about these files is indexed"
@@ -226,7 +353,7 @@ def get_impact_radius(
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
-                "impacted_file_count": len(result["impacted_files"]),
+                "impacted_file_count": total_impacted_files,
                 "key_entities": key_entities,
                 "truncated": truncated,
                 "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
@@ -239,14 +366,26 @@ def get_impact_radius(
         response: dict[str, Any] = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
+            # Every file_path below is relative to this root. Repeating the
+            # absolute prefix per node and per edge was the bulk of the old
+            # payload and tied token counts to the checkout's depth on disk.
+            "repo_root": str(root),
             "changed_files": changed_files,
             "changed_nodes": changed_dicts,
             "impacted_nodes": impacted_dicts,
-            "impacted_files": result["impacted_files"],
+            "impacted_files": impacted_files,
             "edges": edge_dicts,
-            "truncated": truncated,
+            "truncated": lists_truncated,
             "total_impacted": total_impacted,
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
+            "total_changed": total_changed,
+            "changed_nodes_omitted": max(0, total_changed - len(changed_dicts)),
+            "total_edges": total_edges,
+            "edges_omitted": max(0, total_edges - len(edge_dicts)),
+            "total_impacted_files": total_impacted_files,
+            "impacted_files_omitted": max(
+                0, total_impacted_files - len(impacted_files),
+            ),
         }
         if confidence:
             response["confidence"] = confidence

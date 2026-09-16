@@ -1085,9 +1085,10 @@ class TestCSharpReceiverCallResolution:
             n["name"] for n in result.get("impacted_nodes", [])
         }
         assert "Run" in impacted_names
-        assert str(tmp_path / "Consumer.cs") in set(
-            result.get("impacted_files", []),
-        )
+        # Impact paths are repo-relative; the absolute prefix is reported
+        # once, as ``repo_root``.
+        assert result.get("repo_root") == str(tmp_path)
+        assert "Consumer.cs" in set(result.get("impacted_files", []))
 
     def test_impact_radius_of_decoy_file_does_not_reach_consumer(
         self, tmp_path,

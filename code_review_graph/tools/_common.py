@@ -131,6 +131,33 @@ def with_provenance(result: Any, repo_root: str | None = None) -> Any:
         result["_graph"] = provenance
     return result
 
+
+def to_repo_relative(file_path: Any, root: Path) -> Any:
+    """Return *file_path* relative to *root*, POSIX-style.
+
+    Graph rows store whatever spelling the build used, which on most repos is
+    an absolute path. Repeating that absolute prefix once per node and once
+    per edge dominates a large response — measured at 66% of a 1.6 MB
+    ``get_impact_radius`` payload on django — and makes any token benchmark
+    depend on how deep the checkout happens to sit. The prefix belongs in the
+    response once, as ``repo_root``.
+
+    Paths that are already relative, paths outside the repository, and values
+    that are not strings come back unchanged, so a caller can still tell the
+    unusual cases apart.
+    """
+    if not isinstance(file_path, str) or not file_path:
+        return file_path
+    normalized = normalize_file_path(file_path)
+    root_posix = normalize_file_path(root).rstrip("/")
+    if not root_posix:
+        return normalized
+    prefix = f"{root_posix}/"
+    if normalized.startswith(prefix):
+        return normalized[len(prefix):] or normalized
+    return normalized
+
+
 # Common JS/TS builtin method names filtered from callers_of results.
 # "Who calls .map()?" returns hundreds of hits and is never useful.
 # These are kept in the graph (callees_of still shows them) but excluded
