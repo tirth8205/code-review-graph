@@ -228,8 +228,9 @@ def test_generate_html(store_with_data, tmp_path):
 
 
 # Pinned D3 contract for the visualization templates (issue #475): the page
-# must load D3 from a same-origin vendored file so `visualize --serve` works
-# on offline/filtered networks, while keeping SRI integrity verification.
+# must load D3 from a vendored local file so `visualize --serve` *and* a
+# plain `file://` open both work on offline/filtered networks, while the
+# cross-origin CDN fallback keeps SRI integrity verification.
 _D3_FILENAME = "d3.v7.min.js"
 _D3_CDN_URL = "https://d3js.org/d3.v7.min.js"
 _D3_SRI_HASH = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
@@ -243,8 +244,8 @@ def _sha384_sri(data: bytes) -> str:
 def test_generated_html_loads_d3_same_origin_with_sri(store_with_data, tmp_path, vis_mode):
     """Regression test for #475: `visualize --serve` must not depend on the
     d3js.org CDN being reachable. The generated page loads a vendored,
-    same-origin D3 file (with the SRI hash intact) and only falls back to
-    the CDN — still SRI-pinned with crossorigin — if the local copy fails."""
+    local D3 file and only falls back to the CDN — still SRI-pinned with
+    crossorigin — if the local copy fails."""
     from code_review_graph.visualization import generate_html
 
     output_path = tmp_path / "graph.html"
@@ -252,13 +253,21 @@ def test_generated_html_loads_d3_same_origin_with_sri(store_with_data, tmp_path,
     content = output_path.read_text()
 
     script_sources, inline_scripts = _extract_scripts(content)
-    # Same-origin, offline-first D3 reference — no external host required.
+    # Local, offline-first D3 reference — no external host required.
     assert script_sources == [_D3_FILENAME]
 
-    # The local script tag keeps SRI integrity verification.
+    # The local tag must carry NO integrity attribute. A page opened from a
+    # file:// URL gets an opaque origin per file, so the response is not
+    # eligible for integrity validation and the browser blocks the script:
+    # measured in headless Chrome, the attribute produced a blank graph
+    # offline (0 rendered edges) and a silent CDN fetch online. The bytes are
+    # verified against _D3_SRI_HASH at write time instead, below.
     local_tag = re.search(r"<script src=\"d3\.v7\.min\.js\"[^>]*>", content)
     assert local_tag is not None
-    assert f'integrity="{_D3_SRI_HASH}"' in local_tag.group(0)
+    assert "integrity=" not in local_tag.group(0), (
+        "an integrity attribute on the local D3 tag makes the page blank "
+        "when opened from file:// without network access"
+    )
 
     # CDN fallback (only used when the local asset is missing) keeps the
     # security invariant: SRI hash AND crossorigin on the d3js.org tag.

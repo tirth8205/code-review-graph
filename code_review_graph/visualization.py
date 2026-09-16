@@ -30,21 +30,34 @@ from .graph import GraphStore, edge_to_dict, node_to_dict
 logger = logging.getLogger(__name__)
 
 # Pinned D3 build vendored with the package (issue #475). The generated HTML
-# loads this same-origin copy first so `visualize --serve` works on offline or
-# filtered networks, and only falls back to the CDN — still SRI-pinned — when
-# the local copy is unavailable. Both references carry the same integrity hash.
+# loads this local copy first so `visualize --serve` and a plain `file://`
+# open both work on offline or filtered networks, and only falls back to the
+# CDN — still SRI-pinned — when the local copy is unavailable. The hash below
+# is verified against the bytes at write time by ``_write_d3_asset``; see
+# ``_d3_script_tags`` for why only the CDN tag carries it as an attribute.
 D3_LOCAL_FILENAME = "d3.v7.min.js"
 D3_CDN_URL = "https://d3js.org/d3.v7.min.js"
 D3_SRI_HASH = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
 
 
 def _d3_script_tags() -> str:
-    """Build the D3 loader tags: same-origin script plus SRI-pinned CDN fallback.
+    """Build the D3 loader tags: local script plus SRI-pinned CDN fallback.
 
     The fallback uses ``document.write`` so it loads *synchronously* during
     parsing — the rest of the page's inline scripts use ``d3`` immediately.
+
+    The local tag deliberately carries no ``integrity`` attribute. A page
+    opened straight off disk gets an opaque origin per file, so the response
+    is not eligible for integrity validation and the browser blocks the
+    script outright: measured in headless Chrome, a ``file://`` page with the
+    attribute rendered zero graph edges offline and silently fell through to
+    the CDN when online. The bytes are still verified — ``_write_d3_asset``
+    checks them against ``D3_SRI_HASH`` before writing, which is a stronger
+    guarantee than a browser check on a file this process just produced. The
+    cross-origin CDN tag keeps its SRI hash, where it is both enforceable and
+    load-bearing.
     """
-    local_tag = f'<script src="{D3_LOCAL_FILENAME}" integrity="{D3_SRI_HASH}"></script>'
+    local_tag = f'<script src="{D3_LOCAL_FILENAME}"></script>'
     cdn_tag = (
         f'<script src="{D3_CDN_URL}" integrity="{D3_SRI_HASH}" crossorigin="anonymous">'
         "<\\/script>"
