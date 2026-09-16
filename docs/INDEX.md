@@ -1,6 +1,7 @@
 # Documentation Index
 
 - [USAGE.md](USAGE.md): install, configure, and use the CLI and MCP tools
+- [DEMO.md](DEMO.md): ten-minute live demo script with measured timings, fallbacks, and the honest limits
 - [COMMANDS.md](COMMANDS.md): reference for the 30 MCP tools, 5 MCP prompts, skills, and CLI commands
 - [FAQ.md](FAQ.md): how it compares to LSP, RAG, grep, and similar tools; when not to use it
 - [FEATURES.md](FEATURES.md): release highlights by version
