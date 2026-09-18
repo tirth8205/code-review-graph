@@ -93,7 +93,7 @@ def list_flows(
             "truncated": truncated,
         }
         result["_hints"] = generate_hints(
-            "list_flows", result, get_session()
+            "list_flows_tool", result, get_session()
         )
         return result
     except Exception as exc:
@@ -184,7 +184,7 @@ def get_flow(
                 file_path = fp
                 if file_path and file_path.is_file():
                     try:
-                        lines = file_path.read_text(
+                        lines = file_path.read_text(encoding="utf-8",
                             errors="replace"
                         ).splitlines()
                         start = max(
@@ -214,7 +214,7 @@ def get_flow(
             "flow": flow,
         }
         result["_hints"] = generate_hints(
-            "get_flow", result, get_session()
+            "get_flow_tool", result, get_session()
         )
         return result
     except Exception as exc:

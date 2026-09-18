@@ -8,7 +8,9 @@ from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
 import pytest
 
+import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
+from code_review_graph.constants import discovery_timeout
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
@@ -18,6 +20,7 @@ from code_review_graph.incremental import (
     _parse_single_file,
     _should_ignore,
     _single_hop_dependents,
+    discover_review_changes,
     ensure_repo_gitignore_excludes_crg,
     find_dependents,
     find_project_root,
@@ -31,6 +34,7 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
+from code_review_graph.errors import ChangeDiscoveryError
 
 
 class TestParseExecutorSelection:
@@ -576,6 +580,15 @@ class TestGitOperations:
         assert "-z" in mock_run.call_args_list[1].args[0]
 
     @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_strict_failure_does_not_fallback(self, mock_run, tmp_path):
+        mock_run.return_value = MagicMock(returncode=128, stdout=b"")
+
+        with pytest.raises(RuntimeError, match="git diff failed"):
+            get_changed_files(tmp_path, strict=True)
+
+        mock_run.assert_called_once()
+
+    @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_rejects_failed_fallback(self, mock_run, tmp_path):
         mock_run.side_effect = [
             MagicMock(returncode=128, stdout=b""),
@@ -637,10 +650,30 @@ class TestGitOperations:
     def test_get_all_tracked_files(self, mock_run, tmp_path):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="a.py\nb.py\nc.go\n",
+            stdout="a.py\0b.py\0c.go\0",
         )
         result = get_all_tracked_files(tmp_path)
         assert result == ["a.py", "b.py", "c.go"]
+        assert "-z" in mock_run.call_args[0][0]
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_all_tracked_files_keeps_paths_git_would_quote(
+        self, mock_run, tmp_path
+    ):
+        """-z means no C-quoting, so odd paths arrive usable.
+
+        Without it core.quotePath makes git answer
+        '"src/caf\\303\\251.py"' — quotes and backslashes included — and the
+        file is dropped from the inventory because that spelling is not on
+        disk. A newline in a path would also end a record.
+        """
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="src/caf\u00e9.py\0src/my module.py\0src/two\nlines.py\0",
+        )
+        assert get_all_tracked_files(tmp_path) == [
+            "src/caf\u00e9.py", "src/my module.py", "src/two\nlines.py",
+        ]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_all_tracked_files_recurse_submodules_param(
@@ -648,7 +681,7 @@ class TestGitOperations:
     ):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="a.py\nsub/b.py\n",
+            stdout="a.py\0sub/b.py\0",
         )
         result = get_all_tracked_files(tmp_path, recurse_submodules=True)
         assert result == ["a.py", "sub/b.py"]
@@ -661,7 +694,7 @@ class TestGitOperations:
     ):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="a.py\n",
+            stdout="a.py\0",
         )
         result = get_all_tracked_files(tmp_path)
         assert result == ["a.py"]
@@ -675,7 +708,7 @@ class TestGitOperations:
     ):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="a.py\nsub/c.py\n",
+            stdout="a.py\0sub/c.py\0",
         )
         # None -> falls back to env var (_RECURSE_SUBMODULES=True)
         result = get_all_tracked_files(tmp_path, recurse_submodules=None)
@@ -690,7 +723,7 @@ class TestGitOperations:
     ):
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout="a.py\n",
+            stdout="a.py\0",
         )
         # Explicit False overrides env var
         result = get_all_tracked_files(tmp_path, recurse_submodules=False)
@@ -1400,8 +1433,12 @@ class TestWatchReconciliation:
             with (
                 patch("watchdog.observers.Observer") as observer,
                 patch("time.sleep", side_effect=KeyboardInterrupt),
+                # Patch the entry point post-processing calls, not the
+                # rebuild underneath it: whether a sync rebuilds or applies
+                # a delta depends on how much of the graph moved, and this
+                # test is about the warning, not about which path ran.
                 patch(
-                    "code_review_graph.search.rebuild_fts_index",
+                    "code_review_graph.search.update_fts_index",
                     side_effect=sqlite3.OperationalError("forced FTS failure"),
                 ),
                 pytest.raises(
@@ -1813,3 +1850,464 @@ class TestRenamePurgeParity:
             assert store.get_nodes_by_file(str(tmp_path / "b.py"))
         finally:
             store.close()
+
+
+class TestRevertedContentParity:
+    """Issue #817: an edit/revert round trip must not leave ghost nodes."""
+
+    def test_content_scan_runs_only_for_reconciling_updates(self, tmp_path, monkeypatch):
+        source = tmp_path / "source.py"
+        source.write_text("def foo():\n    return 1\n")
+        scan_calls = []
+
+        def fake_content_scan(repo_root, store):
+            scan_calls.append(repo_root)
+            return [], {}, set()
+
+        monkeypatch.setattr(
+            incremental_module,
+            "_find_content_mismatches",
+            fake_content_scan,
+        )
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            disabled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=["source.py"],
+                reconcile_stale=False,
+            )
+
+            assert disabled_result["files_updated"] == 1
+            assert scan_calls == []
+
+            reconciled_result = incremental_update(
+                tmp_path,
+                store,
+                changed_files=[],
+                reconcile_stale=True,
+            )
+
+            assert reconciled_result["files_updated"] == 0
+            assert scan_calls == [tmp_path]
+        finally:
+            store.close()
+
+    def test_reverted_file_with_empty_diff_is_reparsed(self, tmp_path):
+        source = tmp_path / "source.py"
+        original = "def foo():\n    return 1\n"
+        intermediate = original + "\n\ndef bar():\n    return 2\n"
+        source.write_text(original)
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo"}
+
+            source.write_text(intermediate)
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo", "bar"}
+
+            source.write_text(original)
+            result = incremental_update(tmp_path, store, changed_files=[])
+
+            assert result["changed_files"] == ["source.py"]
+            assert result["files_updated"] == 1
+            function_names = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert function_names == {"foo"}
+        finally:
+            store.close()
+
+    def test_reverted_file_is_reconciled_alongside_another_change(self, tmp_path):
+        source = tmp_path / "source.py"
+        other = tmp_path / "other.py"
+        original = "def foo():\n    return 1\n"
+        intermediate = original + "\n\ndef bar():\n    return 2\n"
+        source.write_text(original)
+        other.write_text("def other():\n    return 3\n")
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            incremental_update(
+                tmp_path,
+                store,
+                changed_files=["source.py", "other.py"],
+            )
+
+            source.write_text(intermediate)
+            incremental_update(tmp_path, store, changed_files=["source.py"])
+
+            source.write_text(original)
+            other.write_text("def other():\n    return 4\n")
+            result = incremental_update(tmp_path, store, changed_files=["other.py"])
+
+            assert set(result["changed_files"]) == {"other.py", "source.py"}
+            assert result["files_updated"] == 2
+
+            source_functions = {
+                node.name for node in store.get_nodes_by_file(str(source))
+                if node.kind == "Function"
+            }
+            assert source_functions == {"foo"}
+            other_functions = {
+                node.name for node in store.get_nodes_by_file(str(other))
+                if node.kind == "Function"
+            }
+            assert other_functions == {"other"}
+        finally:
+            store.close()
+
+
+class TestGraphExtraCorruption:
+    def test_get_all_files_survives_malformed_extra_and_false_virtual(self, tmp_path):
+        """#864: a killed writer can leave extra='' and crash every
+        get_all_files caller with SQLite 'malformed JSON'; extra with
+        virtual=false must stay visible so reconciliation can purge it."""
+        good = tmp_path / "good.py"
+        good.write_text("def ok():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            store._conn.execute(
+                "INSERT INTO nodes (kind, name, qualified_name, file_path, "
+                "extra, updated_at) "
+                "VALUES ('Function', 'dead', 'dead', ?, '', 1.0)",
+                (str(tmp_path / "killed.py"),),
+            )
+            store._conn.execute(
+                "INSERT INTO nodes (kind, name, qualified_name, file_path, "
+                "extra, updated_at) "
+                "VALUES ('Class', 'Concrete', 'Concrete', ?, ?, 1.0)",
+                (str(tmp_path / "flagged.py"), '{"virtual": false}'),
+            )
+            store._conn.execute(
+                "INSERT INTO nodes (kind, name, qualified_name, file_path, "
+                "extra, updated_at) "
+                "VALUES ('Event', 'SpringEvent', 'SpringEvent', ?, ?, 1.0)",
+                (str(tmp_path / "virtual.py"), '{"virtual": true}'),
+            )
+            store.commit()
+
+            files = set(store.get_all_files())
+            assert str(tmp_path / "killed.py") in files, "malformed extra must not crash"
+            assert str(tmp_path / "flagged.py") in files, "virtual=false must remain purgeable"
+            assert str(tmp_path / "virtual.py") not in files, "virtual=true stays resolver-managed"
+        finally:
+            store.close()
+
+
+# ---------------------------------------------------------------------------
+# Change discovery: its own budget (#262 cause 2) and a scoped untracked walk
+# (#262 cause 3).
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryTimeout:
+    """``discovery_timeout`` is the budget for read-only change discovery."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        monkeypatch.delenv("CRG_DISCOVERY_TIMEOUT", raising=False)
+        # Both variables matter to the precedence below, so neither may leak
+        # in from the environment the suite happens to run in.
+        monkeypatch.delenv("CRG_GIT_TIMEOUT", raising=False)
+
+    def test_default_is_far_below_the_general_git_budget(self):
+        """The point of the variable: discovery cannot inherit 30 seconds.
+
+        Four serial subprocesses at ``CRG_GIT_TIMEOUT`` is a two-minute worst
+        case, which is longer than an MCP client will wait (#262).
+        """
+        assert discovery_timeout() == 5.0
+        assert discovery_timeout() < incremental_module._GIT_TIMEOUT
+
+    def test_env_var_is_read_at_call_time_not_import_time(self, monkeypatch):
+        """``CRG_GIT_TIMEOUT`` is frozen at import; this one must not be.
+
+        A long-lived MCP server, and any test that sets the variable after
+        the module is imported, only sees a value that is read per call.
+        """
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", "1.25")
+        assert discovery_timeout() == 1.25
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", "0.5")
+        assert discovery_timeout() == 0.5
+
+    def test_explicit_override_may_exceed_the_git_budget(self, monkeypatch):
+        """An explicit value is an instruction, not a hint; it is not clamped."""
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", "120")
+        assert discovery_timeout() == 120.0
+
+    def test_zero_is_honoured_so_a_forced_timeout_stays_testable(
+        self, monkeypatch,
+    ):
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", "0")
+        assert discovery_timeout() == 0.0
+
+    @pytest.mark.parametrize("bad", ["", "   ", "abc", "1.5.2", "-3", "nan"])
+    def test_invalid_values_fall_back_instead_of_raising(self, bad, monkeypatch):
+        """A bad value inside an MCP tool call must not surface as a crash."""
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", bad)
+        assert discovery_timeout() == 5.0
+
+    def test_default_never_exceeds_a_lowered_git_budget(self, monkeypatch):
+        """Lowering ``CRG_GIT_TIMEOUT`` still lowers discovery."""
+        monkeypatch.setattr(constants_module, "GIT_TIMEOUT", 2)
+        assert discovery_timeout() == 2.0
+
+    def test_an_explicitly_raised_git_budget_raises_discovery_too(
+        self, monkeypatch,
+    ):
+        """The documented escape hatch for slow Git must keep working.
+
+        ``CRG_GIT_TIMEOUT`` predates this variable and is what the #262
+        reporters were already told to raise. Capping discovery at 5s
+        regardless would silently ignore an operator who asked for 120 --
+        a knob that stops working is worse than one that never existed.
+        """
+        monkeypatch.setenv("CRG_GIT_TIMEOUT", "120")
+        monkeypatch.setattr(constants_module, "GIT_TIMEOUT", 120)
+        assert discovery_timeout() == 120.0
+
+    def test_discovery_variable_still_wins_over_an_explicit_git_budget(
+        self, monkeypatch,
+    ):
+        """The more specific instruction is the one that applies."""
+        monkeypatch.setenv("CRG_GIT_TIMEOUT", "120")
+        monkeypatch.setattr(constants_module, "GIT_TIMEOUT", 120)
+        monkeypatch.setenv("CRG_DISCOVERY_TIMEOUT", "3")
+        assert discovery_timeout() == 3.0
+
+
+class TestDiscoverReviewChanges:
+    """The chain a review tool runs when it was not given ``changed_files``."""
+
+    def test_every_step_runs_on_the_discovery_budget(self, tmp_path):
+        seen: dict[str, object] = {}
+
+        def fake_resolve(root, base, *, timeout=None, require_vcs=False):
+            seen["resolve"] = (timeout, require_vcs)
+            return "merge-base-sha"
+
+        def fake_changed(
+            root, base, *, timeout=None, strict=False, require_vcs=False,
+        ):
+            seen["changed"] = (base, timeout, require_vcs)
+            return []
+
+        def fake_staged(root, *, timeout=None, require_vcs=False):
+            seen["staged"] = (timeout, require_vcs)
+            return ["a.py"]
+
+        with (
+            patch.object(incremental_module, "resolve_review_base", fake_resolve),
+            patch.object(incremental_module, "get_changed_files", fake_changed),
+            patch.object(incremental_module, "get_staged_and_unstaged", fake_staged),
+        ):
+            files, base = discover_review_changes(tmp_path, "origin/main")
+
+        budget = discovery_timeout()
+        assert files == ["a.py"]
+        assert base == "merge-base-sha"
+        # Every step: short budget AND require_vcs. The second is what makes
+        # the first safe -- a budget that runs out has to be reported, not
+        # rounded down to "nothing changed".
+        assert seen["resolve"] == (budget, True)
+        # The diff runs against the ref discovery resolved, not the raw input.
+        assert seen["changed"] == ("merge-base-sha", budget, True)
+        assert seen["staged"] == (budget, True)
+
+    @pytest.mark.parametrize(
+        "failing_step",
+        ["resolve_review_base", "get_changed_files", "get_staged_and_unstaged"],
+    )
+    def test_a_step_that_runs_out_of_budget_is_raised_not_swallowed(
+        self, failing_step, tmp_path,
+    ):
+        """The whole reason the budget may be short (#262).
+
+        Shortening a budget whose timeout path returns ``[]`` would only make
+        #913's false all-clear easier to hit, and would extend it to the base
+        resolution, where a timed-out merge base silently degrades a three-dot
+        diff into a two-dot one. Each step therefore reports instead.
+        """
+        def timing_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+        patches = {
+            "resolve_review_base": lambda root, base, **kw: base,
+            "get_changed_files": lambda root, base, **kw: [],
+            "get_staged_and_unstaged": lambda root, **kw: [],
+        }
+        patches[failing_step] = timing_out
+
+        with (
+            patch.object(
+                incremental_module, "resolve_review_base",
+                patches["resolve_review_base"],
+            ),
+            patch.object(
+                incremental_module, "get_changed_files",
+                patches["get_changed_files"],
+            ),
+            patch.object(
+                incremental_module, "get_staged_and_unstaged",
+                patches["get_staged_and_unstaged"],
+            ),
+            pytest.raises(subprocess.TimeoutExpired),
+        ):
+            discover_review_changes(tmp_path, "HEAD~1")
+
+    def test_a_real_timeout_names_the_budget_that_expired(self, tmp_path):
+        """And the knob that governs it, which is not CRG_GIT_TIMEOUT.
+
+        Advice pointing at a variable that does not control the call the user
+        just made is worse than none.
+        """
+        (tmp_path / ".git").mkdir()
+
+        def timing_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=5)
+
+        with (
+            patch("code_review_graph.incremental.subprocess.run", timing_out),
+            pytest.raises(ChangeDiscoveryError) as excinfo,
+        ):
+            discover_review_changes(tmp_path, "HEAD~1")
+
+        assert "CRG_DISCOVERY_TIMEOUT" in str(excinfo.value)
+        assert "CRG_GIT_TIMEOUT" not in str(excinfo.value)
+
+    def test_the_general_git_budget_still_names_its_own_knob(self, tmp_path):
+        """A build-side timeout is not a discovery timeout."""
+        (tmp_path / ".git").mkdir()
+
+        def timing_out(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+        with (
+            patch("code_review_graph.incremental.subprocess.run", timing_out),
+            pytest.raises(ChangeDiscoveryError) as excinfo,
+        ):
+            get_changed_files(tmp_path, "HEAD~1", require_vcs=True)
+
+        assert "CRG_GIT_TIMEOUT" in str(excinfo.value)
+
+    def test_working_tree_fallback_is_skipped_when_the_diff_answered(
+        self, tmp_path,
+    ):
+        """The expensive ``git status`` only runs when the diff is empty."""
+        with (
+            patch.object(
+                incremental_module, "resolve_review_base",
+                lambda root, base, **kw: base,
+            ),
+            patch.object(
+                incremental_module, "get_changed_files",
+                lambda root, base, **kw: ["app.py"],
+            ),
+            patch.object(incremental_module, "get_staged_and_unstaged") as staged,
+        ):
+            files, _ = discover_review_changes(tmp_path, "HEAD~1")
+
+        assert files == ["app.py"]
+        staged.assert_not_called()
+
+
+class TestVcsBudgetsDefaultToTheGitTimeout:
+    """Build, update and watch must keep the generous per-command budget."""
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_defaults_to_git_timeout(self, mock_run, tmp_path):
+        (tmp_path / ".git").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"")
+        get_changed_files(tmp_path, "HEAD~1")
+        assert mock_run.call_args.kwargs["timeout"] == incremental_module._GIT_TIMEOUT
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_staged_and_unstaged_defaults_to_git_timeout(
+        self, mock_run, tmp_path,
+    ):
+        (tmp_path / ".git").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"")
+        get_staged_and_unstaged(tmp_path)
+        assert mock_run.call_args.kwargs["timeout"] == incremental_module._GIT_TIMEOUT
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_explicit_timeout_is_forwarded(self, mock_run, tmp_path):
+        (tmp_path / ".git").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"")
+        get_changed_files(tmp_path, "HEAD~1", timeout=1.5)
+        assert mock_run.call_args.kwargs["timeout"] == 1.5
+
+    def test_incremental_update_never_uses_the_discovery_budget(self, tmp_path):
+        """A build-side update legitimately takes longer than a review.
+
+        It also never reaches the working-tree fallback at all, which is why
+        scoping that fallback's untracked walk cannot affect it.
+        """
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            with (
+                patch.object(
+                    incremental_module, "get_changed_files", return_value=[],
+                ) as changed,
+                patch.object(incremental_module, "get_staged_and_unstaged") as staged,
+            ):
+                incremental_update(tmp_path, store, base="HEAD~1")
+        finally:
+            store.close()
+
+        assert changed.called
+        assert "timeout" not in changed.call_args.kwargs
+        staged.assert_not_called()
+
+
+class TestUntrackedScope:
+    """The working-tree walk stays at ``--untracked-files=all``, on purpose.
+
+    Scoping it down to git's cheaper ``normal`` mode was tried, because that
+    mode does not stat every file under an un-ignored ``node_modules``. It was
+    reverted: ``normal`` collapses a wholly-untracked directory to a single
+    ``dir/`` record, which is not a path any caller can open, so the first
+    commit of every new package vanished from every review tool with
+    ``status: ok``. These tests exist so that trade is not made again by
+    accident.
+    """
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_the_walk_is_untracked_files_all(self, mock_run, tmp_path):
+        """Not a default nobody chose: the review tools depend on it."""
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"")
+        get_staged_and_unstaged(tmp_path)
+        argv = mock_run.call_args.args[0]
+        assert "--untracked-files=all" in argv
+        assert "--untracked-files=normal" not in argv
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_every_record_is_returned_as_a_path(self, mock_run, tmp_path):
+        """No record is filtered out on the way back.
+
+        Under ``all`` git never emits a ``dir/`` placeholder, so a path that
+        does end in a slash is a real path and is kept. Dropping trailing-slash
+        records was how the collapsed-directory bug erased new packages.
+        """
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=b"?? brandnew/a.py\0?? pkg/newmod.py\0 M src/a.py\0?? weird/\0",
+        )
+        assert get_staged_and_unstaged(tmp_path) == [
+            "brandnew/a.py", "pkg/newmod.py", "src/a.py", "weird/",
+        ]

@@ -14,13 +14,16 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
+import anyio.to_thread
 from fastmcp import FastMCP
 
 from . import __version__
 from . import incremental as _incremental
+from .constants import env_int
 from .graph import GraphStore
 from .incremental import find_project_root, get_db_path, start_watch_thread
 from .prompts import (
@@ -87,6 +90,126 @@ def _resolve_repo_root(repo_root: Optional[str]) -> Optional[str]:
     return repo_root if repo_root else _default_repo_root
 
 
+#: Appended to the message a tool returns when ``CRG_TOOL_TIMEOUT`` cuts it
+#: short. ``detect_changes_tool`` keeps its own, which names the two knobs that
+#: actually bound change analysis.
+#:
+#: Deliberately hedged about argument names: this one message is shared by
+#: every bounded tool, and several of them (``list_graph_stats_tool``,
+#: ``get_architecture_overview_tool``) accept none of the three. Advice that
+#: names a parameter the caller cannot pass is worse than no advice.
+_TIMEOUT_HINT = (
+    "Narrow the request with whichever of changed_files, max_depth or "
+    "max_results this tool accepts, or increase CRG_TOOL_TIMEOUT."
+)
+_DETECT_CHANGES_TIMEOUT_HINT = (
+    "Reduce scope with CRG_MAX_CHANGED_FUNCS / CRG_MAX_TRANSITIVE_FRONTIER, "
+    "or increase CRG_TOOL_TIMEOUT."
+)
+
+
+async def _run_off_loop(work: Callable[[], dict]) -> dict:
+    """Run *work* on a worker thread, on the same limiter FastMCP uses.
+
+    ``anyio.to_thread.run_sync``, not ``asyncio.to_thread``, and the
+    difference is not cosmetic. A plain ``def`` tool body is dispatched by
+    FastMCP through anyio's default thread limiter (40 slots). Rewriting these
+    tools as ``async def`` takes them off that limiter and onto
+    ``asyncio.to_thread``'s default executor, which is capped at
+    ``min(32, os.cpu_count() + 4)`` -- 8 slots on a 4-core Windows box. Making
+    the server *more* likely to queue was the opposite of the point, so the
+    offload stays on the limiter it came from.
+
+    ``abandon_on_cancel=True`` keeps the semantics ``asyncio.wait_for`` needs:
+    without it, cancelling the await blocks until the thread finishes anyway
+    and the timeout below could never fire.
+    """
+    return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+
+
+async def _offload(
+    tool_name: str,
+    work: Callable[[], dict],
+    root: str | None,
+    *,
+    provenance: bool = True,
+    bounded: bool = True,
+    timeout_hint: str = _TIMEOUT_HINT,
+) -> dict:
+    """Run one blocking tool body off the event loop, optionally bounded.
+
+    Every MCP tool that reaches Git discovery, a BFS traversal, FTS, an
+    embedding provider or any other multi-second work goes through here. Two
+    things happen, and both matter for #262, where a tool call that is quick
+    from the CLI comes back to an MCP client as error -32001:
+
+    1. The work stays off the stdio event loop, so the server can still answer
+       other requests while it runs. FastMCP's own ``run_in_thread`` default
+       does this for sync tool functions today, but that is a library default
+       inside a ``>=3.2.4,<4`` range, and it is not a promise this server's
+       responsiveness should rest on. See #46, #136.
+    2. ``CRG_TOOL_TIMEOUT``, when set above 0, bounds the call. A bounded call
+       answers -- with ``status: error`` and a message naming the tool and the
+       budget -- where an unbounded one just stops responding until the client
+       gives up. That is the difference between a diagnosable result and
+       -32001.
+
+    Unset or 0 leaves every call unbounded, which is the historical behaviour
+    and stays the default.
+
+    Args:
+        tool_name: The registered tool name, used in the timeout message.
+        work: Zero-argument callable returning the tool's result dict. It runs
+            on a worker thread.
+        root: Resolved repository root, passed to ``with_provenance``.
+        provenance: Whether to stamp the result with graph provenance. The
+            stamp reads SQLite and spawns ``git rev-parse``, so it runs on the
+            worker thread too, never on the event loop.
+        bounded: Whether ``CRG_TOOL_TIMEOUT`` applies. **Default True, and the
+            four long-running tools plus ``apply_refactor_tool`` pass False.**
+
+            A timeout here cancels the *await*, never the thread: there is no
+            way to interrupt a running parse, embed, or file rewrite from
+            outside. For a read-only query that is harmless -- the abandoned
+            worker computes a result nobody reads. For a tool that writes, it
+            is not: ``build_or_update_graph_tool`` would report failure to the
+            client while its worker kept writing ``graph.db``, and the natural
+            retry would run a second concurrent update against the same
+            database. ``apply_refactor_tool`` would report failure with the
+            rename already applied to disk, and its retry would fail again
+            with "not found or expired", leaving a modified tree and two
+            errors.
+
+            These tools were also unbounded before this helper existed, and
+            ``CRG_TOOL_TIMEOUT`` is exactly what #262 tells a user to set to
+            keep review calls responsive. Letting that knob quietly abort
+            their builds would make the documented remedy a new bug.
+        timeout_hint: Advice appended to the timeout message.
+    """
+    def _run() -> dict:
+        result = work()
+        return with_provenance(result, root) if provenance else result
+
+    tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
+    if not bounded or tool_timeout <= 0:
+        return await _run_off_loop(_run)
+
+    try:
+        return await asyncio.wait_for(_run_off_loop(_run), timeout=tool_timeout)
+    except asyncio.TimeoutError:
+        message = f"{tool_name} timed out after {tool_timeout}s. {timeout_hint}"
+        error_response = {
+            "status": "error",
+            "error": message,
+            "summary": message,
+        }
+        if not provenance:
+            return error_response
+        return await _run_off_loop(
+            lambda: with_provenance(error_response, root)
+        )
+
+
 mcp = FastMCP(
     "code-review-graph",
     version=__version__,
@@ -114,12 +237,12 @@ async def build_or_update_graph_tool(
     By default performs an incremental update (only changed files).
     Set full_rebuild=True to re-parse every file.
 
-    Runs the blocking full_build / incremental_update work in a thread
-    via ``asyncio.to_thread`` so the stdio event loop stays responsive.
-    Without this wrapper, long builds deadlocked on Windows because
+    Runs the blocking full_build / incremental_update work on a worker
+    thread via ``_offload`` so the stdio event loop stays responsive.
+    Without that, long builds deadlocked on Windows because
     ``ProcessPoolExecutor`` (used by parallel parsing) interacted badly
     with the sync handler blocking the only event-loop thread. See:
-    #46, #136.
+    #46, #136, #262.
 
     Args:
         full_rebuild: If True, re-parse all files. Default: False (incremental).
@@ -138,16 +261,19 @@ async def build_or_update_graph_tool(
             refresh. Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
-
-    def _run() -> dict:
-        return with_provenance(build_or_update_graph(
+    return await _offload(
+        "build_or_update_graph_tool",
+        lambda: build_or_update_graph(
             full_rebuild=full_rebuild, repo_root=root, base=base,
             postprocess=postprocess, recurse_submodules=recurse_submodules,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
-        ), root)
-
-    return await asyncio.to_thread(_run)
+        ),
+        root,
+        # Writes graph.db for as long as the repository takes. A timeout
+        # cannot stop the worker, only stop waiting for it. See _offload.
+        bounded=False,
+    )
 
 
 @mcp.tool()
@@ -164,9 +290,8 @@ async def run_postprocess_tool(
     Use after building with postprocess="none" or "minimal", or to re-run
     expensive steps independently. Signatures are always computed.
 
-    Offloaded to a thread via ``asyncio.to_thread`` so community
-    detection on large graphs doesn't block the MCP event loop. See:
-    #46, #136.
+    Offloaded via ``_offload`` so community detection on large graphs
+    does not block the MCP event loop. See: #46, #136, #262.
 
     Args:
         flows: Run flow detection. Default: True.
@@ -179,19 +304,22 @@ async def run_postprocess_tool(
             Must be supplied with embedding_provider. Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
-
-    def _run() -> dict:
-        return with_provenance(run_postprocess(
+    return await _offload(
+        "run_postprocess_tool",
+        lambda: run_postprocess(
             flows=flows, communities=communities, fts=fts, repo_root=root,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
-        ), root)
-
-    return await asyncio.to_thread(_run)
+        ),
+        root,
+        # Writes graph.db for as long as the repository takes. A timeout
+        # cannot stop the worker, only stop waiting for it. See _offload.
+        bounded=False,
+    )
 
 
 @mcp.tool()
-def get_minimal_context_tool(
+async def get_minimal_context_tool(
     task: str = "",
     changed_files: Optional[list[str]] = None,
     repo_root: Optional[str] = None,
@@ -212,46 +340,69 @@ def get_minimal_context_tool(
         base: Git ref for diff comparison. Default: HEAD~1.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_minimal_context(
-        task=task, changed_files=changed_files,
-        repo_root=root, base=base,
-    ), root)
+    return await _offload(
+        "get_minimal_context_tool",
+        lambda: get_minimal_context(
+            task=task, changed_files=changed_files,
+            repo_root=root, base=base,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_impact_radius_tool(
+async def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
+    max_results: int = 500,
     repo_root: Optional[str] = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    resolution: str = "all",
 ) -> dict:
     """Analyze the blast radius of changed files in the codebase.
 
     Shows which functions, classes, and files are impacted by changes.
     Auto-detects changed files from git if not specified.
 
+    An impacted node that calls or references the changed code directly also
+    carries the ``call_site`` (file and line) it does so at, and
+    ``unresolved_call_sites`` counts call sites that name a changed symbol but
+    were never bound to it, so an empty radius is not mistaken for proof.
+
     Args:
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
         max_depth: Number of hops to traverse in the dependency graph. Default: 2.
+        max_results: How many impacted nodes to traverse to. Default: 500. Each
+            list in the response also has a fixed ceiling (100 nodes, 150
+            edges, 200 files) so the response size does not grow with the
+            repository; the omitted counts report the rest.
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes. Default: HEAD~1.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        resolution: "all" (default) or "direct" to traverse only calls bound to an indexed node.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_impact_radius(
-        changed_files=changed_files, max_depth=max_depth,
-        repo_root=root, base=base, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "get_impact_radius_tool",
+        lambda: get_impact_radius(
+            changed_files=changed_files, max_depth=max_depth,
+            max_results=max_results,
+            repo_root=root, base=base, detail_level=detail_level,
+            resolution=resolution,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def query_graph_tool(
+async def query_graph_tool(
     pattern: str,
     target: str,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
     max_results: int = 100,
+    resolution: str = "all",
 ) -> dict:
     """Run a predefined graph query to explore code relationships.
 
@@ -273,22 +424,34 @@ def query_graph_tool(
     - consumers_of: Find classes that consume a Spring configuration property
     - file_summary: Get all nodes in a file
 
+    callers_of, callees_of and references_to return one row per call site, each
+    carrying the ``call_site`` (file and line) the call is written at, plus a
+    ``resolution_split`` saying how many of those call sites are bound to an
+    indexed node and how many are bare-name matches.
+
     Args:
         pattern: Query pattern name (see above).
         target: Node name, qualified name, or file path to query.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
         max_results: Maximum results to return. Default: 100.
+        resolution: "all" (default), "direct" for only calls bound to an indexed
+            node, or "unresolved" for only the bare-name matches.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(query_graph(
-        pattern=pattern, target=target, repo_root=root,
-        detail_level=detail_level, max_results=max_results,
-    ), root)
+    return await _offload(
+        "query_graph_tool",
+        lambda: query_graph(
+            pattern=pattern, target=target, repo_root=root,
+            detail_level=detail_level, max_results=max_results,
+            resolution=resolution,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_review_context_tool(
+async def get_review_context_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
     include_source: bool = True,
@@ -319,16 +482,20 @@ def get_review_context_tool(
             Default: 25. Snippets share an 800-line budget.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_review_context(
-        changed_files=changed_files, max_depth=max_depth,
-        include_source=include_source, max_lines_per_file=max_lines_per_file,
-        repo_root=root, base=base, detail_level=detail_level,
-        max_results=max_results, max_files=max_files,
-    ), root)
+    return await _offload(
+        "get_review_context_tool",
+        lambda: get_review_context(
+            changed_files=changed_files, max_depth=max_depth,
+            include_source=include_source, max_lines_per_file=max_lines_per_file,
+            repo_root=root, base=base, detail_level=detail_level,
+            max_results=max_results, max_files=max_files,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def semantic_search_nodes_tool(
+async def semantic_search_nodes_tool(
     query: str,
     kind: Optional[str] = None,
     limit: int = 20,
@@ -359,10 +526,14 @@ def semantic_search_nodes_tool(
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(semantic_search_nodes(
-        query=query, kind=kind, limit=limit, repo_root=root,
-        model=model, provider=provider, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "semantic_search_nodes_tool",
+        lambda: semantic_search_nodes(
+            query=query, kind=kind, limit=limit, repo_root=root,
+            model=model, provider=provider, detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
@@ -383,10 +554,10 @@ async def embed_graph_tool(
     After running this, semantic_search_nodes_tool will use vector similarity
     instead of keyword matching for much better results.
 
-    Runs the blocking sentence-transformers / Gemini / HTTP inference in a
-    thread via ``asyncio.to_thread`` so the stdio event loop stays
-    responsive — without this wrapper, embedding a large graph would
-    silently hang the MCP server on Windows. See: #46, #136.
+    Runs the blocking sentence-transformers / Gemini / HTTP inference on a
+    worker thread via ``_offload`` so the stdio event loop stays
+    responsive — without that, embedding a large graph would silently hang
+    the MCP server on Windows. See: #46, #136, #262.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
@@ -403,17 +574,18 @@ async def embed_graph_tool(
                   unless a model arg or CRG_VOYAGE_MODEL is supplied.
     """
     root = _resolve_repo_root(repo_root)
-
-    def _run() -> dict:
-        return with_provenance(embed_graph(
+    return await _offload(
+        "embed_graph_tool",
+        lambda: embed_graph(
             repo_root=root, model=model, provider=provider,
-        ), root)
-
-    return await asyncio.to_thread(_run)
+        ),
+        root,
+        bounded=False,  # writes embeddings; minutes is normal. See _offload.
+    )
 
 
 @mcp.tool()
-def list_graph_stats_tool(
+async def list_graph_stats_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
     """Get aggregate statistics about the code knowledge graph.
@@ -425,7 +597,11 @@ def list_graph_stats_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(list_graph_stats(repo_root=root), root)
+    return await _offload(
+        "list_graph_stats_tool",
+        lambda: list_graph_stats(repo_root=root),
+        root,
+    )
 
 
 @mcp.tool()
@@ -437,6 +613,11 @@ def get_docs_section_tool(
 
     Returns only the requested section content for minimal token usage.
     Use this before answering any user question about the plugin.
+
+    One of the two tools that stay synchronous: it reads one bundled
+    Markdown file and touches neither the graph database nor Git, so there
+    is nothing here that can hold the event loop for seconds. See
+    ``_offload`` for the tools that do.
 
     Available sections: usage, review-delta, review-pr, commands, legal,
     watch, embeddings, languages, troubleshooting.
@@ -452,7 +633,7 @@ def get_docs_section_tool(
 
 
 @mcp.tool()
-def find_large_functions_tool(
+async def find_large_functions_tool(
     min_lines: int = 50,
     kind: Optional[str] = None,
     file_path_pattern: Optional[str] = None,
@@ -472,14 +653,18 @@ def find_large_functions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(find_large_functions(
-        min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
-        limit=limit, repo_root=root,
-    ), root)
+    return await _offload(
+        "find_large_functions_tool",
+        lambda: find_large_functions(
+            min_lines=min_lines, kind=kind, file_path_pattern=file_path_pattern,
+            limit=limit, repo_root=root,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def list_flows_tool(
+async def list_flows_tool(
     sort_by: str = "criticality",
     limit: int = 50,
     kind: Optional[str] = None,
@@ -501,14 +686,18 @@ def list_flows_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(list_flows(
-        repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
-        detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "list_flows_tool",
+        lambda: list_flows(
+            repo_root=root, sort_by=sort_by, limit=limit, kind=kind,
+            detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_flow_tool(
+async def get_flow_tool(
     flow_id: Optional[int] = None,
     flow_name: Optional[str] = None,
     include_source: bool = False,
@@ -534,15 +723,19 @@ def get_flow_tool(
             include_source is set. Default: 400.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_flow(
-        flow_id=flow_id, flow_name=flow_name,
-        include_source=include_source, repo_root=root,
-        max_steps=max_steps, max_source_lines=max_source_lines,
-    ), root)
+    return await _offload(
+        "get_flow_tool",
+        lambda: get_flow(
+            flow_id=flow_id, flow_name=flow_name,
+            include_source=include_source, repo_root=root,
+            max_steps=max_steps, max_source_lines=max_source_lines,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_affected_flows_tool(
+async def get_affected_flows_tool(
     changed_files: Optional[list[str]] = None,
     base: str = "HEAD~1",
     repo_root: Optional[str] = None,
@@ -567,14 +760,18 @@ def get_affected_flows_tool(
             because a standard flow costs ~980 tokens against ~18 minimal.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_affected_flows_func(
-        changed_files=changed_files, base=base, repo_root=root,
-        detail_level=detail_level, max_flows=max_flows,
-    ), root)
+    return await _offload(
+        "get_affected_flows_tool",
+        lambda: get_affected_flows_func(
+            changed_files=changed_files, base=base, repo_root=root,
+            detail_level=detail_level, max_flows=max_flows,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def list_communities_tool(
+async def list_communities_tool(
     sort_by: str = "size",
     min_size: int = 0,
     detail_level: str = "standard",
@@ -602,15 +799,19 @@ def list_communities_tool(
             count. Default: 10.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(list_communities_func(
-        repo_root=root, sort_by=sort_by, min_size=min_size,
-        detail_level=detail_level, max_results=max_results,
-        max_members=max_members,
-    ), root)
+    return await _offload(
+        "list_communities_tool",
+        lambda: list_communities_func(
+            repo_root=root, sort_by=sort_by, min_size=min_size,
+            detail_level=detail_level, max_results=max_results,
+            max_members=max_members,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_community_tool(
+async def get_community_tool(
     community_name: Optional[str] = None,
     community_id: Optional[int] = None,
     include_members: bool = False,
@@ -635,15 +836,19 @@ def get_community_tool(
             members_truncated marks the cut. Default: 25.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_community_func(
-        community_name=community_name, community_id=community_id,
-        include_members=include_members, repo_root=root,
-        max_members=max_members,
-    ), root)
+    return await _offload(
+        "get_community_tool",
+        lambda: get_community_func(
+            community_name=community_name, community_id=community_id,
+            include_members=include_members, repo_root=root,
+            max_members=max_members,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_architecture_overview_tool(
+async def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "minimal",
     max_results: int = 100,
@@ -667,12 +872,16 @@ def get_architecture_overview_tool(
             Default: 10.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_architecture_overview_func(
-        repo_root=root,
-        detail_level=detail_level,
-        max_results=max_results,
-        max_members=max_members,
-    ), root)
+    return await _offload(
+        "get_architecture_overview_tool",
+        lambda: get_architecture_overview_func(
+            repo_root=root,
+            detail_level=detail_level,
+            max_results=max_results,
+            max_members=max_members,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
@@ -692,9 +901,9 @@ async def detect_changes_tool(
     flows, communities, and test coverage gaps. Returns risk scores and
     prioritized review items. Replaces get_review_context for change-aware reviews.
 
-    Offloaded to a thread via ``asyncio.to_thread`` — runs `git diff`
-    subprocesses and BFS traversals that can take several seconds on
-    large repos. See: #46, #136.
+    Offloaded via ``_offload`` — runs `git diff` subprocesses and BFS
+    traversals that can take several seconds on large repos, and honours
+    ``CRG_TOOL_TIMEOUT``. See: #46, #136, #262.
 
     Args:
         base: Git ref to diff against. Default: HEAD~1.
@@ -712,37 +921,21 @@ async def detect_changes_tool(
             detail. Default: 20.
     """
     root = _resolve_repo_root(repo_root)
-
-    def _run() -> dict:
-        return with_provenance(detect_changes_func(
+    return await _offload(
+        "detect_changes_tool",
+        lambda: detect_changes_func(
             base=base, changed_files=changed_files,
             include_source=include_source, max_depth=max_depth,
             repo_root=root, detail_level=detail_level,
             max_results=max_results, max_flows=max_flows,
-        ), root)
-
-    coro = asyncio.to_thread(_run)
-    tool_timeout = int(os.environ.get("CRG_TOOL_TIMEOUT", "0"))
-    if tool_timeout > 0:
-        try:
-            return await asyncio.wait_for(coro, timeout=tool_timeout)
-        except asyncio.TimeoutError:
-            message = (
-                f"detect_changes_tool timed out after {tool_timeout}s. "
-                "Reduce scope with CRG_MAX_CHANGED_FUNCS / CRG_MAX_TRANSITIVE_FRONTIER, "
-                "or increase CRG_TOOL_TIMEOUT."
-            )
-            error_response = {
-                "status": "error",
-                "error": message,
-                "summary": message,
-            }
-            return await asyncio.to_thread(with_provenance, error_response, root)
-    return await coro
+        ),
+        root,
+        timeout_hint=_DETECT_CHANGES_TIMEOUT_HINT,
+    )
 
 
 @mcp.tool()
-def refactor_tool(
+async def refactor_tool(
     mode: str = "rename",
     old_name: Optional[str] = None,
     new_name: Optional[str] = None,
@@ -780,15 +973,19 @@ def refactor_tool(
             identifying fields only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(refactor_func(
-        mode=mode, old_name=old_name, new_name=new_name,
-        kind=kind, file_pattern=file_pattern, repo_root=root,
-        max_results=max_results, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "refactor_tool",
+        lambda: refactor_func(
+            mode=mode, old_name=old_name, new_name=new_name,
+            kind=kind, file_pattern=file_pattern, repo_root=root,
+            max_results=max_results, detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def apply_refactor_tool(
+async def apply_refactor_tool(
     refactor_id: str,
     repo_root: Optional[str] = None,
     dry_run: bool = False,
@@ -815,10 +1012,18 @@ def apply_refactor_tool(
             would_modify still lists every file. Default: 25.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(apply_refactor_func(
-        refactor_id=refactor_id, repo_root=root,
-        dry_run=dry_run, max_diff_files=max_diff_files,
-    ), root)
+    return await _offload(
+        "apply_refactor_tool",
+        lambda: apply_refactor_func(
+            refactor_id=refactor_id, repo_root=root,
+            dry_run=dry_run, max_diff_files=max_diff_files,
+        ),
+        root,
+        # Rewrites source files. Reporting a timeout while the rename lands
+        # anyway leaves the caller a modified tree and a retry that cannot
+        # work: the refactor id is consumed. See _offload.
+        bounded=False,
+    )
 
 
 @mcp.tool()
@@ -832,26 +1037,27 @@ async def generate_wiki_tool(
     Pages are written to .code-review-graph/wiki/ inside the repository.
     Only regenerates pages whose content has changed unless force=True.
 
-    Offloaded to a thread via ``asyncio.to_thread`` — on large graphs
-    the page-generation loop touches every community and issues many
-    SQLite reads, which would block the MCP event loop. See: #46, #136.
+    Offloaded via ``_offload`` — on large graphs the page-generation loop
+    touches every community and issues many SQLite reads, which would
+    block the MCP event loop. See: #46, #136, #262.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
         force: If True, regenerate all pages even if content unchanged. Default: False.
     """
     root = _resolve_repo_root(repo_root)
-
-    def _run() -> dict:
-        return with_provenance(generate_wiki_func(
+    return await _offload(
+        "generate_wiki_tool",
+        lambda: generate_wiki_func(
             repo_root=root, force=force,
-        ), root)
-
-    return await asyncio.to_thread(_run)
+        ),
+        root,
+        bounded=False,  # writes the wiki tree; minutes is normal. See _offload.
+    )
 
 
 @mcp.tool()
-def get_wiki_page_tool(
+async def get_wiki_page_tool(
     community_name: str,
     repo_root: Optional[str] = None,
     max_chars: int = 20000,
@@ -868,14 +1074,18 @@ def get_wiki_page_tool(
             total_chars reports the real length. Default: 20000.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_wiki_page_func(
-        community_name=community_name, repo_root=root,
-        max_chars=max_chars,
-    ), root)
+    return await _offload(
+        "get_wiki_page_tool",
+        lambda: get_wiki_page_func(
+            community_name=community_name, repo_root=root,
+            max_chars=max_chars,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_hub_nodes_tool(
+async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
@@ -892,13 +1102,17 @@ def get_hub_nodes_tool(
             kind, and total_degree only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_hub_nodes_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "get_hub_nodes_tool",
+        lambda: get_hub_nodes_func(
+            repo_root=root, top_n=top_n, detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_bridge_nodes_tool(
+async def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
@@ -916,13 +1130,17 @@ def get_bridge_nodes_tool(
             kind, and betweenness only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_bridge_nodes_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "get_bridge_nodes_tool",
+        lambda: get_bridge_nodes_func(
+            repo_root=root, top_n=top_n, detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_knowledge_gaps_tool(
+async def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
     max_per_category: int = 15,
     detail_level: str = "standard",
@@ -941,14 +1159,18 @@ def get_knowledge_gaps_tool(
             file paths. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_knowledge_gaps_func(
-        repo_root=root, max_per_category=max_per_category,
-        detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "get_knowledge_gaps_tool",
+        lambda: get_knowledge_gaps_func(
+            repo_root=root, max_per_category=max_per_category,
+            detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_surprising_connections_tool(
+async def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
     detail_level: str = "standard",
@@ -966,13 +1188,17 @@ def get_surprising_connections_tool(
             source, target, kind, and score only. Default: standard.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_surprising_connections_func(
-        repo_root=root, top_n=top_n, detail_level=detail_level,
-    ), root)
+    return await _offload(
+        "get_surprising_connections_tool",
+        lambda: get_surprising_connections_func(
+            repo_root=root, top_n=top_n, detail_level=detail_level,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def get_suggested_questions_tool(
+async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
     """Auto-generate review questions from graph analysis.
@@ -985,13 +1211,17 @@ def get_suggested_questions_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(get_suggested_questions_func(
-        repo_root=root,
-    ), root)
+    return await _offload(
+        "get_suggested_questions_tool",
+        lambda: get_suggested_questions_func(
+            repo_root=root,
+        ),
+        root,
+    )
 
 
 @mcp.tool()
-def traverse_graph_tool(
+async def traverse_graph_tool(
     query: str,
     mode: str = "bfs",
     depth: int = 3,
@@ -1014,11 +1244,15 @@ def traverse_graph_tool(
         repo_root: Repository root path. Auto-detected if omitted.
     """
     root = _resolve_repo_root(repo_root)
-    return with_provenance(traverse_graph_func(
-        query=query, mode=mode, depth=depth,
-        token_budget=token_budget,
-        repo_root=root or "",
-    ), root)
+    return await _offload(
+        "traverse_graph_tool",
+        lambda: traverse_graph_func(
+            query=query, mode=mode, depth=depth,
+            token_budget=token_budget,
+            repo_root=root or "",
+        ),
+        root,
+    )
 
 
 @mcp.tool()
@@ -1027,20 +1261,23 @@ def list_repos_tool() -> dict:
 
     Returns the list of repos registered at ~/.code-review-graph/registry.json.
     Use the CLI 'register' command to add repos.
+
+    Stays synchronous: one small JSON read, no graph database and no Git.
     """
     return list_repos_func()
 
 
 @mcp.tool()
-def cross_repo_search_tool(
+async def cross_repo_search_tool(
     query: str,
     kind: Optional[str] = None,
     limit: int = 20,
     max_results: int = 50,
+    repos: Optional[list[str]] = None,
 ) -> dict:
-    """Search for code entities across all registered repositories.
+    """Search for code entities across registered repositories.
 
-    Runs hybrid search on each registered repo's graph database and interleaves
+    Runs hybrid search on each searched repo's graph database and interleaves
     results by repository-local rank. Equal ranks follow registry order, and up
     to ``limit`` results per searched repo may be returned. Register repos first
     with the CLI 'register' command.
@@ -1049,11 +1286,23 @@ def cross_repo_search_tool(
         query: Search string to match against node names.
         kind: Optional filter: File, Class, Function, Type, or Test.
         limit: Maximum results per repo. Default: 20.
-        max_results: Maximum merged results across all repos; total reports
-            the untruncated merged count. Default: 50.
+        max_results: Maximum merged results across searched repos; total
+            reports the untruncated merged count. Default: 50.
+        repos: Optional repo aliases or folder names to search. Default: every
+            registered repo. Use it when the registry spans unrelated products
+            and only some of them can answer the question. Matching is exact
+            and case-sensitive, and paths are not accepted. Names matching no
+            registry entry come back in ``unknown``; a name matching several
+            entries selects all of them and is listed in ``ambiguous``.
     """
-    return cross_repo_search_func(
-        query=query, kind=kind, limit=limit, max_results=max_results,
+    return await _offload(
+        "cross_repo_search_tool",
+        lambda: cross_repo_search_func(
+            query=query, kind=kind, limit=limit, max_results=max_results,
+            repos=repos,
+        ),
+        None,
+        provenance=False,
     )
 
 
@@ -1138,7 +1387,6 @@ def _apply_tool_filter(tools: str | None = None) -> None:
         CRG_TOOLS=query_graph_tool,semantic_search_nodes_tool
     """
     import asyncio
-    import os
 
     raw = tools or os.environ.get("CRG_TOOLS")
     if not raw:

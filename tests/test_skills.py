@@ -1040,7 +1040,10 @@ class TestCodeBuddyPlatform:
         configured = install_platform_configs(tmp_path, target="codebuddy")
 
         assert configured == ["CodeBuddy Code"]
-        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        written = mcp_path.read_text(encoding="utf-8")
+        # The comment is the user's; merging our entry may not delete it.
+        assert "// CodeBuddy supports JSONC in project MCP files" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         assert data["dashboard"] == "https://example.test/a,b"
         assert data["mcpServers"]["existing"]["command"] == "existing"
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
@@ -1345,7 +1348,9 @@ class TestInstallPlatformConfigs:
 
         install_platform_configs(tmp_path, target="opencode")
 
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        written = config_path.read_text(encoding="utf-8")
+        assert "// keep this server" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         assert "other" in data["mcp"]
         assert "code-review-graph" in data["mcp"]
         assert (tmp_path / "opencode.json").read_text(encoding="utf-8") == "{}"
@@ -2550,7 +2555,9 @@ class TestInstallConfigDataLoss:
         configured = self._run_zed(settings, tmp_path)
 
         assert "Zed" in configured
-        data = json.loads(settings.read_text(encoding="utf-8"))
+        written = settings.read_text(encoding="utf-8")
+        assert "// user theme preference" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         # User's existing setting preserved AND our server added.
         assert data["theme"] == "One Dark"
         assert "code-review-graph" in data["context_servers"]
