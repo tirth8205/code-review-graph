@@ -2610,6 +2610,52 @@ def _php_docblock_marks_test(node) -> bool:
     )
 
 
+def _csharp_name(node) -> str:
+    """Read a C# name without folding trivia into its identity."""
+    parts = []
+    pending = [node] if node is not None else []
+    while pending:
+        current = pending.pop()
+        if current.type == "comment":
+            continue
+        if current.children:
+            pending.extend(reversed(current.children))
+        else:
+            parts.append(current.text.decode("utf-8", errors="replace").removeprefix("@"))
+    return "".join(parts)
+
+
+def _csharp_namespace_context(node) -> list[tuple[str, int]]:
+    """Innermost namespace body first; byte offsets distinguish reopened bodies.
+
+    Some grammar versions put file-scoped namespace members beside the
+    declaration rather than underneath it. Its scope still extends to EOF.
+    The compilation unit has scope -1, distinct from a namespace at byte 0.
+    """
+    declarations = []
+    current = node.parent
+    while current is not None:
+        if current.type in ("namespace_declaration", "file_scoped_namespace_declaration"):
+            declarations.append(current)
+        if current.parent is None and not declarations:
+            for child in current.named_children:
+                if child.start_byte >= node.start_byte:
+                    break
+                if child.type == "file_scoped_namespace_declaration":
+                    declarations.append(child)
+                    break
+                if child.type in _CLASS_TYPES["csharp"] or child.type == "namespace_declaration":
+                    break
+        current = current.parent
+    scopes = [("", -1)]
+    namespace = ""
+    for declaration in reversed(declarations):
+        name = _csharp_name(declaration.child_by_field_name("name"))
+        namespace = f"{namespace}.{name}" if namespace else name
+        scopes.append((namespace, declaration.start_byte))
+    return list(reversed(scopes))
+
+
 def _csharp_namespaces(root_node) -> list[str]:
     """Return all namespaces declared in a C# compilation unit.
 
@@ -2619,7 +2665,7 @@ def _csharp_namespaces(root_node) -> list[str]:
     See: #310
     """
     namespaces: list[str] = []
-    stack = [(root_node, None)]
+    stack = [(root_node, "")]
 
     while stack:
         node, parent_namespace = stack.pop()
@@ -2629,7 +2675,7 @@ def _csharp_namespaces(root_node) -> list[str]:
         ):
             for c in node.children:
                 if c.type in ("qualified_name", "identifier"):
-                    text = c.text.decode("utf-8", errors="replace").strip()
+                    text = _csharp_name(c)
                     if text:
                         current_namespace = (
                             f"{parent_namespace}.{text}"
@@ -3349,6 +3395,15 @@ class CodeParser:
             )
 
         edges = self._apply_typed_call_targets(edges, typed_call_targets, language)
+        if language == "csharp":
+            for edge in edges:
+                if edge.kind != "CALLS":
+                    continue
+                receiver = edge.extra.get("receiver_scope") or edge.extra.get("receiver")
+                if receiver:
+                    # Distinct receivers on one line must survive edge upsert.
+                    edge.target = f"{receiver}::{edge.target}"
+                edge.extra["csharp_raw_target"] = edge.target
 
         if language == "python":
             edges = self._apply_python_receiver_evidence(
@@ -5260,6 +5315,11 @@ class CodeParser:
                 nodes, edges, file_path,
             )
 
+        # All C# call binding belongs to the namespace-aware graph pass.
+        # A same-file or bare-name match cannot establish C# visibility.
+        if any(node.language == "csharp" for node in nodes):
+            return edges
+
         is_cpp = any(node.language == "cpp" for node in nodes)
         is_go = any(node.language == "go" for node in nodes)
 
@@ -5664,8 +5724,9 @@ class CodeParser:
     ) -> dict[tuple[int, str, str], tuple[str, str, str]]:
         """Collect evidence-backed targets for calls on typed receivers.
 
-        The result is keyed by source line, receiver, and method so the normal
-        call extractor remains the single producer of CALLS edges. Statically
+        The result is keyed by source position, receiver, and method so the normal
+        call extractor remains the single producer of CALLS edges. C# uses byte
+        offsets to distinguish lexical bindings on the same line. Statically
         typed receivers resolve directly when their class is repository-local.
         PHP variables assigned from ``new Type`` retain a bare parse-time target
         plus the constructed class scope for conservative graph-wide resolution.
@@ -5676,6 +5737,8 @@ class CodeParser:
 
         class_types = set(self._class_types.get(language, []))
         function_types = set(self._function_types.get(language, []))
+        if language == "csharp":
+            function_types.add("local_function_statement")
         call_types = set(self._call_types.get(language, []))
         block_types = {
             "java": {"block"},
@@ -5716,6 +5779,10 @@ class CodeParser:
 
             if node.type in block_types:
                 scoped = dict(bindings)
+                if language == "csharp":
+                    for child in node.named_children:
+                        if child.type == "local_function_statement":
+                            scoped[_csharp_name(child.child_by_field_name("name"))] = ""
                 for child in node.children:
                     walk(child, scoped, class_fields, depth + 1)
                 return
@@ -5737,6 +5804,13 @@ class CodeParser:
                 return
 
             if node.type in call_types:
+                if language == "csharp":
+                    callee = node.child_by_field_name("function")
+                    if callee is not None and callee.type == "identifier":
+                        name = _csharp_name(callee)
+                        if name in bindings:
+                            # A callable local/member hides containing-type methods.
+                            targets[(node.start_byte, "", name)] = ("", "", "shadowed_callable")
                 receiver, method = self._get_member_call_receiver_method(
                     node, language,
                 )
@@ -5747,7 +5821,14 @@ class CodeParser:
                         if language == "php"
                         else "typed_receiver"
                     )
-                    if type_name is None and receiver[:1].isupper():
+                    if (
+                        type_name is None
+                        and (receiver[:1].isupper() or language == "csharp")
+                        and not (
+                            language == "csharp"
+                            and receiver.split(".", 1)[0] in bindings
+                        )
+                    ):
                         # C# receivers keep their class-name evidence even
                         # when the class is not visible in this file: the
                         # graph-wide scoped resolver validates it against
@@ -5769,7 +5850,11 @@ class CodeParser:
                             defined_names,
                         )
                         if target:
-                            key = (node.start_point[0] + 1, receiver, method)
+                            position = (
+                                node.start_byte if language == "csharp"
+                                else node.start_point[0] + 1
+                            )
+                            key = (position, receiver, method)
                             targets[key] = (target, type_name, evidence)
 
             for child in node.children:
@@ -5973,13 +6058,15 @@ class CodeParser:
                     result,
                     child.child_by_field_name("name"),
                     declared_type,
+                    csharp=True,
                 )
 
-        elif language == "csharp" and node.type == "parameter":
+        elif language == "csharp" and node.type in ("parameter", "property_declaration"):
             self._store_typed_binding(
                 result,
                 node.child_by_field_name("name"),
                 node.child_by_field_name("type"),
+                csharp=True,
             )
 
         elif language == "php" and node.type == "assignment_expression":
@@ -6023,8 +6110,17 @@ class CodeParser:
         return {name} if name else set()
 
     @classmethod
-    def _store_typed_binding(cls, result: dict[str, str], name_node, type_node) -> None:
-        if name_node is None or type_node is None:
+    def _store_typed_binding(
+        cls, result: dict[str, str], name_node, type_node, *, csharp: bool = False,
+    ) -> None:
+        if name_node is None:
+            return
+        if csharp:
+            # Preserve qualification and type arguments. An unknown local still
+            # shadows a type name; it must not become a static receiver guess.
+            result[_csharp_name(name_node)] = _csharp_name(type_node)
+            return
+        if type_node is None:
             return
         name = name_node.text.decode("utf-8", errors="replace")
         type_name = cls._base_type_name(
@@ -6087,10 +6183,7 @@ class CodeParser:
             # class receiver cannot be resolved to its defining file during
             # a single-file parse. Emit the receiver class as a scope target
             # for the graph-wide scoped resolver (#612).
-            base_type = self._base_type_name(type_name)
-            if not base_type:
-                return None
-            return f"{base_type}::{method}"
+            return f"{type_name}::{method}" if type_name else None
 
         base_type = self._base_type_name(type_name)
         if not base_type:
@@ -6120,7 +6213,11 @@ class CodeParser:
         for edge in edges:
             receiver = edge.extra.get("receiver")
             method = edge.target.rsplit(".", 1)[-1].rsplit("::", 1)[-1]
-            evidence = targets.get((edge.line, receiver, method)) if receiver else None
+            position = edge.extra.get("source_offset", -1) if language == "csharp" else edge.line
+            evidence = (
+                targets.get((position, receiver or "", method))
+                if receiver or language == "csharp" else None
+            )
             if edge.kind == "CALLS" and evidence:
                 target, type_name, evidence_kind = evidence
                 extra = dict(edge.extra)
@@ -11652,12 +11749,30 @@ class CodeParser:
             return False
 
         class_parent = enclosing_class
+        csharp_namespace = None
+        if language == "csharp":
+            name = _csharp_name(child.child_by_field_name("name"))
+            csharp_namespace = _csharp_namespace_context(child)[0][0]
+            class_parent = enclosing_class or csharp_namespace or None
 
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
         # protocol uses its own protocol_declaration node type.
         extra: dict = {}
+        if language == "csharp":
+            extra["csharp_namespace"] = csharp_namespace
+            parameters = next(
+                (c for c in child.children if c.type == "type_parameter_list"), None,
+            )
+            if parameters is not None:
+                # Arity, not a flag: it is what separates the declarations of
+                # ``I``, ``I<T>`` and ``I<T, U>`` from one another.
+                extra["csharp_arity"] = sum(
+                    1 for c in parameters.named_children if c.type == "type_parameter"
+                )
+            if any(c.type == "modifier" and c.text == b"partial" for c in child.children):
+                extra["csharp_partial"] = True
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -11738,7 +11853,7 @@ class CodeParser:
         # CONTAINS edge
         class_container = (
             self._qualify(enclosing_class, file_path, None)
-            if language == "julia" and enclosing_class
+            if language in ("julia", "csharp") and enclosing_class
             else file_path
         )
         edges.append(EdgeInfo(
@@ -11778,6 +11893,8 @@ class CodeParser:
         # Recurse into class body
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
+        elif language == "csharp":
+            recursive_class = f"{class_parent}.{name}" if class_parent else name
         else:
             recursive_class = name
         self._extract_from_tree(
@@ -11809,6 +11926,8 @@ class CodeParser:
         name = self._get_name(child, language, "function")
         if not name:
             return False
+        if language == "csharp":
+            name = _csharp_name(child.child_by_field_name("name")) or name
 
         # Go methods: attach to their receiver type as the enclosing class,
         # so `func (s *T) Foo()` becomes a member of T rather than a
@@ -11918,6 +12037,11 @@ class CodeParser:
 
         # Java: detect Temporal method-level annotations and Kafka listeners
         method_extra: dict = {}
+        if language == "csharp":
+            method_extra["csharp_namespace"] = _csharp_namespace_context(child)[0][0]
+            method_extra["csharp_static"] = any(
+                c.type == "modifier" and c.text == b"static" for c in child.children
+            )
         go_receiver_bindings = None
         if language == "go" and child.type == "method_declaration":
             receiver_name = self._get_go_receiver_name(child)
@@ -12105,6 +12229,24 @@ class CodeParser:
         extraction instead of silently dropping the call. See: Ruby call graph.
         """
         specs = self._extract_import_specs(child, language, source, file_path)
+        csharp_extra = {}
+        if language == "csharp":
+            scopes = _csharp_namespace_context(child)
+            alias = next((c for c in child.children if c.type == "="), None)
+            csharp_extra = {
+                "source_offset": child.start_byte,
+                "csharp_scopes": scopes,
+                "csharp_global": any(c.type == "global" for c in child.children),
+                "csharp_using_kind": (
+                    "alias" if alias is not None
+                    else "static" if any(c.type == "static" for c in child.children)
+                    else "namespace"
+                ),
+            }
+            if alias is not None:
+                csharp_extra["csharp_alias"] = _csharp_name(next(
+                    c for c in child.named_children if c.type != "comment"
+                ))
         for spec in specs:
             target, scope = self._resolve_import_target(
                 spec.module, file_path, language, spec.form,
@@ -12121,7 +12263,7 @@ class CodeParser:
                 target=target,
                 file_path=file_path,
                 line=spec.line,
-                extra={IMPORT_SCOPE_KEY: scope} if scope else {},
+                extra={**csharp_extra, **({IMPORT_SCOPE_KEY: scope} if scope else {})},
             ))
         return bool(specs)
 
@@ -12376,7 +12518,26 @@ class CodeParser:
             # lives on the receiver's type, not in the current file's scope.
             # The spring_resolver post-pass will do the correct cross-type lookup.
             receiver_name = call_extra.get("receiver")
-            if receiver_name in ("self", "cls", "this") and enclosing_class:
+            if language == "csharp":
+                target = call_name
+                callee = child.child_by_field_name("function")
+                call_extra.update({
+                    "source_offset": child.start_byte,
+                    "csharp_raw_target": call_name,
+                    "csharp_scopes": _csharp_namespace_context(child),
+                    "csharp_containing_type": enclosing_class,
+                    "csharp_call_kind": (
+                        "constructor" if child.type == "object_creation_expression"
+                        else "unqualified" if callee is not None and callee.type == "identifier"
+                        else "member"
+                    ),
+                    "unresolved_targets": [],
+                })
+                if child.type == "object_creation_expression":
+                    call_extra["receiver_scope"] = _csharp_name(
+                        child.child_by_field_name("type"),
+                    )
+            elif receiver_name in ("self", "cls", "this") and enclosing_class:
                 target = (
                     call_name
                     if language == "cpp"
@@ -12608,13 +12769,13 @@ class CodeParser:
             name_node = callee.child_by_field_name("name")
             if name_node is None:
                 return None, None
-            method = name_node.text.decode("utf-8", errors="replace")
+            method = _csharp_name(name_node)
             receiver_node = callee.child_by_field_name("expression")
             if receiver_node is None:
                 return None, method
             if receiver_node.type in ("identifier", "this", "this_expression"):
                 return (
-                    receiver_node.text.decode("utf-8", errors="replace"),
+                    _csharp_name(receiver_node),
                     method,
                 )
             # ``this.field.Save()``: the class field is the receiver.
@@ -12627,9 +12788,22 @@ class CodeParser:
                     and root.type in ("this", "this_expression")
                 ):
                     return (
-                        field_node.text.decode("utf-8", errors="replace"),
+                        _csharp_name(field_node),
                         method,
                     )
+            # Namespace/type paths retain every segment, including global::.
+            # Calls or computed expressions in the receiver are not type names.
+            pending = [receiver_node]
+            while pending:
+                part = pending.pop()
+                if part.type not in (
+                    "identifier", "member_access_expression", "qualified_name",
+                    "alias_qualified_name", "comment",
+                ):
+                    break
+                pending.extend(part.named_children)
+            else:
+                return _csharp_name(receiver_node), method
             return None, method
 
         if callee.type == "conditional_access_expression":
@@ -12642,7 +12816,7 @@ class CodeParser:
             name_node = bindings[-1].child_by_field_name("name")
             if name_node is None:
                 return None, None
-            method = name_node.text.decode("utf-8", errors="replace")
+            method = _csharp_name(name_node)
             receiver_node = callee.child_by_field_name("condition")
             named_children = [
                 child for child in callee.children if child.is_named
@@ -12653,7 +12827,7 @@ class CodeParser:
                 and len(named_children) == 2
             ):
                 return (
-                    receiver_node.text.decode("utf-8", errors="replace"),
+                    _csharp_name(receiver_node),
                     method,
                 )
             return None, method
@@ -18197,7 +18371,11 @@ class CodeParser:
                 if child.type in ("system_lib_string", "string_literal"):
                     val = child.text.decode("utf-8", errors="replace").strip("<>\"")
                     imports.append(val)
-        elif language in ("java", "csharp"):
+        elif language == "csharp":
+            names = [c for c in node.named_children if c.type != "comment"]
+            if names:
+                imports.append(_csharp_name(names[-1]))
+        elif language == "java":
             # import/using package.Class
             parts = text.split()
             if len(parts) >= 2:

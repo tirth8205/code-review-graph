@@ -669,9 +669,18 @@ class TestQueryGraphCallTargetFallbacks:
             "Child.cs": child_source,
             **extra_files,
         })
+        # C# identities include their lexical namespace; query the declaration
+        # stored for this fixture rather than its former namespace-free name.
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            bases = [
+                node for node in store.get_nodes_by_file(str(tmp_path / "Base.cs"))
+                if node.name == "PlainBase"
+            ]
+            assert len(bases) == 1
+            base_qualified = bases[0].qualified_name
         for detail_level in ("standard", "minimal"):
             result = query_graph(
-                "inheritors_of", f"{(tmp_path / 'Base.cs').as_posix()}::PlainBase",
+                "inheritors_of", base_qualified,
                 str(tmp_path), detail_level=detail_level,
             )
             assert result["status"] == "ok"

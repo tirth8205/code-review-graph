@@ -841,12 +841,15 @@ class GraphStore:
         confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
         extra = json.dumps(extra_dict)
 
-        # Check for existing edge (include line so multiple call sites are preserved)
+        # A parser can supply a byte offset when distinct scopes/calls share a
+        # line. Without it, two C# namespace bodies can overwrite a using edge.
         existing = self._conn.execute(
             """SELECT id FROM edges
                WHERE kind=? AND source_qualified=? AND target_qualified=?
-                     AND file_path=? AND line=?""",
-            (edge.kind, edge.source, edge.target, edge.file_path, edge.line),
+                     AND file_path=? AND line=?
+                     AND json_extract(extra, '$.source_offset') IS ?""",
+            (edge.kind, edge.source, edge.target, edge.file_path, edge.line,
+             extra_dict.get("source_offset")),
         ).fetchone()
 
         if existing:
@@ -1073,19 +1076,22 @@ class GraphStore:
                 node_rows,
             )
         if edges:
-            # upsert_edge() collapsed duplicate call sites (same kind, source,
-            # target, file, line) into a single row carrying the *last*
+            # upsert_edge() collapses duplicate call sites (same kind, source,
+            # target, file, line and optional offset) into a row carrying the *last*
             # extra/confidence values. Replicate that collapse in Python so a
             # plain INSERT batch is safe — the file's previous rows were
             # deleted above and an identical edge cannot come from another
             # file (file_path is part of the identity).
-            edge_by_site: dict[tuple[str, str, str, str, int], tuple] = {}
+            edge_by_site: dict[tuple[str, str, str, str, int, int | None], tuple] = {}
             for edge in edges:
                 extra_dict = edge.extra if edge.extra else {}
                 confidence = float(extra_dict.get("confidence", 1.0))
                 confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
                 extra = json.dumps(extra_dict)
-                site = (edge.kind, edge.source, edge.target, edge.file_path, edge.line)
+                site = (
+                    edge.kind, edge.source, edge.target, edge.file_path, edge.line,
+                    extra_dict.get("source_offset"),
+                )
                 edge_by_site[site] = (
                     edge.kind, edge.source, edge.target, edge.file_path, edge.line,
                     extra, confidence, confidence_tier, now,

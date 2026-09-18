@@ -699,7 +699,9 @@ def build_or_update_graph(
                     "postprocess_level": postprocess,
                 }
             failed = [str(item.get("file", "?")) for item in result["errors"]]
-            if result["files_updated"] == 0 and not failed:
+            if result["files_updated"] == 0 and not failed and not (
+                postprocess == "full" and store.get_metadata("csharp_flows_dirty") == "1"
+            ):
                 summary = (
                     "No changes detected. Graph is up to date."
                     if result.get("freshness_advanced")

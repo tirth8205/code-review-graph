@@ -154,6 +154,85 @@ Languages without a grammar can be added through `.code-review-graph/languages.t
 (`docs/CUSTOM_LANGUAGES.md`). Some formats (notebooks, Vue and Svelte SFCs, SQL, Ansible,
 Spring configuration) use targeted parsers instead of Tree-sitter.
 
+### C# namespace identity and binding
+
+C# declarations include their namespace and complete containing-type path:
+`/repo/Handlers.cs::App.Report.ExportHandler.Run`. `parent_name` contains
+`App.Report.ExportHandler`; `extra.csharp_namespace` separately records `App`.
+This distinguishes types in different namespaces even when they occupy the same
+file. Namespace strings remain metadata, not synthetic graph nodes. The existing
+file-level `csharp_namespaces` list remains available for file import/impact queries.
+
+Parsing records facts; `csharp_resolver.py` binds calls after storage. C# calls and
+imports carry `csharp_scopes`, ordered pairs of namespace names and namespace-body
+byte offsets, innermost first. Compilation-unit scope uses offset `-1`. Reopened
+bodies with the same namespace name have different offsets, so an ordinary using
+cannot leak between them. File-scoped namespaces include all following members,
+including grammars that represent those members as siblings. `source_offset`
+distinguishes both receiver evidence and stored edges on the same source line
+without a schema migration. Calls also retain `csharp_containing_type` so field
+and property initializers keep their lexical context when their graph caller is a File.
+
+The resolver selects a receiver type before looking up its method. It checks
+enclosing types, enclosing namespaces, and imports at their actual lexical scopes;
+it does not use file co-location, short-name uniqueness, or suffix matching as
+visibility evidence. Namespace imports expose types, not child namespaces.
+`global::` qualifications and simple namespace/type aliases retain their meaning.
+`Alias::Type` searches only namespace aliases in the call's lexical scopes; it
+does not select a same-named type, namespace, or local. Unqualified calls can reach
+static methods in enclosing types, using parsed `csharp_static` evidence. Lookup
+stops at a nearer method group; `this.Run()` stays within the immediate type.
+Unqualified calls hidden by recorded local, parameter, field or property bindings
+stay unresolved.
+This follows the lookup order in the C# specification's
+[namespace and type names](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/basic-concepts#78-namespace-and-type-names)
+and [using directives](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/namespaces#146-using-directives).
+
+Explicit global usings are collected across files owned by the nearest single
+`.csproj`, rather than across all projects in the repository. With multiple project
+files in that directory, ownership is unknown and global usings stay local to their
+file. Loose C# files without a project share the review root as one compilation.
+This is a structural approximation: linked/conditional compile items, generated or
+implicit usings, project references and target frameworks require MSBuild evaluation.
+Rebuild after changing project layout when updates are driven only by source watches.
+
+Every C# call keeps `csharp_raw_target` and receiver evidence after binding. Resolved
+edges are marked `INFERRED`; unresolved edges retain `unresolved_targets` so generic
+graph fallbacks cannot bind them using weaker evidence. Each C# update re-evaluates
+these calls, including unchanged callers. `TESTED_BY` mirrors move with their calls.
+Before deleting a callee file, incoming managed calls return to their raw references
+so recreating a declaration can resolve them again.
+Binding changes persist a `csharp_flows_dirty` marker with the edge update.
+The next full postprocess retraces all flows, including unchanged callers and
+old/new entry points. Deferred postprocessing retains the marker even if a later
+update parses no files; successful full flow replacement clears it atomically.
+This reuses the existing full trace until the binder can provide a complete
+affected set for incremental tracing.
+
+`CSHARP_IDENTITY_VERSION = "5"` upgrades the old namespace-free format, the
+nested-type-only format proposed in #937, and graphs lacking per-call lexical
+context, static/callable evidence, or generic arity. Incremental updates reparse existing C# files
+despite matching hashes.
+The attempted version is recorded together with
+failed file paths; subsequent updates retry those files alone and preserve their
+last stored data until parsing succeeds. This avoids extending #944's repeated
+full-rebuild loop. No SQL migration attempts to reconstruct missing source identity.
+
+A generic declaration is keyed by arity — ``App.Box`1`` — so a constructed
+reference reaches the declaration it names and never a same-named one of another
+arity: `I<int>` binds to `I<T>`, `I` binds to `I`, and `Pair<int>` binds to
+neither when only `Pair<K, V>` exists. The receiver's spelling is retained on the
+call; only the key is derived from it, and the key is built from the syntax rather
+than by scanning for angle brackets, so nested arguments and tuples count
+correctly. A constructed containing type such as `Outer<T>.Inner` carries a second
+arity that one key cannot describe, and stays unresolved.
+
+This remains a structural graph, not a C# compiler. Overload selection, type
+argument substitution and constraints (#943), inherited members, assembly
+accessibility, and unqualified calls imported with `using static` are outside this
+change; unsupported or ambiguous bindings stay unresolved. Inheritance target
+spelling is unchanged.
+
 ## Visualisation
 
 `visualization.py` writes a self-contained HTML file with a D3.js force-directed graph of the
