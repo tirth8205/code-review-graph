@@ -790,8 +790,16 @@ class GraphStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(qualified_name) DO UPDATE SET
                  kind=excluded.kind, name=excluded.name,
-                 file_path=excluded.file_path, line_start=excluded.line_start,
-                 line_end=excluded.line_end, language=excluded.language,
+                 file_path=excluded.file_path,
+                 line_start=CASE WHEN excluded.kind IN ('Function', 'Test')
+                                 AND nodes.kind IN ('Function', 'Test')
+                            THEN MIN(nodes.line_start, excluded.line_start)
+                            ELSE excluded.line_start END,
+                 line_end=CASE WHEN excluded.kind IN ('Function', 'Test')
+                               AND nodes.kind IN ('Function', 'Test')
+                          THEN MAX(nodes.line_end, excluded.line_end)
+                          ELSE excluded.line_end END,
+                 language=excluded.language,
                  parent_name=excluded.parent_name, params=excluded.params,
                  return_type=excluded.return_type, modifiers=excluded.modifiers,
                  is_test=excluded.is_test, file_hash=excluded.file_hash,
@@ -1043,8 +1051,10 @@ class GraphStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(qualified_name) DO UPDATE SET
                      kind=excluded.kind, name=excluded.name,
-                     file_path=excluded.file_path, line_start=excluded.line_start,
-                     line_end=excluded.line_end, language=excluded.language,
+                     file_path=excluded.file_path,
+                     line_start=MIN(nodes.line_start, excluded.line_start),
+                     line_end=MAX(nodes.line_end, excluded.line_end),
+                     language=excluded.language,
                      parent_name=excluded.parent_name, params=excluded.params,
                      return_type=excluded.return_type, modifiers=excluded.modifiers,
                      is_test=excluded.is_test, file_hash=excluded.file_hash,

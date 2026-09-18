@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -2729,6 +2730,78 @@ class TestElixirParsing:
         }
         assert any(t.endswith("::Calculator.add") for t in function_targets)
         assert any(t.endswith("::Calculator.compute") for t in function_targets)
+
+    def test_guarded_functions_are_parsed_and_called(self, tmp_path):
+        path = tmp_path / "guarded.ex"
+        source = (
+            b"defmodule T do\n"
+            b"  def plain(x), do: x\n"
+            b"  def guarded(x) when is_binary(x), do: x\n"
+            b"  def caller(x) do\n"
+            b"    guarded(x)\n"
+            b"  end\n"
+            b"  def zero, do: :zero\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+
+        function_names = {node.name for node in nodes if node.kind == "Function"}
+        assert {"plain", "guarded", "caller", "zero"} <= function_names
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::T.caller")
+            and edge.target.endswith("::T.guarded")
+            for edge in edges
+        )
+
+    @pytest.mark.parametrize(
+        "name, declaration",
+        [
+            ("compound", b"  def compound(a, b) when a and b, do: a\n"),
+            ("stacked", b"  def stacked(x) when g1 when g2, do: x\n"),
+            ("private_guarded", b"  defp private_guarded(x) when is_integer(x), do: x\n"),
+            ("macro_guarded", b"  defmacro macro_guarded(x) when is_atom(x), do: x\n"),
+            ("zero_guarded", b"  def zero_guarded when is_boolean(true), do: :zero\n"),
+        ],
+    )
+    def test_guarded_function_forms_are_parsed(self, tmp_path, name, declaration):
+        path = tmp_path / f"{name}.ex"
+        source = b"defmodule T do\n" + declaration + b"end\n"
+
+        nodes, _ = self.parser.parse_bytes(path, source)
+
+        functions = [node for node in nodes if node.kind == "Function"]
+        assert [node.name for node in functions] == [name]
+
+    def test_multi_clause_functions_keep_the_full_graph_range(self, tmp_path):
+        path = tmp_path / "clauses.ex"
+        source = (
+            b"defmodule T do\n"
+            b"\n"
+            b"\n"
+            b"  def multi(0), do: :zero\n"
+            b"  def multi(n), do: n\n"
+            b"end\n"
+        )
+
+        nodes, edges = self.parser.parse_bytes(path, source)
+        clauses = [
+            node for node in nodes
+            if node.kind == "Function" and node.name == "multi"
+        ]
+        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 4), (5, 5)]
+
+        for writer_name, writer in (
+            ("nodes_edges", lambda store: store.store_file_nodes_edges(path, nodes, edges)),
+            ("batch", lambda store: store.store_file_batch([(str(path), nodes, edges, "")])),
+        ):
+            with GraphStore(tmp_path / f"clauses-{writer_name}.db") as store:
+                writer(store)
+                multi = store.get_node(f"{path.as_posix()}::T.multi")
+
+            assert multi is not None
+            assert (multi.line_start, multi.line_end) == (4, 5)
 
 
 class TestGDScriptParsing:
