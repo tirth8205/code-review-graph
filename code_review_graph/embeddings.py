@@ -1310,11 +1310,8 @@ def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) ->
     if not embedding_store.available:
         return 0
 
-    all_files = graph_store.get_all_files()
-    all_nodes: list[GraphNode] = []
-    for f in all_files:
-        all_nodes.extend(graph_store.get_nodes_by_file(f))
-
+    # Legacy stores may hold paths that normalized file lookups cannot reach.
+    all_nodes = graph_store.get_all_nodes(exclude_files=True)
     return embedding_store.embed_nodes(all_nodes)
 
 
@@ -1391,9 +1388,7 @@ def refresh_embeddings(
             )
 
         purged = embedding_store.purge_orphans()
-        all_nodes: list[GraphNode] = []
-        for file_path in graph_store.get_all_files():
-            all_nodes.extend(graph_store.get_nodes_by_file(file_path))
+        all_nodes = graph_store.get_all_nodes(exclude_files=True)
         embedded = embedding_store.embed_nodes(all_nodes)
         return {"embedded": embedded, "purged": purged}
     finally:

@@ -1,179 +1,133 @@
 # Knowledge Graph Schema
 
+The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
+The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
+Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
+The current schema version is 10.
+
 ## Node Types
 
-### File
-Represents a source code file.
+`nodes.kind` holds one of the values below.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| name | string | Absolute file path |
-| file_path | string | Same as name for File nodes |
-| language | string | Detected language (python, typescript, go, etc.) |
-| line_start | int | Always 1 |
-| line_end | int | Total line count |
-| file_hash | string | SHA-256 of file contents (for change detection) |
+### File
+One row per parsed file.
+
+| Column | Value |
+|---|---|
+| name | File path, as stored at build time (absolute) |
+| file_path | Same as `name` |
+| language | Detected language (`python`, `typescript`, `go`, ...) |
+| line_start | 1 |
+| line_end | Line count |
+| file_hash | SHA-256 of the file bytes, used for change detection |
 
 ### Class
-Represents a class, struct, interface, enum, or module definition.
+A class, struct, interface, enum or module definition.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| name | string | Class name |
-| file_path | string | File containing the class |
-| line_start | int | Definition start line |
-| line_end | int | Definition end line |
-| language | string | Source language |
-| parent_name | string? | Enclosing class (for nested classes) |
-| modifiers | string? | Access modifiers (public, abstract, etc.) |
+| Column | Value |
+|---|---|
+| name | Class name |
+| file_path | Containing file |
+| line_start, line_end | Definition range |
+| language | Source language |
+| parent_name | Enclosing class, for nested classes |
+| modifiers | Access modifiers (`public`, `abstract`, ...) where the grammar exposes them |
 
 ### Function
-Represents a function, method, or constructor definition.
+A function, method or constructor.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| name | string | Function name |
-| file_path | string | File containing the function |
-| line_start | int | Definition start line |
-| line_end | int | Definition end line |
-| language | string | Source language |
-| parent_name | string? | Enclosing class (for methods) |
-| params | string? | Parameter list as source text |
-| return_type | string? | Return type annotation |
-| is_test | bool | Whether this is a test function |
+| Column | Value |
+|---|---|
+| name | Function name |
+| file_path | Containing file |
+| line_start, line_end | Definition range |
+| language | Source language |
+| parent_name | Enclosing class, for methods |
+| params | Parameter list as source text |
+| return_type | Return type annotation |
+| signature | Signature text computed by post-processing and indexed by `nodes_fts` (added in v2) |
+| is_test | 1 for test functions |
 
 ### Test
-Same schema as Function, but `kind = "Test"` and `is_test = true`. Identified by:
-- Name starts with `test_` or `Test`
-- Name ends with `_test` or `_spec`
-- File matches test file patterns (`test_*.py`, `*.test.ts`, `*_test.go`, etc.)
-- Language-specific test markers where supported, such as common Rust test attributes
+Same columns as Function, with `kind = 'Test'` and `is_test = 1`. A function is a test when
+any of these hold (`_is_test_function` in `parser.py`):
+
+- Its name matches `^test_`, `^Test`, `_test$`, `_spec$`, `.test.` or `.spec.`.
+- It is in a test file (`test_*.py`, `*_test.py`, `*.test.ts`, `*.spec.js`, `*_test.go`,
+  `tests/`, `__tests__/`, `*Test.java`, `*Test.kt`, `*_test.dart`, R `testthat`, Julia
+  `test/`, ReScript `*_test.res`) and is named like a test-runner call (`describe`, `it`,
+  `test`, `beforeEach`, ...).
+- It carries a test annotation: JUnit `@Test`, `@ParameterizedTest`, `@RepeatedTest`,
+  `@TestFactory`, or Rust `#[test]`, `#[tokio::test]`, `#[async_std::test]`, `#[rstest]`,
+  `#[proptest]`.
 
 ### Type
-Represents a type alias, interface, enum, struct-like type, or parser-specific type construct where the language exposes one.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| name | string | Type name |
-| file_path | string | File containing the type |
-| line_start | int | Definition start line |
-| line_end | int | Definition end line |
+A type alias, interface, enum or similar construct where the language parser emits one.
+Columns as for Class.
 
 ### Endpoint
-A synthesised node representing a routed entry point, emitted by the Spring enrichment for request mappings. Linked to the method that services it by a `HANDLES` edge.
+A synthesised routed entry point, emitted for Spring request mappings and WebFlux functional
+routes. Linked to the handling method by a `HANDLES` edge.
 
 ### Scheduler
-A synthesised node representing a scheduled invocation, emitted for `@Scheduled` methods. Linked to the method it fires by a `TRIGGERS` edge.
+A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
+edge.
 
 ### ConfigProperty
-An externalised configuration key parsed out of Spring `application.properties` / `application.yml` files. Values are deliberately discarded — only the key is stored. Linked to the code that binds it by a `DEPENDS_ON_CONFIG` edge.
+A configuration key parsed from Spring `application.properties` or `application.yml`.
+Values are discarded; only the key is stored. Linked to the code that binds it by a
+`DEPENDS_ON_CONFIG` edge.
+
+### Event
+A synthesised node for a Spring application event, created after the build by
+`event_resolver.py` from `PUBLISHES` and `HANDLES` edges. Its `file_path` is the placeholder
+`event` and `extra` carries `{"event_type": ..., "virtual": true}`.
 
 ## Edge Types
 
-### CALLS
-A function calls another function.
+Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship
+was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
+`CALLS` and `REFERENCES`, `target_resolution`.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Qualified name of the caller |
-| target | string | Name of the called function (may be unqualified) |
-| file_path | string | File where the call occurs |
-| line | int | Line number of the call |
+| Kind | Source -> target | Notes |
+|---|---|---|
+| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |
+| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py` |
+| INHERITS | child class -> parent class | |
+| IMPLEMENTS | implementing class -> interface | |
+| CONTAINS | file -> class or function; class -> method | Structural containment |
+| TESTED_BY | function -> test function | |
+| REFERENCES | node -> symbol used as a value | Callback maps, arrays, assignment |
+| DEPENDS_ON | general dependency | Ansible role `meta` dependencies, Solidity `using` directives |
+| INJECTS | Spring bean -> injected field or constructor parameter type | Spring enrichment |
+| CONSUMES | `@KafkaListener` / `@KafkaHandler` method -> `kafka:<topic>` | Spring Kafka enrichment |
+| PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
+| TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
+| DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
+| HANDLES | `Endpoint` -> controller method; `@EventListener` method -> event | Spring enrichment |
+| TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
+| PUBLISHES | method -> Spring application event | Spring enrichment |
 
-### IMPORTS_FROM
-A file imports from another module or file.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Importing file path |
-| target | string | Imported module/path |
-| file_path | string | Same as source |
-| line | int | Line number of the import |
-
-### INHERITS
-A class extends/inherits from another class.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Child class qualified name |
-| target | string | Parent class name |
-| file_path | string | File containing the child class |
-
-### IMPLEMENTS
-A class implements an interface (Java, C#, TypeScript, Go).
-
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Implementing class |
-| target | string | Interface name |
-
-### CONTAINS
-Structural containment: a file contains a class, a class contains a method.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Container (file path or class qualified name) |
-| target | string | Contained node qualified name |
-
-### TESTED_BY
-A function is tested by a test function.
-
-| Property | Type | Description |
-|----------|------|-------------|
-| source | string | Function being tested |
-| target | string | Test function qualified name |
-
-### DEPENDS_ON
-General dependency relationship (used for non-specific dependencies).
-
-### REFERENCES
-A value-level reference to another symbol, often used for function-as-value patterns such as callback maps, arrays, or assignment.
-
-### INJECTS
-A dependency-injection relationship, currently used by Java/Spring enrichment for injected fields and constructor parameters.
-
-### CONSUMES / PRODUCES
-Data or event flow relationships emitted by specialised parsers when a source consumes or produces a named resource.
-
-### TEMPORAL_STUB
-Temporal dependency placeholder emitted by specialised parsers when a time/order relationship is detected but cannot be resolved to a stronger edge type.
-
-### DEPENDS_ON_CONFIG
-A binding from code to externalised configuration, emitted by the Spring enrichment for `@ConfigurationProperties` classes and the `ConfigProperty` nodes parsed out of `application.properties` / `application.yml`.
-
-### HANDLES
-A handler relationship between a dispatch point and the method that services it — Spring request mappings binding an `Endpoint` node to its controller method, and `@EventListener` methods binding to the event they consume.
-
-### TRIGGERS
-A scheduled invocation, emitted for `@Scheduled` methods to link the synthesised `Scheduler` node to the method it fires.
-
-### PUBLISHES
-An event-publication relationship, emitted where code publishes a Spring application event.
-
-> `OVERRIDES` appears in the impact-scoring tables (`constants.py`) but is not emitted by any parser today.
+`OVERRIDES` has an impact weight in `constants.py` but no parser emits it.
 
 ## Qualified Name Format
 
-Nodes are uniquely identified by qualified names:
-
+```text
+/absolute/path/to/file.py                                  # File
+/absolute/path/to/file.py::function_name                   # top-level function
+/absolute/path/to/file.py::ClassName.method_name           # method
+/absolute/path/to/file.py::OuterClass.InnerClass.method    # nested class method
 ```
-# File node
-/absolute/path/to/file.py
 
-# Top-level function
-/absolute/path/to/file.py::function_name
-
-# Method in a class
-/absolute/path/to/file.py::ClassName.method_name
-
-# Nested class method
-/absolute/path/to/file.py::OuterClass.InnerClass.method_name
-```
+`nodes.symbol` stores the part after the first `::` (or the whole name when there is none)
+so that dotted-tail lookups are an indexed equality test.
 
 ## SQLite Tables
 
+Base tables from `graph.py`. Columns marked with a version are added by that migration on
+existing databases.
+
 ```sql
--- Nodes table
 CREATE TABLE nodes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -190,11 +144,14 @@ CREATE TABLE nodes (
     is_test INTEGER DEFAULT 0,
     file_hash TEXT,
     extra TEXT DEFAULT '{}',
-    community_id INTEGER,
-    updated_at REAL NOT NULL
+    symbol TEXT,                 -- v10
+    docstring TEXT,              -- v13
+    name_tokens TEXT,            -- v13
+    updated_at REAL NOT NULL,
+    signature TEXT,              -- v2
+    community_id INTEGER         -- v4
 );
 
--- Edges table
 CREATE TABLE edges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kind TEXT NOT NULL,
@@ -203,18 +160,22 @@ CREATE TABLE edges (
     file_path TEXT NOT NULL,
     line INTEGER DEFAULT 0,
     extra TEXT DEFAULT '{}',
-    confidence REAL DEFAULT 1.0,
-    confidence_tier TEXT DEFAULT 'EXTRACTED',
+    confidence REAL DEFAULT 1.0,              -- v9
+    confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9
+    target_resolution TEXT,                   -- v11; 'direct' | 'unresolved' | NULL
     updated_at REAL NOT NULL
 );
 
--- Metadata table
 CREATE TABLE metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+```
 
--- Flows table (v2.0)
+Tables added by migrations:
+
+```sql
+-- v3
 CREATE TABLE flows (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -228,7 +189,6 @@ CREATE TABLE flows (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Flow memberships table (v2.0)
 CREATE TABLE flow_memberships (
     flow_id INTEGER NOT NULL,
     node_id INTEGER NOT NULL,
@@ -236,7 +196,7 @@ CREATE TABLE flow_memberships (
     PRIMARY KEY (flow_id, node_id)
 );
 
--- Communities table (v2.0)
+-- v4
 CREATE TABLE communities (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -249,14 +209,15 @@ CREATE TABLE communities (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Full-text search virtual table (v2.0)
+-- v5, widened by v13 (rebuilt by search.rebuild_fts_index from the same
+-- migrations.NODES_FTS_DDL, so the two cannot drift)
 CREATE VIRTUAL TABLE nodes_fts USING fts5(
-    name, qualified_name, file_path, signature,
+    name, qualified_name, file_path, signature, docstring, name_tokens,
     content='nodes', content_rowid='rowid',
     tokenize='porter unicode61'
 );
 
--- Token-efficient summary tables (v6)
+-- v6
 CREATE TABLE community_summaries (
     community_id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
@@ -264,7 +225,8 @@ CREATE TABLE community_summaries (
     key_symbols TEXT DEFAULT '[]',
     risk TEXT DEFAULT 'unknown',
     size INTEGER DEFAULT 0,
-    dominant_language TEXT DEFAULT ''
+    dominant_language TEXT DEFAULT '',
+    FOREIGN KEY (community_id) REFERENCES communities(id)
 );
 
 CREATE TABLE flow_snapshots (
@@ -274,7 +236,8 @@ CREATE TABLE flow_snapshots (
     critical_path TEXT DEFAULT '[]',
     criticality REAL DEFAULT 0.0,
     node_count INTEGER DEFAULT 0,
-    file_count INTEGER DEFAULT 0
+    file_count INTEGER DEFAULT 0,
+    FOREIGN KEY (flow_id) REFERENCES flows(id)
 );
 
 CREATE TABLE risk_index (
@@ -284,16 +247,99 @@ CREATE TABLE risk_index (
     caller_count INTEGER DEFAULT 0,
     test_coverage TEXT DEFAULT 'unknown',
     security_relevant INTEGER DEFAULT 0,
-    last_computed TEXT DEFAULT ''
+    last_computed TEXT DEFAULT '',
+    FOREIGN KEY (node_id) REFERENCES nodes(id)
 );
 
--- Embeddings table, stored in the embeddings database
+-- v12, widened by v13 to mirror every nodes_fts column
+CREATE TABLE nodes_fts_state (
+    node_id INTEGER PRIMARY KEY,
+    name TEXT,
+    qualified_name TEXT,
+    file_path TEXT,
+    signature TEXT,
+    docstring TEXT,      -- v13
+    name_tokens TEXT     -- v13
+);
+CREATE INDEX idx_nodes_fts_state_file ON nodes_fts_state(file_path);
+```
+
+`nodes_fts` is an external content table: it holds the inverted index but reads column
+values from `nodes`. Removing one of its entries therefore needs the values that were
+indexed, and those are gone once the node row is deleted. `nodes_fts_state` mirrors what
+the index currently holds so `search.update_fts_index` can rewrite just the rows an
+update touched instead of dropping and repopulating the whole index. It starts empty
+after the migration; the first index sync fills it with one full rebuild. Its columns
+have to be exactly `migrations.NODES_FTS_COLUMNS`, because an external-content delete
+replays every indexed value; the `fts_state_synced` metadata key records the mirror
+shape, and a mirror written under an older value forces one rebuild.
+
+### Embeddings
+
+`EmbeddingStore` in `code_review_graph/embeddings.py` creates this table in the same
+`graph.db` when embeddings are first generated. It is not part of the migration chain; a
+missing `provider` column is added when the store opens.
+
+```sql
 CREATE TABLE embeddings (
     qualified_name TEXT PRIMARY KEY,
-    vector BLOB NOT NULL,
+    vector BLOB NOT NULL,            -- float32 array
     text_hash TEXT NOT NULL,
     provider TEXT NOT NULL DEFAULT 'unknown'
 );
 ```
 
-Indexes include qualified-name, file-path, node-kind, edge source/target/kind, community, flow criticality, risk score, compound edge lookup indexes, and the composite edge upsert index.
+### Metadata keys
+
+| Key | Set by |
+|---|---|
+| `schema_version` | `migrations.py`; `13` on a current database |
+| `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
+| `last_updated` | Full and incremental builds |
+| `last_build_type` | Full and incremental builds |
+| `git_head_sha`, `git_branch` | Builds in a git checkout |
+| `svn_branch`, `svn_revision` | Builds in an SVN working copy |
+| `postprocess_level` | Post-processing |
+
+### Indexes
+
+| Index | Columns | Added |
+|---|---|---|
+| `idx_nodes_file` | `nodes(file_path)` | base |
+| `idx_nodes_kind` | `nodes(kind)` | base |
+| `idx_nodes_qualified` | `nodes(qualified_name)` | base |
+| `idx_edges_source` | `edges(source_qualified)` | base |
+| `idx_edges_target` | `edges(target_qualified)` | base |
+| `idx_edges_kind` | `edges(kind)` | base |
+| `idx_edges_file` | `edges(file_path)` | base |
+| `idx_edges_target_kind` | `edges(target_qualified, kind)` | base, v7 |
+| `idx_edges_source_kind` | `edges(source_qualified, kind)` | base, v7 |
+| `idx_flows_criticality` | `flows(criticality DESC)` | v3 |
+| `idx_flows_entry` | `flows(entry_point_id)` | v3 |
+| `idx_flow_memberships_node` | `flow_memberships(node_id)` | v3 |
+| `idx_nodes_community` | `nodes(community_id)` | v4 |
+| `idx_communities_parent` | `communities(parent_id)` | v4 |
+| `idx_communities_cohesion` | `communities(cohesion DESC)` | v4 |
+| `idx_risk_index_score` | `risk_index(risk_score DESC)` | v6 |
+| `idx_edges_composite` | `edges(kind, source_qualified, target_qualified, file_path, line)` | v8 |
+| `idx_nodes_symbol` | `nodes(symbol)` | v10 |
+| `idx_edges_kind_target_resolution` | `edges(kind, target_resolution)` | v11 |
+
+### Migrations
+
+Each migration runs in its own transaction and updates `schema_version` on success.
+
+| Version | Change |
+|---|---|
+| 2 | `nodes.signature` |
+| 3 | `flows`, `flow_memberships` and their indexes |
+| 4 | `communities`, `nodes.community_id` and their indexes |
+| 5 | `nodes_fts` FTS5 table |
+| 6 | `community_summaries`, `flow_snapshots`, `risk_index`, `idx_risk_index_score` |
+| 7 | `idx_edges_target_kind`, `idx_edges_source_kind` |
+| 8 | `idx_edges_composite` |
+| 9 | `edges.confidence`, `edges.confidence_tier` |
+| 10 | `nodes.symbol`, back-filled from `qualified_name`, and `idx_nodes_symbol` |
+| 11 | `edges.target_resolution`, back-filled for `CALLS`/`REFERENCES`, and `idx_edges_kind_target_resolution` |
+| 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
+| 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |

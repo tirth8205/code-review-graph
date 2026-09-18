@@ -217,9 +217,9 @@ def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
         called["codebuddy_hooks"] = True
         return repo_root / ".codebuddy" / "settings.json"
 
-    def _inject_platform_instructions(repo_root, target="all"):
+    def _inject_instruction_files(repo_root, target="all", *, include_claude_md=True):
         called["codebuddy_instructions"] = target == "codebuddy"
-        return ["CODEBUDDY.md"]
+        return {"CODEBUDDY.md": "created"}
 
     monkeypatch.setattr(skills_module, "generate_skills", _generate_skills)
     monkeypatch.setattr(
@@ -236,8 +236,8 @@ def test_handle_init_codebuddy_installs_only_codebuddy_native_files(
     )
     monkeypatch.setattr(
         skills_module,
-        "inject_platform_instructions",
-        _inject_platform_instructions,
+        "inject_instruction_files",
+        _inject_instruction_files,
     )
 
     args = _args(tmp_path, "codebuddy")
