@@ -5,26 +5,23 @@ description: Perform a structured code review using change detection and impact
 
 ## Review Changes
 
-Perform a thorough, risk-aware code review using the knowledge graph.
+Review a change set with risk scores and blast radius from the knowledge graph.
 
 ### Steps
 
-1. Run `detect_changes_tool` to get risk-scored change analysis.
-2. Run `get_affected_flows_tool` to find impacted execution paths.
-3. For each high-risk function, run `query_graph_tool` with pattern="tests_for" to check test coverage.
-4. Run `get_impact_radius_tool` to understand the blast radius.
-5. For any untested changes, suggest specific test cases.
+1. Call `detect_changes_tool` for risk-scored changed functions, test gaps and affected flows.
+2. Call `get_affected_flows_tool` only when you need the steps of an affected flow.
+3. For each high-risk function, call `query_graph_tool` with `pattern="tests_for"` to check test coverage.
+4. Call `get_impact_radius_tool` when the blast radius is not clear from step 1.
+5. Suggest specific test cases for untested changes.
 
 ### Output Format
 
-Provide findings grouped by risk level (high/medium/low) with:
-- What changed and why it matters
-- Test coverage status
-- Suggested improvements
-- Overall merge recommendation
+Group findings by risk level (high, medium, low). For each finding give what changed and why it matters, its test coverage, and the suggested fix. End with a merge recommendation.
 
 ## Token Efficiency Rules
-- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
-- Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
-- Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.
+- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when minimal is not enough.
+- Prefer a targeted `query_graph_tool` call over a broad listing call.
+- Budget: about five tool calls and 800 tokens of graph output per task.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

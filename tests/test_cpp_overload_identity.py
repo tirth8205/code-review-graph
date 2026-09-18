@@ -139,7 +139,12 @@ void caller() { process(1); }
         "candidates": [int_overload, double_overload],
         "candidate_count": 2,
         "candidates_truncated": False,
+        # An overload set was never bound to one node, so the row says so and
+        # carries the line the unresolved call is written at.
+        "target_resolution": "unresolved",
+        "call_site": {"line": 3, "file": prefix},
     }]
+    assert callees["resolution_split"] == {"direct": 0, "unresolved": 1}
     assert callees["edges"][0]["ambiguous_targets"] == [
         int_overload,
         double_overload,
@@ -714,7 +719,8 @@ def test_failed_cpp_identity_upgrade_remains_pending_and_retries(tmp_path: Path)
         ):
             retried = incremental_update(tmp_path, store, changed_files=[])
 
-        assert retried["identity_rebuild"] is True
+        assert retried.get("identity_rebuild") is None
+        assert retried["files_updated"] == 1
         assert retried["errors"] == []
         assert store.get_metadata("cpp_identity_version") == CPP_IDENTITY_VERSION
         assert store.get_node(legacy_qn) is None

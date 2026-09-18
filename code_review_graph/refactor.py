@@ -19,6 +19,8 @@ from typing import Any, Optional, Union
 
 from .flows import _has_framework_decorator, _matches_entry_name
 from .graph import GraphStore, _sanitize_name
+from .parser import is_test_file as _is_test_file
+from .parser import repo_relative_path as _repo_relative
 
 logger = logging.getLogger(__name__)
 
@@ -201,19 +203,6 @@ def _is_entry_point(node: Any) -> bool:
     return False
 
 
-# Matches identifiers inside type annotations (e.g. "GoalCreate" in
-# "body: GoalCreate", "Optional[UserResponse]", "list[Item]").
-_TEST_FILE_RE = re.compile(
-    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$"
-    r"|[\\/]e2e[_-]?tests?[\\/]|[\\/]test[_-]utils?[\\/])",
-)
-
-
-def _is_test_file(file_path: str) -> bool:
-    """Return True if *file_path* looks like a test file."""
-    return bool(_TEST_FILE_RE.search(file_path))
-
-
 _MIN_PKG_SEGMENT_LEN = 4  # ignore short dirs like "src", "lib", "app"
 
 
@@ -227,6 +216,8 @@ def _path_segments(file_path: str) -> tuple[str, ...]:
     )
 
 
+# Matches identifiers inside type annotations (e.g. "GoalCreate" in
+# "body: GoalCreate", "Optional[UserResponse]", "list[Item]").
 _TYPE_IDENT_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
 
 
@@ -276,6 +267,35 @@ def find_dead_code(
         kinds=[kind] if kind else ["Function", "Class"],
         file_pattern=file_pattern,
     )
+
+    # Stored file paths are absolute. Test-ness is read from the path
+    # relative to this root so ``tests/`` means the repository's own tests
+    # and not a directory above the checkout (#1023).
+    test_root = root or store.get_repo_root()
+
+    def _package_segments(file_path: str) -> tuple[str, ...]:
+        """Directory segments of *file_path* that could name a package.
+
+        Only the part inside the repository counts. The directories above a
+        checkout belong to whoever cloned it, so matching them against an
+        import specifier makes the answer depend on where the repository
+        happens to live: a job directory named "test" or "common" would
+        accept callers that a checkout elsewhere rejects (#1023). When the
+        root is unknown there is nothing better than the whole path, which is
+        what this did before roots were recorded.
+        """
+        return _path_segments(_repo_relative(file_path, test_root) or file_path)
+
+    def _in_test_file(file_path: str) -> bool:
+        """Whether *file_path* is test code, for dead-code purposes.
+
+        Dead-code detection opts into the ambiguous ``test-utils/`` and
+        ``test_utils/`` directories, which the shared default leaves out
+        because shared libraries are published from them. Here the trade is
+        the other way round: a wrong "this is dead" report sends a reviewer
+        to delete working code, while over-suppressing only costs a hint.
+        """
+        return _is_test_file(file_path, test_root, include_helper_dirs=True)
 
     # Build set of class names referenced in function type annotations.
     type_ref_names = _collect_type_referenced_names(store)
@@ -344,7 +364,7 @@ def find_dead_code(
             # "@cova-utils/lambda-common" and the path "libraries/lambda-common/...").
             if not imp_target.startswith("/"):
                 # imp_target is a package specifier, not a file path
-                for seg in _path_segments(node_file):
+                for seg in _package_segments(node_file):
                     if seg in imp_target:
                         return True
         return False
@@ -354,7 +374,7 @@ def find_dead_code(
     for node in candidates:
 
         # Skip test nodes and anything defined in test files.
-        if node.is_test or _is_test_file(node.file_path):
+        if node.is_test or _in_test_file(node.file_path):
             continue
 
         # Skip ambient type declarations (.d.ts) — they describe external APIs.
@@ -372,7 +392,7 @@ def find_dead_code(
 
         # Skip mock/stub variables in test files -- these are test helpers
         # referenced via variable assignment, not function calls.
-        if node.is_test or _is_test_file(node.file_path):
+        if node.is_test or _in_test_file(node.file_path):
             if _MOCK_NAME_RE.search(node.name):
                 continue
 

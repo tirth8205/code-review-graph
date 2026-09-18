@@ -33,6 +33,31 @@ _FILES = {
     ),
 }
 
+# The same shape as _FILES, but reached through RELATIVE imports, which take a
+# different resolution path: `_collect_import_names` and `_extract_import` hand
+# a relative specifier to the Python-specific resolver, which the file-level
+# `exclude_files` filter in `_resolve_module_to_file` never saw. A CALLS edge
+# derived from one therefore survived `forget` pointing at a node that had just
+# been deleted. `_FILES` above could not catch it: `from util import helper` is
+# absolute, and the absolute path was never broken.
+_RELATIVE_IMPORT_FILES = {
+    "pkg/__init__.py": "",
+    "pkg/util.py": "def helper():\n    return 41\n",
+    "pkg/shared.py": "def shared_fn():\n    return 7\n",
+    "pkg/sub/__init__.py": "",
+    "pkg/sub/deep.py": "def deep_fn():\n    return 3\n",
+    "pkg/main.py": (
+        "from .util import helper\n"
+        "from .shared import shared_fn\n"
+        "from . import util\n"
+        "from .sub.deep import deep_fn\n"
+        "from .sub import deep\n"
+        "\n"
+        "def run():\n"
+        "    return helper() + shared_fn() + deep_fn() + util.helper()\n"
+    ),
+}
+
 _AMBIGUOUS_IMPORT_FILES = {
     "src_one/pkg/util.py": "def helper():\n    return 1\n",
     "src_two/pkg/util.py": "def helper():\n    return 2\n",
@@ -260,6 +285,75 @@ def test_forget_matches_full_rebuild_without_file(tmp_path):
     # Guard against a vacuous pass: the surviving graph still has real content.
     assert after_forget["nodes"]
     assert after_forget["edges"]
+
+
+def _forget_then_rebuild(tmp_path, name: str, files: dict[str, str], forget: str):
+    """Forget *forget*, then build the same repository without it.
+
+    Returns ``(after_forget, rebuilt)`` snapshots taken at the same root so
+    repository-derived names stay comparable.
+    """
+    repo = _make_repo(tmp_path, name, files)
+    forgotten_path = repo / forget
+    store = _build(repo)
+    try:
+        _seed_embeddings(store)
+        forget_files(store, repo, [str(forgotten_path)])
+        after_forget = _snapshot(store, repo)
+        dangling = store._conn.execute(
+            "SELECT kind, source_qualified, target_qualified FROM edges "
+            "WHERE target_qualified LIKE '%::%' "
+            "AND target_qualified NOT IN (SELECT qualified_name FROM nodes)"
+        ).fetchall()
+    finally:
+        store.close()
+
+    forgotten_path.unlink()
+    shutil.rmtree(get_db_path(repo).parent)
+
+    rebuilt_store = _build(repo)
+    try:
+        _seed_embeddings(rebuilt_store)
+        rebuilt = _snapshot(rebuilt_store, repo)
+    finally:
+        rebuilt_store.close()
+    return after_forget, rebuilt, [tuple(row) for row in dangling]
+
+
+def test_forget_matches_rebuild_for_relative_imports(tmp_path):
+    """The relative-import path must honour exclusions like the absolute one.
+
+    ``pkg/main.py`` reaches ``pkg/util.py`` only through ``from .util import
+    helper`` and ``from . import util``. Both resolve through
+    ``_resolve_python_module_in_repo``, which the forgotten-file filter in
+    ``_resolve_module_to_file`` does not wrap -- so the re-parsed referrer
+    used to rediscover ``util.py`` on disk and keep a CALLS edge into a node
+    ``forget`` had already deleted.
+    """
+    after_forget, rebuilt, dangling = _forget_then_rebuild(
+        tmp_path, "relative-import", _RELATIVE_IMPORT_FILES, "pkg/util.py",
+    )
+
+    assert dangling == []
+    assert after_forget == rebuilt
+    assert after_forget["nodes"]
+    assert after_forget["edges"]
+    # Not vacuous: the surviving relative imports still resolve to files.
+    assert any(
+        "pkg/shared.py" in (row[2] or "")
+        for row in after_forget["edges"]
+        if row[0] == "IMPORTS_FROM"
+    )
+
+
+def test_forget_matches_rebuild_for_a_relative_subpackage(tmp_path):
+    """Same contract one package deeper, through ``from .sub import deep``."""
+    after_forget, rebuilt, dangling = _forget_then_rebuild(
+        tmp_path, "relative-sub", _RELATIVE_IMPORT_FILES, "pkg/sub/deep.py",
+    )
+
+    assert dangling == []
+    assert after_forget == rebuilt
 
 
 def test_forget_recomputes_python_import_after_candidate_is_removed(tmp_path):
