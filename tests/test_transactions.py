@@ -4,7 +4,6 @@ import sqlite3
 import tempfile
 import logging
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -85,24 +84,33 @@ class TestTransactionRobustness:
         """Verify that store_file_nodes_edges rolls back if an operation fails inside."""
         # Pre-seed some data
         node_keep = NodeInfo(
-            kind="File", name="keep", file_path="keep.py", 
+            kind="File", name="keep", file_path="keep.py",
+            line_start=1, line_end=10, language="python"
+        )
+        node_fail = NodeInfo(
+            kind="File", name="fail", file_path="fail.py",
             line_start=1, line_end=10, language="python"
         )
         store.store_file_nodes_edges("keep.py", [node_keep], [])
-        
-        # Attempt to store new file but force a failure
-        node_fail = NodeInfo(
-            kind="File", name="fail", file_path="fail.py", 
-            line_start=1, line_end=10, language="python"
+        store.store_file_nodes_edges("fail.py", [node_fail], [])
+
+        # Force a failure inside the batched write path. The old test patched
+        # store.upsert_node, but _replace_file_data no longer calls it, so the
+        # patch never fired (DID NOT RAISE). Inject the failure into the new
+        # path instead: a node whose `extra` is not JSON-serializable makes
+        # _replace_file_data raise while it builds the INSERT batch (after the
+        # file's rows were deleted), and the whole transaction must roll back.
+        node_fail_bad = NodeInfo(
+            kind="File", name="fail", file_path="fail.py",
+            line_start=1, line_end=10, language="python",
+            extra={"boom": object()},
         )
-        
-        with patch.object(store, 'upsert_node', side_effect=Exception("Simulated failure")):
-            with pytest.raises(Exception, match="Simulated failure"):
-                store.store_file_nodes_edges("fail.py", [node_fail], [])
-        
-        # Verify 'fail.py' data is NOT present
-        assert len(store.get_nodes_by_file("fail.py")) == 0
-        # Verify 'keep.py' data IS still present
+        with pytest.raises(TypeError, match="JSON serializable"):
+            store.store_file_nodes_edges("fail.py", [node_fail_bad], [])
+
+        # The failed transaction was rolled back: 'fail.py' still has its
+        # original node and 'keep.py' is untouched.
+        assert len(store.get_nodes_by_file("fail.py")) == 1
         assert len(store.get_nodes_by_file("keep.py")) == 1
 
     def test_public_rollback_api(self, store):
