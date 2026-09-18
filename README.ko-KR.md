@@ -97,6 +97,47 @@ Build the code review graph for this project
 빌드 시간은 저장소 크기에 비례합니다. 파일이 약 3,000개인 저장소의 콜드 빌드는 약 40초가 걸렸습니다([측정값](docs/REPRODUCING.md#incremental-update-latency)). 그 뒤로는 훅과 watch 모드가 그래프를 최신으로 유지합니다. 일부 파일의 파싱이 실패하면 결과 상태가 `partial`이 되고 요약에 해당 파일이 나열됩니다. CLI는 stderr에 `Warning:` 줄도 출력하며, 그 파일들은 기존 그래프 행을 유지합니다.
 
 
+### Docker 또는 Podman으로 실행하기
+
+프로젝트 저장소의 루트 디렉터리에서 이미지를 빌드합니다.
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+분석할 저장소의 디렉터리에서 다음 명령을 실행합니다.
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+마운트한 저장소에는 쓰기 권한이 있어야 합니다.
+위 명령은 현재 사용자의 사용자 ID와 그룹 ID를 사용하므로,
+생성된 `.code-review-graph/` 디렉터리의 소유권이 현재 사용자에게 유지됩니다.
+호스트에서 root가 아닌 사용자로 이 명령들을 실행하세요.
+
+Podman에서는 같은 Dockerfile을 빌드하고 사용자 매핑을 유지합니다.
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+저장된 그래프를 확인하려면 `build`를 `status`로 바꾸세요.
+이미지에는 Git이 포함되어 있으며, 기본적으로 root가 아닌 사용자로 실행됩니다.
+이미지를 빌드하는 동안에는 그래프를 생성하지 않습니다.
+
+이 예제들은 macOS/Linux 셸 문법을 사용합니다.
+macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
+
 ## 동작 방식
 
 <p align="center">

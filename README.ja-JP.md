@@ -96,6 +96,46 @@ Build the code review graph for this project
 
 ビルド時間はリポジトリの規模に比例します。約 3,000 ファイルのリポジトリのコールドビルドで約 40 秒でした（[計測値](docs/REPRODUCING.md#incremental-update-latency)）。その後はフックと watch モードがグラフを更新し続けます。一部のファイルの解析に失敗した場合、結果のステータスは `partial` になり、要約にそのファイル名が入ります。CLI は stderr に `Warning:` の行も出力し、それらのファイルは以前のグラフの行をそのまま保持します。
 
+### Docker または Podman で実行する
+
+プロジェクトのリポジトリルートからイメージをビルドします。
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+解析するリポジトリのディレクトリで、次を実行します。
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+マウントするリポジトリには書き込み権限が必要です。
+上のコマンドはホストのユーザー ID とグループ ID を使用するため、
+生成される `.code-review-graph/` ディレクトリの所有者は自分のユーザーになります。
+これらのコマンドは、ホスト上の root 以外のユーザーで実行してください。
+
+Podman では、同じ Dockerfile をビルドし、ユーザーマッピングを維持します。
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+保存されたグラフを確認するには、`build` を `status` に置き換えます。
+イメージには Git が含まれ、デフォルトでは root 以外のユーザーで実行されます。
+イメージのビルド中にグラフは生成されません。
+
+これらの例は macOS/Linux のシェル構文を使用しています。
+macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
 
 ## 仕組み
 
