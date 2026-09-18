@@ -1156,11 +1156,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # *.d.ts) contributes zero symbol nodes and its blast radius collapses to
     # whole-file IMPORTS_FROM fan-out. See: #737
     "typescript": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "tsx": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "go": ["type_declaration"],
