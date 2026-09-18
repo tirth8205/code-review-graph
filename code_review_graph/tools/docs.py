@@ -59,7 +59,8 @@ def embed_graph(
                   supplied.
 
     Returns:
-        Number of nodes embedded and total embedding count.
+        Number of nodes embedded and total embedding count. The summary reports
+        semantic search as unavailable when no embeddings exist.
     """
     store, root = _get_store(repo_root)
     try:
@@ -91,13 +92,18 @@ def embed_graph(
 
             newly_embedded = embed_all_nodes(store, emb_store)
             total = emb_store.count()
+            search_status = (
+                "Semantic search is now active."
+                if total > 0
+                else "No embeddings are available for semantic search."
+            )
 
             return {
                 "status": "ok",
                 "summary": (
                     f"Embedded {newly_embedded} new node(s). "
                     f"Total embeddings: {total}. "
-                    "Semantic search is now active."
+                    f"{search_status}"
                 ),
                 "newly_embedded": newly_embedded,
                 "total_embeddings": total,

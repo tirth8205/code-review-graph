@@ -30,6 +30,11 @@ dependencies = [
     # CVE-2025-62800/62801/66416 fixes; <4 prevents the next major release
     # from breaking the server the way fastmcp 3.0 did. See: #488
     "fastmcp>=3.2.4,<4",
+    # main.py imports anyio directly: the MCP tool offload has to use the
+    # same thread limiter FastMCP dispatches sync tool bodies through, not
+    # asyncio's smaller default executor. A direct import gets a direct
+    # dependency rather than relying on fastmcp to keep pulling it in.
+    "anyio>=4.0,<5",
     "tree-sitter>=0.23.0,<1",
     "tree-sitter-language-pack>=0.3.0,<1",
     "pyyaml>=6.0,<7",
@@ -51,7 +56,7 @@ crg-daemon = "code_review_graph.daemon_cli:main"
 
 [project.optional-dependencies]
 embeddings = [
-    "sentence-transformers>=3.0.0,<6",
+    "sentence-transformers>=3.0.0,<7",
     "numpy>=1.26,<3",
 ]
 google-embeddings = [
@@ -86,9 +91,21 @@ dev = [
     "ruff>=0.3.0,<1",
     "tomli>=2.0; python_version < '3.11'",
 ]
+# Real-browser tests for the generated visualization page
+# (tests/test_visualization_browser.py, `pytest -m browser`). Deliberately
+# NOT part of "all": it pulls a ~150 MB Chromium download that nothing at
+# runtime needs, and the browser build has to be fetched separately with
+# `python -m playwright install chromium`.
+browser-test = [
+    "playwright>=1.45,<2",
+    "pytest-playwright>=0.5,<1",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["code_review_graph"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"skills" = "code_review_graph/_bundled_skills"
 
 [tool.hatch.build.targets.sdist]
 include = [
@@ -139,6 +156,24 @@ skips = ["B101", "B404", "B603", "B607", "B608"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 norecursedirs = ["tests/fixtures"]
+# Browser tests are opt-in: they need the "browser-test" extra and a
+# Chromium build (`python -m playwright install chromium`). CI runs them in
+# the separate "viz-browser" job; the coverage job excludes them.
+markers = [
+    "e2e: end-to-end tests that drive the real pipeline, MCP server or CLI as a subprocess",
+    "browser: drives the generated visualization page in a real headless browser",
+    "action_e2e: drives the composite GitHub Action's own steps against scratch repositories",
+    "platform_lifecycle: drives install/reinstall/uninstall for every supported platform",
+    "packaging: builds the distribution artefacts and smoke-tests them from a clean install",
+    "determinism: rebuilds one corpus many ways and compares every table (minutes)",
+    "upgrade: installs released versions from PyPI, builds a graph with each, and upgrades it with the current code (needs uv and network; minutes and hundreds of MB)",
+    "surface: drives every registered MCP tool and prompt through a real client over stdio",
+    "corpus: builds the graph over pinned real repositories and compares recorded baselines",
+    "exports: slow conformance checks for every artefact the tool writes (visualize --format html/json/graphml/cypher/obsidian/svg, and wiki)",
+    "action_e2e: drives the composite GitHub Action's own steps against scratch repositories",
+    "cli_surface: enumerates the whole CLI and its failure modes as subprocesses (slow)",
+    "concurrency: cross-process database contention, interrupted builds, daemon lifecycle and watcher stress (opt-in, slow)",
+]
 
 [dependency-groups]
 dev = [

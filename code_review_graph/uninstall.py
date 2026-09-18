@@ -19,18 +19,17 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
-from . import skills
+from . import jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
 )
 
 _ENTRY_NAME = "code-review-graph"
-_GIT_HOOK_MARKER = (
-    "# Installed by code-review-graph. Remove this file to disable pre-commit graph checks."
-)
+# Sourced from the installer so the two can never drift apart.
+_GIT_HOOK_MARKER = skills._GIT_HOOK_NOTE
 _GITIGNORE_BANNER = "# Added by code-review-graph"
 
 
@@ -48,28 +47,10 @@ class UninstallReport:
         return len(self.removed_paths) + len(self.edited_paths)
 
 
-@dataclass(frozen=True)
-class _Token:
-    kind: str
-    start: int
-    end: int
-    value: str | None = None
-
-
-@dataclass(frozen=True)
-class _Member:
-    key: str
-    key_index: int
-    value_index: int
-    value_end: int
-    comma_index: int | None
-
-
-@dataclass(frozen=True)
-class _Element:
-    value_index: int
-    value_end: int
-    comma_index: int | None
+# Comment-preserving JSONC edits live in ``jsonc`` so install and uninstall
+# splice a commented config exactly the same way. Re-serialising one would
+# delete every comment in it.
+_remove_jsonc_paths = jsonc.remove_paths
 
 
 def _absolute(path: Path) -> Path:
@@ -187,215 +168,11 @@ def _write_text(
     _record_edit(report, path, detail, False)
 
 
-def _tokenize_jsonc(raw: str) -> list[_Token]:
-    """Tokenize JSONC while retaining exact source offsets for safe splices."""
-    tokens: list[_Token] = []
-    i = 0
-    while i < len(raw):
-        char = raw[i]
-        if char.isspace():
-            i += 1
-            continue
-        if char == "/" and i + 1 < len(raw):
-            if raw[i + 1] == "/":
-                newline = raw.find("\n", i + 2)
-                i = len(raw) if newline < 0 else newline
-                continue
-            if raw[i + 1] == "*":
-                end = raw.find("*/", i + 2)
-                i = len(raw) if end < 0 else end + 2
-                continue
-        if char == '"':
-            start = i
-            i += 1
-            while i < len(raw):
-                if raw[i] == "\\":
-                    i += 2
-                    continue
-                if raw[i] == '"':
-                    i += 1
-                    break
-                i += 1
-            else:
-                raise ValueError("unterminated JSON string")
-            try:
-                value = json.loads(raw[start:i])
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid JSON string: {exc}") from exc
-            tokens.append(_Token("string", start, i, value))
-            continue
-        if char in "{}[]:,":
-            tokens.append(_Token(char, i, i + 1))
-            i += 1
-            continue
-        start = i
-        while i < len(raw):
-            if raw[i].isspace() or raw[i] in "{}[]:,":
-                break
-            if raw[i] == "/" and i + 1 < len(raw) and raw[i + 1] in "/*":
-                break
-            i += 1
-        if i == start:
-            raise ValueError(f"unexpected JSONC character at offset {i}")
-        tokens.append(_Token("literal", start, i, raw[start:i]))
-    return tokens
 
 
-def _skip_value(tokens: Sequence[_Token], index: int) -> int:
-    """Return the token index immediately after one JSON value."""
-    if index >= len(tokens):
-        raise ValueError("missing JSON value")
-    token = tokens[index]
-    if token.kind not in ("{", "["):
-        return index + 1
-    closing = "}" if token.kind == "{" else "]"
-    depth = 1
-    index += 1
-    while index < len(tokens):
-        kind = tokens[index].kind
-        if kind == token.kind:
-            depth += 1
-        elif kind == closing:
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        elif kind in ("{", "["):
-            index = _skip_value(tokens, index)
-            continue
-        index += 1
-    raise ValueError("unterminated JSON container")
 
 
-def _object_members(tokens: Sequence[_Token], index: int) -> list[_Member]:
-    if index >= len(tokens) or tokens[index].kind != "{":
-        raise ValueError("expected JSON object")
-    members: list[_Member] = []
-    cursor = index + 1
-    while cursor < len(tokens) and tokens[cursor].kind != "}":
-        if tokens[cursor].kind == ",":  # trailing comma
-            cursor += 1
-            continue
-        key_token = tokens[cursor]
-        if key_token.kind != "string" or not isinstance(key_token.value, str):
-            raise ValueError("expected JSON object key")
-        if cursor + 1 >= len(tokens) or tokens[cursor + 1].kind != ":":
-            raise ValueError("expected colon after JSON object key")
-        value_index = cursor + 2
-        value_end = _skip_value(tokens, value_index)
-        comma_index = value_end if (
-            value_end < len(tokens) and tokens[value_end].kind == ","
-        ) else None
-        members.append(
-            _Member(key_token.value, cursor, value_index, value_end, comma_index)
-        )
-        cursor = value_end + 1 if comma_index is not None else value_end
-    return members
 
-
-def _array_elements(tokens: Sequence[_Token], index: int) -> list[_Element]:
-    if index >= len(tokens) or tokens[index].kind != "[":
-        raise ValueError("expected JSON array")
-    elements: list[_Element] = []
-    cursor = index + 1
-    while cursor < len(tokens) and tokens[cursor].kind != "]":
-        if tokens[cursor].kind == ",":  # trailing comma
-            cursor += 1
-            continue
-        value_end = _skip_value(tokens, cursor)
-        comma_index = value_end if (
-            value_end < len(tokens) and tokens[value_end].kind == ","
-        ) else None
-        elements.append(_Element(cursor, value_end, comma_index))
-        cursor = value_end + 1 if comma_index is not None else value_end
-    return elements
-
-
-def _find_value(tokens: Sequence[_Token], path: Sequence[str | int]) -> int:
-    if not tokens:
-        raise ValueError("empty JSON document")
-    current = 0
-    for component in path:
-        if isinstance(component, str):
-            member = next(
-                (item for item in _object_members(tokens, current) if item.key == component),
-                None,
-            )
-            if member is None:
-                raise KeyError(component)
-            current = member.value_index
-        else:
-            elements = _array_elements(tokens, current)
-            if component < 0 or component >= len(elements):
-                raise IndexError(component)
-            current = elements[component].value_index
-    return current
-
-
-def _removal_ranges(tokens: Sequence[_Token], path: Sequence[str | int]) -> list[tuple[int, int]]:
-    if not path:
-        raise ValueError("refusing to remove the JSON document root")
-    parent_index = _find_value(tokens, path[:-1])
-    component = path[-1]
-    if isinstance(component, str):
-        members = _object_members(tokens, parent_index)
-        sibling_index = next(
-            (index for index, member in enumerate(members) if member.key == component),
-            None,
-        )
-        if sibling_index is None:
-            raise KeyError(component)
-        item = members[sibling_index]
-        start = tokens[item.key_index].start
-        end = tokens[item.value_end - 1].end
-        if item.comma_index is not None:
-            return [(start, tokens[item.comma_index].end)]
-        if sibling_index > 0:
-            previous = members[sibling_index - 1]
-            if previous.comma_index is not None:
-                return [
-                    (tokens[previous.comma_index].start, tokens[previous.comma_index].end),
-                    (start, end),
-                ]
-        return [(start, end)]
-
-    elements = _array_elements(tokens, parent_index)
-    if component < 0 or component >= len(elements):
-        raise IndexError(component)
-    element = elements[component]
-    start = tokens[element.value_index].start
-    end = tokens[element.value_end - 1].end
-    if element.comma_index is not None:
-        return [(start, tokens[element.comma_index].end)]
-    if component > 0:
-        previous_element = elements[component - 1]
-        if previous_element.comma_index is not None:
-            return [
-                (
-                    tokens[previous_element.comma_index].start,
-                    tokens[previous_element.comma_index].end,
-                ),
-                (start, end),
-            ]
-    return [(start, end)]
-
-
-def _remove_jsonc_paths(raw: str, paths: Iterable[Sequence[str | int]]) -> str:
-    """Remove paths against one token snapshot, then merge overlapping spans."""
-    tokens = _tokenize_jsonc(raw)
-    ranges = [
-        source_range
-        for path in paths
-        for source_range in _removal_ranges(tokens, tuple(path))
-    ]
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(set(ranges)):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-        else:
-            merged.append((start, end))
-    for start, end in reversed(merged):
-        raw = raw[:start] + raw[end:]
-    return raw
 
 
 def _parse_jsonc(path: Path, raw: str, report: UninstallReport) -> dict[str, Any] | None:
@@ -499,16 +276,18 @@ def _remove_toml_entry(
     except _tomllib.TOMLDecodeError as exc:
         report.skipped_paths.append(f"{path} (TOML parse failed; left unchanged: {exc})")
         return
-    header = f"[{key}.{_ENTRY_NAME}]"
     lines = raw.splitlines(keepends=True)
-    start = next((index for index, line in enumerate(lines) if line.strip() == header), None)
-    if start is None:
+    # The same span the installer replaces, so both stop short of the comment
+    # and blank lines that belong to whatever table comes next. Walking to the
+    # next ``[`` header instead would delete a "DO NOT REMOVE" note written
+    # above an unrelated server.
+    span = skills._toml_table_span(lines, (key, _ENTRY_NAME))
+    if span is None:
         return
-    end = start + 1
-    while end < len(lines):
-        stripped = lines[end].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            break
+    start, end = span
+    # A blank line that only separated our table from the next one goes with
+    # it; a comment never does.
+    while end < len(lines) and not lines[end].strip():
         end += 1
     rewritten = "".join(lines[:start] + lines[end:])
     try:
@@ -938,6 +717,38 @@ def _resolve_git_hook(repo_root: Path) -> Path:
     return repo_root / ".git" / "hooks" / "pre-commit"
 
 
+def _strip_git_hook_blocks(raw: str) -> tuple[str, bool]:
+    """Cut out every pre-commit block this project has ever written.
+
+    Marked blocks are removed between their begin and end markers; blocks from
+    releases that predate the markers are matched by their full recorded text,
+    longest first. Nothing infers a block's extent from the shell inside it:
+    the body nests an ``if``/``elif``/``else`` in an outer ``if``, so a rule
+    such as "stop at the first ``fi``" leaves the outer ``fi`` behind and the
+    hook becomes a syntax error that breaks every later ``git commit``.
+
+    An unbalanced marker pair removes nothing at all: matching the body by its
+    legacy text there would strip it and leave the orphan marker line sitting
+    in the user's hook, which is neither a removal nor a refusal.
+    """
+    if (
+        skills._GIT_HOOK_BEGIN_MARKER in raw
+        and not skills._git_hook_markers_balanced(raw)
+    ):
+        return raw, False
+    text = raw
+    removed = False
+    while (span := skills._git_hook_block_span(text)) is not None:
+        begin, end = span
+        text = text[:begin] + text[end:]
+        removed = True
+    for block in skills._known_git_hook_blocks():
+        while block in text:
+            text = text.replace(block, "", 1)
+            removed = True
+    return text, removed
+
+
 def _remove_git_hook(
     repo_root: Path,
     report: UninstallReport,
@@ -946,23 +757,45 @@ def _remove_git_hook(
 ) -> None:
     path = _resolve_git_hook(repo_root)
     if not path.exists() or not _safe_path(path, repo_root, report):
+        # A symlinked or out-of-boundary hook is reported by ``_safe_path`` and
+        # left exactly as it is; rewriting through a link is not ours to do.
         return
     raw = _read_text(path, report)
-    if raw is None or _GIT_HOOK_MARKER not in raw:
+    if raw is None:
         return
-    lines = raw.splitlines(keepends=True)
-    rewritten: list[str] = []
-    dropping = False
-    for line in lines:
-        if _GIT_HOOK_MARKER in line:
-            dropping = True
-            continue
-        if dropping:
-            if line.strip() == "fi":
-                dropping = False
-            continue
-        rewritten.append(line)
-    new_text = "".join(rewritten).rstrip() + "\n"
+    if _GIT_HOOK_MARKER not in raw and skills._GIT_HOOK_BEGIN_MARKER not in raw:
+        # The hook is entirely the user's own.
+        return
+    if (
+        skills._GIT_HOOK_BEGIN_MARKER in raw
+        and not skills._git_hook_markers_balanced(raw)
+    ):
+        # Refused, exactly as documented: with no end marker there is no
+        # trustworthy boundary, and stripping a guess leaves an orphan marker
+        # line behind. Reported once, as left unchanged, and nothing is written.
+        report.skipped_paths.append(
+            f"{path} (a code-review-graph begin marker has no matching end marker; "
+            "left unchanged)"
+        )
+        return
+
+    new_text, removed = _strip_git_hook_blocks(raw)
+    if not removed:
+        report.skipped_paths.append(
+            f"{path} (marked pre-commit block differs from a known installed block; "
+            "left unchanged)"
+        )
+        return
+    detail = "removed code-review-graph hook block"
+    if _GIT_HOOK_MARKER in new_text or skills._GIT_HOOK_BEGIN_MARKER in new_text:
+        # One block was generated and another was edited by hand. Take out what
+        # this project owns and say so on the edit itself: the file was changed,
+        # so listing it as "left unchanged" as well would contradict that.
+        detail = (
+            "removed code-review-graph hook block; a further block differs from "
+            "every known installed block and was kept"
+        )
+
     meaningful = [
         line
         for line in new_text.splitlines()
@@ -971,9 +804,9 @@ def _remove_git_hook(
     if meaningful:
         _write_text(
             path,
-            new_text,
+            new_text.rstrip("\n") + "\n",
             report,
-            detail="removed code-review-graph hook block",
+            detail=detail,
             dry_run=dry_run,
         )
     else:
