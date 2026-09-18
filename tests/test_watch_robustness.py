@@ -214,6 +214,29 @@ class TestIgnoreAwareScheduling:
 
         assert plan == [(tmp_path, True)]
 
+    def test_startup_budget_fallback_is_degraded(self, tmp_path):
+        for index in range(10):
+            (tmp_path / f"pkg{index}").mkdir()
+        for index in range(6):
+            (tmp_path / "node_modules" / f"dep{index}").mkdir(parents=True)
+
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer,
+            tmp_path,
+            _load_ignore_patterns(tmp_path),
+            health_path=None,
+            max_schedules=3,
+        )
+        supervisor.schedule_initial(MagicMock())
+
+        assert supervisor.degraded is True
+        supervisor._health_path = tmp_path / "health.json"
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is True
+        assert watcher_status(True, {**health, "stalled": False}) == "partial"
+
     def test_nested_module_output_is_ignored_and_never_watched(self, tmp_path):
         """`moduleA/target/` is build output when `moduleA/pom.xml` says so."""
         _maven_repo(tmp_path)
@@ -338,6 +361,67 @@ class TestNewDirectoryAdoption:
 
         assert adopted == []
         assert not any(path == str(created) for path, _ in observer.scheduled)
+
+    def test_new_large_ignored_tree_replaces_recursive_root_watch(self, tmp_path):
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+        assert observer.scheduled == [(str(tmp_path), True)]
+
+        created = tmp_path / "node_modules"
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir(parents=True)
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert str(tmp_path) in observer.unscheduled
+        assert (str(tmp_path), False) in observer.scheduled
+        assert not any("node_modules" in path for path, _ in observer.scheduled)
+
+    def test_ignored_tree_growth_replans_recursive_root(self, tmp_path):
+        created = tmp_path / "node_modules"
+        created.mkdir()
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+        assert observer.scheduled == [(str(tmp_path), True)]
+
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir()
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert (str(tmp_path), False) in observer.scheduled
+        assert not any("node_modules" in path for path, _ in observer.scheduled)
+
+    def test_failed_replan_keeps_the_existing_recursive_watch(self, tmp_path):
+        class FailingReplacementObserver(FakeObserver):
+            def schedule(self, handler, path, *, recursive=False, event_filter=None):
+                if path == str(tmp_path) and not recursive:
+                    raise OSError("watch limit")
+                return super().schedule(
+                    handler, path, recursive=recursive, event_filter=event_filter
+                )
+
+        observer = FailingReplacementObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+
+        created = tmp_path / "node_modules"
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir(parents=True)
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert observer.unscheduled == []
+        assert supervisor.watched_paths == [str(tmp_path)]
+        assert observer.scheduled == [(str(tmp_path), True)]
 
     def test_directory_inside_a_recursive_watch_is_not_rescheduled(self, tmp_path):
         """watchdog already covers those; a second watch would be waste."""
@@ -1131,6 +1215,120 @@ class TestRealObserver:
                 return True
             time.sleep(interval)
         return False
+
+    def _polling_watch_survives_failed_replan(
+        self,
+        tmp_path,
+        *,
+        start_ignored: bool,
+        failed_path: Path,
+        failed_recursive: bool,
+        retry: bool = False,
+    ) -> None:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers.polling import PollingObserver
+
+        source = tmp_path / "src" / "deep" / "a.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("value = 1\n", encoding="utf-8")
+        ignored = tmp_path / "node_modules"
+        if start_ignored:
+            for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+                (ignored / f"pkg{index}").mkdir(parents=True)
+
+        delivered = threading.Event()
+
+        class Handler(FileSystemEventHandler):
+            def on_modified(self, event):
+                if not event.is_directory and event.src_path == str(source):
+                    delivered.set()
+
+        observer = PollingObserver(timeout=0.05)
+        supervisor = _WatchSupervisor(
+            observer,
+            tmp_path,
+            _load_ignore_patterns(tmp_path),
+            health_path=None,
+        )
+        supervisor.schedule_initial(Handler())
+        original_schedule = observer.schedule
+        failed = {"once": True}
+
+        def schedule(handler, path, recursive=False, event_filter=None):
+            if (
+                failed["once"]
+                and path == str(failed_path)
+                and recursive == failed_recursive
+            ):
+                failed["once"] = False
+                raise OSError("watch limit")
+            return original_schedule(
+                handler, path, recursive=recursive, event_filter=event_filter
+            )
+
+        observer.schedule = schedule
+        observer.start()
+        try:
+            if start_ignored:
+                shutil.rmtree(ignored)
+            else:
+                for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+                    (ignored / f"pkg{index}").mkdir(parents=True)
+            supervisor.request_replan()
+            supervisor.sync_watches()
+            if start_ignored:
+                assert str(source.parents[1]) in supervisor.watched_paths
+            else:
+                assert supervisor.watched_paths == [str(tmp_path)]
+            if retry:
+                supervisor.request_replan()
+                supervisor.sync_watches()
+
+            source.write_text("value = 2\n", encoding="utf-8")
+            assert self._wait_for(delivered.is_set), (
+                f"edit under {source.parent} was not delivered after failed replan"
+            )
+        finally:
+            observer.stop()
+            observer.join()
+
+    def test_polling_observer_keeps_recursive_root_after_failed_split(self, tmp_path):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=False,
+            failed_path=tmp_path / "src",
+            failed_recursive=True,
+        )
+
+    def test_polling_observer_keeps_coverage_while_split_replan_retries(
+        self, tmp_path
+    ):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=False,
+            failed_path=tmp_path / "src",
+            failed_recursive=True,
+            retry=True,
+        )
+
+    def test_polling_observer_keeps_source_watch_after_failed_restore(self, tmp_path):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=True,
+            failed_path=tmp_path,
+            failed_recursive=True,
+        )
+
+    def test_polling_observer_keeps_coverage_while_restore_replan_retries(
+        self, tmp_path
+    ):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=True,
+            failed_path=tmp_path,
+            failed_recursive=True,
+            retry=True,
+        )
 
     def test_new_top_level_directory_is_indexed(self, tmp_path):
         repo = tmp_path / "repo"
