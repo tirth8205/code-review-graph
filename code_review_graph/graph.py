@@ -1505,6 +1505,96 @@ class GraphStore:
         """
         return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
 
+    def resolve_inherited_self_calls(self) -> int:
+        """Retarget `this.method()` calls that name the caller's own class when
+        the method is declared on an ancestor.
+
+        FIX-984 part 5. For a `this.` call the parser builds
+        ``<file>::<EnclosingClass>.<method>``, which is right when the class
+        declares the method and wrong when it inherits it: the target then names
+        no node at all, so ``callers_of`` on the real declaration returns zero
+        while the edge points at a phantom. Walk INHERITS upwards and retarget
+        when exactly one ancestor declares the method. Deliberately
+        conservative: ambiguous or unreachable cases are left untouched.
+        """
+        conn = self._conn
+        node_names = {
+            r["qualified_name"]
+            for r in conn.execute("SELECT qualified_name FROM nodes")
+        }
+        parents: dict[str, set[str]] = {}
+        for r in conn.execute(
+            "SELECT source_qualified, target_qualified FROM edges "
+            "WHERE kind = 'INHERITS'"
+        ):
+            src, tgt = r["source_qualified"], r["target_qualified"]
+            cls = src.rsplit("::", 1)[-1] if "::" in src else src
+            par = tgt.rsplit("::", 1)[-1] if "::" in tgt else tgt
+            par = par.split("<", 1)[0].rsplit(".", 1)[-1]
+            cls = cls.split("<", 1)[0]
+            if cls and par:
+                parents.setdefault(cls, set()).add(par)
+        declares: dict[tuple[str, str], set[str]] = {}
+        for r in conn.execute(
+            "SELECT qualified_name FROM nodes WHERE kind IN ('Function', 'Test')"
+        ):
+            qn = r["qualified_name"]
+            tail = qn.rsplit("::", 1)[-1]
+            if "." in tail:
+                cls, meth = tail.rsplit(".", 1)
+                declares.setdefault((cls, meth), set()).add(qn)
+
+        updates: list[tuple[str, str, int]] = []
+        for r in conn.execute(
+            "SELECT id, target_qualified, extra FROM edges WHERE kind = 'CALLS' "
+            "AND target_qualified LIKE '%::%'"
+        ):
+            target = r["target_qualified"]
+            if target in node_names:
+                continue
+            try:
+                extra = json.loads(r["extra"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(extra, dict):
+                continue
+            if extra.get("receiver") not in ("this", "self", "super", "base"):
+                continue
+            tail = target.rsplit("::", 1)[-1]
+            if "." not in tail:
+                continue
+            cls, meth = tail.rsplit(".", 1)
+            seen, frontier, found = {cls}, list(parents.get(cls, ())), set()
+            while frontier:
+                nxt: list[str] = []
+                for anc in frontier:
+                    if anc in seen:
+                        continue
+                    seen.add(anc)
+                    found |= declares.get((anc, meth), set())
+                    nxt.extend(parents.get(anc, ()))
+                if found:
+                    break
+                frontier = nxt
+            if len(found) != 1:
+                continue
+            resolved = next(iter(found))
+            extra["inherited_self_resolution"] = "ancestor"
+            updates.append((resolved, json.dumps(extra, sort_keys=True), r["id"]))
+
+        for resolved, extra_json, edge_id in updates:
+            conn.execute(
+                "UPDATE edges SET target_qualified = ?, extra = ?, "
+                "confidence_tier = 'INFERRED' WHERE id = ?",
+                (resolved, extra_json, edge_id),
+            )
+        if updates:
+            conn.commit()
+            logger.info(
+                "Resolved %d inherited this/self call target(s)", len(updates)
+            )
+        return len(updates)
+
     def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
         """Resolve a bare edge endpoint only when one candidate has evidence."""
         if endpoint == "target_qualified":
@@ -1628,6 +1718,43 @@ class GraphStore:
                     expanded |= namespace_files.get(target, set())
                 imported |= expanded
 
+        # FIX-984 part 2: Java same-package visibility (prototype; the real fix
+        # captures the package on each File node in the parser).
+        java_pkg: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE kind='File' "
+            "AND file_path LIKE '%.java'"
+        ).fetchall():
+            try:
+                with open(row["file_path"], encoding="utf-8", errors="ignore") as fh:
+                    for raw in fh:
+                        s = raw.strip()
+                        if s.startswith("package ") and s.endswith(";"):
+                            java_pkg[row["file_path"]] = s[8:-1].strip(); break
+                        if s.startswith(("class ", "public ", "import ")): break
+            except OSError:
+                continue
+        pkg_files: dict[str, set[str]] = {}
+        for f, pkg in java_pkg.items():
+            pkg_files.setdefault(pkg, set()).add(f)
+        # FIX-984 part 3: Java imports store dotted FQCNs, not file paths.
+        fqcn_file: dict[str, str] = {}
+        for row in conn.execute(
+            "SELECT name, file_path FROM nodes WHERE kind='Class' "
+            "AND file_path LIKE '%.java'"
+        ).fetchall():
+            pkg = java_pkg.get(row["file_path"])
+            if pkg:
+                fqcn_file[f"{pkg}.{row['name']}"] = row["file_path"]
+        for _caller, tgts in list(import_targets.items()):
+            tgts |= {fqcn_file[x] for x in tgts if x in fqcn_file}
+        # class name -> declaring file, for part 4
+        class_file: dict[str, set[str]] = {}
+        for row in conn.execute(
+            "SELECT name, file_path FROM nodes WHERE kind='Class'"
+        ).fetchall():
+            class_file.setdefault(row["name"], set()).add(row["file_path"])
+
         # Python imports the repository-suffix resolver could not map to a file
         # keep their raw dotted module as the IMPORTS_FROM target — the standard
         # `src` layout, or framework-mediated packages such as Odoo's
@@ -1673,11 +1800,45 @@ class GraphStore:
 
             context_file = edge["file_path"]
             imported_files = import_targets.get(context_file, set())
+            same_pkg = pkg_files.get(java_pkg.get(context_file, ""), set())
+            imported_files = imported_files | same_pkg
             supported = [
                 qualified
                 for qualified, candidate_file in candidates
                 if candidate_file == context_file or candidate_file in imported_files
             ]
+            receiver = edge_extra.get("receiver")
+            has_recv = isinstance(receiver, str) and receiver not in (
+                "this", "self", "super", "base",
+            )
+            # FIX-984 part 4: when the receiver's declared type is known, keep
+            # only candidates declared by that class.
+            recv_type = edge_extra.get("receiver_type")
+            if has_recv and isinstance(recv_type, str) and recv_type:
+                typed = [
+                    q for q in supported
+                    if q.rsplit("::", 1)[-1].rsplit(".", 1)[0] == recv_type
+                    and q.split("::", 1)[0] in class_file.get(recv_type, set())
+                ]
+                if typed:
+                    supported = typed
+                elif recv_type not in class_file:
+                    # The receiver's type is known and is not declared anywhere
+                    # in the graph (a JDK or third-party class). That is
+                    # evidence the callee is external, so falling back to
+                    # same-file candidates would resurrect exactly the
+                    # invention part 1 exists to prevent. Leave it unresolved.
+                    supported = []
+            # FIX-984 part 1: a call on a receiver cannot land on a method of
+            # the caller's own enclosing class.
+            elif has_recv:
+                src = edge["source_qualified"]
+                caller_cls = None
+                if "::" in src and "." in src.rsplit("::", 1)[-1]:
+                    caller_cls = src.rsplit("::", 1)[-1].rsplit(".", 1)[0]
+                if caller_cls:
+                    supported = [q for q in supported
+                                 if q != f"{context_file}::{caller_cls}.{bare_name}"]
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [
                 qualified

@@ -88,6 +88,13 @@ def _resolve_bare_endpoints(
         result["cpp_scoped_edges_resolved"] = (
             store.resolve_cpp_scoped_call_targets()
         )
+        # FIX-984 part 5: a this.method() target naming the caller's own class
+        # is qualified but phantom when the method is inherited. Must run here
+        # too, not only in the full-build path, or an incremental update leaves
+        # those edges pointing at nothing.
+        result["inherited_self_edges_resolved"] = (
+            store.resolve_inherited_self_calls()
+        )
         # Resolvers rewrite bare targets into qualified ones, so the stored
         # certainty column is only correct once they have all run.
         store.refresh_target_resolution()

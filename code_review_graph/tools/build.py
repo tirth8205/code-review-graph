@@ -196,6 +196,11 @@ def _run_postprocess(
         resolved = store.resolve_bare_call_targets()
         resolved += store.resolve_bare_tested_by_sources()
         build_result["bare_edges_resolved"] = resolved
+        # FIX-984 part 5: a this.method() target is qualified but phantom, not
+        # bare, so it gets its own counter rather than inflating the one above.
+        build_result["inherited_self_edges_resolved"] = (
+            store.resolve_inherited_self_calls()
+        )
         build_result["cpp_scoped_edges_resolved"] = (
             store.resolve_cpp_scoped_call_targets()
         )
@@ -818,6 +823,10 @@ def run_postprocess(
             resolved = store.resolve_bare_call_targets()
             resolved += store.resolve_bare_tested_by_sources()
             result["bare_edges_resolved"] = resolved
+            # FIX-984 part 5: see the note in the full-build path above.
+            result["inherited_self_edges_resolved"] = (
+                store.resolve_inherited_self_calls()
+            )
             result["cpp_scoped_edges_resolved"] = (
                 store.resolve_cpp_scoped_call_targets()
             )

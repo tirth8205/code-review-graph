@@ -1010,11 +1010,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # *.d.ts) contributes zero symbol nodes and its blast radius collapses to
     # whole-file IMPORTS_FROM fan-out. See: #737
     "typescript": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "tsx": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "go": ["type_declaration"],
@@ -5607,9 +5607,15 @@ class CodeParser:
                             import_map,
                             defined_names,
                         )
+                        key = (node.start_point[0] + 1, receiver, method)
                         if target:
-                            key = (node.start_point[0] + 1, receiver, method)
                             targets[key] = (target, type_name, evidence)
+                        else:
+                            # FIX-984 part 4: the receiver's declared type is
+                            # known even when its defining file is not visible
+                            # from this parse. Keep it so the graph-wide
+                            # resolver can disambiguate same-named candidates.
+                            targets[key] = (None, type_name, "typed_receiver_unresolved")
 
             for child in node.children:
                 walk(child, bindings, class_fields, depth + 1)
@@ -5968,7 +5974,10 @@ class CodeParser:
                     "receiver_resolution": evidence_kind,
                 })
                 resolved_target = target
-                if evidence_kind == "constructed_receiver" or language == "csharp":
+                if target is None:
+                    # FIX-984 part 4: type-only evidence, target stays bare.
+                    resolved_target = edge.target
+                elif evidence_kind == "constructed_receiver" or language == "csharp":
                     # Keep PHP/C# parse-only CALLS output backward-compatible
                     # (bare method target) while preserving the receiver
                     # class scope for the graph-wide resolver.
