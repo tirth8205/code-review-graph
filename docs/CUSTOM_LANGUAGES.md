@@ -1,11 +1,10 @@
 # Custom Languages (Bring Your Own Language)
 
-code-review-graph ships parsers for 35+ languages, but the
+code-review-graph has built-in parsers for more than 35 languages. The
 [tree-sitter-language-pack](https://github.com/Goldziher/tree-sitter-language-pack)
-it depends on bundles many more grammars than the built-in list. If your repo
-uses a language the graph does not cover yet — Erlang, Haskell, OCaml,
-Fortran, Ada, Clojure, ... — you can teach the parser about it with a small
-config file. No fork, no code changes.
+it depends on bundles many more grammars. If your repository uses a language
+the graph does not cover (Erlang, Haskell, OCaml, Fortran, Ada, Clojure, ...),
+you can add it with a config file. No fork, no code changes.
 
 ## Quick start
 
@@ -25,14 +24,14 @@ comment = "Erlang via the bundled tree-sitter-erlang grammar"
 Then rebuild:
 
 ```bash
-uv run code-review-graph build
+code-review-graph build
 ```
 
-Files matching the configured extensions are now parsed with the named
-grammar, and the resulting Function/Class nodes and CALLS/IMPORTS_FROM edges
-flow through every downstream feature (impact radius, search, communities,
-wiki, MCP tools) exactly like built-in languages. Nodes carry the custom
-language name (here `erlang`) in their `language` field.
+Files with the configured extensions are parsed with the named grammar. The
+resulting `Function` and `Class` nodes and `CALLS` and `IMPORTS_FROM` edges go
+through every downstream feature (impact radius, search, communities, wiki,
+MCP tools) like built-in languages. Nodes carry the custom language name (here
+`erlang`) in their `language` field.
 
 ## Schema reference
 
@@ -40,57 +39,57 @@ Each custom language is one `[languages.<name>]` table.
 
 | Key | Type | Required | Meaning |
 |-----|------|----------|---------|
-| `<name>` | table key | yes | Language identifier stored on every parsed node. Lowercase letters, digits, `_`, `-`; max 32 chars; must start with a letter. |
-| `extensions` | list of strings | yes | File extensions to claim, each starting with a dot (e.g. `".erl"`). Matched case-insensitively. |
-| `grammar` | string | yes | A grammar name shipped by `tree_sitter_language_pack` (probe availability — see below). |
-| `function_node_types` | list of strings | no* | Tree-sitter node types that define functions/methods. Matching nodes become `Function` nodes (or `Test` nodes when the name/file looks like a test). |
-| `class_node_types` | list of strings | no* | Node types that define classes/records/types. Matching nodes become `Class` nodes. |
-| `import_node_types` | list of strings | no* | Node types for import/include statements. Each yields an `IMPORTS_FROM` edge. |
+| `<name>` | table key | yes | Language identifier stored on every parsed node. A lowercase letter followed by lowercase letters, digits, `_` or `-`; at most 32 characters. |
+| `extensions` | list of strings | yes | File extensions to claim. Each is a dot followed by 1 to 15 characters from `a-z`, `0-9`, `_`, `+`, `-`. Matched case-insensitively. |
+| `grammar` | string | yes | A grammar name shipped by `tree_sitter_language_pack` (see [Troubleshooting](#troubleshooting) for how to check). |
+| `function_node_types` | list of strings | no* | Node types that define functions or methods. Each becomes a `Function` node, or a `Test` node when its name or location marks it as a test. |
+| `class_node_types` | list of strings | no* | Node types that define classes, records or types. Each becomes a `Class` node. |
+| `import_node_types` | list of strings | no* | Node types for import or include statements. Each yields an `IMPORTS_FROM` edge. |
 | `call_node_types` | list of strings | no* | Node types for call expressions. Each yields a `CALLS` edge from the enclosing function. |
-| `name_field` | string or list of strings | no | Ordered candidates for locating a definition's name when it is not a `name` field or a plain `identifier` child (see below). |
-| `comment` | string | no | Free-form note for humans; ignored by the parser. |
+| `name_field` | string or list of strings | no | Ordered candidates for finding a definition's name when it is not in a `name` field or an identifier child (see below). At most 8. |
+| `comment` | string | no | Free text for humans; ignored by the parser. |
 
 \* At least one of the four node-type lists must be non-empty, otherwise the
-entry is skipped (there would be nothing to extract).
+entry is skipped.
 
-### Validation rules (safety first)
+### Validation rules
 
-The loader never crashes a build. Anything invalid is skipped with a
-`WARNING` log line:
+The loader never fails a build. An invalid entry is skipped with a `WARNING`
+log line that says why:
 
-- **Built-ins always win.** A custom language cannot claim a built-in
-  extension (`.py`, `.ts`, `.ex`, ...) and cannot reuse a built-in language
-  name (`python`, `elixir`, ...).
-- `grammar` must load from `tree_sitter_language_pack`; unknown grammars are
-  skipped.
+- Built-ins win. A custom language cannot claim a built-in extension (`.py`,
+  `.ts`, `.ex`, ...) or reuse a built-in language name (`python`, `elixir`, ...).
+- `grammar` must load from `tree_sitter_language_pack`.
 - Every extension must start with a dot.
-- Two custom languages cannot claim the same extension (first one wins).
-- At most **20** custom languages are loaded per repo.
-- Malformed TOML disables custom languages for that build (with a warning).
-- `name_field` must be a string or a list of non-empty strings (max 8
-  candidates); anything else skips the entry with a warning.
+- Two custom languages cannot claim the same extension; the first one wins.
+- At most 20 custom languages are loaded per repository; the rest are ignored.
+- Malformed TOML disables custom languages for that build.
+- `name_field` must be a string or a list of non-empty strings, at most 8
+  entries.
 
 ### Naming definitions with `name_field`
 
-By default the parser finds a definition's name from an `identifier`-like child
-or a field literally called `name`. Many grammars keep the name elsewhere — in
-a differently named field, or nested a level or two below it. When that happens
-the definition is extracted **unnamed and silently dropped**. `name_field` tells
-the parser where to look.
+Without `name_field`, the parser reads a definition's name from the grammar's
+`name` field, then from the first child whose type is identifier-like
+(`identifier`, `name`, `type_identifier`, `property_identifier`,
+`simple_identifier`, `constant`, `field_identifier`). Many grammars keep the
+name elsewhere: in a differently named field, or nested a level or two down.
+A definition whose name cannot be found is dropped. `name_field` says where to
+look.
 
-Each candidate is tried in order and resolved in two passes:
+Candidates are tried in two passes:
 
-1. **Field first** — a child accessed by that tree-sitter field name. Fields are
-   tried across *all* candidates before any type search, so a precise field
-   always wins over a broader match.
-2. **Typed descendant** — if no candidate matched a field, the first descendant
-   whose *node type* equals a candidate (bounded depth). This covers names that
-   sit under a fieldless wrapper.
+1. Fields. Each candidate is tried as a tree-sitter field name on the
+   definition node. All candidates are tried as fields before any type search,
+   so a precise field beats a broader match.
+2. Typed descendants. If no field matched, the first descendant (up to 4 levels
+   down) whose node type equals a candidate.
 
-The resolved node is then descended to its first text-bearing leaf and cleaned
-(surrounding `{}`/quotes/whitespace stripped; multi-line or oversized text is
-rejected). Because resolution is anchored on your configured candidates, it
-never grabs an unrelated inner identifier.
+The matched node is reduced to its first text-bearing leaf of a known name type
+(`identifier`, `word`, `name`, `type_identifier`, ...) or, failing that, its own
+text. Surrounding braces, quotes and whitespace are stripped. Text that is
+empty, spans lines or is longer than 256 characters is rejected. If no
+candidate resolves, the `name` field fallback above applies.
 
 ```toml
 [languages.bibtex]
@@ -115,26 +114,23 @@ class_node_types = ["section"]
 name_field = ["inline"]         # "# My Heading" -> "My Heading" (typed descendant)
 ```
 
-Use a **list** when a grammar's node types keep their names in different places
-(LaTeX `section` uses `text`, `\newcommand` uses `declaration`): the first
-candidate that resolves wins. Omitting `name_field` preserves the previous
-behavior exactly.
+Use a list when node types keep their names in different places (LaTeX
+`section` uses `text`, `\newcommand` uses `declaration`): the first candidate
+that resolves wins.
 
 ## Finding the right node type names
 
-Node type names are grammar-specific, so you need to look at the tree the
-grammar actually produces. Two easy options:
+Node type names are grammar-specific. Two ways to see them:
 
-**Option 1 — tree-sitter playground.** Paste a snippet into
-<https://tree-sitter.github.io/tree-sitter/7-playground.html> and read the
-node names off the parse tree (select the matching grammar first).
+**Tree-sitter playground.** Paste a snippet into
+<https://tree-sitter.github.io/tree-sitter/7-playground.html>, select the
+grammar, and read the node names off the tree.
 
-**Option 2 — probe locally with Python.** The exact grammar version your
-build uses is the one in `tree_sitter_language_pack`, so probing locally is
-the most reliable source of truth:
+**Probe locally.** The grammar version your build uses is the one in
+`tree_sitter_language_pack`, so this is the reliable source:
 
 ```bash
-uv run python - <<'EOF'
+python - <<'EOP'
 import tree_sitter_language_pack as tslp
 
 source = b"""
@@ -149,11 +145,11 @@ def dump(node, depth=0):
         dump(child, depth + 1)
 
 dump(tslp.get_parser("erlang").parse(source).root_node)
-EOF
+EOP
 ```
 
-Pick the node types that wrap whole definitions (`function_clause`, not the
-inner `atom`) and whole call expressions (`call`, not the callee identifier).
+Pick node types that wrap whole definitions (`function_clause`, not the inner
+`atom`) and whole call expressions (`call`, not the callee identifier).
 
 ## Worked example: Erlang end to end
 
@@ -177,48 +173,46 @@ scale(Points, F) ->
 
 With the `[languages.erlang]` config from the quick start, a build produces:
 
-- `Function` nodes `add`, `helper`, `scale` (from `function_clause`),
-  each with `language = "erlang"`.
+- `Function` nodes `add`, `helper`, `scale` (from `function_clause`), each
+  with `language = "erlang"`.
 - A `Class` node `point` (from `record_decl`).
-- `CALLS` edges `add → helper` and `scale → add`, resolved to their
-  same-file qualified names, plus `scale → lists:map` for the remote call.
+- `CALLS` edges `add -> helper` and `scale -> add`, resolved to their
+  same-file qualified names, plus `scale -> lists:map` for the remote call.
 - An `IMPORTS_FROM` edge targeting `lists` (from `import_attribute`).
 - `CONTAINS` edges from the file to every definition.
 
 ## How extraction works (and its limits)
 
-Custom languages run through the same generic tree-sitter walker as built-in
-languages — there is no per-language code path to maintain. That keeps the
-feature simple, but the generic heuristics have limits:
+Custom languages go through the same generic tree-sitter walker as built-in
+languages. There is no per-language code path, which keeps the feature simple
+and sets its limits:
 
-- **Name extraction uses the default name-field heuristics.** The walker
-  looks for a child node of a common identifier type (`identifier`, `name`,
-  `type_identifier`, ...) and falls back to the grammar's `name` field
-  (`node.child_by_field_name("name")`). Grammars that store definition names
-  in another shape (e.g. nested two levels deep with a non-standard field)
-  will produce unnamed — and therefore skipped — definitions.
-- **Callee extraction probes common field names** (`function`, `callee`,
-  `expr`, `name`) and descends through curried applications. Exotic call
-  shapes may be missed.
-- **Import targets** come from the grammar's `module`/`name`/`path`/`source`
-  field when present, otherwise the raw statement text is recorded.
-- **No cross-file module resolution.** Import edges keep the module name as
-  written (e.g. `lists`); they are not resolved to file paths the way
-  built-in languages with dedicated resolvers are.
-- **No language-specific extras**: things like decorator-based test
-  detection, framework annotations (Spring, Temporal), or SFC handling only
-  exist for built-in languages.
+- Names come from `name_field`, then the grammar's `name` field, then an
+  identifier-like child (see above). Definitions with no resolvable name are
+  dropped.
+- Callees are read from the call node's `function`, `callee`, `expr` or `name`
+  field, in that order, descending through nested applications of the same
+  field (curried calls). Callee text that spans lines or exceeds 256 characters
+  is dropped. Other call shapes are missed.
+- Import targets come from the statement's `module`, `name`, `path` or `source`
+  field; otherwise the whole statement text is recorded.
+- No cross-file module resolution. Import edges keep the module name as written
+  (`lists`); they are not resolved to file paths as built-in languages with
+  dedicated resolvers are.
+- No language-specific extras: decorator-based test detection, framework
+  annotations (Spring, Temporal) and SFC handling exist only for built-in
+  languages.
 
-If a language needs deeper support than the generic walker can give, please
-open an issue — config-driven support is the on-ramp, not the ceiling.
+If a language needs more than the generic walker gives, open an issue.
 
 ## Troubleshooting
 
-- Run a build with `-v`/logging enabled and look for `languages.toml`
-  warnings — every skipped entry says exactly why it was skipped.
-- Probe grammar availability:
-  `uv run python -c "import tree_sitter_language_pack as t; t.get_language('erlang')"`
-  (raises `LookupError` if the grammar is not bundled).
-- The config is read when a parser is constructed (every `build`/`update`),
-  so config changes take effect on the next build — re-run
-  `uv run code-review-graph build` after editing.
+- The loader logs a `WARNING` for every skipped entry, naming the config file,
+  the language and the reason. The CLI prints log lines to stderr during
+  `build` and `update`; `-q` does not hide warnings.
+- Check a grammar is bundled:
+  `python -c "import tree_sitter_language_pack as t; t.get_language('erlang')"`.
+  It raises `LookupError` if it is not.
+- The config is read when a parser is constructed and cached by file mtime and
+  size. `update` re-parses only changed files, so run `code-review-graph build`
+  after editing the config to apply it to every file.

@@ -1,0 +1,527 @@
+# The one promotion that happens without a person: `staging` to `testing`,
+# once a day, when `staging` is green and has something `testing` does not.
+#
+# Promotion of `testing` to the release branch is NOT here and never will be.
+# It stays the maintainer's decision, made with the `Promote` workflow after
+# reading `promotion-gate.yml`'s verdict. This workflow has no input, no
+# variable and no code path that can target it: the two branches below are
+# the only ones it knows, scripts/auto_promote.py refuses anything else, and
+# the pull request it merges is re-read and re-checked immediately before the
+# merge, because a pull request's base branch is mutable by its author.
+#
+# Every rule lives in scripts/auto_promote.py so it can be tested with no
+# network (tests/test_auto_promote.py). This file fetches facts and obeys.
+#
+# Two facts about GitHub this workflow is built around, both established by
+# this repository's own history rather than assumed:
+#
+#   1. Opening the promotion pull request RE-QUEUES every required context on
+#      the head commit, even though they are already green there from the
+#      push run, and GitHub reports the pull request as blocked until the new
+#      runs finish. That took roughly fourteen minutes on PR #1040. The merge
+#      step therefore waits on `mergeStateStatus`, not on `mergeable`, and it
+#      waits in minutes rather than seconds.
+#   2. The required contexts on the tip of `testing` are NOT needed for the
+#      next manual `testing -> main` pull request: opening that pull request
+#      runs ci.yml on that same commit and satisfies them. So this workflow
+#      does not dispatch ci.yml afterwards. It dispatches the promotion gate
+#      only, because that one runs on `push` and a GITHUB_TOKEN merge starts
+#      no push run.
+name: Auto promote
+
+on:
+  schedule:
+    # 06:17 UTC. Off the hour because the top of the hour is the busiest
+    # slot on GitHub's shared cron pool and the most likely to be delayed.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Decide and report only: open nothing, update nothing, merge nothing"
+        type: boolean
+        # Defaults to true for a hand-started run so the maintainer can read
+        # the verdict before this thing ever merges anything. The scheduled
+        # run is NOT a dry run -- a schedule that only ever reports would be
+        # the manual `Promote` workflow with extra steps, and promoting
+        # daily is the whole feature.
+        default: true
+
+permissions:
+  contents: read
+
+# One promotion at a time, and never cancel one in flight: a run cancelled
+# between "open the pull request" and "merge it" leaves a pull request open
+# with nobody reporting why.
+concurrency:
+  group: auto-promote
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote staging to testing
+    # Nothing to promote in a fork, and a fork's schedule must never try.
+    if: github.repository == 'tirth8205/code-review-graph'
+    runs-on: ubuntu-latest
+    # Long enough to sit out the required checks the pull request itself
+    # re-queues (fact 1 above): they took about fourteen minutes the last
+    # time this was measured, and the wait loop below is allowed thirty.
+    timeout-minutes: 45
+    permissions:
+      # contents: write is what merging a pull request needs; pull-requests:
+      # write is what opening and editing one needs; actions: write is what
+      # starting the promotion gate on the target branch needs. None is
+      # optional, and nothing else is granted.
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      HEAD_BRANCH: staging
+      BASE_BRANCH: testing
+      # True only when a person ticked the box on a manual run. On the
+      # schedule this is false.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # The marker that tells "the pull request this workflow opened" apart
+      # from "a promotion pull request a person opened and deliberately did
+      # not merge". Only pull requests carrying it are ever merged here.
+      AUTO_LABEL: auto-promotion
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Both branch tips and the whole range between them are needed.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          # No pip cache: scripts/auto_promote.py imports nothing but the
+          # standard library, so this job installs no dependencies at all.
+
+      - name: Collect the facts the decision is made from
+        id: facts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          facts="$RUNNER_TEMP/facts"
+          mkdir -p "$facts"
+
+          head_sha=$(git rev-parse "origin/$HEAD_BRANCH")
+          base_sha=$(git rev-parse "origin/$BASE_BRANCH")
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+
+          # Same format as the manual Promote workflow, so the two bodies are
+          # the same shape to read. This range is only the truth for
+          # $head_sha, which is why the body states that commit and why the
+          # merge is pinned to it.
+          git log --no-merges --format='%h %s (%an)' \
+            "origin/$BASE_BRANCH..origin/$HEAD_BRANCH" > "$facts/commits.txt"
+
+          # The ruleset, through the endpoint that needs only repository read
+          # access. This is where the required contexts come from.
+          gh api "repos/$GITHUB_REPOSITORY/rules/branches/$BASE_BRANCH" \
+            > "$facts/rules.json"
+
+          # A required context can be satisfied by a check run or by a commit
+          # status, so both are collected and handed over together.
+          gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha/check-runs?per_page=100" \
+            > "$facts/check-runs.json"
+          gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha/status" \
+            > "$facts/status.json"
+          jq -s '{check_runs: (.[0].check_runs // []), statuses: (.[1].statuses // [])}' \
+            "$facts/check-runs.json" "$facts/status.json" > "$facts/reports.json"
+
+          # Candidate promotion pull requests. `gh pr list --head` matches a
+          # branch of that name in ANY repository, forks included, so every
+          # field the script needs to tell ours apart from a stranger's is
+          # asked for here and checked there. Nothing is trusted because it
+          # appeared in this list.
+          gh pr list --base "$BASE_BRANCH" --head "$HEAD_BRANCH" --state open --limit 30 \
+            --json number,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,headRefName,isCrossRepository,headRepositoryOwner,labels,state,author,url \
+            > "$facts/open-pr.json"
+
+          # What the release gate last said about the tip of `testing`. A
+          # branch that already cannot be released is not given more to
+          # carry, and a tip the gate never ran on is repaired below.
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/promotion-gate.yml/runs?branch=$BASE_BRANCH&per_page=30" \
+            > "$facts/gate.json"
+
+      - name: Decide
+        id: decide
+        # Keep going: `decide` exits 1 when the automation is stuck on its own
+        # pull request, and the summary still has to be published.
+        continue-on-error: true
+        env:
+          HEAD_SHA: ${{ steps.facts.outputs.head_sha }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          extra=()
+          if [ "$DRY_RUN" = "true" ]; then extra+=(--dry-run); fi
+          python scripts/auto_promote.py decide \
+            --rules "$RUNNER_TEMP/facts/rules.json" \
+            --checks "$RUNNER_TEMP/facts/reports.json" \
+            --open-pr "$RUNNER_TEMP/facts/open-pr.json" \
+            --gate "$RUNNER_TEMP/facts/gate.json" \
+            --commits "$RUNNER_TEMP/facts/commits.txt" \
+            --head-sha "$HEAD_SHA" \
+            --base-sha "$BASE_SHA" \
+            --event "$EVENT" \
+            --run-url "$RUN_URL" \
+            --out "$RUNNER_TEMP/verdict.json" \
+            --body "$RUNNER_TEMP/body.md" \
+            --summary "$RUNNER_TEMP/summary.md" \
+            --github-output "$GITHUB_OUTPUT" \
+            "${extra[@]}"
+
+      # Written on every run, including the runs that do nothing, so that
+      # "decided there was nothing to do" and "never ran" are never the same
+      # empty page in the Actions tab.
+      - name: Publish the verdict to the job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/summary.md" ]; then
+            cat "$RUNNER_TEMP/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## Auto promote" >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "The run failed before it reached a verdict. Nothing was opened," \
+              "updated or merged. See the run log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # `decide` is allowed to fail (it exits 1 when the automation is stuck),
+      # so a crash in it would otherwise reach the next step as an empty
+      # verdict and read exactly like "nothing to do".
+      - name: Fail if no verdict was reached
+        if: steps.decide.outputs.state == ''
+        run: |
+          echo "::error title=auto promote::the decision step produced no verdict. See the run log."
+          exit 1
+
+      # A cancelled or timed-out run can merge and then die before starting
+      # the gate, and a maintainer's own merge into `testing` from a fork
+      # pull request starts one either way -- but a GITHUB_TOKEN merge starts
+      # no `push` run at all. Either way the branch a release is cut from
+      # would carry no gate verdict and nothing would ever notice. Repairing
+      # it here, before deciding anything, makes the next daily run the
+      # thing that heals yesterday's.
+      # Not when this run is about to promote: the merge moves the tip and
+      # the step after it starts the gate on the new one. Two gate runs
+      # queued behind each other is two hours of CI for one landing.
+      - name: Repair a target tip the release gate never ran on
+        if: >-
+          steps.decide.outputs.gate == 'missing'
+          && steps.decide.outputs.state != 'READY'
+          && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ steps.facts.outputs.base_sha }}
+        run: |
+          set -uo pipefail
+          if gh workflow run promotion-gate.yml --ref "$BASE_BRANCH"; then
+            echo "::notice title=auto promote::started the promotion gate on $BASE_BRANCH."
+            {
+              echo
+              echo "\`$BASE_BRANCH\` at \`${BASE_SHA:0:12}\` had no promotion gate run."
+              echo "One was started. Its verdict gates tomorrow's promotion."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo
+              echo "**Could not start the promotion gate on \`$BASE_BRANCH\`.** That branch"
+              echo "has commits no release gate has verified. Start \`promotion-gate.yml\`"
+              echo "from the Actions tab before cutting a release from \`$BASE_BRANCH\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=auto promote::could not start the promotion gate on $BASE_BRANCH."
+          fi
+
+      - name: Stop, this workflow is stuck on its own pull request
+        if: steps.decide.outputs.escalate == 'true'
+        env:
+          STATE: ${{ steps.decide.outputs.state }}
+        run: |
+          echo "::error title=auto promote::$STATE, and it will not clear by itself. See the job summary."
+          exit 1
+
+      - name: Stop, with the reason
+        if: steps.decide.outputs.state != 'READY' && steps.decide.outputs.escalate != 'true'
+        env:
+          STATE: ${{ steps.decide.outputs.state }}
+        run: |
+          echo "Verdict: $STATE. Nothing was opened, updated or merged."
+
+      - name: Stop, this was a dry run
+        if: steps.decide.outputs.state == 'READY' && env.DRY_RUN == 'true'
+        run: |
+          echo "::notice title=auto promote::dry run: would promote $HEAD_BRANCH to $BASE_BRANCH."
+          cat "$RUNNER_TEMP/body.md"
+
+      - name: Open or update the promotion pull request
+        id: pr
+        if: steps.decide.outputs.state == 'READY' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXISTING: ${{ steps.decide.outputs.pr_number }}
+        run: |
+          set -uo pipefail
+          # --force makes this idempotent, and it is what puts the marker
+          # label in the repository the first time this workflow runs. Without
+          # it `gh pr create --label` fails on an unknown label.
+          gh label create "$AUTO_LABEL" --force --color 1D76DB \
+            --description "Promotion pull request opened by auto-promote.yml" >/dev/null || true
+          if [ -n "$EXISTING" ]; then
+            # `decide` already proved this one is same-repository, correctly
+            # aimed, labelled as ours and at the head SHA the checks were
+            # read on. Only then is its body rewritten.
+            if ! gh pr edit "$EXISTING" --body-file "$RUNNER_TEMP/body.md"; then
+              echo "::error title=auto promote::could not update the body of PR #$EXISTING."
+              exit 1
+            fi
+            number="$EXISTING"
+            echo "::notice title=auto promote::updated promotion PR #$number"
+          else
+            # gh prints the new pull request's URL on stdout. It is the only
+            # answer that cannot be wrong: re-listing races GitHub's own
+            # index, and an empty answer from that race used to be written to
+            # $GITHUB_OUTPUT as "no pull request", skipping the merge, the
+            # refusal report and everything else while the run stayed green.
+            if ! gh pr create --base "$BASE_BRANCH" --head "$HEAD_BRANCH" \
+                 --title "Promote $HEAD_BRANCH -> $BASE_BRANCH" \
+                 --body-file "$RUNNER_TEMP/body.md" \
+                 --label promotion --label "$AUTO_LABEL" \
+                 > "$RUNNER_TEMP/create.log" 2>&1; then
+              cat "$RUNNER_TEMP/create.log"
+              if grep -qi 'not permitted to create or approve pull requests' \
+                   "$RUNNER_TEMP/create.log"; then
+                python scripts/auto_promote.py create-denied \
+                  --message "$RUNNER_TEMP/create.log" \
+                  --run-url "$RUN_URL" \
+                  --summary "$RUNNER_TEMP/denied.md"
+                cat "$RUNNER_TEMP/denied.md" >> "$GITHUB_STEP_SUMMARY"
+              else
+                {
+                  echo
+                  echo "**Could not open the promotion pull request.** Nothing was merged."
+                } >> "$GITHUB_STEP_SUMMARY"
+                echo "::error title=auto promote::gh pr create failed; see the run log."
+              fi
+              exit 1
+            fi
+            cat "$RUNNER_TEMP/create.log"
+            url=$(grep -oE 'https://[^ ]+/pull/[0-9]+' "$RUNNER_TEMP/create.log" | tail -1)
+            number="${url##*/}"
+            if [ -z "$number" ]; then
+              {
+                echo
+                echo "**A promotion pull request was opened but its number could not be read**"
+                echo "from what \`gh\` printed. Nothing was merged. Find it in the pull request"
+                echo "list and merge it by hand with a merge commit."
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error title=auto promote::opened a pull request but could not read its number."
+              exit 1
+            fi
+            echo "::notice title=auto promote::opened promotion PR #$number"
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for GitHub to be willing to merge it
+        id: wait
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -uo pipefail
+          # `mergeable` is only GitHub's conflict computation. It says
+          # MERGEABLE while the required checks re-queued by opening this
+          # pull request are still running, and asking to merge then is
+          # refused. `mergeStateStatus` is the field that knows:
+          #   CLEAN / HAS_HOOKS  -> go.
+          #   UNSTABLE           -> go; only non-required checks are unhappy,
+          #                         and the required ones were classified
+          #                         from the check runs themselves.
+          #   BLOCKED / UNKNOWN / BEHIND -> wait, this is the re-queue.
+          #   DIRTY / DRAFT      -> stop, waiting will not help.
+          state=UNKNOWN
+          for _ in $(seq 1 60); do
+            state=$(gh pr view "$NUMBER" --json mergeStateStatus --jq '.mergeStateStatus' \
+              || echo UNKNOWN)
+            case "$state" in
+              CLEAN|HAS_HOOKS|UNSTABLE|DIRTY|DRAFT) break ;;
+            esac
+            echo "merge state $state; waiting."
+            sleep 30
+          done
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "::notice title=auto promote::merge state for #$NUMBER is $state."
+
+      # The door-side control. Everything the decision checked about this
+      # pull request -- above all its BASE BRANCH, which its author may
+      # change at any time, and which changing does not re-run a single
+      # workflow -- is read again here, from the API, seconds before the
+      # merge. A pull request that is no longer same-repository,
+      # `staging -> testing`, labelled as ours and at the decided head SHA is
+      # refused and the run goes red.
+      - name: Verify the pull request is still the one that was decided
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.facts.outputs.head_sha }}
+        if: steps.pr.outputs.number != ''
+        run: |
+          set -uo pipefail
+          gh pr view "$NUMBER" \
+            --json number,baseRefName,headRefName,isCrossRepository,headRepositoryOwner,headRefOid,labels,state \
+            > "$RUNNER_TEMP/pr.json"
+          python scripts/auto_promote.py verify \
+            --pull-request "$RUNNER_TEMP/pr.json" \
+            --expect-number "$NUMBER" \
+            --expect-head-sha "$HEAD_SHA" \
+            --summary "$RUNNER_TEMP/verify.md"
+          code=$?
+          if [ -f "$RUNNER_TEMP/verify.md" ]; then
+            cat "$RUNNER_TEMP/verify.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # 0 go, 3 the head moved (quiet stop, tomorrow promotes the newer
+          # commit), anything else somebody moved the pull request under us
+          # and the run goes red.
+          echo "ok=$([ "$code" = "0" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          [ "$code" = "0" ] || [ "$code" = "3" ]
+
+      - name: Merge it with a merge commit
+        id: merge
+        if: steps.check.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.facts.outputs.head_sha }}
+        run: |
+          set -uo pipefail
+          # --merge, never --squash and never --rebase: every promoted commit
+          # must keep its own author. The ruleset allows no other method, and
+          # no --delete-branch either: the head here is a long-lived branch.
+          #
+          # --match-head-commit is what makes the commit whose checks were
+          # read the commit that gets merged. The pull request head tracks a
+          # branch, so a push to `staging` during this run moves it; without
+          # this flag those commits would be promoted having been verified by
+          # nothing. GitHub enforces it, so it holds even against a push that
+          # lands between the verify step and this one.
+          if gh pr merge "$NUMBER" --merge \
+               --match-head-commit "$HEAD_SHA" \
+               --subject "Promote $HEAD_BRANCH -> $BASE_BRANCH (#$NUMBER)" \
+               > "$RUNNER_TEMP/merge.log" 2>&1; then
+            cat "$RUNNER_TEMP/merge.log"
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/merge.log"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Say that it worked
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ steps.facts.outputs.head_sha }}
+        run: |
+          echo "::notice title=auto promote::merged PR #$NUMBER."
+          {
+            echo
+            echo "Merged **#$NUMBER** with a merge commit, at \`${HEAD_SHA:0:12}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A merge made with GITHUB_TOKEN starts no `push` workflow run, so this
+      # merge does not run promotion-gate.yml on the target branch the way
+      # the maintainer's own merge does. The gate is the evidence the manual
+      # `testing -> main` promotion rests on, so it is started by hand here.
+      #
+      # ci.yml is deliberately NOT started. Its eight contexts are not needed
+      # on the tip of `testing`: opening the manual `testing -> main` pull
+      # request runs ci.yml on that same commit and satisfies them, which is
+      # how every promotion pull request in this repository has got them.
+      # Dispatching it would also switch on its `upgrade-path` job, which is
+      # manual-only, takes forty-five minutes, installs three releases from
+      # PyPI, and is not a required context -- so a network flake in it would
+      # be a red run a day about nothing.
+      - name: Start the release gate the merge itself could not trigger
+        id: followup
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if ! gh workflow run promotion-gate.yml --ref "$BASE_BRANCH"; then
+            {
+              echo
+              echo "**Could not start \`promotion-gate.yml\` on \`$BASE_BRANCH\`.** The merge"
+              echo "landed, but the release gate has not run on it. Start it from the"
+              echo "Actions tab before cutting a release from \`$BASE_BRANCH\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=auto promote::merged, but could not start the release gate on $BASE_BRANCH."
+            exit 1
+          fi
+          # `gh workflow run` exits 0 for a dispatch it merely handed over.
+          # Whether a run actually appeared is a separate question, and the
+          # answer matters: the gate is what the next promotion is judged on.
+          sleep 15
+          runs=$(gh run list --workflow promotion-gate.yml --branch "$BASE_BRANCH" \
+            --event workflow_dispatch --limit 1 --json databaseId --jq 'length' || echo 0)
+          {
+            echo
+            if [ "$runs" = "0" ]; then
+              echo "Dispatched \`promotion-gate.yml\` on \`$BASE_BRANCH\`, but no run had"
+              echo "appeared a moment later. Check the Actions tab."
+            else
+              echo "Started \`promotion-gate.yml\` on \`$BASE_BRANCH\`. Its verdict decides"
+              echo "whether \`$BASE_BRANCH\` may be released, and gates tomorrow's"
+              echo "automatic promotion into \`$BASE_BRANCH\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The one red outcome that is about the automation rather than the
+      # repository: it asked GitHub to merge and was told no. Nothing else
+      # reports that, and the pull request would otherwise sit open until
+      # somebody happened to look.
+      - name: Report a merge GitHub refused
+        if: steps.merge.outputs.merged == 'false'
+        env:
+          NUMBER: ${{ steps.pr.outputs.number }}
+          MERGE_STATE: ${{ steps.wait.outputs.state }}
+        run: |
+          set -uo pipefail
+          python scripts/auto_promote.py refused \
+            --pr-number "$NUMBER" \
+            --message "$RUNNER_TEMP/merge.log" \
+            --merge-state "$MERGE_STATE" \
+            --verdict "$RUNNER_TEMP/verdict.json" \
+            --run-url "$RUN_URL" \
+            --summary "$RUNNER_TEMP/refusal.md"
+          code=$?
+          cat "$RUNNER_TEMP/refusal.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=auto promote::GitHub refused to merge PR #$NUMBER. It is still open; merge it by hand with a merge commit."
+          exit "$code"
+
+      # Last word, on every path including cancellation and the timeout. A
+      # run that merged and then died would otherwise leave no trace of the
+      # merge anywhere, and the grey "cancelled" square in the Actions tab
+      # reads exactly like a run that did nothing.
+      - name: Say what actually happened to the pull request
+        if: always() && steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+        run: |
+          set -uo pipefail
+          state=$(gh pr view "$NUMBER" --json state --jq '.state' || echo UNKNOWN)
+          {
+            echo
+            echo "Final state of #$NUMBER: \`$state\`."
+            if [ "$state" != "MERGED" ]; then
+              echo
+              echo "It is still open. Merge it by hand with a **merge commit**, or close it."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
