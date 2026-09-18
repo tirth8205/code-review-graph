@@ -131,13 +131,25 @@ class TestSqlTableExtraction:
 
     def test_create_table(self):
         matches = _SQL_TABLE_RE.findall("CREATE TABLE my_db.new_table (id INT)")
-        assert "my_db.new_table" in matches
+        assert matches == ["my_db.new_table"]
+
+    def test_create_table_if_not_exists(self):
+        matches = _SQL_TABLE_RE.findall(
+            "CREATE TABLE IF NOT EXISTS my_db.new_table (id INT)"
+        )
+        assert matches == ["my_db.new_table"]
 
     def test_create_or_replace_view(self):
         matches = _SQL_TABLE_RE.findall(
             "CREATE OR REPLACE VIEW my_view AS SELECT 1"
         )
         assert "my_view" in matches
+
+    def test_create_or_replace_view_if_not_exists(self):
+        matches = _SQL_TABLE_RE.findall(
+            "CREATE OR REPLACE VIEW IF NOT EXISTS my_view AS SELECT 1"
+        )
+        assert matches == ["my_view"]
 
     def test_insert_overwrite(self):
         matches = _SQL_TABLE_RE.findall(

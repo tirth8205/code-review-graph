@@ -36,6 +36,10 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: home)
+    # conftest pins HERMES_HOME to its own temp dir so no test can reach the
+    # real config. Re-point it inside this fake home so the Hermes platform
+    # is exercised within the user-scope boundary uninstall enforces.
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
     return home
 
 
@@ -64,6 +68,16 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
             "command = \"code-review-graph\"\n\n"
             "[mcp_servers.other]\ncommand = \"other\"\n",
         )
+    elif spec["format"] == "yaml":
+        _write(
+            config_path,
+            "theme: dark\n\n"
+            f"{spec['key']}:\n"
+            "  code-review-graph:\n"
+            "    command: code-review-graph\n"
+            "  other:\n"
+            "    url: https://example.test/mcp\n",
+        )
     else:
         if spec["format"] == "array":
             container: object = [
@@ -85,6 +99,12 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
         assert 'theme = "dark"' in text
+    elif spec["format"] == "yaml":
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert set(data[spec["key"]]) == {"other"}
+        assert data["theme"] == "dark"
     else:
         data = _read_jsonc(config_path)
         container = data[spec["key"]]
@@ -435,6 +455,139 @@ def test_uninstall_cleans_current_and_legacy_copilot_instruction_paths(
     assert report.errors == []
     for path in paths:
         assert path.read_text(encoding="utf-8") == "# User notes\n"
+
+
+def _legacy_claude_section() -> str:
+    """The longest recorded pre-guardrails CLAUDE.md-shaped block."""
+    return next(
+        block
+        for block in skills.LEGACY_INSTRUCTION_SECTIONS
+        if not block.startswith("---\n")
+    )
+
+
+def test_uninstall_removes_a_section_written_by_an_older_release(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """Removal used to match only the running version's text, so a block from
+    any earlier release survived an explicit uninstall (#314)."""
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + _legacy_claude_section())
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert path.read_text(encoding="utf-8") == "user instructions\n"
+    assert report.skipped_paths == []
+
+
+def test_uninstall_removes_the_current_section_including_its_end_marker(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + skills._CLAUDE_MD_SECTION)
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    remaining = path.read_text(encoding="utf-8")
+    assert remaining == "user instructions\n"
+    assert skills._CLAUDE_MD_SECTION_END_MARKER not in remaining
+
+
+def test_uninstall_leaves_a_hand_edited_section_alone_and_reports_it(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    path = fake_repo / "CLAUDE.md"
+    content = "user prefix\n\n" + _legacy_claude_section().replace(
+        "### Key Tools", "### Key Tools (our notes)"
+    )
+    _write(path, content)
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert path.read_text(encoding="utf-8") == content
+    assert any(str(path) in item and "left unchanged" in item for item in report.skipped_paths)
+
+
+def test_uninstall_keeps_user_content_on_both_sides_of_the_block(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    head = "# House rules\n\nNever force push.\n\n"
+    tail = "\n## Deploy notes\n\nRun the migration first.\n"
+    path = fake_repo / "CLAUDE.md"
+    _write(path, head + _legacy_claude_section() + tail)
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    remaining = path.read_text(encoding="utf-8")
+    assert remaining == (
+        "# House rules\n\nNever force push.\n\n## Deploy notes\n\nRun the migration first.\n"
+    )
+    assert skills._CLAUDE_MD_SECTION_MARKER not in remaining
+    # One blank line where the block was, not a pileup left by the removal.
+    assert "\n\n\n" not in remaining
+
+
+def test_uninstall_clears_every_duplicate_stale_block(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """Repeat installs used to stack blocks (#558); removal must clear them all."""
+    older = [
+        block
+        for block in skills.LEGACY_INSTRUCTION_SECTIONS
+        if not block.startswith("---\n")
+    ]
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + older[0] + "\n" + older[1] + "\n" + older[0])
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert path.read_text(encoding="utf-8") == "user instructions\n"
+
+
+def test_install_then_uninstall_restores_the_file_byte_for_byte(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    original = "# House rules\n\nNever force push.\n"
+    path = fake_repo / "CLAUDE.md"
+    _write(path, original)
+
+    skills.inject_claude_md(fake_repo)
+    assert path.read_text(encoding="utf-8") != original
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_uninstall_removes_older_sections_from_every_instruction_path(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    older_claude = _legacy_claude_section()
+    older_copilot = next(
+        block for block in skills.LEGACY_INSTRUCTION_SECTIONS if block.startswith("---\n")
+    )
+    relatives = ["CLAUDE.md", *skills._PLATFORM_INSTRUCTION_FILES]
+    for relative in relatives:
+        custom = relative in skills._PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+        _write(
+            fake_repo / relative,
+            "user instructions\n\n" + (older_copilot if custom else older_claude),
+        )
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    for relative in relatives:
+        assert (fake_repo / relative).read_text(encoding="utf-8") == "user instructions\n"
 
 
 def test_modified_instruction_section_is_not_guessed_or_truncated(

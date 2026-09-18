@@ -1,12 +1,34 @@
 """Tests for CLI helpers and MCP serve command wiring."""
 
+import io
 import json
 import logging
 import sys
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from code_review_graph import cli
+
+
+def test_main_handles_legacy_stdio_encoding(monkeypatch):
+    """Unicode CLI output must not crash when stdio starts as cp1252."""
+    raw_stdout = io.BytesIO()
+    legacy_stdout = io.TextIOWrapper(raw_stdout, encoding="cp1252")
+    raw_stderr = io.BytesIO()
+    legacy_stderr = io.TextIOWrapper(raw_stderr, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", legacy_stdout)
+    monkeypatch.setattr(sys, "stderr", legacy_stderr)
+    monkeypatch.setattr(sys, "argv", ["code-review-graph"])
+
+    cli.main()
+
+    legacy_stdout.flush()
+    output = raw_stdout.getvalue().decode(legacy_stdout.encoding)
+    assert legacy_stdout.encoding == "utf-8"
+    assert legacy_stderr.encoding == "utf-8"
+    assert "code-review-graph" in output
+    assert "Commands:" in output
 
 
 def test_get_version_falls_back_to_package_attr_when_metadata_missing(
@@ -63,7 +85,7 @@ class TestServeCommand:
                 cli.main()
 
         mock_serve.assert_called_once_with(
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             auto_watch=True,
             tools=None,
         )
@@ -80,7 +102,7 @@ class TestServeCommand:
                 cli.main()
 
         mock_serve.assert_called_once_with(
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             auto_watch=False,
         )
 
@@ -112,13 +134,17 @@ def test_visualize_json_uses_local_export(tmp_path, capsys):
         "json",
     ]
     data_dir = tmp_path / ".code-review-graph"
+    data_dir.mkdir()
+    # visualize is read-only for missing graphs (#803); the path must exist.
+    db_path = data_dir / "graph.db"
+    db_path.touch()
     store = MagicMock()
 
     with patch.object(sys, "argv", argv):
         with patch("code_review_graph.graph.GraphStore", return_value=store):
             with patch(
                 "code_review_graph.incremental.get_db_path",
-                return_value=data_dir / "graph.db",
+                return_value=db_path,
             ):
                 with patch(
                     "code_review_graph.incremental.get_data_dir",
@@ -167,7 +193,7 @@ class TestBuildUpdateCommands:
 
         mock_build.assert_called_once_with(
             full_rebuild=True,
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             postprocess="none",
         )
         mock_postprocess.assert_not_called()
@@ -205,7 +231,7 @@ class TestBuildUpdateCommands:
         # can resolve the base to the last-synced commit.
         mock_build.assert_called_once_with(
             full_rebuild=False,
-            repo_root="repo-root",
+            repo_root=str(Path("repo-root").resolve()),
             base=None,
             postprocess="minimal",
         )
@@ -308,6 +334,61 @@ class TestDetectChangesCommand:
 
         assert json.loads(capsys.readouterr().out)["summary"] == "with churn"
         assert analyze.call_args.kwargs["include_churn"] is True
+
+    def test_branch_base_is_resolved_once_for_detection_and_analysis(
+        self, tmp_path, capsys,
+    ):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+        argv = [
+            "code-review-graph",
+            "detect-changes",
+            "--repo",
+            str(repo),
+            "--base",
+            "origin/main",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with (
+                        patch(
+                            "code_review_graph.incremental.resolve_review_base",
+                            return_value="merge-base-sha",
+                        ) as resolve,
+                        patch(
+                            "code_review_graph.incremental.get_changed_files",
+                            return_value=["app.py"],
+                        ) as get_changed,
+                        patch(
+                            "code_review_graph.changes.analyze_changes",
+                            return_value={"summary": "resolved"},
+                        ) as analyze,
+                    ):
+                        cli.main()
+
+        from code_review_graph.constants import discovery_timeout
+
+        budget = discovery_timeout()
+        assert json.loads(capsys.readouterr().out)["summary"] == "resolved"
+        # Discovery runs on its own short budget, not the 30s CRG_GIT_TIMEOUT
+        # that build and update need (#262), and with require_vcs throughout:
+        # detect-changes' exit code is a review gate, so a git it could not
+        # run -- including one that overran that budget -- must not be
+        # reported as "no changes".
+        resolve.assert_called_once_with(
+            repo.resolve(), "origin/main", timeout=budget, require_vcs=True,
+        )
+        get_changed.assert_called_once_with(
+            repo.resolve(), "merge-base-sha", timeout=budget, require_vcs=True,
+        )
+        assert budget <= 5.0
+        assert analyze.call_args.kwargs["base"] == "merge-base-sha"
 
     def test_brief_output_includes_token_savings_panel(self, tmp_path, capsys):
         """v2.3.5: --brief output renders a boxed Token Savings panel.

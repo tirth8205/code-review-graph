@@ -1029,6 +1029,88 @@ class TestDaemonCLI:
 
         assert exc_info.value.code == 1
 
+    def test_handle_stop_retains_pid_when_forced_signal_does_not_kill(self):
+        """Successful signal delivery is not proof that the daemon exited."""
+        from code_review_graph.daemon_cli import _handle_stop
+
+        args = MagicMock()
+        pid = 4242
+        windows_signal = MagicMock(spec=["SIGTERM"])
+        windows_signal.SIGTERM = signal.SIGTERM
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=True),
+            patch("code_review_graph.daemon.read_pid", return_value=pid),
+            patch(
+                "code_review_graph.daemon.pid_alive",
+                return_value=True,
+            ) as mock_alive,
+            patch("code_review_graph.daemon.clear_pid") as mock_clear_pid,
+            patch("code_review_graph.daemon_cli.signal", windows_signal),
+            patch("code_review_graph.daemon_cli.os.kill") as mock_kill,
+            patch("code_review_graph.daemon_cli.time.sleep"),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            _handle_stop(args)
+
+        assert [entry.args for entry in mock_kill.call_args_list] == [
+            (pid, signal.SIGTERM),
+            (pid, signal.SIGTERM),
+        ]
+        assert mock_alive.call_count == 100
+        mock_clear_pid.assert_not_called()
+        assert exc_info.value.code == 1
+
+    def test_handle_restart_windows_starts_after_process_exits(self):
+        """A Windows restart continues to start after the old process exits."""
+        from code_review_graph.daemon_cli import _handle_restart
+
+        args = MagicMock()
+        pid = 4242
+        windows_signal = MagicMock(spec=["SIGTERM"])
+        windows_signal.SIGTERM = signal.SIGTERM
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=True),
+            patch("code_review_graph.daemon.read_pid", return_value=pid),
+            patch("code_review_graph.daemon.pid_alive", return_value=False) as mock_alive,
+            patch("code_review_graph.daemon.clear_pid") as mock_clear_pid,
+            patch("code_review_graph.daemon_cli.signal", windows_signal),
+            patch("code_review_graph.daemon_cli.os.kill") as mock_kill,
+            patch("code_review_graph.daemon_cli.time.sleep") as mock_sleep,
+            patch("code_review_graph.daemon_cli._handle_start") as mock_start,
+        ):
+            _handle_restart(args)
+
+        mock_kill.assert_called_once_with(pid, signal.SIGTERM)
+        mock_alive.assert_called_once_with(pid)
+        mock_sleep.assert_not_called()
+        mock_clear_pid.assert_called_once_with()
+        mock_start.assert_called_once_with(args)
+
+    def test_handle_stop_keeps_pid_if_forced_stop_does_not_kill(self):
+        """A still-live daemon must retain its PID file after failed escalation."""
+        from code_review_graph.daemon_cli import _handle_stop
+
+        args = MagicMock()
+        pid = 4242
+
+        with (
+            patch("code_review_graph.daemon.is_daemon_running", return_value=True),
+            patch("code_review_graph.daemon.read_pid", return_value=pid),
+            patch("code_review_graph.daemon.pid_alive", return_value=True),
+            patch("code_review_graph.daemon.clear_pid") as mock_clear_pid,
+            patch(
+                "code_review_graph.daemon_cli.os.kill",
+                side_effect=[None, OSError("forced stop failed")],
+            ),
+            patch("code_review_graph.daemon_cli.time.sleep"),
+            pytest.raises(OSError, match="forced stop failed"),
+        ):
+            _handle_stop(args)
+
+        mock_clear_pid.assert_not_called()
+
     def test_handle_status_not_running(self):
         """_handle_status displays 'not running' when daemon is down."""
         from code_review_graph.daemon_cli import _handle_status

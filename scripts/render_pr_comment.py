@@ -13,6 +13,14 @@ Exit codes:
     0  rendered successfully (gate passed or disabled)
     2  the input file could not be read
     3  risk gate breached (``--fail-on-risk high|critical``)
+    4  detect-changes did not produce an analysis at all
+
+Exit 4 exists because "no changes" and "could not determine the changes"
+must not render as the same comment. ``detect-changes`` prints exactly
+``No changes detected.`` for a genuinely clean tree and exits 0; anything
+else non-JSON on its stdout means the analysis never happened, and a review
+gate that rendered a reassuring comment for that would be waving through a
+pull request nobody looked at.
 """
 
 from __future__ import annotations
@@ -40,8 +48,22 @@ RISK_THRESHOLDS: dict[str, float] = {"critical": 0.85, "high": 0.7, "medium": 0.
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_CELL = 120
-# GitHub rejects comment bodies over 65,536 characters; leave headroom.
+# GitHub rejects comment bodies over 65,536 characters, and the trusted
+# workflow that publishes this report (.github/workflows/pr-review-comment.yml)
+# rejects an artifact larger than MAX_REPORT_BYTES. This is that same budget,
+# and it is a budget for the *finished* body: the truncation notice and the
+# footer have to fit inside it, or every truncated report is rejected by the
+# consumer and the largest pull requests get no comment at all. Measured in
+# UTF-8 bytes, because that is what the consumer measures.
 _MAX_BODY = 60_000
+# main() writes the body followed by a newline, and the consumer measures the
+# file on disk, not the string this module returns. That newline is therefore
+# part of what is measured and one byte of the budget belongs to it: without
+# this reservation a report sized at exactly _MAX_BODY becomes a 60,001-byte
+# artifact and is rejected by the very check the budget exists to satisfy.
+_ARTIFACT_NEWLINE_BYTES = len(b"\n")
+#: What the body itself may occupy, once the artifact's newline is reserved.
+_MAX_BODY_TEXT = _MAX_BODY - _ARTIFACT_NEWLINE_BYTES
 
 
 def risk_level(score: float) -> str:
@@ -260,10 +282,38 @@ def render_markdown(
         )
 
     lines.extend(["", "---", "", FOOTER])
-    body = "\n".join(lines)
-    if len(body) > _MAX_BODY:
-        body = body[:_MAX_BODY] + "\n\n*Report truncated.*\n\n" + FOOTER
-    return body
+    return _fit_to_budget("\n".join(lines))
+
+
+def _fit_to_budget(body: str) -> str:
+    """Return *body* trimmed so the written artifact fits ``_MAX_BODY``.
+
+    Everything the consumer measures is inside the budget: the truncation
+    notice, the footer, and the newline ``main`` writes after the body. The
+    notice and footer are subtracted before the report is cut, and the cut
+    lands on a line boundary so the last row of a markdown table is never
+    left half-written.
+    """
+    encoded = body.encode("utf-8")
+    if len(encoded) <= _MAX_BODY_TEXT:
+        return body
+    suffix = "\n\n*Report truncated.*\n\n" + FOOTER
+    budget = _MAX_BODY_TEXT - len(suffix.encode("utf-8"))
+    head = encoded[:budget].decode("utf-8", "ignore")
+    newline = head.rfind("\n")
+    if newline > 0:
+        head = head[:newline]
+    return head + suffix
+
+
+def _artifact_text(body: str) -> str:
+    """The exact bytes written out for *body*.
+
+    The trailing newline is what a text file ends with, and it is also the
+    byte ``_MAX_BODY_TEXT`` reserves. Both callers below go through here so
+    the reservation and the write cannot drift apart.
+    """
+    return body + "\n"
 
 
 def render_no_changes() -> str:
@@ -283,6 +333,32 @@ def render_no_changes() -> str:
     )
 
 
+def render_not_analyzed(detail: str) -> str:
+    """Comment for output that is neither an analysis nor a clean tree."""
+    return "\n".join(
+        [
+            MARKER,
+            "",
+            "## code-review-graph review",
+            "",
+            "**The change analysis did not run, so this pull request has not "
+            "been reviewed by code-review-graph.** This is not an all-clear.",
+            "",
+            "```",
+            md_escape(detail, limit=400) or "(no output)",
+            "```",
+            "",
+            "---",
+            "",
+            FOOTER,
+        ]
+    )
+
+
+#: The exact line ``detect-changes`` prints for a genuinely unchanged tree.
+NO_CHANGES_MARKER = "No changes detected."
+
+
 def load_report(text: str) -> dict[str, Any] | None:
     """Parse detect-changes output; None when it is not a JSON object.
 
@@ -296,6 +372,16 @@ def load_report(text: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     return data
+
+
+def is_clean_tree(text: str) -> bool:
+    """True only for detect-changes' own "nothing changed" line.
+
+    Anything else that failed to parse as JSON — an error message, a partial
+    write, an empty file because the command died — is the analysis not
+    having happened, which is a different thing entirely.
+    """
+    return text.strip() == NO_CHANGES_MARKER
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -351,7 +437,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     report = load_report(text)
-    if report is None:
+    not_analyzed = report is None and not is_clean_tree(text)
+    if not_analyzed:
+        logger.error(
+            "detect-changes produced no analysis; this is NOT an all-clear: %s",
+            text.strip()[:400] or "(no output)",
+        )
+        body = render_not_analyzed(text)
+    elif report is None:
         body = render_no_changes()
     else:
         body = render_markdown(
@@ -362,13 +455,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         if args.output == "-":
-            sys.stdout.write(body + "\n")
+            sys.stdout.write(_artifact_text(body))
         else:
             try:
-                Path(args.output).write_text(body + "\n", encoding="utf-8")
+                Path(args.output).write_text(_artifact_text(body), encoding="utf-8")
             except OSError as exc:
                 logger.error("Cannot write output file %s: %s", args.output, exc)
                 return 2
+
+    if not_analyzed:
+        # Distinct from the risk gate: the risk is unknown, not low.
+        return 4
 
     if args.fail_on_risk != "none" and report is not None:
         score = float(report.get("risk_score") or 0.0)
