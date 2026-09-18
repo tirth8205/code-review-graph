@@ -9,13 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import re
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional
 
 import networkx as nx
@@ -31,13 +32,31 @@ from .constants import (
     IMPACT_EDGE_DIRECTIONS,
     IMPACT_EDGE_WEIGHTS,
     IMPACT_SCORE_FLOOR,
+    IMPORT_SCOPE_KEY,
+    IMPORT_SCOPE_PACKAGE,
+    IMPORT_SCOPE_TREE,
     MAX_IMPACT_DEPTH,
     MAX_IMPACT_NODES,
+    env_int,
 )
-from .migrations import get_schema_version, run_migrations
+from .errors import GraphStoreError, is_lock_error
+from .migrations import (
+    LATEST_VERSION,
+    TARGET_RESOLUTION_EXPR,
+    TARGET_RESOLUTION_KINDS,
+    get_schema_version,
+    run_migrations,
+    target_resolution_expr,
+)
 from .parser import EdgeInfo, NodeInfo, normalize_file_path
 
 logger = logging.getLogger(__name__)
+
+# Maximum rows bound into a single executemany() call for batched writes.
+# Chunking keeps peak memory bounded, while the surrounding transaction and
+# single commit mean SQLite performs one WAL commit/checkpoint per batch job
+# instead of one per row (issue #721).
+_UPDATE_BATCH = 50_000
 
 # These are the canonical language values stored for the JavaScript ecosystem.
 # JSX files are stored as ``javascript`` and Astro files as ``typescript`` by
@@ -52,6 +71,108 @@ def _compatible_edge_languages(language: str) -> tuple[str, ...]:
     if normalized in _JAVASCRIPT_LANGUAGE_FAMILY_SET:
         return _JAVASCRIPT_LANGUAGE_FAMILY
     return (language,)
+
+
+def _symbol_of(qualified_name: str) -> str:
+    """Return the symbol portion of a qualified name (after the first "::").
+
+    ``src/app.py::Handler.process`` → ``Handler.process``. A qualified name
+    without a path component is already a bare symbol.
+    """
+    _, sep, symbol = qualified_name.partition("::")
+    return symbol if sep else qualified_name
+
+
+# Longest docstring summary mirrored into the searchable ``nodes.docstring``
+# column. The parser already caps what it stores in ``extra``; this bound is
+# re-applied because existing databases may hold anything.
+MAX_INDEXED_DOCSTRING_CHARS = 400
+# Bound on the derived ``nodes.name_tokens`` column so a pathological
+# identifier cannot grow the FTS index without limit.
+MAX_INDEXED_TOKEN_CHARS = 200
+
+_ALNUM_RUN_RE = re.compile(r"[0-9A-Za-z]+")
+# Split at lower/digit -> upper ("hashPassword") and at the boundary before
+# the final capitalised word of an acronym run ("HTTPServer" -> HTTP Server).
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _index_tokens(*values: str | None) -> str:
+    """Return the camelCase/PascalCase word splits of *values*, space joined.
+
+    Only sub-words that the FTS5 ``unicode61`` tokenizer cannot produce on
+    its own are emitted. unicode61 already breaks on every non-alphanumeric
+    character, so ``get_users`` and ``graph/impact.py`` contribute nothing,
+    while ``hashPassword`` contributes ``hash Password``, the tokens that
+    make ``password`` match it. Keeping the column minimal matters: repeating
+    tokens that are already indexed would inflate their term frequency and
+    skew BM25 ranking.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        for run in _ALNUM_RUN_RE.findall(value):
+            parts = _CAMEL_BOUNDARY_RE.split(run)
+            if len(parts) < 2:
+                continue
+            for part in parts:
+                lowered = part.lower()
+                if lowered and lowered not in seen:
+                    seen.add(lowered)
+                    out.append(part)
+    return " ".join(out)[:MAX_INDEXED_TOKEN_CHARS]
+
+
+def identifier_words(text: str) -> set[str]:
+    """Return the lowercase words *text* is built from.
+
+    Both the whole alphanumeric run and its camelCase parts are returned, so
+    ``GraphStore`` yields ``{graphstore, graph, store}``. Callers compare
+    these sets to decide whether a symbol is *named after* a query, which is
+    the signal BM25 cannot express once long file paths dominate a row's
+    token count.
+    """
+    words: set[str] = set()
+    for run in _ALNUM_RUN_RE.findall(text or ""):
+        words.add(run.lower())
+        for part in _CAMEL_BOUNDARY_RE.split(run):
+            if part:
+                words.add(part.lower())
+    return words
+
+
+def node_index_tokens(
+    kind: str,
+    name: str,
+    parent_name: str | None,
+    file_path: str | None,
+) -> str:
+    """Return the value for a node's ``name_tokens`` column.
+
+    A File node's ``name`` *is* its path, so splitting it would fold every
+    directory segment of the checkout into the index (an absolute path under
+    ``.../CloudDocs/`` would add "Cloud Docs" to every file in the graph).
+    File nodes contribute their stem only.
+    """
+    stem = PurePosixPath(file_path or "").stem
+    return _index_tokens("" if kind == "File" else name, parent_name, stem)
+
+
+def _indexed_docstring(extra: dict[str, Any] | None) -> str | None:
+    """Return the whitespace-normalized docstring summary held in *extra*.
+
+    Existing databases may carry any JSON value under ``docstring``, so
+    non-strings are ignored rather than coerced.
+    """
+    if not extra:
+        return None
+    raw = extra.get("docstring")
+    if not isinstance(raw, str):
+        return None
+    summary = " ".join(raw.split())[:MAX_INDEXED_DOCSTRING_CHARS]
+    return summary or None
 
 
 def _bridge_qualified_name(qualified_name: str) -> str:
@@ -88,6 +209,21 @@ CREATE TABLE IF NOT EXISTS nodes (
     is_test INTEGER DEFAULT 0,
     file_hash TEXT,
     extra TEXT DEFAULT '{}',
+    -- Symbol portion of qualified_name (everything after the first "::").
+    -- Stored so a dotted-tail lookup is an indexed equality test instead of a
+    -- substr() scan over every node; see search_nodes_by_qualified_tail.
+    -- idx_nodes_symbol is created by migration v10, not here: _init_schema runs
+    -- before run_migrations, so indexing a column this CREATE TABLE cannot add
+    -- to an existing table would break every pre-existing database on open.
+    symbol TEXT,
+    -- Documentation summary lifted out of extra['docstring'] so the FTS5
+    -- external-content index can reach it (FTS columns must be real columns
+    -- of the content table). See migration v11.
+    docstring TEXT,
+    -- camelCase/PascalCase word splits for name, parent_name and the file
+    -- stem. unicode61 splits on punctuation but keeps hashPassword as one
+    -- token, so "password" could never match it. Added by migration v11.
+    name_tokens TEXT,
     updated_at REAL NOT NULL
 );
 
@@ -101,6 +237,13 @@ CREATE TABLE IF NOT EXISTS edges (
     extra TEXT DEFAULT '{}',
     confidence REAL DEFAULT 1.0,
     confidence_tier TEXT DEFAULT 'EXTRACTED',
+    -- 'direct' when target_qualified names an indexed node, 'unresolved' when
+    -- it is a bare name the read path can only match by name. NULL for edge
+    -- kinds where the distinction is meaningless (an IMPORTS_FROM target is a
+    -- file path, not a call target) and for rows written since the last
+    -- refresh_target_resolution() pass. Same rule as nodes.symbol above:
+    -- idx_edges_kind_target_resolution is created by migration v11, not here.
+    target_resolution TEXT,
     updated_at REAL NOT NULL
 );
 
@@ -119,6 +262,33 @@ CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_path);
 """
+
+
+#: Accepted values for the ``resolution`` filter shared by the query tools
+#: and the impact traversal. "all" keeps today's behaviour; "direct" keeps
+#: only attributions the graph bound to an indexed node; "unresolved" keeps
+#: only the bare-name guesses (query patterns only).
+RESOLUTION_ALL = "all"
+RESOLUTION_DIRECT = "direct"
+RESOLUTION_UNRESOLVED = "unresolved"
+QUERY_RESOLUTIONS = (RESOLUTION_ALL, RESOLUTION_DIRECT, RESOLUTION_UNRESOLVED)
+IMPACT_RESOLUTIONS = (RESOLUTION_ALL, RESOLUTION_DIRECT)
+
+
+def _impact_resolution_guard(resolution: str) -> str:
+    """Return the SQL predicate for one validated impact resolution mode."""
+    if resolution == RESOLUTION_ALL:
+        return ""
+    if resolution != RESOLUTION_DIRECT:
+        raise ValueError(
+            f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, "
+            f"got {resolution!r}"
+        )
+    return (
+        " AND (e.kind NOT IN ('CALLS', 'REFERENCES') "
+        f"OR COALESCE(e.target_resolution, {target_resolution_expr('e')})"
+        " = 'direct')"
+    )
 
 
 @dataclass
@@ -150,6 +320,9 @@ class GraphEdge:
     extra: dict
     confidence: float = 1.0
     confidence_tier: str = "EXTRACTED"
+    #: 'direct', 'unresolved', or None where the distinction does not apply
+    #: (a non-call edge) or has not been computed yet. See migration v11.
+    target_resolution: Optional[str] = None
 
 
 @dataclass
@@ -177,9 +350,324 @@ class GraphStats:
     last_updated: Optional[str]
 
 
+#: How far above a file an ancestor directory may still be the target of a
+#: tree-scoped import. A ``require_all`` names a subsystem, not a whole
+#: repository, and the walk has to stop somewhere that is not the filesystem
+#: root.
+IMPORT_SCOPE_MAX_ANCESTORS = 12
+
+
+def _edge_import_scope(extra: Optional[str]) -> Optional[str]:
+    """The ``import_scope`` recorded on one raw ``edges.extra`` value."""
+    if not extra or IMPORT_SCOPE_KEY not in extra:
+        return None
+    try:
+        payload = json.loads(extra)
+    except (TypeError, ValueError):
+        return None
+    scope = payload.get(IMPORT_SCOPE_KEY) if isinstance(payload, dict) else None
+    return scope if isinstance(scope, str) else None
+
+
+def _parent_dir(path: Optional[str]) -> Optional[str]:
+    """The directory holding *path*, as a directory-scoped edge spells it.
+
+    Registered as the SQLite function ``crg_parent_dir``. Returns ``None``
+    for anything that is not an absolute POSIX-ish path, so a qualified name
+    that is not a file path can never join a directory target by accident.
+    """
+    if not isinstance(path, str) or "/" not in path:
+        return None
+    head = path.rsplit("/", 1)[0]
+    return head or None
+
+
+def import_scope_ancestors(file_path: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Directory targets that could name *file_path*, nearest first.
+
+    Each entry pairs a directory with the import scopes for which that
+    directory legitimately stands for the file. The file's own directory
+    qualifies under both scopes; anything higher only under
+    :data:`IMPORT_SCOPE_TREE`, because a Go package is exactly one directory
+    deep and a subdirectory of it is a different package.
+    """
+    parent = _parent_dir(file_path)
+    if parent is None:
+        return []
+    out: list[tuple[str, tuple[str, ...]]] = [
+        (parent, (IMPORT_SCOPE_PACKAGE, IMPORT_SCOPE_TREE)),
+    ]
+    current = parent
+    for _ in range(IMPORT_SCOPE_MAX_ANCESTORS):
+        current = _parent_dir(current) or ""
+        if not current:
+            break
+        out.append((current, (IMPORT_SCOPE_TREE,)))
+    return out
+
+
+#: Fills ``_impact_frontier_dirs`` with the package directory of every File
+#: node on the frontier, once per hop. CROSS JOIN drives it from the frontier,
+#: which is small, rather than from every File node in the graph.
+IMPACT_FRONTIER_DIRS_SQL = """
+INSERT INTO _impact_frontier_dirs (dir, score)
+SELECT dir, MAX(score) FROM (
+    SELECT crg_parent_dir(n.file_path) AS dir, f.score AS score
+    FROM _impact_frontier f
+    CROSS JOIN nodes n
+      ON n.qualified_name = f.node_qn AND n.kind = 'File'
+)
+WHERE dir IS NOT NULL
+GROUP BY dir
+"""
+
+
+def _impact_candidate_sql(resolution_guard: str) -> str:
+    """One hop of the impact relaxation.
+
+    *resolution_guard* is either the empty string or a fixed predicate chosen
+    by a validated enum; no caller value reaches the SQL text.
+
+    The third branch is the directory-scoped one. A Go import names a
+    package, so its edge targets the file's DIRECTORY rather than the file,
+    and expanding it here -- at every hop, without spending one -- is what
+    one edge per import buys: the alternative is one edge per file in the
+    package, which on kubernetes is 73,507 edges for a single directory.
+
+    ``CROSS JOIN`` and ``INDEXED BY`` pin that branch to one index seek per
+    frontier package. Left to itself SQLite drove it from the covering index
+    on ``kind`` alone and rescanned every IMPORTS_FROM row once per
+    directory: 18 seconds of a 19-second kubernetes traversal, against 1.5
+    with the plan pinned. ``tests/test_import_scope.py`` asserts the plan.
+    """
+    return f"""
+    INSERT INTO _impact_next (node_qn, score)
+    SELECT node_qn, MAX(score)
+    FROM (
+        SELECT e.target_qualified AS node_qn,
+               f.score * COALESCE(p.weight, ?) * ? AS score
+        FROM _impact_frontier f
+        JOIN edges e ON e.source_qualified = f.node_qn
+        LEFT JOIN _impact_policies p ON p.kind = e.kind
+        WHERE COALESCE(p.direction, ?) = ?{resolution_guard}
+        UNION ALL
+        SELECT e.source_qualified AS node_qn,
+               f.score * COALESCE(p.weight, ?) * ? AS score
+        FROM _impact_frontier f
+        JOIN edges e ON e.target_qualified = f.node_qn
+        LEFT JOIN _impact_policies p ON p.kind = e.kind
+        WHERE COALESCE(p.direction, ?) = ?{resolution_guard}
+        UNION ALL
+        SELECT e.source_qualified AS node_qn,
+               d.score * COALESCE(p.weight, ?) * ? AS score
+        FROM _impact_frontier_dirs d
+        CROSS JOIN edges e INDEXED BY idx_edges_target_kind
+          ON e.target_qualified = d.dir AND e.kind = 'IMPORTS_FROM'
+        LEFT JOIN _impact_policies p ON p.kind = e.kind
+        WHERE COALESCE(p.direction, ?) = ?
+    ) candidates
+    WHERE score > ?
+    GROUP BY node_qn
+    """  # noqa: S608
+
+
 # ---------------------------------------------------------------------------
 # GraphStore
 # ---------------------------------------------------------------------------
+
+
+_RECOVERY_HINT = (
+    "Delete it and run `code-review-graph build` to rebuild the graph."
+)
+
+
+def _describe_open_failure(db_path: Path, exc: Exception) -> str:
+    """Turn a raw SQLite/OS error into one actionable line.
+
+    ``sqlite3`` reports "file is not a database" for a corrupt or foreign
+    file and "attempt to write a readonly database" / "unable to open
+    database file" for a directory the process may not write to. Those two
+    need opposite fixes, so they get opposite messages instead of one
+    generic apology.
+    """
+    detail = str(exc).strip() or exc.__class__.__name__
+    lowered = detail.lower()
+    if isinstance(exc, OSError) or "readonly" in lowered or "unable to open" in lowered:
+        return (
+            f"cannot open the graph database for writing at {db_path} ({detail}). "
+            f"Check the permissions on {db_path.parent}, or set CRG_DATA_DIR to a "
+            "writable directory."
+        )
+    return (
+        f"the graph database at {db_path} is unreadable ({detail}). "
+        f"{_RECOVERY_HINT}"
+    )
+
+
+def _assert_usable_database(conn: sqlite3.Connection, db_path: Path) -> None:
+    """Refuse a SQLite file this build cannot honestly answer from.
+
+    Two cases that both used to be accepted in silence:
+
+    * a perfectly valid SQLite file belonging to something else. ``CREATE
+      TABLE IF NOT EXISTS`` would graft our schema onto it and every query
+      would then answer "nothing found" about a graph that was never there.
+    * a file written by a newer release. ``run_migrations`` is a no-op once
+      the stored version is at or above ``LATEST_VERSION``, so the mismatch
+      only surfaced much later, as a missing column in an unrelated query.
+    """
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+    ).fetchall()
+    tables = {row[0] for row in rows if not str(row[0]).startswith("sqlite_")}
+    if tables and not tables & {"nodes", "metadata"}:
+        sample = ", ".join(sorted(tables)[:3])
+        raise GraphStoreError(
+            f"{db_path} is a SQLite database but not a code-review-graph graph "
+            f"(it holds {sample}). Point --data-dir somewhere else, or delete "
+            "the file and run `code-review-graph build`."
+        )
+
+    version = get_schema_version(conn)
+    if version > LATEST_VERSION:
+        raise GraphStoreError(
+            f"the graph database at {db_path} was written by a newer "
+            f"code-review-graph (schema v{version}; this build understands "
+            f"v{LATEST_VERSION}). Upgrade code-review-graph, or delete the file "
+            "and run `code-review-graph build`."
+        )
+
+
+class CorruptGraphDatabaseError(GraphStoreError):
+    """The graph database file exists but cannot be opened as this graph.
+
+    A named subclass of :class:`GraphStoreError`, rather than a bare one, so
+    a caller that is about to rebuild the graph from scratch anyway
+    (``build``) can discard the unusable file and carry on, and every other
+    caller reports the single actionable line every ``GraphStoreError``
+    carries instead of a traceback. A restored CI cache is the
+    common source: an unusable ``graph.db`` turns every later run red until
+    someone clears the cache by hand.
+
+    Deliberately not a ``sqlite3.Error``. Nothing this package can explain
+    about itself may reach a caller as a raw SQLite exception; what the
+    subclass records is the one shape of unusable that a rebuild fixes by
+    itself. A foreign SQLite file and a database written by a newer release
+    are excluded for the same reason they are refused up front in
+    :func:`_assert_usable_database`: deleting somebody else's data, or a
+    graph this build is merely too old to read, is not a recovery.
+
+    Two shapes of unusable reach here, and both are unrecoverable in place:
+    a file SQLite cannot read at all (truncated, half-written, not a
+    database), and a perfectly valid SQLite file whose tables are the wrong
+    shape, which ``CREATE TABLE IF NOT EXISTS`` will not repair.
+    """
+
+    def __init__(self, db_path: str | Path, reason: object) -> None:
+        self.db_path = Path(db_path)
+        self.reason = str(reason)
+        super().__init__(
+            f"the graph database at {self.db_path} is unreadable "
+            f"({self.reason}). Run `code-review-graph build` to rebuild it "
+            "from scratch."
+        )
+
+
+_SQLITE_HEADER = b"SQLite format 3\x00"
+
+_CORRUPTION_MESSAGES = (
+    "file is not a database",
+    "database disk image is malformed",
+    "file is encrypted",
+    "malformed database schema",
+)
+
+#: SQLite's wording when a statement names a table or column that is not
+#: shaped the way this schema expects. A file can be perfectly readable and
+#: still answer this way: ``_init_schema`` uses ``CREATE TABLE IF NOT
+#: EXISTS``, so a ``nodes`` table left behind by something else is never
+#: replaced, and the first index or migration that mentions a column it does
+#: not have fails.
+#:
+#: Deliberately narrow, because everything listed here ends in the file being
+#: deleted. "database is locked", "attempt to write a readonly database" and
+#: "disk I/O error" are environment problems and must never cost anyone their
+#: database. "already exists" and "duplicate column name" are excluded for the
+#: same reason: every migration guards its DDL with a check first, so those
+#: two mean two processes migrated the same healthy database at once, not that
+#: the database is wrong.
+_INCOMPATIBLE_SCHEMA_MESSAGES = (
+    "no such column",
+    "no such table",
+    "has no column named",
+)
+
+
+def _is_unreadable_database(db_path: Path, exc: sqlite3.DatabaseError) -> bool:
+    """Distinguish a corrupt database file from an environment problem.
+
+    A missing directory or a permission error also raises
+    ``sqlite3.DatabaseError``; deleting the file would be wrong there, so
+    only SQLite's own corruption messages, or a file that does not carry the
+    SQLite header, count as corruption.
+    """
+    message = str(exc).lower()
+    if any(known in message for known in _CORRUPTION_MESSAGES):
+        return True
+    try:
+        with open(db_path, "rb") as handle:
+            header = handle.read(len(_SQLITE_HEADER))
+    except OSError:
+        return False
+    return bool(header) and not header.startswith(_SQLITE_HEADER)
+
+
+def _has_incompatible_schema(db_path: Path, exc: sqlite3.DatabaseError) -> bool:
+    """True when *db_path* is readable SQLite holding the wrong tables.
+
+    Both halves are required. The message has to name a schema object, which
+    rules out locks, read-only filesystems and I/O errors; and the file has
+    to still answer a read of ``sqlite_master``, which rules out reporting a
+    genuinely broken file as merely mis-shaped.
+    """
+    message = str(exc).lower()
+    if not any(known in message for known in _INCOMPATIBLE_SCHEMA_MESSAGES):
+        return False
+    if not db_path.is_file():
+        # Never let the probe below be the thing that creates the file.
+        return False
+    try:
+        probe = sqlite3.connect(str(db_path), timeout=5)
+    except sqlite3.DatabaseError:
+        return False
+    try:
+        probe.execute("SELECT name FROM sqlite_master LIMIT 1").fetchall()
+    except sqlite3.DatabaseError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def discard_corrupt_database(db_path: str | Path) -> bool:
+    """Delete an unusable graph database and its WAL sidecars.
+
+    Returns True when at least one file was removed. Only ever call this
+    where the graph is about to be rebuilt from scratch: the data is gone.
+    """
+    path = Path(db_path)
+    removed = False
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        candidate = path.with_name(path.name + suffix) if suffix else path
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("Could not remove %s: %s", candidate, exc)
+            continue
+        removed = True
+    return removed
 
 
 class GraphStore:
@@ -187,26 +675,86 @@ class GraphStore:
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(
-            str(self.db_path), timeout=30, check_same_thread=False,
-            isolation_level=None,  # Disable implicit transactions (#135)
-        )
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA busy_timeout=5000")
-        self._init_schema()
-        # Ensure schema_version is set, then run pending migrations
-        if get_schema_version(self._conn) < 1:
-            # Fresh DB — metadata table just created by _init_schema
-            self._conn.execute(
-                "INSERT OR IGNORE INTO metadata (key, value) "
-                "VALUES ('schema_version', '1')"
+        conn: sqlite3.Connection | None = None
+        try:
+            # Inside the try on purpose: an unwritable data directory raises
+            # here, and it is one of the failures this constructor explains.
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(
+                str(self.db_path), timeout=30, check_same_thread=False,
+                isolation_level=None,  # Disable implicit transactions (#135)
             )
-            self._conn.commit()
-        run_migrations(self._conn)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            _assert_usable_database(conn, self.db_path)
+            self._conn = conn
+            self._init_schema()
+            # Ensure schema_version is set, then run pending migrations
+            if get_schema_version(self._conn) < 1:
+                # Fresh DB — metadata table just created by _init_schema
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO metadata (key, value) "
+                    "VALUES ('schema_version', '1')"
+                )
+                self._conn.commit()
+            run_migrations(self._conn)
+        except (sqlite3.Error, OSError, GraphStoreError) as exc:
+            # A corrupt file, a foreign SQLite file, or a data directory this
+            # process cannot write to used to escape as a raw traceback from
+            # every single command. Report the cause and the recovery instead.
+            if conn is not None:
+                try:
+                    conn.close()
+                except sqlite3.Error:  # pragma: no cover - dead handle
+                    logger.debug("Could not close %s after a failed open",
+                                 self.db_path)
+            if isinstance(exc, GraphStoreError):
+                # Already classified, and already carries its own line:
+                # a foreign SQLite file, a newer schema, or (from a nested
+                # open) an unusable one.
+                raise
+            if is_lock_error(exc):
+                # Contention, not damage. Another process holds the write
+                # lock (migrations retry it, so reaching here means it held
+                # on past that); the graph is intact and the answer is to try
+                # again in a moment. Describing it as an unreadable database
+                # would tell the user to delete a healthy graph, would hide it
+                # from the contention report in ``cli.main``, and would send
+                # ``build`` to discard a graph that was never broken.
+                raise
+            if isinstance(exc, sqlite3.DatabaseError) and (
+                _is_unreadable_database(self.db_path, exc)
+                or _has_incompatible_schema(self.db_path, exc)
+            ):
+                # Unusable *and* unrecoverable in place, which is the one
+                # shape a rebuild can fix by itself. Both classifiers are
+                # deliberately narrow: everything they decline keeps the
+                # generic message below and nobody's database is deleted.
+                raise CorruptGraphDatabaseError(self.db_path, exc) from exc
+            raise GraphStoreError(
+                _describe_open_failure(self.db_path, exc)
+            ) from exc
+        # Directory-scoped IMPORTS_FROM targets (a Go package, a Ruby
+        # ``require_all`` tree) are expanded on the read path, so the impact
+        # traversal needs a file's own directory as a join key. Deterministic
+        # so SQLite evaluates it once per row and seeks idx_edges_target_kind
+        # rather than scanning. See IMPORT_SCOPE_KEY in constants.py.
+        #
+        # Registered outside the open/migrate guard above: a failure here is
+        # not a corrupt file, and the guard must keep deleting databases only
+        # for the two shapes it recognises.
+        try:
+            self._conn.create_function(
+                "crg_parent_dir", 1, _parent_dir, deterministic=True,
+            )
+        except (sqlite3.NotSupportedError, TypeError):  # pragma: no cover
+            self._conn.create_function("crg_parent_dir", 1, _parent_dir)
         self._nxg_cache: nx.DiGraph | None = None
         self._cache_lock = threading.Lock()
+        # Identifies the read transaction currently open on this connection,
+        # so a reader cannot roll back a transaction a writer took from it.
+        self._active_read_txn: object | None = None
 
     def __enter__(self) -> "GraphStore":
         return self
@@ -238,8 +786,8 @@ class GraphStore:
             """INSERT INTO nodes
                (kind, name, qualified_name, file_path, line_start, line_end,
                 language, parent_name, params, return_type, modifiers, is_test,
-                file_hash, extra, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                file_hash, extra, symbol, docstring, name_tokens, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(qualified_name) DO UPDATE SET
                  kind=excluded.kind, name=excluded.name,
                  file_path=excluded.file_path, line_start=excluded.line_start,
@@ -247,14 +795,19 @@ class GraphStore:
                  parent_name=excluded.parent_name, params=excluded.params,
                  return_type=excluded.return_type, modifiers=excluded.modifiers,
                  is_test=excluded.is_test, file_hash=excluded.file_hash,
-                 extra=excluded.extra, updated_at=excluded.updated_at
+                 extra=excluded.extra, symbol=excluded.symbol,
+                 docstring=excluded.docstring, name_tokens=excluded.name_tokens,
+                 updated_at=excluded.updated_at
             """,
             (
                 node.kind, node.name, qualified, node.file_path,
                 node.line_start, node.line_end, node.language,
                 node.parent_name, node.params, node.return_type,
                 node.modifiers, int(node.is_test), file_hash,
-                extra, now,
+                extra, _symbol_of(qualified), _indexed_docstring(node.extra),
+                node_index_tokens(node.kind, node.name, node.parent_name,
+                                  node.file_path),
+                now,
             ),
         )
         row = self._conn.execute(
@@ -307,9 +860,17 @@ class GraphStore:
         """Remove one deleted file and every graph reference to its nodes."""
         return self.remove_files_permanently([file_path])
 
-    def remove_files_permanently(self, file_paths: list[str]) -> int:
-        """Atomically remove deleted files and graph references to their nodes."""
-        file_paths = [normalize_file_path(p) for p in file_paths]
+    def remove_files_permanently(
+        self, file_paths: list[str], *, stored_paths: bool = False,
+    ) -> int:
+        """Atomically remove deleted files and graph references to their nodes.
+
+        Reconciliation passes exact inventory spellings with ``stored_paths``.
+        Normalising legacy rows would miss them and could delete a different,
+        current row that already uses the canonical spelling (#911).
+        """
+        if not stored_paths:
+            file_paths = [normalize_file_path(p) for p in file_paths]
         changed = 0
         has_embeddings = self._conn.execute(
             "SELECT 1 FROM sqlite_master "
@@ -347,12 +908,64 @@ class GraphStore:
         self._invalidate_cache()
         return changed
 
+    @contextmanager
+    def _read_transaction(self) -> Iterator[None]:
+        """Hold one snapshot for the duration of a multi-statement read.
+
+        The connection runs with ``isolation_level=None``, so without this
+        every statement gets its own snapshot and a writer committing between
+        two of them yields numbers that contradict each other — ``get_stats``
+        could report a ``total_nodes`` taken before a watcher's commit and a
+        per-kind breakdown taken after it.
+
+        ``BEGIN DEFERRED`` takes no lock and, under WAL, never blocks the
+        writer: it only pins the snapshot this connection reads from. Nested
+        use is a no-op so an enclosing write transaction keeps its own scope,
+        and a failure to begin degrades to today's per-statement reads rather
+        than failing the query.
+        """
+        if self._conn.in_transaction:
+            yield
+            return
+        try:
+            self._conn.execute("BEGIN DEFERRED")
+        except sqlite3.OperationalError as exc:  # pragma: no cover - defensive
+            logger.debug("Could not open a read transaction: %s", exc)
+            yield
+            return
+        token = object()
+        self._active_read_txn = token
+        try:
+            yield
+        finally:
+            # A writer thread sharing this store (the MCP server's auto-watch
+            # does) calls _begin_immediate, which rolls back whatever is open
+            # and starts its own transaction. Rolling back here would then
+            # discard that writer's rows. The token says whether the
+            # transaction being closed is still ours.
+            if self._active_read_txn is token:
+                self._active_read_txn = None
+                try:
+                    # Read-only: rollback and commit are equivalent, and
+                    # rollback cannot fail on a transaction that wrote nothing.
+                    self._conn.rollback()
+                except sqlite3.Error as exc:  # pragma: no cover - defensive
+                    logger.debug("Could not close the read transaction: %s", exc)
+
     def _begin_immediate(self) -> None:
         """Start an IMMEDIATE transaction, rolling back any prior uncommitted
         transaction first (regression guard for #135 / #489).
         """
         if self._conn.in_transaction:
-            logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+            if self._active_read_txn is None:
+                logger.warning(
+                    "Rolling back uncommitted transaction before BEGIN IMMEDIATE"
+                )
+            else:
+                # A concurrent multi-statement read on this connection; taking
+                # it over costs that reader its snapshot, nothing more.
+                logger.debug("Taking over an open read transaction for a write")
+            self._active_read_txn = None
             self._conn.rollback()
         self._conn.execute("BEGIN IMMEDIATE")
 
@@ -362,11 +975,7 @@ class GraphStore:
         """Atomically replace all data for a file."""
         self._begin_immediate()
         try:
-            self.remove_file_data(file_path)
-            for node in nodes:
-                self.upsert_node(node, file_hash=fhash)
-            for edge in edges:
-                self.upsert_edge(edge)
+            self._replace_file_data(file_path, nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
@@ -380,15 +989,96 @@ class GraphStore:
         self._begin_immediate()
         try:
             for file_path, nodes, edges, fhash in batch:
-                self.remove_file_data(file_path)
-                for node in nodes:
-                    self.upsert_node(node, file_hash=fhash)
-                for edge in edges:
-                    self.upsert_edge(edge)
+                self._replace_file_data(file_path, nodes, edges, fhash)
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
+        self._invalidate_cache()
+
+    def _replace_file_data(
+        self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
+    ) -> None:
+        """Delete and re-insert one file's nodes/edges with batched statements.
+
+        The previous implementation ran :meth:`upsert_node` /
+        :meth:`upsert_edge` once per symbol, i.e. a SELECT + INSERT (or
+        SELECT + UPDATE) round trip for every row. On large graphs (10^5+
+        nodes, 10^6+ edges) that per-row Python/SQLite round trip dominates
+        the whole build and can take tens of minutes (issue #721). This bulk
+        path deduplicates rows in Python and inserts everything with
+        ``executemany``, so each statement is prepared once and the file
+        lands in a single transaction.
+
+        Must be called inside an open transaction (BEGIN IMMEDIATE).
+        """
+        normalized = normalize_file_path(file_path)
+        self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (normalized,))
+        self._conn.execute("DELETE FROM edges WHERE file_path = ?", (normalized,))
+
+        now = time.time()
+        if nodes:
+            # ON CONFLICT(qualified_name) keeps the same upsert semantics as
+            # upsert_node(): duplicate qualified names end up as one row with
+            # the last batch entry's values.
+            node_rows: list[tuple] = []
+            for node in nodes:
+                qualified = self._make_qualified(node)
+                extra = json.dumps(node.extra) if node.extra else "{}"
+                node_rows.append((
+                    node.kind, node.name, qualified, node.file_path,
+                    node.line_start, node.line_end, node.language,
+                    node.parent_name, node.params, node.return_type,
+                    node.modifiers, int(node.is_test), fhash,
+                    extra, _symbol_of(qualified), _indexed_docstring(node.extra),
+                    node_index_tokens(node.kind, node.name, node.parent_name,
+                                      normalized),
+                    now,
+                ))
+            self._conn.executemany(
+                """INSERT INTO nodes
+                   (kind, name, qualified_name, file_path, line_start, line_end,
+                    language, parent_name, params, return_type, modifiers, is_test,
+                    file_hash, extra, symbol, docstring, name_tokens, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(qualified_name) DO UPDATE SET
+                     kind=excluded.kind, name=excluded.name,
+                     file_path=excluded.file_path, line_start=excluded.line_start,
+                     line_end=excluded.line_end, language=excluded.language,
+                     parent_name=excluded.parent_name, params=excluded.params,
+                     return_type=excluded.return_type, modifiers=excluded.modifiers,
+                     is_test=excluded.is_test, file_hash=excluded.file_hash,
+                     extra=excluded.extra, symbol=excluded.symbol,
+                     docstring=excluded.docstring, name_tokens=excluded.name_tokens,
+                     updated_at=excluded.updated_at
+                """,
+                node_rows,
+            )
+        if edges:
+            # upsert_edge() collapsed duplicate call sites (same kind, source,
+            # target, file, line) into a single row carrying the *last*
+            # extra/confidence values. Replicate that collapse in Python so a
+            # plain INSERT batch is safe — the file's previous rows were
+            # deleted above and an identical edge cannot come from another
+            # file (file_path is part of the identity).
+            edge_by_site: dict[tuple[str, str, str, str, int], tuple] = {}
+            for edge in edges:
+                extra_dict = edge.extra if edge.extra else {}
+                confidence = float(extra_dict.get("confidence", 1.0))
+                confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
+                extra = json.dumps(extra_dict)
+                site = (edge.kind, edge.source, edge.target, edge.file_path, edge.line)
+                edge_by_site[site] = (
+                    edge.kind, edge.source, edge.target, edge.file_path, edge.line,
+                    extra, confidence, confidence_tier, now,
+                )
+            self._conn.executemany(
+                """INSERT INTO edges
+                   (kind, source_qualified, target_qualified, file_path, line, extra,
+                    confidence, confidence_tier, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                list(edge_by_site.values()),
+            )
         self._invalidate_cache()
 
     def set_metadata(self, key: str, value: str) -> None:
@@ -400,6 +1090,26 @@ class GraphStore:
     def get_metadata(self, key: str) -> Optional[str]:
         row = self._conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
+
+    def get_repo_root(self) -> Optional[str]:
+        """Absolute root of the repository this graph describes, if known.
+
+        ``file_path`` values are absolute, so any consumer that reads a path
+        convention out of them (``tests/``, ``src/test/``) has to know where
+        the repository starts, or it reads the directories above the checkout
+        instead. Builds record the root; for a graph built before they did,
+        the default database location ``<root>/.code-review-graph/graph.db``
+        gives the same answer. ``None`` means neither applies, and callers
+        must degrade explicitly rather than assume the whole path is inside
+        the repository.
+        """
+        recorded = self.get_metadata("repo_root")
+        if recorded:
+            return recorded
+        parent = self.db_path.parent
+        if parent.name == ".code-review-graph":
+            return str(parent.parent)
+        return None
 
     def has_nodes(self) -> bool:
         row = self._conn.execute("SELECT 1 FROM nodes LIMIT 1").fetchone()
@@ -557,7 +1267,7 @@ class GraphStore:
         ``CRG_MAX_TRANSITIVE_FRONTIER`` env var (50 if unset).
         """
         if max_frontier is None:
-            max_frontier = int(os.environ.get("CRG_MAX_TRANSITIVE_FRONTIER", "50"))
+            max_frontier = env_int("CRG_MAX_TRANSITIVE_FRONTIER", 50)
         conn = self._conn
         seen: set[str] = set()
         results: list[dict] = []
@@ -568,7 +1278,8 @@ class GraphStore:
         # as well as top-level functions.
         input_qns = [qualified_name]
         row = conn.execute(
-            "SELECT kind, file_path FROM nodes WHERE qualified_name = ?",
+            "SELECT kind, file_path, parent_name FROM nodes "
+            "WHERE qualified_name = ?",
             (qualified_name,),
         ).fetchone()
         if row and row["kind"] == "Class":
@@ -586,6 +1297,8 @@ class GraphStore:
                 (row["file_path"], qualified_name),
             ).fetchall():
                 input_qns.append(symbol["qualified_name"])
+        target_file = row["file_path"] if row else ""
+        target_parent = row["parent_name"] if row else None
 
         def _node_dict(qn: str, indirect: bool) -> dict | None:
             row = conn.execute(
@@ -632,8 +1345,14 @@ class GraphStore:
         bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
         candidate_cache: dict[str, list[tuple[str, str]]] = {}
         import_cache: dict[str, set[str]] = {}
+        # Same dotted-module evidence the endpoint resolver uses, for graphs
+        # queried before that pass has run. Built on first use: most queries
+        # never reach this fallback, and the index scans every .py path.
+        # See: #903
+        module_files: dict[str, str] | None = None
 
         def _candidate_for_context(name: str, context_file: str) -> str | None:
+            nonlocal module_files
             if name not in candidate_cache:
                 candidate_cache[name] = [
                     (candidate["qualified_name"], candidate["file_path"])
@@ -645,6 +1364,8 @@ class GraphStore:
                     ).fetchall()
                 ]
             if context_file not in import_cache:
+                if module_files is None:
+                    module_files = self._python_module_file_index(conn)
                 imported_files: set[str] = set()
                 for imported in conn.execute(
                     "SELECT target_qualified FROM edges "
@@ -652,9 +1373,13 @@ class GraphStore:
                     (context_file,),
                 ).fetchall():
                     target = imported["target_qualified"]
-                    imported_files.add(
+                    target_file = (
                         target.split("::", 1)[0] if "::" in target else target
                     )
+                    imported_files.add(target_file)
+                    resolved_module = module_files.get(target_file)
+                    if resolved_module:
+                        imported_files.add(resolved_module)
                 import_cache[context_file] = imported_files
             return self._select_evidence_backed_candidate(
                 candidate_cache[name],
@@ -670,6 +1395,22 @@ class GraphStore:
             if _has_unresolved_metadata(row["extra"]):
                 continue
             if _candidate_for_context(bare, row["file_path"]) != qualified_name:
+                continue
+            # TESTED_BY is minted from the test's own CALLS edge and inherits
+            # its metadata, so a bare source here carries the same receiver
+            # evidence a bare call target does. An import that merely brings a
+            # same-named symbol into the test file is not proof the test
+            # exercised this node — `some_dict.get(...)` in a test is still
+            # not a test of `ConnectionPool.get`. See: #997
+            try:
+                tested_by_extra = json.loads(row["extra"] or "{}")
+            except (TypeError, json.JSONDecodeError):
+                tested_by_extra = {}
+            if isinstance(tested_by_extra, dict) and not (
+                self._receiver_evidence_admits_candidate(
+                    tested_by_extra, qualified_name, target_file, target_parent,
+                )
+            ):
                 continue
             tgt = row["target_qualified"]
             if tgt not in seen:
@@ -717,6 +1458,38 @@ class GraphStore:
         return results
 
     @staticmethod
+    def _python_module_file_index(conn: sqlite3.Connection) -> dict[str, str]:
+        """Map each dotted Python module to the one indexed file defining it.
+
+        Built from indexed ``.py`` paths rather than the filesystem, so it works
+        on a graph queried away from the source tree. A module maps to a file
+        only when exactly one file answers to it; ambiguous modules are dropped
+        so they cannot manufacture evidence. Matching is on whole path segments,
+        which keeps ``mypkg.core`` away from ``.../notmypkg/core.py``.
+        """
+        modules: dict[str, str | None] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path LIKE '%.py'"
+        ).fetchall():
+            file_path = row["file_path"]
+            path = PurePosixPath(file_path).with_suffix("")
+            # `.parts` leads with the root ("/"), which is never part of a
+            # module name.
+            segments = path.parts[1:] if path.is_absolute() else path.parts
+            if segments and segments[-1] == "__init__":
+                # `pkg/__init__.py` is imported as `pkg`, never `pkg.__init__`.
+                segments = segments[:-1]
+            for start in range(len(segments)):
+                module = ".".join(segments[start:])
+                if not module:
+                    continue
+                if modules.setdefault(module, file_path) != file_path:
+                    modules[module] = None
+        return {
+            module: path for module, path in modules.items() if path is not None
+        }
+
+    @staticmethod
     def _select_evidence_backed_candidate(
         candidates: list[tuple[str, str]],
         context_file: str,
@@ -730,6 +1503,93 @@ class GraphStore:
         ]
         return supported[0] if len(supported) == 1 else None
 
+    @staticmethod
+    def _receiver_backed_candidates(
+        candidates: list[tuple[str, str]],
+        edge_extra: dict,
+        parent_lookup: dict[str, str | None],
+    ) -> list[tuple[str, str]]:
+        """Narrow bare-name candidates to what the receiver can actually hold.
+
+        ``x.get(...)`` calls the ``get`` belonging to whatever ``x`` is. The
+        call-site file's import list says nothing about that, so a name match
+        plus an import is not evidence — it is how a plain ``some_dict.get()``
+        ended up recorded as a call into ``ConnectionPool.get``. The parser
+        records what the file itself says the receiver is; honour it:
+
+        ``module``
+            the name is bound to a module file, so the method has to be a
+            top-level name in that file — ``agent_baseline.run(...)`` means
+            ``agent_baseline.py::run`` and nothing else.
+        ``class``
+            the name is annotated, constructed, or is itself an imported
+            symbol, so the method has to belong to a class of that name.
+        anything else
+            a container literal, or a local with no evidence at all. There is
+            nothing to attribute the call to, so nothing is attributed and the
+            target stays bare for the unresolved path to explain.
+        """
+        binding = edge_extra.get("receiver_binding")
+        if binding == "module":
+            module_file = edge_extra.get("receiver_module")
+            if not isinstance(module_file, str) or not module_file:
+                return []
+            return [
+                candidate for candidate in candidates
+                if candidate[1] == module_file
+                and parent_lookup.get(candidate[0]) is None
+            ]
+        if binding == "class":
+            class_name = edge_extra.get("receiver_class")
+            if not isinstance(class_name, str) or not class_name:
+                return []
+            return [
+                candidate for candidate in candidates
+                if parent_lookup.get(candidate[0]) == class_name
+            ]
+        return []
+
+    @classmethod
+    def _receiver_evidence_admits_candidate(
+        cls,
+        edge_extra: dict,
+        qualified_name: str,
+        file_path: str,
+        parent_name: str | None,
+    ) -> bool:
+        """Row-level form of :meth:`receiver_evidence_admits`."""
+        if "receiver_binding" not in edge_extra:
+            return True
+        return bool(cls._receiver_backed_candidates(
+            [(qualified_name, file_path)],
+            edge_extra,
+            {qualified_name: parent_name or None},
+        ))
+
+    @classmethod
+    def receiver_evidence_admits(
+        cls, edge_extra: dict, node: GraphNode,
+    ) -> bool:
+        """Can this edge's receiver evidence mean *node*?
+
+        The read path keeps a bare-name fallback: a CALLS edge whose target is
+        the plain method name still answers ``callers_of`` for a node of that
+        name. That fallback applies exactly the rule
+        ``_resolve_bare_endpoints`` refuses to apply — ``some_dict.get(...)``
+        writes the target ``get`` and says nothing whatever about
+        ``ConnectionPool.get`` — so leaving the two paths disagreeing means
+        every attribution the resolver honestly declined is handed back by the
+        tool. Reuse the resolver's own test here, over the single candidate the
+        caller is asking about.
+
+        An edge carrying no ``receiver_binding`` at all is a plain
+        ``foo(...)`` call with no receiver to consult. That is the case the
+        fallback exists for, and it is admitted unchanged.
+        """
+        return cls._receiver_evidence_admits_candidate(
+            edge_extra, node.qualified_name, node.file_path, node.parent_name,
+        )
+
     def resolve_bare_call_targets(self) -> int:
         """Resolve bare CALLS targets backed by same-file or import evidence.
 
@@ -742,6 +1602,64 @@ class GraphStore:
         Returns the number of resolved edges.
         """
         return self._resolve_bare_endpoints("CALLS", "target_qualified")
+
+    # -- Target-resolution certainty --------------------------------------
+
+    def refresh_target_resolution(self) -> int:
+        """Recompute ``edges.target_resolution`` for CALLS/REFERENCES edges.
+
+        Run after every resolver pass: those passes rewrite bare targets into
+        qualified ones, so a classification taken at insert time would be
+        stale for exactly the edges the distinction is about. One set-based
+        UPDATE over the edge table, not a per-row query.
+
+        Returns the number of rows classified.
+        """
+        placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
+        self._begin_immediate()
+        try:
+            cursor = self._conn.execute(
+                "UPDATE edges SET target_resolution = "  # noqa: S608
+                f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders})",
+                TARGET_RESOLUTION_KINDS,
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+    def count_edges_by_resolution(self, kind: str = "CALLS") -> dict[str, int]:
+        """Split one edge kind into certain and guessed target attributions.
+
+        The first query is an index-only group-by over
+        ``idx_edges_kind_target_resolution``; that is what the stored column
+        is for. Only rows the column has not classified yet -- a store written
+        directly by a test, or a build that skipped post-processing -- pay for
+        re-deriving the answer, so the count is never silently short and a
+        refreshed graph never pays for a scan.
+        """
+        split = {"direct": 0, "unresolved": 0}
+        unclassified = 0
+        for resolution, count in self._conn.execute(
+            "SELECT target_resolution, COUNT(*) FROM edges "
+            "WHERE kind = ? GROUP BY target_resolution",
+            (kind,),
+        ):
+            if resolution in split:
+                split[resolution] = count
+            elif resolution is None:
+                unclassified = count
+        if unclassified:
+            for resolution, count in self._conn.execute(
+                f"SELECT {TARGET_RESOLUTION_EXPR} AS resolution, "  # noqa: S608
+                "COUNT(*) FROM edges WHERE kind = ? "
+                "AND target_resolution IS NULL GROUP BY resolution",
+                (kind,),
+            ):
+                if resolution in split:
+                    split[resolution] += count
+        return split
 
     def resolve_cpp_scoped_call_targets(self) -> int:
         """Resolve cross-file C++ ``Scope::call`` targets by stable scope identity.
@@ -772,7 +1690,10 @@ class GraphStore:
             candidates_by_name.setdefault(candidate["name"], []).append(candidate)
 
         resolved = 0
-        changed = False
+        # Collect every mutation and apply them in one transaction at the end
+        # (see below); the previous loop autocommitted per row (issue #721).
+        call_updates: list[tuple[str, str, int]] = []
+        mirror_updates: list[tuple[str, str, int]] = []
 
         def sync_tested_by(
             call_edge: sqlite3.Row,
@@ -780,9 +1701,8 @@ class GraphStore:
             source_qualified: str,
             desired_extra: dict,
             serialized_extra: str,
-        ) -> bool:
+        ) -> None:
             """Keep parser-generated TESTED_BY mirrors aligned with CALLS."""
-            changed_mirror = False
             mirrors = self._conn.execute(
                 "SELECT id, source_qualified, extra FROM edges "
                 "WHERE kind = 'TESTED_BY' AND target_qualified = ? "
@@ -814,12 +1734,9 @@ class GraphStore:
                     and mirror_extra == desired_extra
                 ):
                     continue
-                self._conn.execute(
-                    "UPDATE edges SET source_qualified = ?, extra = ? WHERE id = ?",
+                mirror_updates.append(
                     (source_qualified, serialized_extra, mirror["id"]),
                 )
-                changed_mirror = True
-            return changed_mirror
 
         for edge in rows:
             try:
@@ -877,20 +1794,17 @@ class GraphStore:
                 ):
                     extra.pop(key, None)
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
+                if (
                     edge["target_qualified"] != candidates[0]
                     or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
+                ):
+                    call_updates.append(
                         (candidates[0], serialized_extra, edge["id"]),
                     )
                     resolved += 1
-                mirror_changed = sync_tested_by(
+                sync_tested_by(
                     edge, target, candidates[0], extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
             elif len(candidates) > 1:
                 for key in (
                     "unresolved_targets",
@@ -905,19 +1819,11 @@ class GraphStore:
                     "ambiguous_targets_truncated": len(candidates) > 20,
                 })
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
-                    edge["target_qualified"] != target
-                    or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-                        (target, serialized_extra, edge["id"]),
-                    )
-                mirror_changed = sync_tested_by(
+                if edge["target_qualified"] != target or previous_extra != extra:
+                    call_updates.append((target, serialized_extra, edge["id"]))
+                sync_tested_by(
                     edge, target, target, extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
             else:
                 extra["cpp_scoped_target"] = target
                 for key in (
@@ -932,22 +1838,36 @@ class GraphStore:
                     "unresolved_targets_truncated": False,
                 })
                 serialized_extra = json.dumps(extra, sort_keys=True)
-                call_changed = (
-                    edge["target_qualified"] != target
-                    or previous_extra != extra
-                )
-                if call_changed:
-                    self._conn.execute(
-                        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-                        (target, serialized_extra, edge["id"]),
-                    )
-                mirror_changed = sync_tested_by(
+                if edge["target_qualified"] != target or previous_extra != extra:
+                    call_updates.append((target, serialized_extra, edge["id"]))
+                sync_tested_by(
                     edge, target, target, extra, serialized_extra,
                 )
-                changed = changed or call_changed or mirror_changed
 
-        if changed:
-            self._conn.commit()
+        if call_updates or mirror_updates:
+            # Same batching rationale as _resolve_bare_endpoints: one prepared
+            # statement, one transaction, one commit/checkpoint instead of one
+            # autocommitted UPDATE (+ fsync) per edge (issue #721).
+            self._begin_immediate()
+            try:
+                call_sql = (
+                    "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(call_updates), _UPDATE_BATCH):
+                    self._conn.executemany(
+                        call_sql, call_updates[start:start + _UPDATE_BATCH]
+                    )
+                mirror_sql = (
+                    "UPDATE edges SET source_qualified = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(mirror_updates), _UPDATE_BATCH):
+                    self._conn.executemany(
+                        mirror_sql, mirror_updates[start:start + _UPDATE_BATCH]
+                    )
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
         return resolved
 
     def resolve_bare_tested_by_sources(self) -> int:
@@ -962,44 +1882,86 @@ class GraphStore:
         """
         return self._resolve_bare_endpoints("TESTED_BY", "source_qualified")
 
+    @staticmethod
+    def _directory_member_files(
+        conn: sqlite3.Connection, scoped_dirs: dict[str, str],
+    ) -> dict[str, set[str]]:
+        """Member files of each directory-scoped import target.
+
+        One pass over the File nodes, walking each file's ancestors against
+        the directories that are actually import targets. A ``package``
+        directory owns only the files directly in it; a ``tree`` directory
+        owns every file below it.
+        """
+        members: dict[str, set[str]] = {}
+        for row in conn.execute(
+            "SELECT file_path FROM nodes WHERE kind = 'File'"
+        ):
+            file_path = row["file_path"]
+            for directory, scopes in import_scope_ancestors(file_path):
+                if scoped_dirs.get(directory) in scopes:
+                    members.setdefault(directory, set()).add(file_path)
+        return members
+
     def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
         """Resolve a bare edge endpoint only when one candidate has evidence."""
         if endpoint == "target_qualified":
             raw_key = "bare_call_target"
             endpoint_column = "target_qualified"
+            bare_condition = (
+                "target_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_call_target\"%'"
+            )
             select_sql = (
                 "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? "
-                "AND (target_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_call_target\"%')"
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
             )
         elif endpoint == "source_qualified":
             raw_key = "bare_tested_by_source"
             endpoint_column = "source_qualified"
+            bare_condition = (
+                "source_qualified NOT LIKE '%::%' "
+                "OR extra LIKE '%\"bare_tested_by_source\"%'"
+            )
             select_sql = (
                 "SELECT id, source_qualified, target_qualified, file_path, extra "
-                "FROM edges WHERE kind = ? "
-                "AND (source_qualified NOT LIKE '%::%' "
-                "OR extra LIKE '%\"bare_tested_by_source\"%')"
+                "FROM edges WHERE kind = ? AND (" + bare_condition + ")"
             )
         else:
             raise ValueError(f"Invalid edge endpoint column: {endpoint!r}")
 
         conn = self._conn
 
-        bare_edges = conn.execute(select_sql, (kind,)).fetchall()
-        if not bare_edges:
+        # Cheap no-op guard: avoid materialising the full candidate set when
+        # nothing needs resolving. EXISTS stops at the first matching row, so
+        # the common case exits immediately while the empty case pays a single
+        # scan instead of materialising an empty list (issue #721).
+        has_bare = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM edges WHERE kind = ? AND ("
+            + bare_condition
+            + "))",
+            (kind,),
+        ).fetchone()[0]
+        if not has_bare:
             return 0
+
+        # Stream candidate rows lazily instead of materialising the full set
+        # into memory (millions of rows on large graphs, issue #721).
+        bare_edges = conn.execute(select_sql, (kind,))
 
         # bare_name -> [(qualified_name, defining_file)]
         node_lookup: dict[str, list[tuple[str, str]]] = {}
+        # qualified_name -> owning class, so a receiver known to be an
+        # instance of one class cannot be answered by another class's method.
+        parent_lookup: dict[str, str | None] = {}
         for row in conn.execute(
-            "SELECT name, qualified_name, file_path FROM nodes "
+            "SELECT name, qualified_name, file_path, parent_name FROM nodes "
             "WHERE kind IN ('Function', 'Test', 'Class')"
         ).fetchall():
             node_lookup.setdefault(row["name"], []).append(
                 (row["qualified_name"], row["file_path"]),
             )
+            parent_lookup[row["qualified_name"]] = row["parent_name"]
 
         # call-site file -> explicitly imported files
         import_targets: dict[str, set[str]] = {}
@@ -1009,6 +1971,10 @@ class GraphStore:
         # first built in the ambiguous state cannot fall back to a name-only
         # caller match for every candidate.
         ambiguous_import_targets: dict[str, set[str]] = {}
+        # Directory-scoped targets: a Go import names a package, not a file.
+        # The edge stays one row; the member files are expanded here, once
+        # per post-processing pass, rather than stored one edge per member.
+        scoped_dirs: dict[str, str] = {}
         for row in conn.execute(
             "SELECT DISTINCT file_path, target_qualified, extra FROM edges "
             "WHERE kind = 'IMPORTS_FROM'"
@@ -1016,6 +1982,9 @@ class GraphStore:
             target = row["target_qualified"]
             target_file = target.split("::", 1)[0] if "::" in target else target
             import_targets.setdefault(row["file_path"], set()).add(target_file)
+            scope = _edge_import_scope(row["extra"])
+            if scope is not None:
+                scoped_dirs[target] = scope
             try:
                 import_extra = json.loads(row["extra"] or "{}")
             except (TypeError, json.JSONDecodeError):
@@ -1064,8 +2033,35 @@ class GraphStore:
                     expanded |= namespace_files.get(target, set())
                 imported |= expanded
 
+        if scoped_dirs:
+            members = self._directory_member_files(conn, scoped_dirs)
+            for imported in import_targets.values():
+                grown: set[str] = set()
+                for target in imported:
+                    grown |= members.get(target, set())
+                imported |= grown
+
+        # Python imports the repository-suffix resolver could not map to a file
+        # keep their raw dotted module as the IMPORTS_FROM target — the standard
+        # `src` layout, or framework-mediated packages such as Odoo's
+        # `odoo.addons.*`. Path-keyed evidence can never match a dotted module,
+        # so map each dotted module back to the file that could define it. Only
+        # an unambiguous match counts: a module answered by two indexed files is
+        # no more evidence than a bare name. See: #903
+        module_files = self._python_module_file_index(conn)
+        if module_files:
+            for imported in import_targets.values():
+                expanded = set()
+                for target in imported:
+                    resolved_file = module_files.get(target)
+                    if resolved_file:
+                        expanded.add(resolved_file)
+                imported |= expanded
+
         resolved = 0
-        changed = False
+        # Collect every mutation, then apply them in one transaction at the
+        # end of the loop (see below).
+        updates: list[tuple[str, str, int]] = []
         for edge in bare_edges:
             try:
                 edge_extra = json.loads(edge["extra"] or "{}")
@@ -1083,6 +2079,10 @@ class GraphStore:
             if not isinstance(bare_name, str):
                 continue
             candidates = node_lookup.get(bare_name, [])
+            if "receiver_binding" in edge_extra:
+                candidates = self._receiver_backed_candidates(
+                    candidates, edge_extra, parent_lookup,
+                )
 
             context_file = edge["file_path"]
             imported_files = import_targets.get(context_file, set())
@@ -1162,16 +2162,30 @@ class GraphStore:
                 and edge_extra == desired_extra
             ):
                 continue
-            conn.execute(
-                f"UPDATE edges SET {endpoint_column} = ?, extra = ? WHERE id = ?",
-                (desired_endpoint, serialized_extra, edge["id"]),
-            )
-            changed = True
+            updates.append((desired_endpoint, serialized_extra, edge["id"]))
             if len(supported) == 1 and edge[endpoint] != desired_endpoint:
                 resolved += 1
 
-        if changed:
-            conn.commit()
+        bare_edges.close()
+
+        if updates:
+            # Apply every mutation as one prepared statement inside a single
+            # transaction. The previous code relied on autocommit
+            # (isolation_level=None), so each row became its own WAL commit +
+            # fsync — effectively a hang once a graph has 10^5+ bare edges
+            # (issue #721). Chunked executemany keeps peak memory bounded
+            # while preserving a single commit/checkpoint.
+            self._begin_immediate()
+            try:
+                update_sql = (
+                    f"UPDATE edges SET {endpoint_column} = ?, extra = ? WHERE id = ?"
+                )
+                for start in range(0, len(updates), _UPDATE_BATCH):
+                    conn.executemany(update_sql, updates[start:start + _UPDATE_BATCH])
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
         if resolved:
             endpoint_label = (
                 "sources" if endpoint == "source_qualified" else "targets"
@@ -1190,14 +2204,31 @@ class GraphStore:
         # every represented path so those orphans can be purged, while explicit
         # virtual nodes (such as Spring Event markers) remain outside the file
         # inventory and are managed by their owning resolver.
+        # A killed writer can leave extra='' (or truncated text), which makes
+        # json_extract raise SQLite 'malformed JSON' and crash every caller of
+        # get_all_files. json_valid gates the extraction, and the truthiness
+        # comparison keeps extra='{"virtual": false}' visible instead of
+        # making the node immortal to reconciliation (#864).
         rows = self._conn.execute(
             "SELECT file_path FROM nodes "
-            "WHERE json_extract(extra, '$.virtual') IS NULL "
+            "WHERE extra IS NULL "
+            "OR json_valid(extra) = 0 "
+            "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1 "
             "UNION "
             "SELECT file_path FROM edges "
             "ORDER BY file_path"
         ).fetchall()
         return [r["file_path"] for r in rows]
+
+    def get_file_hashes(self) -> dict[str, str]:
+        """Return indexed file paths mapped to the hash last stored for each file."""
+        rows = self._conn.execute(
+            "SELECT file_path, file_hash FROM nodes WHERE kind = 'File'"
+        ).fetchall()
+        return {
+            normalize_file_path(row["file_path"]): row["file_hash"] or ""
+            for row in rows
+        }
 
     def get_file_marker_paths(self) -> list[str]:
         """Return paths that have authoritative File nodes.
@@ -1209,6 +2240,30 @@ class GraphStore:
             "SELECT file_path FROM nodes WHERE kind = 'File' ORDER BY file_path"
         ).fetchall()
         return [row["file_path"] for row in rows]
+
+    def search_nodes_by_qualified_tail(
+        self, tail: str, limit: int = 20,
+    ) -> list[GraphNode]:
+        """Return nodes whose qualified symbol portion exactly matches *tail*.
+
+        Both predicates are indexed equality tests (``idx_nodes_symbol`` and the
+        ``qualified_name`` unique index), so this stays a bounded lookup rather
+        than a scan of every node on large graphs.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE symbol = ? OR qualified_name = ? LIMIT ?",
+            (tail, tail, limit),
+        ).fetchall()
+        return [self._row_to_node(row) for row in rows]
+
+    def count_nodes_by_qualified_tail(self, tail: str) -> int:
+        """Count nodes whose qualified symbol portion exactly matches *tail*."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS count FROM nodes "
+            "WHERE symbol = ? OR qualified_name = ?",
+            (tail, tail),
+        ).fetchone()
+        return int(row["count"])
 
     def search_nodes(self, query: str, limit: int = 20) -> list[GraphNode]:
         """Keyword search across node names.
@@ -1323,22 +2378,165 @@ class GraphStore:
         reach importers of a changed .cs file. The namespace strings have
         no node rows, so they act purely as bridges and never surface in
         results. See: #310
+
+        Tree-scoped import targets are bridged the same way. A Ruby
+        ``require_all "jekyll/converters"`` names a DIRECTORY, and a file
+        two levels below it is still one of the files it loads, so the
+        directory is seeded for the changed file. The one-level case -- a Go
+        package, which is exactly one directory -- is not seeded here: the
+        traversal expands it at every hop, so it also works for a file
+        reached indirectly rather than only for a changed one.
         """
         seeds: set[str] = set()
+        files: list[str] = []
         for f in changed_files:
             for n in self.get_nodes_by_file(f):
                 seeds.add(n.qualified_name)
-                if n.kind == "File" and n.language == "csharp":
-                    for ns in n.extra.get("csharp_namespaces") or []:
-                        if isinstance(ns, str) and ns:
-                            seeds.add(ns)
+                if n.kind == "File":
+                    files.append(n.file_path)
+                    if n.language == "csharp":
+                        for ns in n.extra.get("csharp_namespaces") or []:
+                            if isinstance(ns, str) and ns:
+                                seeds.add(ns)
+        seeds.update(self.tree_scope_bridges(files))
         return seeds
+
+    def tree_scope_bridges(self, file_paths: Iterable[str]) -> set[str]:
+        """Ancestor directories that a tree-scoped import target names.
+
+        Only ancestors ABOVE each file's own directory: the own-directory
+        case is handled by the traversal itself, which is what keeps it
+        working at every hop instead of only for a seed.
+        """
+        wanted: dict[str, str] = {}
+        for file_path in file_paths:
+            for directory, scopes in import_scope_ancestors(file_path)[1:]:
+                if IMPORT_SCOPE_TREE in scopes:
+                    wanted[directory] = IMPORT_SCOPE_TREE
+        if not wanted:
+            return set()
+        found: set[str] = set()
+        directories = list(wanted)
+        for start in range(0, len(directories), 450):
+            batch = directories[start:start + 450]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                "SELECT DISTINCT target_qualified, extra FROM edges "
+                "WHERE kind = 'IMPORTS_FROM' "
+                f"AND target_qualified IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                if _edge_import_scope(row["extra"]) == IMPORT_SCOPE_TREE:
+                    found.add(row["target_qualified"])
+        return found
+
+    def import_scope_edges(
+        self, file_paths: Iterable[str], source_qns: set[str],
+    ) -> list[GraphEdge]:
+        """Directory-scoped IMPORTS_FROM edges that connect the given files.
+
+        ``get_edges_among`` matches source and target against the same set of
+        qualified names, and a directory target is in no such set, so these
+        edges would otherwise be missing from the answer that rests on them.
+        """
+        wanted: dict[str, tuple[str, ...]] = {}
+        for file_path in file_paths:
+            for directory, scopes in import_scope_ancestors(file_path):
+                wanted[directory] = tuple(
+                    sorted(set(wanted.get(directory, ())) | set(scopes)),
+                )
+        if not wanted or not source_qns:
+            return []
+        out: list[GraphEdge] = []
+        directories = list(wanted)
+        for start in range(0, len(directories), 450):
+            batch = directories[start:start + 450]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self._conn.execute(  # nosec B608
+                "SELECT * FROM edges WHERE kind = 'IMPORTS_FROM' "
+                f"AND target_qualified IN ({placeholders})",
+                batch,
+            ).fetchall()
+            for row in rows:
+                edge = self._row_to_edge(row)
+                if edge.source_qualified not in source_qns:
+                    continue
+                scope = edge.extra.get(IMPORT_SCOPE_KEY)
+                if scope in wanted.get(edge.target_qualified, ()):
+                    out.append(edge)
+        return out
+
+    def _import_scope_importer_index(self) -> dict[str, list[str]]:
+        """Directory target -> the qualified names that import it.
+
+        Only the NetworkX engine needs this materialised. The SQL engine
+        seeks the same rows one directory at a time through
+        ``idx_edges_target_kind``.
+        """
+        index: dict[str, list[str]] = {}
+        rows = self._conn.execute(
+            "SELECT source_qualified, target_qualified, extra FROM edges "
+            "WHERE kind = 'IMPORTS_FROM' AND extra LIKE ?",
+            (f"%{IMPORT_SCOPE_KEY}%",),
+        ).fetchall()
+        for row in rows:
+            if _edge_import_scope(row["extra"]) is None:
+                continue
+            index.setdefault(row["target_qualified"], []).append(
+                row["source_qualified"],
+            )
+        return index
+
+    def _file_node_directories(self) -> dict[str, str]:
+        """File node qualified name -> the directory that holds it."""
+        out: dict[str, str] = {}
+        for row in self._conn.execute(
+            "SELECT qualified_name, file_path FROM nodes WHERE kind = 'File'"
+        ):
+            directory = _parent_dir(row["file_path"])
+            if directory:
+                out[row["qualified_name"]] = directory
+        return out
+
+    def count_unresolved_call_sites(self, names: set[str]) -> int:
+        """Count call sites that name *names* but were never bound to a node.
+
+        These are the blast radius's blind spot: a CALLS/REFERENCES edge whose
+        target is a bare name cannot join a qualified seed, so the traversal
+        never follows it. The count is deliberately not receiver-filtered --
+        that check needs a specific candidate node -- so it is an upper bound
+        on missed impact, not a claim that every one of these is a real call.
+        """
+        if not names:
+            return 0
+        self._conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _impact_seed_names (name TEXT PRIMARY KEY)"
+        )
+        self._conn.execute("DELETE FROM _impact_seed_names")
+        name_list = list(names)
+        for start in range(0, len(name_list), 450):
+            batch = name_list[start:start + 450]
+            placeholders = ",".join("(?)" for _ in batch)
+            self._conn.execute(  # nosec B608
+                f"INSERT OR IGNORE INTO _impact_seed_names (name) VALUES {placeholders}",
+                batch,
+            )
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM edges "  # noqa: S608
+            "JOIN _impact_seed_names s ON s.name = edges.target_qualified "
+            "WHERE edges.kind IN ('CALLS', 'REFERENCES') "
+            f"AND COALESCE(edges.target_resolution, {TARGET_RESOLUTION_EXPR}) "
+            "= 'unresolved'",
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def get_impact_radius(
         self,
         changed_files: list[str],
         max_depth: int = MAX_IMPACT_DEPTH,
         max_nodes: int = MAX_IMPACT_NODES,
+        resolution: str = "all",
     ) -> dict[str, Any]:
         """Find dependents and tests impacted by changed files within depth N.
 
@@ -1357,13 +2555,25 @@ class GraphStore:
           - impacted_files: unique set of affected files
           - edges: connecting edges
           - impact_scores: qualified name to best-path score
+
+        ``resolution="direct"`` refuses to traverse a CALLS/REFERENCES edge
+        whose target was never bound to an indexed node, so the answer rests
+        only on attributions the graph can prove. It is a guard, not a
+        reachability change: a bare target cannot equal a qualified seed, so
+        an unresolved hop is already unreachable under both engines. The
+        guard keeps that true if a future resolver leaves a dangling
+        qualified target behind. ``IMPORTS_FROM`` is never filtered -- its
+        targets are file paths and C# namespace bridges, for which
+        "unresolved" would be a false claim.
         """
         if BFS_ENGINE == "networkx":
             return self._get_impact_radius_networkx(
                 changed_files, max_depth=max_depth, max_nodes=max_nodes,
+                resolution=resolution,
             )
         return self.get_impact_radius_sql(
             changed_files, max_depth=max_depth, max_nodes=max_nodes,
+            resolution=resolution,
         )
 
     # -- Bounded SQLite relaxation version (default) ----------------------
@@ -1373,12 +2583,16 @@ class GraphStore:
         changed_files: list[str],
         max_depth: int = MAX_IMPACT_DEPTH,
         max_nodes: int = MAX_IMPACT_NODES,
+        resolution: str = "all",
     ) -> dict[str, Any]:
         """Impact radius via bounded best-score relaxation in SQLite.
 
         Faster than NetworkX for large graphs because it avoids
         materialising the full graph in Python.
         """
+        # Validate before the empty-input short circuits so a bad mode is an
+        # error rather than a silently accepted no-op.
+        resolution_guard = _impact_resolution_guard(resolution)
         max_depth = max(0, int(max_depth))
         max_nodes = max(0, int(max_nodes))
         if not changed_files:
@@ -1453,6 +2667,16 @@ class GraphStore:
                 "(node_qn TEXT PRIMARY KEY, score REAL NOT NULL)"
             )
             self._conn.execute(f"DELETE FROM {table}")  # nosec B608
+        # The frontier's package directories, refilled once per hop. Keeping
+        # them in a table rather than computing crg_parent_dir inside the
+        # candidate query is what keeps the directory branch an index seek:
+        # inlined, SQLite drove the join from nodes-by-kind and scanned every
+        # IMPORTS_FROM row on every hop (82s on kubernetes, against 6s here).
+        self._conn.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS _impact_frontier_dirs "
+            "(dir TEXT PRIMARY KEY, score REAL NOT NULL)"
+        )
+        self._conn.execute("DELETE FROM _impact_frontier_dirs")
 
         self._conn.execute(
             "INSERT INTO _impact_best (node_qn, score) "
@@ -1463,27 +2687,7 @@ class GraphStore:
             "SELECT qn, 1.0 FROM _impact_seeds"
         )
 
-        candidate_sql = """
-        INSERT INTO _impact_next (node_qn, score)
-        SELECT node_qn, MAX(score)
-        FROM (
-            SELECT e.target_qualified AS node_qn,
-                   f.score * COALESCE(p.weight, ?) * ? AS score
-            FROM _impact_frontier f
-            JOIN edges e ON e.source_qualified = f.node_qn
-            LEFT JOIN _impact_policies p ON p.kind = e.kind
-            WHERE COALESCE(p.direction, ?) = ?
-            UNION ALL
-            SELECT e.source_qualified AS node_qn,
-                   f.score * COALESCE(p.weight, ?) * ? AS score
-            FROM _impact_frontier f
-            JOIN edges e ON e.target_qualified = f.node_qn
-            LEFT JOIN _impact_policies p ON p.kind = e.kind
-            WHERE COALESCE(p.direction, ?) = ?
-        ) candidates
-        WHERE score > ?
-        GROUP BY node_qn
-        """
+        candidate_sql = _impact_candidate_sql(resolution_guard)
         candidate_params = (
             IMPACT_DEFAULT_EDGE_WEIGHT,
             IMPACT_DEPTH_DECAY,
@@ -1493,10 +2697,16 @@ class GraphStore:
             IMPACT_DEPTH_DECAY,
             IMPACT_DEFAULT_EDGE_DIRECTION,
             IMPACT_DIRECTION_INCOMING,
+            IMPACT_DEFAULT_EDGE_WEIGHT,
+            IMPACT_DEPTH_DECAY,
+            IMPACT_DEFAULT_EDGE_DIRECTION,
+            IMPACT_DIRECTION_INCOMING,
             IMPACT_SCORE_FLOOR,
         )
         for _ in range(max_depth):
             self._conn.execute("DELETE FROM _impact_next")
+            self._conn.execute("DELETE FROM _impact_frontier_dirs")
+            self._conn.execute(IMPACT_FRONTIER_DIRS_SQL)
             self._conn.execute(candidate_sql, candidate_params)
             self._conn.execute(
                 "DELETE FROM _impact_next "
@@ -1563,6 +2773,18 @@ class GraphStore:
         all_qns = seeds | {n.qualified_name for n in impacted_nodes}
         if all_qns:
             relevant_edges = self.get_edges_among(all_qns)
+            # A directory-scoped import edge connects two files in the answer
+            # without either endpoint naming the other, so it is invisible to
+            # the set-membership match above.
+            relevant_edges.extend(self.import_scope_edges(
+                {n.file_path for n in changed_nodes + impacted_nodes},
+                all_qns,
+            ))
+            if resolution == RESOLUTION_DIRECT:
+                relevant_edges = [
+                    edge for edge in relevant_edges
+                    if edge.target_resolution != RESOLUTION_UNRESOLVED
+                ]
 
         return {
             "changed_nodes": changed_nodes,
@@ -1586,13 +2808,31 @@ class GraphStore:
         changed_files: list[str],
         max_depth: int = MAX_IMPACT_DEPTH,
         max_nodes: int = MAX_IMPACT_NODES,
+        resolution: str = "all",
     ) -> dict[str, Any]:
         """BFS via NetworkX (legacy). Used when CRG_BFS_ENGINE=networkx."""
+        if resolution not in IMPACT_RESOLUTIONS:
+            raise ValueError(
+                f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, "
+                f"got {resolution!r}"
+            )
+        direct_only = resolution == RESOLUTION_DIRECT
         max_depth = max(0, int(max_depth))
         max_nodes = max(0, int(max_nodes))
         nxg = self._build_networkx_graph()
 
         seeds = self._impact_seed_qns(changed_files)
+
+        # Parity with the SQL engine's directory-scoped branch: a Go import
+        # edge targets the package directory, so a file is reached through
+        # its own directory rather than by name.
+        scope_importers = self._import_scope_importer_index()
+        file_directories = (
+            self._file_node_directories() if scope_importers else {}
+        )
+        scope_weight = IMPACT_EDGE_WEIGHTS.get(
+            "IMPORTS_FROM", IMPACT_DEFAULT_EDGE_WEIGHT,
+        )
 
         best: dict[str, float] = dict.fromkeys(seeds, 1.0)
         frontier = dict(best)
@@ -1602,17 +2842,27 @@ class GraphStore:
                 break
             next_frontier: dict[str, float] = {}
             for qn, score in frontier.items():
-                if qn not in nxg:
-                    continue
-                neighbors = [
-                    (target, data["impact_outgoing_weight"])
-                    for _, target, data in nxg.out_edges(qn, data=True)
-                    if "impact_outgoing_weight" in data
-                ] + [
-                    (source, data["impact_incoming_weight"])
-                    for source, _, data in nxg.in_edges(qn, data=True)
-                    if "impact_incoming_weight" in data
+                directory = file_directories.get(qn)
+                scoped = [
+                    (importer, scope_weight)
+                    for importer in scope_importers.get(directory or "", ())
                 ]
+                if qn not in nxg:
+                    if not scoped:
+                        continue
+                    neighbors = scoped
+                else:
+                    neighbors = [
+                        (target, data["impact_outgoing_weight"])
+                        for _, target, data in nxg.out_edges(qn, data=True)
+                        if "impact_outgoing_weight" in data
+                        and not (direct_only and data.get("unresolved_target"))
+                    ] + [
+                        (source, data["impact_incoming_weight"])
+                        for source, _, data in nxg.in_edges(qn, data=True)
+                        if "impact_incoming_weight" in data
+                        and not (direct_only and data.get("unresolved_target"))
+                    ] + scoped
                 for other_qn, weight in neighbors:
                     new_score = score * weight * IMPACT_DEPTH_DECAY
                     if new_score <= IMPACT_SCORE_FLOOR:
@@ -1647,6 +2897,18 @@ class GraphStore:
         all_qns = seeds | {n.qualified_name for n in impacted_nodes}
         if all_qns:
             relevant_edges = self.get_edges_among(all_qns)
+            # A directory-scoped import edge connects two files in the answer
+            # without either endpoint naming the other, so it is invisible to
+            # the set-membership match above.
+            relevant_edges.extend(self.import_scope_edges(
+                {n.file_path for n in changed_nodes + impacted_nodes},
+                all_qns,
+            ))
+            if resolution == RESOLUTION_DIRECT:
+                relevant_edges = [
+                    edge for edge in relevant_edges
+                    if edge.target_resolution != RESOLUTION_UNRESOLVED
+                ]
 
         return {
             "changed_nodes": changed_nodes,
@@ -1681,7 +2943,16 @@ class GraphStore:
         return {"nodes": nodes, "edges": edges}
 
     def get_stats(self) -> GraphStats:
-        """Return aggregate statistics about the graph."""
+        """Return aggregate statistics about the graph.
+
+        Every statement below reads from one snapshot, so the per-kind
+        breakdowns still sum to the totals when a watcher commits partway
+        through (issue: `status` printing numbers that do not add up).
+        """
+        with self._read_transaction():
+            return self._get_stats_locked()
+
+    def _get_stats_locked(self) -> GraphStats:
         total_nodes = self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         total_edges = self._conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
 
@@ -1883,6 +3154,32 @@ class GraphStore:
             "UPDATE nodes SET signature = ? WHERE id = ?",
             (signature, node_id),
         )
+
+    def update_node_signatures(self, signature_rows: list[tuple[str, int]]) -> None:
+        """Bulk-set ``signature`` for many nodes in one transaction.
+
+        Hot paths (postprocessing, review builds) should use this instead of
+        looping :meth:`update_node_signature`: the per-row loop autocommits
+        one UPDATE per node (``isolation_level=None``), i.e. one WAL commit +
+        fsync per row, which dominates runtime on graphs with 10^5+ nodes
+        (issue #721).
+
+        Args:
+            signature_rows: ``(signature, node_id)`` pairs.
+        """
+        if not signature_rows:
+            return
+        self._begin_immediate()
+        try:
+            for start in range(0, len(signature_rows), _UPDATE_BATCH):
+                self._conn.executemany(
+                    "UPDATE nodes SET signature = ? WHERE id = ?",
+                    signature_rows[start:start + _UPDATE_BATCH],
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     def get_all_community_ids(self) -> dict[str, int | None]:
         """Return a mapping of *all* qualified names to their community_id.
@@ -2149,6 +3446,11 @@ class GraphStore:
                 return self._nxg_cache
             g: nx.DiGraph = nx.DiGraph()
             rows = self._conn.execute("SELECT * FROM edges").fetchall()
+            known_qns = {
+                row[0] for row in self._conn.execute(
+                    "SELECT qualified_name FROM nodes"
+                )
+            }
             for r in rows:
                 source = r["source_qualified"]
                 target = r["target_qualified"]
@@ -2159,6 +3461,28 @@ class GraphStore:
                 if not g.has_edge(source, target):
                     g.add_edge(source, target, kind=kind)
                 data = g[source][target]
+                # Mirror the stored column, falling back to the same
+                # node-existence test for a graph built before migration v11.
+                # Parallel edges collapse into one networkx edge, so the flag
+                # means "every edge here is an unresolved call": one proven
+                # relationship of any kind clears it, and a direct-only
+                # traversal never drops a hop it could prove.
+                unresolved = False
+                if kind in TARGET_RESOLUTION_KINDS:
+                    stored = (
+                        r["target_resolution"]
+                        if "target_resolution" in r.keys()
+                        else None
+                    )
+                    unresolved = (
+                        stored == "unresolved"
+                        if stored is not None
+                        else target not in known_qns
+                    )
+                if unresolved:
+                    data.setdefault("unresolved_target", True)
+                else:
+                    data["unresolved_target"] = False
                 existing_weight = IMPACT_EDGE_WEIGHTS.get(
                     data.get("kind", ""), IMPACT_DEFAULT_EDGE_WEIGHT,
                 )
@@ -2206,6 +3530,10 @@ class GraphStore:
         extra = json.loads(row["extra"]) if row["extra"] else {}
         confidence = row["confidence"] if "confidence" in row.keys() else 1.0
         confidence_tier = row["confidence_tier"] if "confidence_tier" in row.keys() else "EXTRACTED"
+        keys = row.keys()
+        target_resolution = (
+            row["target_resolution"] if "target_resolution" in keys else None
+        )
         return GraphEdge(
             id=row["id"],
             kind=row["kind"],
@@ -2216,6 +3544,7 @@ class GraphStore:
             extra=extra,
             confidence=confidence,
             confidence_tier=confidence_tier,
+            target_resolution=target_resolution,
         )
 
 
@@ -2255,6 +3584,11 @@ def edge_to_dict(e: GraphEdge) -> dict:
         "file_path": e.file_path, "line": e.line,
         "confidence": e.confidence, "confidence_tier": e.confidence_tier,
     }
+    # Only the uncertain value is spelled out. Its absence is the certain
+    # case, which is the common one, so the response does not pay a key per
+    # edge to say "as expected".
+    if e.target_resolution == RESOLUTION_UNRESOLVED:
+        result["target_resolution"] = RESOLUTION_UNRESOLVED
     for key in ("ambiguous_targets", "unresolved_targets"):
         targets = e.extra.get(key)
         if isinstance(targets, list):

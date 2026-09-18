@@ -85,7 +85,7 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
         languages=frozenset({"php"}),
         patterns=_IMPORT_PATTERNS,
         note=(
-            "php include/require is not indexed as an import edge, so "
+            "php dynamic include/require paths are not evaluated, so "
             "importers can be missing here (#819)"
         ),
     ),

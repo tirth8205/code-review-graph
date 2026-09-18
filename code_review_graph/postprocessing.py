@@ -5,7 +5,7 @@ post-processing steps must run to populate derived tables:
 
 1. Resolve evidence-backed bare edge endpoints
 2. Compute node signatures
-3. Rebuild FTS5 search index
+3. Sync the FTS5 search index (per-file delta, or a full rebuild)
 4. Trace execution flows
 5. Detect code communities
 
@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Sequence
 from typing import Any
 
 from .graph import GraphStore
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 def run_post_processing(
     store: GraphStore,
     *,
+    changed_files: Sequence[str] | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
 ) -> dict[str, Any]:
@@ -41,6 +43,9 @@ def run_post_processing(
 
     Args:
         store: An open GraphStore with nodes and edges already populated.
+        changed_files: Files this update re-parsed, when the caller knows
+            them. The FTS5 step then rewrites only those files' index
+            entries instead of dropping and repopulating the index.
 
     Returns:
         Dict with keys for each step's result count and a ``warnings``
@@ -51,7 +56,7 @@ def run_post_processing(
 
     _resolve_bare_endpoints(store, result, warnings)
     _compute_signatures(store, result, warnings)
-    _rebuild_fts_index(store, result, warnings)
+    _sync_fts_index(store, result, warnings, changed_files)
     _trace_flows(store, result, warnings)
     _detect_communities(store, result, warnings)
     _refresh_embeddings(
@@ -83,6 +88,9 @@ def _resolve_bare_endpoints(
         result["cpp_scoped_edges_resolved"] = (
             store.resolve_cpp_scoped_call_targets()
         )
+        # Resolvers rewrite bare targets into qualified ones, so the stored
+        # certainty column is only correct once they have all run.
+        store.refresh_target_resolution()
     except sqlite3.OperationalError as e:
         logger.warning("Call-target resolution failed: %s", e)
         warnings.append(
@@ -98,6 +106,7 @@ def _compute_signatures(
     """Compute human-readable signatures for nodes that lack one."""
     try:
         rows = store.get_nodes_without_signature()
+        signature_rows: list[tuple[str, int]] = []
         for row in rows:
             node_id, name, kind, params, ret = (
                 row[0],
@@ -114,25 +123,36 @@ def _compute_signatures(
                 sig = f"class {name}"
             else:
                 sig = name
-            store.update_node_signature(node_id, sig[:512])
-        store.commit()
-        result["signatures_computed"] = len(rows)
+            signature_rows.append((sig[:512], node_id))
+        # Single transaction via executemany instead of one autocommitted
+        # UPDATE per node (issue #721).
+        store.update_node_signatures(signature_rows)
+        result["signatures_computed"] = len(signature_rows)
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
 
 
-def _rebuild_fts_index(
+def _sync_fts_index(
     store: GraphStore,
     result: dict[str, Any],
     warnings: list[str],
+    changed_files: Sequence[str] | None = None,
 ) -> None:
-    """Rebuild the FTS5 full-text search index."""
-    try:
-        from .search import rebuild_fts_index
+    """Bring the FTS5 full-text search index in step with the nodes table.
 
-        fts_count = rebuild_fts_index(store)
-        result["fts_indexed"] = fts_count
+    Rewrites only the changed files' entries when that is cheaper; falls
+    back to a full rebuild on its own when it is not.
+    """
+    try:
+        from .search import update_fts_index
+
+        mode: list[str] = []
+        result["fts_indexed"] = update_fts_index(
+            store, changed_files, _out_mode=mode,
+        )
+        if mode:
+            result["fts_mode"] = mode[0]
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("FTS index rebuild failed: %s", e)
         warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")

@@ -7,11 +7,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_review_graph.embeddings import EmbeddingStore, embed_all_nodes
+from code_review_graph.embeddings import EmbeddingStore, embed_all_nodes, refresh_embeddings
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import NodeInfo
 from code_review_graph.postprocessing import run_post_processing
 from code_review_graph.tools.build import _run_postprocess
+from code_review_graph.tools.docs import embed_graph
 
 
 class _StubProvider:
@@ -108,6 +109,94 @@ class TestOrphanCleanup:
         finally:
             embeddings.close()
             graph.close()
+
+
+class TestEmbeddingNodeEnumeration:
+    def test_embeds_non_file_nodes_outside_the_file_inventory(self, tmp_path):
+        graph, _ = _graph_with_function(tmp_path)
+        graph.upsert_node(NodeInfo(
+            kind="Event", name="OrderCreated", file_path="spring:event:OrderCreated",
+            line_start=0, line_end=0, language="java", extra={"virtual": True},
+        ))
+        graph.commit()
+        provider = _StubProvider()
+        try:
+            assert "spring:event:OrderCreated" not in graph.get_all_files()
+            with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+                with EmbeddingStore(graph.db_path) as embeddings:
+                    assert embed_all_nodes(graph, embeddings) == 2
+                    assert embeddings.count() == 2
+            assert any("OrderCreated" in text for text in provider.embedded)
+        finally:
+            graph.close()
+
+    @pytest.mark.parametrize("legacy_paths", [False, True])
+    def test_manual_embed_reaches_nodes_regardless_of_stored_path(self, tmp_path, legacy_paths):
+        graph, _ = _graph_with_function(tmp_path)
+        if legacy_paths:
+            graph._conn.execute("UPDATE nodes SET file_path = replace(file_path, '/', ?)", ("\\",))
+            graph.commit()
+        provider = _StubProvider()
+        try:
+            with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+                with EmbeddingStore(graph.db_path) as embeddings:
+                    assert embed_all_nodes(graph, embeddings) == 1
+                    assert embeddings.count() == 1
+                    assert embeddings.search("keep")[0][0].endswith("::keep")
+                    assert embed_all_nodes(graph, embeddings) == 0
+            assert len(provider.embedded) == 1
+        finally:
+            graph.close()
+
+    @pytest.mark.parametrize("legacy_paths", [False, True])
+    def test_refresh_reaches_changed_nodes_regardless_of_stored_path(self, tmp_path, legacy_paths):
+        graph, _ = _graph_with_function(tmp_path)
+        provider = _StubProvider()
+        try:
+            with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+                with EmbeddingStore(graph.db_path) as embeddings:
+                    embeddings.embed_nodes(graph.get_all_nodes())
+                graph._conn.execute("UPDATE nodes SET params = '(value)' WHERE kind = 'Function'")
+                if legacy_paths:
+                    graph._conn.execute(
+                        "UPDATE nodes SET file_path = replace(file_path, '/', ?)", ("\\",),
+                    )
+                graph.commit()
+                result = refresh_embeddings(graph, provider="local", model="test-model")
+            assert result == {"embedded": 1, "purged": 0}
+            assert len(provider.embedded) == 2
+            assert "value" in provider.embedded[-1]
+        finally:
+            graph.close()
+
+    @pytest.mark.parametrize("node_kind", [None, "File", "Function"])
+    def test_tool_summary_reflects_whether_any_vectors_exist(self, tmp_path, node_kind):
+        graph, _ = _graph_with_function(tmp_path)
+        if node_kind != "Function":
+            graph._conn.execute("DELETE FROM nodes WHERE kind != 'File'")
+        if node_kind is None:
+            graph._conn.execute("DELETE FROM nodes")
+        graph.commit()
+        db_path = graph.db_path
+        graph.close()
+        provider = _StubProvider()
+        with (
+            patch("code_review_graph.embeddings.get_provider", return_value=provider),
+            patch("code_review_graph.tools.docs.get_db_path", return_value=db_path),
+            patch(
+                "code_review_graph.tools.docs._get_store",
+                side_effect=lambda root: (GraphStore(db_path), tmp_path),
+            ),
+        ):
+            first = embed_graph(str(tmp_path))
+            second = embed_graph(str(tmp_path))
+        has_vectors = node_kind == "Function"
+        assert first["status"] == second["status"] == "ok"
+        assert first["newly_embedded"] == int(has_vectors)
+        assert second["newly_embedded"] == 0
+        for result in (first, second):
+            assert result["total_embeddings"] == int(has_vectors)
+            assert ("Semantic search is now active." in result["summary"]) == has_vectors
 
 
 class TestExplicitRefresh:
