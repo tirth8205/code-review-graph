@@ -1032,6 +1032,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    ".robot": "robot",
+    ".resource": "robot",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -3244,6 +3246,12 @@ class CodeParser:
         if language == "rescript":
             return self._parse_rescript(path, source)
 
+        # Robot Framework has no grammar in the bundled language pack.  Parse
+        # its table sections directly so tests, keywords, calls, and resource
+        # dependencies still contribute useful graph structure.
+        if language == "robot":
+            return self._parse_robot(path, source)
+
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
         if language == "sql":
@@ -4466,6 +4474,128 @@ class CodeParser:
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
+        return nodes, edges
+
+    def _parse_robot(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Extract graph structure from Robot Framework tables."""
+        text = source.decode("utf-8", errors="replace")
+        file_path = normalize_file_path(path)
+        lines = text.splitlines()
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=max(1, len(lines)),
+            language="robot",
+            is_test=_is_test_file(file_path),
+        )]
+        edges: list[EdgeInfo] = []
+        section: Optional[str] = None
+        current: Optional[tuple[str, str, int]] = None
+        ignored_settings = {
+            "[arguments]", "[documentation]", "[return]", "[returns]",
+            "[setup]", "[teardown]", "[timeout]", "[tags]", "[template]",
+        }
+
+        def qualified(name: str) -> str:
+            return f"{file_path}::{name}"
+
+        def finish(end_line: int) -> None:
+            nonlocal current
+            if current is None:
+                return
+            _, name, start_line = current
+            for node in reversed(nodes):
+                if node.name == name and node.line_start == start_line:
+                    node.line_end = max(start_line, end_line)
+                    break
+            current = None
+
+        for line_number, raw_line in enumerate(lines, 1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            cells = [cell.strip() for cell in re.split(r"\s{2,}|\t+", raw_line) if cell.strip()]
+            if not cells:
+                continue
+            section_match = re.fullmatch(r"\*\*\*\s*(.+?)\s*\*\*\*", cells[0])
+            if section_match:
+                finish(line_number - 1)
+                section = section_match.group(1).casefold()
+                continue
+
+            if section == "settings":
+                setting = cells[0].casefold()
+                if setting in {"library", "resource", "variables"} and len(cells) > 1:
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=cells[1],
+                        file_path=file_path,
+                        line=line_number,
+                        extra={"robot_setting": setting},
+                    ))
+                continue
+
+            if section not in {"test cases", "tasks", "keywords"}:
+                continue
+
+            is_definition = not raw_line[:1].isspace()
+            if is_definition:
+                finish(line_number - 1)
+                name = cells[0]
+                is_test = section in {"test cases", "tasks"}
+                current = ("Test" if is_test else "Function", name, line_number)
+                nodes.append(NodeInfo(
+                    kind="Test" if is_test else "Function",
+                    name=name,
+                    file_path=file_path,
+                    line_start=line_number,
+                    line_end=line_number,
+                    language="robot",
+                    is_test=is_test,
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=file_path,
+                    target=qualified(name),
+                    file_path=file_path,
+                    line=line_number,
+                ))
+                continue
+
+            if current is None or cells[0].casefold() in ignored_settings:
+                continue
+            keyword = cells[0]
+            if keyword == "...":
+                continue
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=qualified(current[1]),
+                target=keyword,
+                file_path=file_path,
+                line=line_number,
+            ))
+
+        finish(len(lines))
+        test_qnames = {
+            self._node_qualified(node)
+            for node in nodes
+            if node.is_test
+        }
+        for edge in list(edges):
+            if edge.kind == "CALLS" and edge.source in test_qnames:
+                edges.append(EdgeInfo(
+                    kind="TESTED_BY",
+                    source=edge.target,
+                    target=edge.source,
+                    file_path=edge.file_path,
+                    line=edge.line,
+                    extra=edge.extra.copy(),
+                ))
         return nodes, edges
 
     def _resolve_vbnet_edges(

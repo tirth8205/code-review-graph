@@ -69,6 +69,11 @@ from .tools import (
 
 logger = logging.getLogger(__name__)
 
+try:
+    asyncio.WindowsSelectorEventLoopPolicy
+except (AttributeError, NameError):
+    asyncio.WindowsSelectorEventLoopPolicy = asyncio.DefaultEventLoopPolicy
+
 # NOTE: Thread-safe for stdio MCP (single-threaded). If adding HTTP/SSE
 # transport with concurrent requests, replace with contextvars.ContextVar.
 _default_repo_root: str | None = None
