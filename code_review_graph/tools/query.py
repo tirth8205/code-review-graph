@@ -885,6 +885,20 @@ def query_graph(
                     result["indirect"] = bool(match.get("indirect", False))
                     add_result(result)
                     seen.add(test_qn)
+            # #903: TESTED_BY edges can store bare source names while the
+            # query uses path-qualified names. Retry with the bare name.
+            if not seen and node and node.name and node.name != qn:
+                for match in store.get_transitive_tests(node.name):
+                    test_qn = match.get("qualified_name")
+                    if not isinstance(test_qn, str) or test_qn in seen:
+                        continue
+                    test = store.get_node(test_qn)
+                    if test:
+                        result = node_to_dict(test)
+                        result["indirect"] = bool(match.get("indirect", False))
+                        add_result(result)
+                        seen.add(test_qn)
+
             # Also search by naming convention
             name = node.name if node else target
             cpp_overload_set = bool(
