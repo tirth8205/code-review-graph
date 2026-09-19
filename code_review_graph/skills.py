@@ -2879,20 +2879,29 @@ def install_hermes_skills(repo_root: Path) -> Path:
 def _opencode_plugin_content() -> str:
     """Return TypeScript source for the OpenCode user-level plugin.
 
-    The plugin hooks into three OpenCode events to mirror the Claude Code
-    hook behaviors:
+    The plugin is an OpenCode 2.x (V2) definition — ``Plugin.define`` with
+    an ``id`` and a ``setup`` function — because the V2 loader rejects any
+    other default-export shape with ``SchemaError(Expected object at
+    ["default"])``. ``setup`` mirrors the Claude Code hook behaviors:
 
-    1. ``file.edited`` — runs ``code-review-graph update --skip-flows``
-    2. ``session.created`` — runs ``code-review-graph status``
-    3. ``tool.execute.before`` — when the tool is a shell command starting
-       with ``git commit``, runs ``code-review-graph detect-changes --brief``
+    1. successful ``edit``/``write``/``patch`` tool calls (there is no V2
+       ``file.edited`` hook) — runs ``code-review-graph update --skip-flows``
+    2. ``session.created`` events via ``ctx.event.subscribe`` — runs
+       ``code-review-graph status``
+    3. ``ctx.tool.hook("execute.before")`` — when the tool is a shell
+       command starting with ``git commit``, runs ``code-review-graph
+       detect-changes --brief``
 
-    All handlers use try/catch so errors never break the editor session.
-    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
-    context) for subprocess execution.
+    All handlers use try/catch (or a swallowing helper) so errors never
+    break the editor session. Subprocesses run via ``node:child_process``
+    ``execFile`` with argv arrays — never by interpolating a command string
+    into Bun's ``$`` template, which would escape it into one executable
+    name.
     """
     return """\
-import type { Plugin } from "@opencode-ai/plugin"
+import { Plugin } from "@opencode/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 
 /**
  * code-review-graph plugin for OpenCode.
@@ -2903,58 +2912,74 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Installed by: code-review-graph install --platform opencode
  */
 
-// Helper: run a shell command quietly, swallowing errors.
-async function run($: any, cmd: string): Promise<string> {
+const execFileAsync = promisify(execFile)
+
+// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
-    const result = await $`${cmd}`.quiet()
-    return result.stdout?.toString().trim() ?? ""
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
   } catch {
     return ""
   }
 }
 
-export default (app: any) => {
-  // 1. Auto-update graph after file edits
-  app.on("file.edited", async ({ $ }: { $: any }) => {
-    try {
-      await $`code-review-graph update --skip-flows`.quiet()
-    } catch {
-      // Swallow — graph may not be built yet for this project.
-    }
-  })
+export default Plugin.define({
+  id: "code-review-graph",
+  async setup(ctx) {
+    const baseDir = ctx.location.directory
+    const controller = new AbortController()
 
-  // 2. Show graph status when a new session starts
-  app.on("session.created", async ({ $ }: { $: any }) => {
-    try {
-      const result = await $`code-review-graph status`.quiet()
-      const output = result.stdout?.toString().trim()
-      if (output) {
-        console.log("[code-review-graph]", output)
+    // Show graph status when a new session starts.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type !== "session.created") continue
+          // Only handle sessions for this plugin instance's location.
+          const sessionDir = event.location?.directory
+          if (sessionDir !== undefined && sessionDir !== baseDir) continue
+          const output = await runQuiet(["status"], sessionDir ?? baseDir, 15_000)
+          if (output) {
+            console.log("[code-review-graph]", output)
+          }
+        }
+      } catch {
+        // Aborted on unload — ignore.
       }
-    } catch {
-      // Swallow — not every project has a graph.
-    }
-  })
+    })()
 
-  // 3. Detect changes before git commit commands
-  app.on("tool.execute.before", async (ctx: any) => {
-    try {
-      const input = ctx?.input ?? ctx?.params ?? {}
-      const cmd =
-        input.command ?? input.cmd ?? input.content ?? ""
-      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
-        const result =
-          await ctx.$`code-review-graph detect-changes --brief`.quiet()
-        const output = result.stdout?.toString().trim()
+    // Auto-update graph after file edits. V2 has no `file.edited` hook,
+    // so trigger off successful edit/write/patch tool calls instead.
+    await ctx.tool.hook("execute.after", async (event) => {
+      if (event.status !== "completed") return
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "edit" && tool !== "write" && tool !== "patch") return
+      void runQuiet(["update", "--skip-flows"], baseDir, 60_000)
+    })
+
+    // Detect changes before git commit commands.
+    await ctx.tool.hook("execute.before", async (event) => {
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "bash" && tool !== "shell" && tool !== "execute") return
+      const input = (event.input ?? {}) as Record<string, unknown>
+      const cmd = input.command ?? input.cmd ?? input.content ?? ""
+      if (typeof cmd !== "string" || !/^git\\s+commit/i.test(cmd)) return
+      try {
+        const output = await runQuiet(["detect-changes", "--brief"], baseDir, 30_000)
         if (output) {
           console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
         }
+      } catch {
+        // Swallow — never block a commit.
       }
-    } catch {
-      // Swallow — never block a commit.
-    }
-  })
-}
+    })
+
+    return () => controller.abort()
+  },
+})
 """
 
 

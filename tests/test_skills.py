@@ -2356,27 +2356,35 @@ class TestOpenCodePluginContent:
 
     def test_has_plugin_type_import(self):
         content = _opencode_plugin_content()
-        assert "import type" in content
-        assert "@opencode-ai/plugin" in content
+        assert "@opencode/plugin" in content
+        assert "Plugin.define" in content
 
     def test_has_default_export(self):
         content = _opencode_plugin_content()
         assert "export default" in content
 
-    def test_hooks_file_edited_event(self):
+    def test_uses_v2_definition_shape(self):
+        """V2 loader requires an object with id + setup, not a function."""
         content = _opencode_plugin_content()
-        assert '"file.edited"' in content
-        assert "code-review-graph update --skip-flows" in content
+        assert 'id: "code-review-graph"' in content
+        assert "async setup(ctx" in content
+        assert "app.on(" not in content
+
+    def test_hooks_file_edits_via_tool_hook(self):
+        content = _opencode_plugin_content()
+        assert 'ctx.tool.hook("execute.after"' in content
+        assert '"update", "--skip-flows"' in content
 
     def test_hooks_session_created_event(self):
         content = _opencode_plugin_content()
         assert '"session.created"' in content
-        assert "code-review-graph status" in content
+        assert "ctx.event.subscribe" in content
+        assert '["status"]' in content
 
     def test_hooks_tool_execute_before_event(self):
         content = _opencode_plugin_content()
-        assert '"tool.execute.before"' in content
-        assert "code-review-graph detect-changes --brief" in content
+        assert 'ctx.tool.hook("execute.before"' in content
+        assert '"detect-changes", "--brief"' in content
 
     def test_has_git_commit_detection(self):
         """Pre-commit hook should match git commit commands."""
@@ -2406,7 +2414,7 @@ class TestInstallOpenCodePlugin:
             result = install_opencode_plugin()
         content = result.read_text(encoding="utf-8")
         assert "export default" in content
-        assert "file.edited" in content
+        assert "execute.after" in content
 
     def test_creates_parent_directories(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
