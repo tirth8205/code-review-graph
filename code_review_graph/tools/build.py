@@ -633,7 +633,17 @@ def build_or_update_graph(
         Summary with files_parsed/updated, node/edge counts, and errors.
     """
     store, root = _get_store(repo_root)
+    user_requested_full = full_rebuild
     try:
+        # An automatic full-rebuild fallback must not silently replace a graph
+        # anchored to a different repository root (#906). The incremental path
+        # already refuses via _assert_graph_matches_root; applying the same
+        # guard before the automatic fallback closes the data-loss path that
+        # bypasses it. An explicit user --full still wipes and rebuilds.
+        if not user_requested_full and store.has_nodes():
+            from code_review_graph.incremental import _assert_graph_matches_root
+            _assert_graph_matches_root(root, store)
+
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
