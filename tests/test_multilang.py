@@ -1337,7 +1337,9 @@ class TestRubyParsing:
 
         # A same-class call resolves to the defining method node, not a bare
         # name, so callers_of/callees_of work within a file.
-        assert any(t.endswith("sample.rb::UserRepository.save") for t in targets)
+        assert any(
+            t.endswith("sample.rb::Auth.UserRepository.save") for t in targets
+        )
 
         # Calls are attributed to their enclosing method.
         create_user_targets = {
@@ -1346,6 +1348,344 @@ class TestRubyParsing:
         }
         assert any(t.endswith("UserRepository.save") for t in create_user_targets)
         assert any(t.endswith("new") for t in create_user_targets)
+
+    def test_compact_namespace_class_is_indexed(self, tmp_path):
+        """``class Foo::Bar`` must emit a Class node, like ``module Foo`` + ``class Bar``.
+
+        tree-sitter-ruby types the ``name`` field of a compact declaration as
+        ``scope_resolution`` rather than ``constant``. Without explicit
+        handling ``_get_name`` returns None, ``_extract_classes`` bails, and
+        the class vanishes while its methods are left orphaned. This is the
+        dominant declaration style in Rails codebases.
+        """
+        compact = tmp_path / "compact.rb"
+        compact.write_text(
+            "class Widgets::CompactStyle\n"
+            "  def render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        classes = {n.name: n for n in nodes if n.kind == "Class"}
+        # Named after the rightmost constant, matching the nested form.
+        assert "CompactStyle" in classes
+
+        render = next(
+            n for n in nodes if n.kind == "Function" and n.name == "render"
+        )
+        assert render.parent_name == "Widgets.CompactStyle"
+
+    def test_compact_namespace_module_is_indexed(self, tmp_path):
+        """``module Foo::Bar`` goes through the same scope_resolution path."""
+        compact = tmp_path / "compact_module.rb"
+        compact.write_text(
+            "module Widgets::Helpers\n"
+            "  def self.render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(compact)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Helpers" in names
+
+
+    def test_compact_namespace_three_segments(self, tmp_path):
+        """``class A::B::C`` names the class after the rightmost constant.
+
+        The loop walks ``scope_resolution.children`` in reverse, so nesting
+        depth must not change the result: the emitted Class is ``C``, and its
+        methods hang off ``C`` rather than off an intermediate segment.
+        """
+        deep = tmp_path / "deep.rb"
+        deep.write_text(
+            "class Alpha::Beta::Gamma\n"
+            "  def ping\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(deep)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Gamma" in names
+        # Intermediate segments are scope, not classes of their own.
+        assert "Alpha" not in names
+        assert "Beta" not in names
+
+        ping = next(
+            n for n in nodes if n.kind == "Function" and n.name == "ping"
+        )
+        assert ping.parent_name == "Alpha.Beta.Gamma"
+
+    def test_compact_namespace_same_leaf_keeps_distinct_identities(
+        self, tmp_path,
+    ):
+        """Two compact classes sharing a leaf must not merge into one node.
+
+        The leaf alone is not an identity: ``class Alpha::Same`` and
+        ``class Beta::Same`` in one file both qualified to ``file.rb::Same``
+        before the scope segment fed ``parent_name``, merging the two classes
+        and attaching both methods to the survivor.
+        """
+        twins = tmp_path / "twins.rb"
+        twins.write_text(
+            "class Alpha::Same\n"
+            "  def a\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "class Beta::Same\n"
+            "  def b\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(twins)
+
+        same = [n for n in nodes if n.kind == "Class" and n.name == "Same"]
+        assert len(same) == 2
+        assert {n.parent_name for n in same} == {"Alpha", "Beta"}
+
+        identities = {self.parser._node_qualified(n) for n in same}
+        assert len(identities) == 2
+
+    def test_compact_namespace_with_superclass(self, tmp_path):
+        """``class Foo::Bar < Base`` still emits Class ``Bar``.
+
+        A superclass adds a further child to the ``class`` node. The name is
+        read from the ``name`` field rather than from child order, so the
+        extra child must not displace it. This is the dominant form in Rails
+        (``class Admin::UsersController < ApplicationController``).
+        """
+        inherited = tmp_path / "inherited.rb"
+        inherited.write_text(
+            "class Base\n"
+            "end\n"
+            "\n"
+            "class Widgets::Themed < Base\n"
+            "  def render\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(inherited)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Themed" in names
+
+        render = next(
+            n for n in nodes if n.kind == "Function" and n.name == "render"
+        )
+        assert render.parent_name == "Widgets.Themed"
+
+    def test_top_level_scope_class(self, tmp_path):
+        """``class ::Foo`` has a ``scope_resolution`` name with no scope child.
+
+        Only the leading ``::`` and the constant are present, so the reverse
+        walk has to reach the sole ``constant`` instead of relying on a
+        preceding scope node.
+        """
+        rooted = tmp_path / "rooted.rb"
+        rooted.write_text(
+            "class ::Standalone\n"
+            "  def ping\n"
+            "    :ok\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(rooted)
+
+        names = {n.name for n in nodes if n.kind == "Class"}
+        assert "Standalone" in names
+
+    def test_compact_namespace_inside_module_accumulates_scope(
+        self, tmp_path,
+    ):
+        """A compact class nested in a module stacks both scopes.
+
+        ``module Alpha; class Beta::Gamma`` reports ``Alpha.Beta``, the same
+        identity as the nested spelling ``module Alpha; module Beta; class
+        Gamma``. Ruby resolves the ``Beta`` in a compact name by lexical
+        lookup, and the enclosing module is the first place it looks, so
+        stacking is both the likelier reading and the one that makes the two
+        spellings agree.
+        """
+        nested = tmp_path / "nested.rb"
+        nested.write_text(
+            "module Alpha\n"
+            "  class Beta::Gamma\n"
+            "    def ping\n"
+            "      :ok\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(nested)
+
+        gamma = next(
+            n for n in nodes if n.kind == "Class" and n.name == "Gamma"
+        )
+        # The immediate scope wins, matching the nested equivalent
+        # ``module Alpha; module Beta; class Gamma``, which also reports
+        # ``Beta`` and drops ``Alpha``.
+        assert gamma.parent_name == "Alpha.Beta"
+
+    def test_compact_namespaces_inside_one_module_stay_distinct(self, tmp_path):
+        """Same leaf, different compact scope, one enclosing module.
+
+        Taking the enclosing module as ``parent_name`` would qualify both to
+        ``file.rb::Alpha.Same``. The immediate scope segment is what keeps
+        them apart.
+        """
+        shared = tmp_path / "shared.rb"
+        shared.write_text(
+            "module Alpha\n"
+            "  class Beta::Same\n"
+            "    def b\n"
+            "    end\n"
+            "  end\n"
+            "\n"
+            "  class Gamma::Same\n"
+            "    def c\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, _ = self.parser.parse_file(shared)
+
+        same = [n for n in nodes if n.kind == "Class" and n.name == "Same"]
+        assert len(same) == 2
+        assert {n.parent_name for n in same} == {"Alpha.Beta", "Alpha.Gamma"}
+
+        identities = {self.parser._node_qualified(n) for n in same}
+        assert len(identities) == 2
+
+    def test_scope_resolution_without_constant_is_not_fatal(self):
+        """The fallthrough branch: no ``constant`` child, no crash.
+
+        The reverse walk can complete without a match only on a malformed or
+        error-recovered tree. It must fall through to the generic lookup and
+        return None (no Class node) instead of raising.
+        """
+
+        class _StubNode:
+            def __init__(self, type_, children=(), name_child=None):
+                self.type = type_
+                self.children = list(children)
+                self._name_child = name_child
+
+            def child_by_field_name(self, field):
+                return self._name_child if field == "name" else None
+
+        scope = _StubNode("scope_resolution", children=[_StubNode("::")])
+        class_node = _StubNode("class", children=[scope], name_child=scope)
+
+        assert self.parser._get_name(class_node, "ruby", "class") is None
+
+    def test_malformed_compact_namespace_does_not_crash(self, tmp_path):
+        """An unterminated compact name parses to an error tree, not a crash."""
+        broken = tmp_path / "broken.rb"
+        broken.write_text("class Widgets::\nend\n")
+
+        nodes, _ = self.parser.parse_file(broken)
+
+        # A File node is always emitted; the point is that parsing returns.
+        assert any(n.kind == "File" for n in nodes)
+
+
+    def test_compact_module_class_contains_edge_resolves(self, tmp_path):
+        """An ordinary class inside a compact module keeps a live CONTAINS source.
+
+        The class node is keyed by its qualified identity, so its methods have
+        to descend with that same scope. Descending with the bare leaf pointed
+        the CONTAINS edge at a ``adapters.rb::Stripe`` container that was never
+        emitted: both nodes stayed indexed, the edge dangled, and ``charge``
+        became unreachable from the class that defines it.
+        """
+        adapters = tmp_path / "adapters.rb"
+        adapters.write_text(
+            "module Billing::Adapters\n"
+            "  class Stripe\n"
+            "    def charge(amount)\n"
+            "      amount * 100\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, edges = self.parser.parse_file(adapters)
+
+        stripe = next(
+            n for n in nodes if n.kind == "Class" and n.name == "Stripe"
+        )
+        charge = next(
+            n for n in nodes if n.kind == "Function" and n.name == "charge"
+        )
+        stripe_id = self.parser._node_qualified(stripe)
+        charge_id = self.parser._node_qualified(charge)
+
+        # The method hangs off the class identity, not off a bare leaf.
+        assert charge_id == f"{stripe_id}.charge"
+
+        owning = [
+            e for e in edges if e.kind == "CONTAINS" and e.target == charge_id
+        ]
+        assert len(owning) == 1
+        assert owning[0].source == stripe_id
+
+    def test_compact_namespace_contains_edges_have_no_dangling_source(
+        self, tmp_path,
+    ):
+        """Every CONTAINS source must name a node the same parse emitted.
+
+        A sweep rather than a single case: the identity and the edge are built
+        in two different places, so any compact shape that feeds one but not
+        the other leaves an edge pointing at nothing. Nothing in the suite
+        caught that before, because the tests only ever looked at nodes.
+        """
+        mixed = tmp_path / "mixed.rb"
+        mixed.write_text(
+            "module Billing::Adapters\n"
+            "  class Stripe\n"
+            "    def charge; end\n"
+            "  end\n"
+            "end\n"
+            "\n"
+            "class Admin::User\n"
+            "  def display_name; end\n"
+            "end\n"
+            "\n"
+            "class User\n"
+            "  def display_name; end\n"
+            "end\n"
+            "\n"
+            "module Alpha\n"
+            "  class Beta::Gamma\n"
+            "    def ping; end\n"
+            "  end\n"
+            "end\n"
+        )
+        nodes, edges = self.parser.parse_file(mixed)
+
+        identities = {self.parser._node_qualified(n) for n in nodes}
+        file_id = str(mixed)
+
+        dangling = [
+            e.source for e in edges
+            if e.kind == "CONTAINS"
+            and e.source != file_id
+            and e.source not in identities
+        ]
+        assert dangling == []
+
+        # Same leaf under different scopes stays two distinct rows; the
+        # qualified_name column is UNIQUE, so a collision drops one outright.
+        qualified = [
+            self.parser._node_qualified(n) for n in nodes if n.kind == "Function"
+        ]
+        assert len(qualified) == len(set(qualified))
 
 
 class TestPHPParsing:

@@ -148,6 +148,28 @@
 
 ### Fixed
 
+- Ruby compact namespace declarations (`class Foo::Bar`) are indexed. The
+  name sits in a `scope_resolution` node rather than a bare `constant`, so
+  the class node was dropped entirely and its methods were left orphaned at
+  file scope -- the dominant declaration style in Rails codebases
+  (`class Admin::UsersController < ApplicationController`) produced no class
+  at all.
+- Ruby classes carry their namespace in `parent_name`, and their methods
+  qualify against the class's own key. `class A::Same` and `class B::Same`
+  in one file both resolved to `file.rb::Same`, and because `qualified_name`
+  is UNIQUE one of them was dropped outright while the survivor absorbed
+  both sets of methods. A method's `CONTAINS` source now names the class
+  node that exists rather than a bare-leaf container that was never
+  emitted, so `children_of` reaches the methods of a class declared inside a
+  compact module. The compact and nested spellings agree at every depth:
+  `module A; class B::C` and `module A; module B; class C` both key to
+  `file.rb::A.B.C`. This is schema version 14; existing databases mark their
+  Ruby files for re-parsing on open and pick up the new identities on the
+  next update, and the VS Code extension accepts the new version.
+- Ruby declarations whose scope is not a constant (`class klass::Inner`,
+  `class self::Foo`) no longer emit a file-scope class node. Their scope is
+  resolved at run time, so there is no static namespace to record.
+
 - Go and Ruby imports resolve into the repository instead of staying bare
   strings. Go reads the module path from the nearest `go.mod` (nested
   modules win over their ancestors, and local `replace` targets are
