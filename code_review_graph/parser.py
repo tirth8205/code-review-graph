@@ -37,6 +37,7 @@ from .constants import (
     IMPORT_SCOPE_TREE,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .npm_alias_resolver import NpmAliasResolver
 
 try:
     import yaml as _yaml  # type: ignore[import-untyped]
@@ -2985,6 +2986,7 @@ class CodeParser:
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
+        self._npm_alias_resolver = NpmAliasResolver(self._repo_root)
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
         # Cargo discovery is shared by every Rust import/call in a source file.
@@ -15680,6 +15682,12 @@ class CodeParser:
             else:
                 # Non-relative import — try tsconfig path alias resolution
                 resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
+                if resolved:
+                    return resolved
+                # npm dependency aliases can point at workspace source present
+                # in the scanned repository. Explicit tsconfig paths remain the
+                # stronger, user-provided resolution and are tried first.
+                resolved = self._npm_alias_resolver.resolve_alias(module, file_path)
                 if resolved:
                     return resolved
 
