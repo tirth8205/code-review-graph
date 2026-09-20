@@ -1089,6 +1089,8 @@ def main() -> None:
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
+    sub.add_parser("hook-update", help="Update the graph for the hook payload cwd")
+    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -1374,6 +1376,12 @@ def main() -> None:
         from .enrich import run_hook
 
         run_hook()
+        return
+
+    if args.command in {"hook-update", "hook-status"}:
+        from .hook_update import run_status_hook, run_update_hook
+
+        (run_update_hook if args.command == "hook-update" else run_status_hook)()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:

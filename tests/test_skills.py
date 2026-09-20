@@ -533,7 +533,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -544,7 +544,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
 
@@ -579,10 +579,8 @@ class TestGenerateCodexHooksConfig:
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "--repo" not in post_cmd
-        assert "--repo" not in session_cmd
-        assert "code-review-graph update --skip-flows" in post_cmd
-        assert "code-review-graph status" in session_cmd
+        assert post_cmd == "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-update; else cat >/dev/null; fi; }"
+        assert session_cmd == "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-status; else cat >/dev/null; fi; }"
 
 
 class TestInstallCodexHooks:
