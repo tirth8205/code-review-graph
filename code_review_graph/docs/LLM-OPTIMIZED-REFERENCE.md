@@ -54,7 +54,7 @@ Run embed_graph_tool once; changing model or provider re-embeds every node. sema
 </section>
 
 <section name="languages">
-Tree-sitter (tree-sitter-language-pack): Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua, Luau, Objective-C, Bash and Zsh, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog and SystemVerilog, SQL, HCL (Terraform .tf and .hcl).
+Tree-sitter (tree-sitter-language-pack): Python, JavaScript, TypeScript, TSX, Go, Rust, Java, C, C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua, Luau, Objective-C, Bash and Zsh, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog and SystemVerilog, SQL/PL/SQL (Oracle), HCL (Terraform .tf and .hcl).
 Targeted parsers: Vue and Svelte single-file components, Astro (through the TypeScript parser), Jupyter and Databricks notebooks, Perl XS (parsed as C), Ansible playbooks, roles and tasks, Spring configuration (.properties and YAML). Other YAML is not parsed.
 Custom languages: .code-review-graph/languages.toml (extensions and node types per grammar), see docs/CUSTOM_LANGUAGES.md. Built-in extensions and language names cannot be overridden.
 </section>
