@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -533,6 +535,9 @@ class TestWatchDaemon:
         save_config(config, config_file)
 
         daemon = WatchDaemon(config=config, config_path=config_file)
+        if daemon._windows_job is not None:
+            daemon._windows_job.close()
+            daemon._windows_job = None
 
         return {
             "daemon": daemon,
@@ -581,6 +586,121 @@ class TestWatchDaemon:
             assert "beta" in daemon._children
         finally:
             daemon.stop()
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    @patch("code_review_graph.registry.Registry")
+    def test_start_assigns_children_to_windows_job(self, mock_registry_cls, mock_popen, daemon_env):
+        """Windows watcher children are attached before they are tracked."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        job = MagicMock()
+        daemon._windows_job = job
+
+        daemon.start()
+        try:
+            assert job.assign.call_count == 2
+            assert [call.args[0] for call in job.assign.call_args_list] == [
+                mock_proc,
+                mock_proc,
+            ]
+        finally:
+            daemon.stop()
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_terminates_alive_process(self, mock_popen, daemon_env):
+        """A live watcher is terminated when Windows Job assignment fails."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.wait.assert_called_once_with(timeout=5)
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_kills_after_terminate_timeout(
+        self, mock_popen, daemon_env
+    ):
+        """A watcher is killed when graceful cleanup times out."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+            None,
+        ]
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
+        assert mock_proc.wait.call_count == 2
+        assert all(call.kwargs == {"timeout": 5} for call in mock_proc.wait.call_args_list)
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_does_not_terminate_dead_process(
+        self, mock_popen, daemon_env
+    ):
+        """A watcher that already exited is not terminated after assignment failure."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = 1
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+
+        daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_not_called()
+        assert "alpha" not in daemon._children
+
+    @patch("code_review_graph.daemon.subprocess.Popen")
+    def test_start_watcher_assignment_failure_handles_kill_wait_timeout(
+        self, mock_popen, daemon_env, caplog
+    ):
+        """A second cleanup timeout after kill does not escape watcher startup."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 12345
+        mock_proc.poll.return_value = None
+        mock_proc.wait.side_effect = [
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+            subprocess.TimeoutExpired(cmd="watcher", timeout=5),
+        ]
+        mock_popen.return_value = mock_proc
+
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._windows_job.assign.side_effect = OSError("job assignment failed")
+        log_fd = MagicMock()
+
+        with patch("builtins.open", return_value=log_fd):
+            daemon._start_watcher(daemon_env["config"].repos[0])
+
+        mock_proc.terminate.assert_called_once_with()
+        mock_proc.kill.assert_called_once_with()
+        assert mock_proc.wait.call_count == 2
+        assert "alpha" not in daemon._children
+        log_fd.close.assert_called_once_with()
+        assert "remained alive after SIGKILL" in caplog.text
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")
@@ -861,6 +981,18 @@ class TestWatchDaemon:
         mock_beta.terminate.assert_called_once()
         assert len(daemon._children) == 0
         assert len(daemon._current_repos) == 0
+
+    def test_stop_closes_windows_job_when_child_termination_fails(self, daemon_env):
+        """Job Object cleanup runs even when child termination raises."""
+        daemon = daemon_env["daemon"]
+        daemon._windows_job = MagicMock()
+        daemon._terminate_child = MagicMock(side_effect=RuntimeError("cleanup failure"))
+        daemon._children = {"alpha": MagicMock()}
+
+        with pytest.raises(RuntimeError, match="cleanup failure"):
+            daemon.stop()
+
+        daemon._windows_job.close.assert_called_once_with()
 
     @patch("code_review_graph.daemon.subprocess.Popen")
     @patch("code_review_graph.registry.Registry")
@@ -1440,3 +1572,68 @@ class TestPerUserStateLocation:
         from code_review_graph.daemon import CONFIG_PATH
 
         assert CONFIG_PATH == tmp_path / "state" / "watch.toml"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object integration")
+def test_windows_job_close_terminates_watcher():
+    """Closing the daemon job terminates a watcher it owns."""
+    from code_review_graph.daemon import _WindowsJob
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"]
+    )
+    job = _WindowsJob()
+    try:
+        job.assign(process)
+        job.close()
+        process.wait(timeout=10)
+        assert process.returncode is not None
+    finally:
+        job.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Job Object integration")
+def test_windows_job_close_terminates_watcher_children(tmp_path):
+    """Closing a job terminates an assigned parent and children it creates."""
+    from code_review_graph.daemon import _WindowsJob, pid_alive
+
+    start_file = tmp_path / "start"
+    child_file = tmp_path / "children"
+    child_code = "import time; time.sleep(60)"
+    parent_code = (
+        "import pathlib, subprocess, sys, time\n"
+        f"start = pathlib.Path({str(start_file)!r})\n"
+        f"children = pathlib.Path({str(child_file)!r})\n"
+        "while not start.exists():\n    time.sleep(0.01)\n"
+        f"procs = [subprocess.Popen([sys.executable, '-c', {child_code!r}]) for _ in range(2)]\n"
+        "children.write_text('\\n'.join(str(proc.pid) for proc in procs))\n"
+        "time.sleep(60)"
+    )
+    compile(parent_code, "<parent>", "exec")
+    process = subprocess.Popen([sys.executable, "-c", parent_code])
+    job = _WindowsJob()
+    child_pids: list[int] = []
+    try:
+        job.assign(process)
+        start_file.touch()
+        deadline = time.monotonic() + 10
+        while not child_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child_pids = [int(pid) for pid in child_file.read_text().splitlines()]
+
+        job.close()
+        process.wait(timeout=10)
+        assert process.returncode is not None
+
+        deadline = time.monotonic() + 10
+        while any(pid_alive(pid) for pid in child_pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert all(not pid_alive(pid) for pid in child_pids)
+    finally:
+        job.close()
+        if process.poll() is None:
+            process.kill()
+            process.wait()
