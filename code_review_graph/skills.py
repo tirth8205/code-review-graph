@@ -1464,12 +1464,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph update --skip-flows"
-                                " || true"
-                            ),
+                            "command": "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-update; else cat >/dev/null; fi; }",
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1482,12 +1477,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph status"
-                                " || echo 'Not a git repo, skipping'"
-                            ),
+                            "command": "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-status; else cat >/dev/null; fi; }",
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
                         },
