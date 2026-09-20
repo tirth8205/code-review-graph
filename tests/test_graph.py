@@ -70,6 +70,20 @@ class TestGraphStore:
         assert result.kind == "Function"
         assert result.name == "my_func"
 
+    def test_upsert_function_preserves_full_line_range(self):
+        first = self._make_func_node()
+        second = self._make_func_node()
+        first.line_start, first.line_end = 2, 4
+        second.line_start, second.line_end = 10, 12
+
+        self.store.upsert_node(first)
+        self.store.upsert_node(second)
+        self.store.commit()
+
+        result = self.store.get_node("/test/file.py::my_func")
+        assert result is not None
+        assert (result.line_start, result.line_end) == (2, 12)
+
     def test_upsert_method_node(self):
         method = self._make_func_node(name="do_thing", parent="MyClass")
         self.store.upsert_node(method)
