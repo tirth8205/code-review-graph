@@ -23,6 +23,47 @@ class TestCodeParser:
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
 
+    def test_parse_robot_and_resource_files(self, tmp_path):
+        robot = tmp_path / "sample.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    keywords.resource\n"
+            "Library     OperatingSystem\n\n"
+            "*** Test Cases ***\n"
+            "A passing test\n"
+            "    Log    hello\n"
+            "    Prepare environment\n\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Create directory    ${OUTPUT}\n",
+            encoding="utf-8",
+        )
+        resource = tmp_path / "keywords.resource"
+        resource.write_text(
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Log    ready\n",
+            encoding="utf-8",
+        )
+
+        assert self.parser.detect_language(robot) == "robot"
+        assert self.parser.detect_language(resource) == "robot"
+        nodes, edges = self.parser.parse_file(robot)
+        assert {node.name for node in nodes} >= {
+            str(robot), "A passing test", "Prepare environment",
+        }
+        assert any(node.kind == "Test" and node.name == "A passing test" for node in nodes)
+        assert any(
+            edge.kind == "IMPORTS_FROM" and edge.target == "keywords.resource"
+            for edge in edges
+        )
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::A passing test")
+            and edge.target == "Prepare environment"
+            for edge in edges
+        )
+
     # --- Shebang detection for extension-less Unix scripts (#237) ---
 
     def _write_shebang_file(self, tmp_path: Path, name: str, content: str) -> Path:

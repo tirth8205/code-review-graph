@@ -278,6 +278,30 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 | Feature | Details |
 |---------|---------|
+| **Incremental updates** | Re-parses only the files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
+| **Broad language + notebook support** | Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu structure (`.tf`; generic `.hcl` files are file-only), Ansible playbooks/roles/tasks, Robot Framework (`.robot`, `.resource`), Vue/Svelte SFCs, Astro files parsed through the TypeScript parser, Jupyter/Databricks (.ipynb), and Perl XS (.xs) |
+| **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, and evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
+| **Blast-radius analysis** | Shows which functions, classes, and files are likely affected by a change |
+| **Auto-update hooks** | Hooks and watch mode can update the graph on file saves and supported commit hooks |
+| **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
+| **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles, and degree-scaled nodes |
+| **Hub & bridge detection** | Find most-connected nodes and architectural chokepoints via betweenness centrality |
+| **Surprise scoring** | Detect unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
+| **Knowledge gap analysis** | Identify isolated nodes, untested hotspots, thin communities, and structural weaknesses |
+| **Suggested questions** | Auto-generated review questions from graph analysis (bridges, hubs, surprises) |
+| **Edge confidence** | Three-tier confidence scoring (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
+| **Graph traversal** | Free-form BFS/DFS exploration from any node with configurable depth and token budget |
+| **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault with wikilinks, SVG static graph |
+| **Graph diff** | Compare graph snapshots over time: new/removed nodes, edges, community changes |
+| **Token benchmarking** | Measure naive full-corpus tokens vs graph query tokens with per-question ratios |
+| **Estimated context savings** | Compact `context_savings` metadata on relevant MCP/CLI review outputs, labelled as estimated and kept to three small fields |
+| **Memory loop** | Persist Q&A results as markdown for re-ingestion, so the graph grows from queries |
+| **Community auto-split** | Oversized communities (>25% of graph) are recursively split via Leiden |
+| **Execution flows** | Trace call chains from entry points, sorted by weighted criticality |
+| **Community detection** | Cluster related code via Leiden algorithm with resolution scaling for large graphs |
+| **Architecture overview** | Auto-generated architecture map with coupling warnings |
+| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows, and test gaps |
+| **Custom languages** | Add new languages via `.code-review-graph/languages.toml` — no fork or code changes needed |
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
 | **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
