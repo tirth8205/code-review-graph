@@ -37,10 +37,12 @@ import pytest
 try:
     from mcp import ClientSession
     from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp.shared.exceptions import McpError
 except ImportError:  # pragma: no cover - ``mcp`` is a hard runtime dependency
     ClientSession = None  # type: ignore[assignment,misc]
     StdioServerParameters = None  # type: ignore[assignment,misc]
     stdio_client = None  # type: ignore[assignment]
+    McpError = None  # type: ignore[assignment,misc]
 
 # Generous: a cold interpreter start plus a full tree-sitter build on a loaded
 # Windows CI runner is slow, but nothing here should ever take minutes.
@@ -163,7 +165,12 @@ def _server_env(crg_home: Path) -> dict[str, str]:
     return env
 
 
-def _server_params(repo: Path, crg_home: Path) -> Any:
+def _server_params(
+    repo: Path,
+    crg_home: Path,
+    *,
+    multi_worktree: bool = False,
+) -> Any:
     """Stdio launch parameters, as an MCP client config file would supply them.
 
     ``python -m code_review_graph`` is the runnable entry point: ``cli.py`` has
@@ -171,9 +178,12 @@ def _server_params(repo: Path, crg_home: Path) -> Any:
     starting a server. stdio is the default transport (``--http`` opts out), so
     there is no ``--stdio`` flag to pass.
     """
+    args = ["-m", "code_review_graph", "serve", "--repo", str(repo)]
+    if multi_worktree:
+        args.append("--multi-worktree")
     return StdioServerParameters(
         command=sys.executable,
-        args=["-m", "code_review_graph", "serve", "--repo", str(repo)],
+        args=args,
         env=_server_env(crg_home),
         cwd=str(repo),
     )
@@ -351,6 +361,92 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
             # this is what keeps the test independent of the host machine.
             assert repos["repos"] == [], repos
             assert repos["summary"].startswith("0 registered repository")
+
+
+async def test_mcp_multi_worktree_routes_parallel_graphs(tmp_path: Path) -> None:
+    """One stdio session can build and query separate linked-worktree graphs."""
+    repo = _make_fixture_repo(tmp_path)
+    worktree = tmp_path / "review_worktree"
+    _git(repo, "worktree", "add", "-q", "-b", "review", str(worktree))
+    (worktree / "pkg" / "worktree_only.py").write_text(
+        "def worktree_only():\n    return 'review'\n",
+        encoding="utf-8",
+    )
+    _git(worktree, "add", "pkg/worktree_only.py")
+    _git(worktree, "commit", "-q", "-m", "add worktree-only symbol")
+    other_repo = _make_fixture_repo(tmp_path / "other")
+    crg_home = tmp_path / "crg-home"
+    crg_home.mkdir()
+
+    async with stdio_client(
+        _server_params(repo, crg_home, multi_worktree=True)
+    ) as (read, write):
+        async with ClientSession(
+            read,
+            write,
+            read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
+        ) as session:
+            await asyncio.wait_for(session.initialize(), timeout=CALL_TIMEOUT)
+
+            main_build, worktree_build = await asyncio.gather(
+                _call(
+                    session,
+                    "build_or_update_graph_tool",
+                    {
+                        "full_rebuild": True,
+                        "postprocess": "none",
+                        "repo_root": str(repo),
+                    },
+                ),
+                _call(
+                    session,
+                    "build_or_update_graph_tool",
+                    {
+                        "full_rebuild": True,
+                        "postprocess": "none",
+                        "repo_root": str(worktree),
+                    },
+                ),
+            )
+            assert _payload(main_build)["status"] == "ok"
+            assert _payload(worktree_build)["status"] == "ok"
+            assert (repo / ".code-review-graph" / "graph.db").is_file()
+            assert (worktree / ".code-review-graph" / "graph.db").is_file()
+
+            main_query, worktree_query = await asyncio.gather(
+                _call(
+                    session,
+                    "query_graph_tool",
+                    {
+                        "pattern": "file_summary",
+                        "target": "pkg/worktree_only.py",
+                        "repo_root": str(repo),
+                    },
+                ),
+                _call(
+                    session,
+                    "query_graph_tool",
+                    {
+                        "pattern": "file_summary",
+                        "target": "pkg/worktree_only.py",
+                        "repo_root": str(worktree),
+                    },
+                ),
+            )
+            main_payload = _payload(main_query)
+            worktree_payload = _payload(worktree_query)
+            assert main_payload["result_count"] == 0, main_payload
+            assert worktree_payload["status"] == "ok", worktree_payload
+            assert "worktree_only" in {
+                row["name"] for row in worktree_payload["results"]
+            }
+
+            with pytest.raises(McpError, match="linked worktree"):
+                await _call(
+                    session,
+                    "list_graph_stats_tool",
+                    {"repo_root": str(other_repo)},
+                )
 
 
 async def test_mcp_client_rejects_repo_root_outside_a_project(tmp_path: Path) -> None:

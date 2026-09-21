@@ -505,8 +505,22 @@ code-review-graph eval                         # Run evaluation benchmarks
 code-review-graph serve                        # Start MCP server (stdio)
 code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
 code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
-code-review-graph mcp                          # Alias for serve; accepts only --repo and --auto-watch
+code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
+code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
 ```
+
+`--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
+starts one regular `serve --repo <root>` child lazily for the primary checkout
+and each linked worktree requested through `repo_root`. Only paths reported by
+`git worktree list` for the same Git common directory are accepted. Each child
+uses its worktree's normal `.code-review-graph/graph.db` or its per-repository
+Registry `data_dir`, so graphs from different commits cannot be mixed.
+
+The mode rejects a process-wide `CRG_DATA_DIR`, because that would force all
+worktrees into one database. Configure external storage with a separate,
+non-overlapping Registry `data_dir` entry per worktree instead; the router
+rejects two worktrees that resolve to the same graph database. `--multi-worktree`
+is stdio only and cannot be combined with `--http`.
 
 Notes:
 

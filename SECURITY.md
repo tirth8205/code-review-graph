@@ -30,6 +30,7 @@ code-review-graph is a local development tool. It:
 |--------|------------|
 | SQL injection | All queries use parameterised `?` placeholders |
 | Path traversal | `_validate_repo_root()` requires an existing directory containing `.git`, `.svn` or `.code-review-graph` |
+| Multi-worktree routing | `serve --multi-worktree` permits only the primary checkout and active linked worktrees from the same Git common directory; each root is handled by a separate child server |
 | Prompt injection | `_sanitize_name()` strips control characters and caps names at 256 characters |
 | XSS (visualization) | `escH()` escapes HTML entities; `</script>` is escaped inside embedded JSON |
 | Subprocess injection | No `shell=True`; git and svn are invoked with argument lists |
