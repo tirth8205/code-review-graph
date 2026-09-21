@@ -1968,6 +1968,19 @@ def incremental_update(
     dependent_files: set[str] = set()
     for rel_path in changed_files:
         full_path = normalize_file_path(repo_root / rel_path)
+        # Duplicate watch notifications do not invalidate dependents. A real
+        # content change does: an unchanged importer's resolved edges can still
+        # refer to the old export identity, so its own hash is not sufficient.
+        existing = store.get_nodes_by_file(full_path)
+        try:
+            current_hash = current_hashes.get(normalize_file_path(rel_path))
+            if current_hash is None:
+                current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
+                current_hashes[normalize_file_path(rel_path)] = current_hash
+            if existing and existing[0].file_hash == current_hash:
+                continue
+        except (OSError, PermissionError):
+            pass
         deps = find_dependents(store, full_path)
         for d in deps:
             # Convert back to relative path if needed
@@ -2025,6 +2038,7 @@ def incremental_update(
             existing_nodes = store.get_nodes_by_file(str(abs_path))
             if (
                 rel_path not in remaining_identity
+                and rel_path not in dependent_files
                 and fhash is not None
                 and existing_nodes
                 and existing_nodes[0].file_hash == fhash
