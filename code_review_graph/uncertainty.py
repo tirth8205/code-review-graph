@@ -347,12 +347,14 @@ def _is_untracked_note(note: str) -> bool:
 
 def _untracked_note(count: int) -> str:
     """Say the working tree holds source the index was never offered."""
+    # The suffix has to leave room for the count: at 140 characters it left
+    # none, and _fragment clipped every count past 9 to "1~" — the one part of
+    # the sentence an agent can act on. 128 leaves twelve digits.
     return _interpolated(
         "",
         str(count),
-        " source file(s) are untracked by git and absent from the index, so "
-        "this 0 may be incomplete; `git add` them, then "
-        "`code-review-graph update`",
+        " source file(s) untracked by git, absent from the index, so this 0 "
+        "may be short; `git add` them, then `code-review-graph update`",
     )
 
 

@@ -700,3 +700,161 @@ def test_untracked_source_outranks_the_not_indexed_wording(repo):
 
     assert "untracked by git" in result["confidence"]
     assert "not indexed" not in result["confidence"]
+
+
+# ---------------------------------------------------------------------------
+# The helpers behind the untracked signal, exercised directly. The query-level
+# tests above prove the sentence reaches the agent; these prove each helper's
+# own contract, so a change to one cannot hide behind another's default.
+# ---------------------------------------------------------------------------
+
+
+def _store(repo: Path) -> GraphStore:
+    return GraphStore(repo / ".code-review-graph" / "graph.db")
+
+
+def test_untracked_sources_counts_only_indexed_suffixes(repo):
+    """The calibration is the graph's own suffixes, not a fixed list."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+    (repo / "helper.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    (repo / "NOTES.md").write_text("scratch\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) == 1
+
+
+def test_untracked_sources_is_zero_when_the_graph_indexed_nothing(repo):
+    """No indexed suffixes means nothing the index was ever going to hold."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        # get_all_files reads edges too, so orphaned edges keep a path alive.
+        store._conn.execute("DELETE FROM edges")
+        store._conn.execute("DELETE FROM nodes")
+        store.commit()
+        assert uncertainty._untracked_sources(repo, store) == 0
+
+
+def test_untracked_sources_is_zero_when_git_is_not_a_repository(repo):
+    """A git failure is not evidence of anything: zero, not a raise."""
+    # The fixture's .git is a bare directory, so `git status` exits non-zero.
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) == 0
+
+
+def test_untracked_sources_survives_a_missing_git_binary(repo, monkeypatch):
+    """FileNotFoundError from subprocess is caught, not propagated."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+    monkeypatch.setattr(uncertainty.subprocess, "run", _raise_file_not_found)
+
+    with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) == 0
+
+
+def _raise_file_not_found(*_args, **_kwargs):
+    raise FileNotFoundError("git")
+
+
+def _commit(root: Path) -> None:
+    """A HEAD to compare against; _tracked_repo only stages."""
+    import subprocess
+
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@localhost",
+         "commit", "-qm", "seed"],
+        cwd=str(root), check=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def test_is_untracked_note_recognises_only_its_own_wording():
+    """The rewrite for unresolved targets keys on this predicate."""
+    assert uncertainty._is_untracked_note(uncertainty._untracked_note(3))
+    assert not uncertainty._is_untracked_note(
+        "graph is stale: built at an older commit than HEAD",
+    )
+    assert not uncertainty._is_untracked_note("")
+
+
+def test_untracked_note_carries_the_count_and_the_remedy_within_budget():
+    """The count is the actionable part; it must survive the budget.
+
+    With a 140-character suffix the count's budget was zero and _fragment
+    clipped 12 to "1~" — a wrong number inside a sentence about accuracy.
+    """
+    for count in (1, 12, 1234, 999999):
+        note = uncertainty._untracked_note(count)
+        assert note.startswith(f"{count} source file(s)")
+        assert "git add" in note
+        assert "code-review-graph update" in note
+        assert len(note) <= MAX_CONFIDENCE_CHARS
+
+
+def test_settled_passes_verified_through_when_nothing_is_untracked(repo):
+    """Clean tree: the caller's own verdict stands, whichever it was."""
+    _tracked_repo(repo)
+
+    with _store(repo) as store:
+        assert uncertainty._settled(repo, store, True) == (None, True)
+        assert uncertainty._settled(repo, store, False) == (None, False)
+
+
+def test_settled_withdraws_verification_when_source_is_untracked(repo):
+    """Untracked source overrides a verified=True from the commit check."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        note, verified = uncertainty._settled(repo, store, True)
+        assert verified is False
+        assert uncertainty._is_untracked_note(note)
+
+
+def test_staleness_reaches_settled_without_a_build_timestamp(repo):
+    """The early return for a graph with no last_updated still asks."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        assert store.get_metadata("last_updated") is None
+        note, verified = uncertainty._staleness(store, repo, None)
+        assert verified is False
+        assert uncertainty._is_untracked_note(note)
+
+
+def test_staleness_prefers_the_commit_signal_over_the_untracked_one(repo):
+    """A stale commit is the stronger fact and keeps its own wording."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+
+    _commit(repo)
+
+    with _store(repo) as store:
+        store.set_metadata("git_head_sha", "0" * 40)
+        store.commit()
+        note, verified = uncertainty._staleness(store, repo, None)
+        assert verified is False
+        assert "older commit" in note
+        assert not uncertainty._is_untracked_note(note)
+
+
+def test_staleness_prefers_the_mtime_signal_over_the_untracked_one(repo):
+    """A file edited after the build says so before untracked is considered."""
+    _tracked_repo(repo)
+    (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
+    auth = repo / "auth.py"
+
+    with _store(repo) as store:
+        built = datetime.now() - timedelta(hours=1)
+        store.set_metadata("last_updated", built.isoformat())
+        store.commit()
+        os.utime(auth, None)  # now, after the build
+        note, verified = uncertainty._staleness(store, repo, auth.as_posix())
+        assert verified is False
+        assert "changed after the last build" in note
+        assert not uncertainty._is_untracked_note(note)
