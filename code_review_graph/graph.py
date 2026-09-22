@@ -440,11 +440,28 @@ GROUP BY dir
 """
 
 
+#: AOP-derived CALLS edges (advice -> target, tagged ``extra.aop_resolved``)
+#: do not follow the plain CALLS impact policy: an advice is not "called by"
+#: the method it wraps, so target -> source propagation would answer "the
+#: target changed, is the aspect impacted" and miss the relationship that
+#: matters -- "the advice changed, what does it impact". These edges always
+#: propagate source -> target regardless of CALLS' registered direction.
+#: See aop_resolver.py's module docstring and PR #916 review.
+_IMPACT_AOP_EXTRA_LIKE = '%"aop_resolved"%'
+_IMPACT_AOP_DIRECTION_CASE = (
+    "CASE WHEN e.extra LIKE ? THEN ? ELSE COALESCE(p.direction, ?) END"
+)
+
+
 def _impact_candidate_sql(resolution_guard: str) -> str:
     """One hop of the impact relaxation.
 
     *resolution_guard* is either the empty string or a fixed predicate chosen
     by a validated enum; no caller value reaches the SQL text.
+
+    The first two branches carry the AOP direction override, so each binds
+    the ``extra`` LIKE pattern and the forced direction ahead of the policy
+    default. See ``_IMPACT_AOP_DIRECTION_CASE``.
 
     The third branch is the directory-scoped one. A Go import names a
     package, so its edge targets the file's DIRECTORY rather than the file,
@@ -467,14 +484,14 @@ def _impact_candidate_sql(resolution_guard: str) -> str:
         FROM _impact_frontier f
         JOIN edges e ON e.source_qualified = f.node_qn
         LEFT JOIN _impact_policies p ON p.kind = e.kind
-        WHERE COALESCE(p.direction, ?) = ?{resolution_guard}
+        WHERE {_IMPACT_AOP_DIRECTION_CASE} = ?{resolution_guard}
         UNION ALL
         SELECT e.source_qualified AS node_qn,
                f.score * COALESCE(p.weight, ?) * ? AS score
         FROM _impact_frontier f
         JOIN edges e ON e.target_qualified = f.node_qn
         LEFT JOIN _impact_policies p ON p.kind = e.kind
-        WHERE COALESCE(p.direction, ?) = ?{resolution_guard}
+        WHERE {_IMPACT_AOP_DIRECTION_CASE} = ?{resolution_guard}
         UNION ALL
         SELECT e.source_qualified AS node_qn,
                d.score * COALESCE(p.weight, ?) * ? AS score
@@ -2902,10 +2919,14 @@ class GraphStore:
         candidate_params = (
             IMPACT_DEFAULT_EDGE_WEIGHT,
             IMPACT_DEPTH_DECAY,
+            _IMPACT_AOP_EXTRA_LIKE,
+            IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_DIRECTION,
             IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_WEIGHT,
             IMPACT_DEPTH_DECAY,
+            _IMPACT_AOP_EXTRA_LIKE,
+            IMPACT_DIRECTION_OUTGOING,
             IMPACT_DEFAULT_EDGE_DIRECTION,
             IMPACT_DIRECTION_INCOMING,
             IMPACT_DEFAULT_EDGE_WEIGHT,
@@ -3700,9 +3721,15 @@ class GraphStore:
                 if candidate_weight > existing_weight:
                     data["kind"] = kind
 
-                direction = IMPACT_EDGE_DIRECTIONS.get(
-                    kind, IMPACT_DEFAULT_EDGE_DIRECTION,
-                )
+                # AOP-derived CALLS edges always propagate source->target
+                # (advice -> target), overriding CALLS' registered direction
+                # — see the matching comment in get_impact_radius_sql.
+                if '"aop_resolved"' in (r["extra"] or ""):
+                    direction = IMPACT_DIRECTION_OUTGOING
+                else:
+                    direction = IMPACT_EDGE_DIRECTIONS.get(
+                        kind, IMPACT_DEFAULT_EDGE_DIRECTION,
+                    )
                 if direction != IMPACT_DIRECTION_NONE:
                     weight_key = f"impact_{direction}_weight"
                     data[weight_key] = max(
