@@ -1,0 +1,114 @@
+<?xml version="1.0"?>
+
+<xs:schema   
+             targetNamespace="http://graphml.graphdrawing.org/xmlns"
+
+             xmlns="http://graphml.graphdrawing.org/xmlns"
+             xmlns:xs="http://www.w3.org/2001/XMLSchema"
+
+             elementFormDefault="qualified"
+             attributeFormDefault="unqualified"
+>
+  <xs:annotation>
+    <xs:documentation 
+        source="http://graphml.graphdrawing.org/"
+        xml:lang="en">
+     This document defines the attributes extension of the GraphML language.
+     It redefines the attribut list of &lt;key> by adding two new 
+     attributes:
+     - attr.name (gives a name for the data function) and
+     - attr.type (declares the range of values for the data function).
+     The data values are defined in #PCDATA children of the corresponding
+     &lt;data> element.
+    </xs:documentation>
+  </xs:annotation>
+
+
+<xs:redefine schemaLocation="graphml-structure.xsd">
+
+  <xs:annotation>
+    <xs:documentation 
+        source="http://graphml.graphdrawing.org/"
+        xml:lang="en">
+     Redefinition of file graphml-structure.xsd.
+     Extends the attribute group key.extra.attrib (which takes
+     part in the attribute list of &lt;key>) by adding the
+     attribute group key.attributes.attrib which is defined below.
+    </xs:documentation>
+  </xs:annotation>
+
+  <xs:attributeGroup name="key.extra.attrib">
+    <xs:attributeGroup ref="key.extra.attrib"/>
+    <xs:attributeGroup ref="key.attributes.attrib"/>
+  </xs:attributeGroup>
+
+</xs:redefine>
+
+<xs:simpleType name="key.name.type" final="#all">
+
+  <xs:annotation>
+    <xs:documentation 
+        source="http://graphml.graphdrawing.org/(Dokumentation der Attributes Erweiterung; entsprechende Stelle.html)"
+        xml:lang="en">
+      Simple type for the attr.name attribute of &lt;key>.
+      key.name.type is final, that is, it may not be extended
+                          or restricted.
+      key.name.type is a restriction of xs:NMTOKEN
+      Allowed values: (no restriction)
+    </xs:documentation>
+  </xs:annotation>
+
+  <xs:restriction base="xs:NMTOKEN"/>
+
+</xs:simpleType>
+
+
+
+<xs:simpleType name="key.type.type" final="#all">
+
+  <xs:annotation>
+    <xs:documentation 
+        source="http://graphml.graphdrawing.org/(Dokumentation der Attributes Erweiterung; entsprechende Stelle.html)"
+        xml:lang="en">
+      Simple type for the attr.type attribute of &lt;key>.
+      key.type.type is final, that is, it may not be extended
+                          or restricted.
+      key.type.type is a restriction of xs:NMTOKEN
+      Allowed values: boolean, int, long, float, double, string.
+    </xs:documentation>
+  </xs:annotation>
+
+  <xs:restriction base="xs:NMTOKEN">  
+    <xs:enumeration value="boolean"/>
+    <xs:enumeration value="int"/>
+    <xs:enumeration value="long"/>
+    <xs:enumeration value="float"/>
+    <xs:enumeration value="double"/>
+    <xs:enumeration value="string"/>
+  </xs:restriction>
+
+</xs:simpleType>
+
+
+<xs:attributeGroup name="key.attributes.attrib">
+
+  <xs:annotation>
+    <xs:documentation 
+        source="http://graphml.graphdrawing.org/"
+        xml:lang="en">
+     Definition of the attribute group key.attributes.attrib.
+     This group consists of the two optional attributes
+         - attr.name (gives the name for the data function)
+         - attr.type ((declares the range of values for the data function)
+    </xs:documentation>
+  </xs:annotation>
+
+  <xs:attribute name="attr.name" type="key.name.type" use="optional"/>
+  <xs:attribute name="attr.type" type="key.type.type" use="optional"/>
+</xs:attributeGroup>
+
+</xs:schema>
+
+<!--======================================================-->
+<!--      end of file: graphml-attributes.xsd             -->
+<!--======================================================-->

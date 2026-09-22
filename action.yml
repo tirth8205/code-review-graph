@@ -51,16 +51,16 @@ runs:
       shell: bash
       run: python -m pip install --quiet code-review-graph
 
-    # Cache the SQLite knowledge graph between runs. The "schema9" segment
+    # Cache the SQLite knowledge graph between runs. The "schema13" segment
     # tracks LATEST_VERSION in code_review_graph/migrations.py — bump it when
     # the database schema changes so stale caches are not restored.
     - name: Cache knowledge graph
       uses: actions/cache@v6
       with:
         path: .code-review-graph
-        key: code-review-graph-schema9-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
+        key: code-review-graph-schema13-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
         restore-keys: |
-          code-review-graph-schema9-${{ runner.os }}-
+          code-review-graph-schema13-${{ runner.os }}-
 
     - name: Resolve diff base
       shell: bash
@@ -82,24 +82,42 @@ runs:
         if [ -f .code-review-graph/graph.db ]; then
           # Cache hit: re-parse only the files that differ from the base ref.
           # If the restored database is unusable, fall back to a full build.
+          # A corrupt, foreign or newer-schema cache now says so in one line
+          # and exits 1, which is exactly what this `||` is here to recover
+          # from; a full build then replaces it.
           code-review-graph update --base "${CRG_BASE}" || code-review-graph build
         else
           code-review-graph build
         fi
 
+    # No `|| true` here, on purpose. detect-changes exits non-zero when it
+    # cannot determine the changes (no git, a git that timed out, an
+    # unreadable graph). Swallowing that would post a reassuring comment
+    # about a pull request nobody analyzed.
     - name: Run risk-scored change analysis
       shell: bash
       run: |
         code-review-graph detect-changes --base "${CRG_BASE}" \
           > "${RUNNER_TEMP}/crg-report.json"
 
+    # Renders on exit 0 (an analysis, or a genuinely unchanged tree) and on
+    # exit 4 (output that is neither): the exit-4 comment says the analysis
+    # did not run, and the step below fails the job so the gate cannot be
+    # mistaken for a pass. Any other exit code is a real error and stops here.
     - name: Render markdown report
       id: render
       shell: bash
       run: |
+        set +e
         python "${GITHUB_ACTION_PATH}/scripts/render_pr_comment.py" \
           --input "${RUNNER_TEMP}/crg-report.json" \
           --output "${RUNNER_TEMP}/crg-comment.md"
+        status=$?
+        set -e
+        if [ "${status}" -ne 0 ] && [ "${status}" -ne 4 ]; then
+          exit "${status}"
+        fi
+        echo "RENDER_STATUS=${status}" >> "${GITHUB_ENV}"
         echo "comment-file=${RUNNER_TEMP}/crg-comment.md" >> "${GITHUB_OUTPUT}"
 
     - name: Upsert sticky PR comment
@@ -110,10 +128,34 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         marker='<!-- code-review-graph-report -->'
+        # Only ever edit a comment this Action itself posted. The marker is
+        # published in docs/GITHUB_ACTION.md, so any pull request
+        # participant can post a comment carrying it; without an author
+        # filter the Action would adopt that comment and every later run
+        # would rewrite it (or stall on it) instead of keeping its own
+        # report.
+        #
+        # A personal access token answers `gh api user` with its own login,
+        # so that identity is exact. An installation token (the default
+        # GITHUB_TOKEN, or a GitHub App's) cannot call that endpoint at all,
+        # and its comments are authored by a bot account whose login this
+        # step has no way to learn: github-actions[bot] for the default
+        # token, <app-slug>[bot] for an App. Assuming github-actions[bot]
+        # there loses an App's own sticky comment and posts a duplicate on
+        # every run, so the fallback matches on what is actually knowable --
+        # a marker comment written by a bot. Pull request participants are
+        # Users, never Bots, so the marker is still not enough on its own.
+        author=$(gh api user --jq '.login' 2>/dev/null || true)
+        if [ -n "${author}" ]; then
+          author_filter=".user.login == \"${author}\""
+        else
+          author_filter='.user.type == "Bot"'
+        fi
         comment_id=$(gh api \
           "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
           --paginate \
-          --jq ".[] | select(.body | contains(\"${marker}\")) | .id" | head -n 1)
+          --jq ".[] | select(${author_filter} and
+                 (.body | startswith(\"${marker}\"))) | .id" | head -n 1)
         if [ -n "${comment_id}" ]; then
           gh api --method PATCH --silent \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
@@ -122,6 +164,18 @@ runs:
           gh api --method POST --silent \
             "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             -F body=@"${RUNNER_TEMP}/crg-comment.md"
+        fi
+
+    # Always runs, even with fail-on-risk: none. "No analysis happened" is
+    # not a risk level, so it is not something the risk gate can be
+    # configured to ignore.
+    - name: Fail when the analysis did not run
+      shell: bash
+      run: |
+        if [ "${RENDER_STATUS:-0}" -eq 4 ]; then
+          echo "::error::code-review-graph could not determine the changes;" \
+            "this pull request has NOT been analyzed."
+          exit 1
         fi
 
     - name: Enforce risk gate

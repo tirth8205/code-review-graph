@@ -494,12 +494,14 @@ class TestChanges:
         """detect_changes_func returns clean result when no changes detected."""
         from code_review_graph.tools import detect_changes_func
 
-        # Patch _get_store to use our test store,
-        # and get_changed_files/get_staged_and_unstaged to return empty.
+        # Patch _get_store to use our test store, and change discovery to
+        # come back empty.
         with (
             patch("code_review_graph.tools.review._get_store") as mock_get_store,
-            patch("code_review_graph.tools.review.get_changed_files", return_value=[]),
-            patch("code_review_graph.tools.review.get_staged_and_unstaged", return_value=[]),
+            patch(
+                "code_review_graph.tools.review.discover_review_changes",
+                return_value=([], "HEAD~1"),
+            ),
             # Prevent the tool from closing our shared store, then restore the
             # real method so teardown releases the database handle on Windows.
             patch.object(self.store, "close"),
@@ -513,6 +515,107 @@ class TestChanges:
             assert result["test_gaps"] == []
         assert getattr(self.store.close, "__func__", None) is GraphStore.close
 
+    def test_detect_changes_tool_reports_an_undiscoverable_diff_as_an_error(self):
+        """The MCP tool must not flatten "could not look" into the all-clear.
+
+        ``test_detect_changes_tool_no_changes`` above pins what a genuinely
+        clean tree looks like: ``status: ok`` and an empty analysis. A git
+        that could not be run has to be distinguishable from that, or a
+        client cannot tell a reviewed pull request from an unreviewed one.
+        """
+        from code_review_graph.errors import ChangeDiscoveryError
+        from code_review_graph.tools import detect_changes_func
+
+        with (
+            patch("code_review_graph.tools.review._get_store") as mock_get_store,
+            patch(
+                "code_review_graph.tools.review.discover_review_changes",
+                side_effect=ChangeDiscoveryError(
+                    "could not determine the changes: git could not be run"
+                ),
+            ),
+            patch.object(self.store, "close"),
+        ):
+            mock_get_store.return_value = (self.store, Path("/fake/repo"))
+
+            result = detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
+
+        assert result["status"] == "error"
+        assert "could not determine the changes" in result["error"]
+
+    def test_detect_changes_tool_asks_for_a_working_vcs(self):
+        """The distinction is requested at the call, not hoped for.
+
+        ``discover_review_changes`` is the chain now, and it passes
+        ``require_vcs=True`` to all three of its steps; that wiring is pinned
+        by ``test_incremental.TestDiscoverReviewChanges``. What this test
+        keeps is the end of the contract that matters here: the tool goes
+        through the chain rather than calling raw git helpers that report a
+        failure as an empty list.
+        """
+        from code_review_graph.tools import detect_changes_func
+
+        with (
+            patch("code_review_graph.tools.review._get_store") as mock_get_store,
+            patch(
+                "code_review_graph.tools.review.discover_review_changes",
+                return_value=([], "HEAD~1"),
+            ) as discover,
+            patch(
+                "code_review_graph.tools.review.get_changed_files",
+                create=True,
+            ) as raw_changed,
+            patch.object(self.store, "close"),
+        ):
+            mock_get_store.return_value = (self.store, Path("/fake/repo"))
+            detect_changes_func(base="HEAD~1", repo_root="/fake/repo")
+
+        discover.assert_called_once_with(Path("/fake/repo"), "HEAD~1")
+        raw_changed.assert_not_called()
+
+    @pytest.mark.parametrize("func_name,module", [
+        ("detect_changes_func", "review"),
+        ("get_affected_flows_func", "review"),
+        ("get_review_context", "review"),
+        ("get_impact_radius", "query"),
+    ])
+    def test_every_review_tool_reports_a_discovery_failure(
+        self, func_name, module,
+    ):
+        """None of the four may render "could not look" as the all-clear.
+
+        Each one has a "no changed files detected" branch that a client acts
+        on. A discovery failure -- git missing, or a budget exhausted -- says
+        nothing about the working tree, so it has to arrive as
+        ``status: error`` instead (#262).
+        """
+        import importlib
+
+        from code_review_graph.errors import ChangeDiscoveryError
+
+        tools_module = importlib.import_module(
+            f"code_review_graph.tools.{module}"
+        )
+        func = getattr(tools_module, func_name)
+
+        with (
+            patch(f"code_review_graph.tools.{module}._get_store") as mock_get_store,
+            patch(
+                f"code_review_graph.tools.{module}.discover_review_changes",
+                side_effect=ChangeDiscoveryError(
+                    "could not determine the changes: git timed out after 5s."
+                ),
+            ),
+            patch.object(self.store, "close"),
+        ):
+            mock_get_store.return_value = (self.store, Path("/fake/repo"))
+            result = func(repo_root="/fake/repo")
+
+        assert result["status"] == "error", func_name
+        assert "could not determine the changes" in result["error"]
+        # And it must not read like the clean-tree answer.
+        assert "No changed files detected" not in str(result.get("summary", ""))
+
     def test_detect_changes_tool_with_changes(self):
         """detect_changes_func returns full analysis for changed files."""
         from code_review_graph.tools import detect_changes_func
@@ -521,7 +624,10 @@ class TestChanges:
 
         with (
             patch("code_review_graph.tools.review._get_store") as mock_get_store,
-            patch("code_review_graph.tools.review.get_changed_files", return_value=["app.py"]),
+            patch(
+                "code_review_graph.tools.review.discover_review_changes",
+                return_value=(["app.py"], "HEAD~1"),
+            ),
             patch(
                 "code_review_graph.tools.review.parse_git_diff_ranges",
                 return_value={"app.py": [(1, 10)]},
@@ -536,6 +642,48 @@ class TestChanges:
             assert "risk_score" in result
             assert "test_gaps" in result
             assert "review_priorities" in result
+        assert getattr(self.store.close, "__func__", None) is GraphStore.close
+
+    def test_detect_changes_tool_uses_one_resolved_review_base(self):
+        """File discovery and line ranges must use the same merge base.
+
+        Discovery resolves the base itself and hands it back, so the line
+        ranges have to be read against the ref discovery actually used, not
+        against the raw ``origin/main`` the caller passed. The chain's own
+        end of this contract is covered by
+        ``test_incremental.TestDiscoverReviewChanges``.
+        """
+        from code_review_graph.tools import detect_changes_func
+
+        self._add_func("my_func", path="/fake/repo/app.py", line_start=1, line_end=10)
+
+        with (
+            patch("code_review_graph.tools.review._get_store") as mock_get_store,
+            patch(
+                "code_review_graph.tools.review.discover_review_changes",
+                return_value=(["app.py"], "merge-base-sha"),
+            ) as discover,
+            patch(
+                "code_review_graph.tools.review.resolve_review_base",
+            ) as resolve,
+            patch(
+                "code_review_graph.tools.review.parse_diff_ranges",
+                return_value={"app.py": [(1, 10)]},
+            ) as parse_ranges,
+            patch.object(self.store, "close"),
+        ):
+            root = Path("/fake/repo")
+            mock_get_store.return_value = (self.store, root)
+
+            result = detect_changes_func(base="origin/main", repo_root=str(root))
+
+        assert result["status"] == "ok"
+        discover.assert_called_once_with(root, "origin/main")
+        # Resolving again outside the chain would spend the discovery budget
+        # a second time and could pick a different ref. require_vcs is the
+        # chain's own business now; TestDiscoverReviewChanges pins it.
+        resolve.assert_not_called()
+        parse_ranges.assert_called_once_with(str(root), "merge-base-sha")
         assert getattr(self.store.close, "__func__", None) is GraphStore.close
 
 
@@ -828,15 +976,17 @@ class TestRiskScoreChurn:
 
         baseline = analyze_changes(self.store, **kwargs)
         with patch(
-            "code_review_graph.changes.compute_file_churn",
-            return_value={"app.py": 10},
+            "code_review_graph.changes.compute_file_churn_with_status",
+            return_value=({"app.py": 10}, "ok"),
         ):
             churned = analyze_changes(self.store, include_churn=True, **kwargs)
 
         assert churned["risk_score"] - baseline["risk_score"] == pytest.approx(0.15)
 
     def test_analyze_changes_does_not_compute_churn_by_default(self, tmp_path):
-        with patch("code_review_graph.changes.compute_file_churn") as churn:
+        with patch(
+            "code_review_graph.changes.compute_file_churn_with_status",
+        ) as churn:
             analyze_changes(
                 self.store,
                 changed_files=["app.py"],

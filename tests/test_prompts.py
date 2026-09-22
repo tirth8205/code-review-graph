@@ -34,10 +34,16 @@ class TestReviewChangesPrompt:
         assert "HEAD~1" in _text(result[0])
 
     def test_custom_base(self):
-        result = review_changes_prompt(base="main")
-        assert "main" in _text(result[0])
+        content = _text(review_changes_prompt(base="origin/main")[0])
+        assert (
+            'get_minimal_context_tool(task="review changes against origin/main", base="origin/main")'
+            in content
+        )
+        assert 'detect_changes_tool(base="origin/main", detail_level="minimal")' in content
+        assert 'detect_changes_tool(base="origin/main", detail_level="standard")' in content
+        assert 'get_affected_flows_tool(base="origin/main", detail_level="minimal")' in content
 
-    def test_mentions_detect_changes(self):
+    def test_mentions_detect_changes_tool(self):
         result = review_changes_prompt()
         assert "detect_changes" in _text(result[0])
 
@@ -98,7 +104,7 @@ class TestDebugIssuePrompt:
         result = debug_issue_prompt(description="test issue")
         assert "semantic_search_nodes" in _text(result[0])
 
-    def test_mentions_get_minimal_context(self):
+    def test_mentions_get_minimal_context_tool(self):
         result = debug_issue_prompt()
         assert "get_minimal_context" in _text(result[0])
 
@@ -143,16 +149,15 @@ class TestPreMergeCheckPrompt:
             assert _text(msg)
 
     def test_default_base(self):
-        result = pre_merge_check_prompt()
-        # The pre-merge prompt is now generic (doesn't embed the base ref)
-        assert "pre-merge" in _text(result[0]).lower()
+        content = _text(pre_merge_check_prompt()[0])
+        assert 'get_minimal_context_tool(task="pre-merge check", base="HEAD~1")' in content
+        assert 'detect_changes_tool(base="HEAD~1", detail_level="minimal")' in content
 
     def test_custom_base(self):
-        # pre_merge_check_prompt still accepts base but the workflow
-        # is now generic — just verify it returns valid prompt
-        result = pre_merge_check_prompt(base="develop")
-        assert isinstance(result, list)
-        assert len(result) >= 1
+        content = _text(pre_merge_check_prompt(base="origin/develop")[0])
+        assert 'get_minimal_context_tool(task="pre-merge check", base="origin/develop")' in content
+        assert 'detect_changes_tool(base="origin/develop", detail_level="minimal")' in content
+        assert 'get_affected_flows_tool(base="origin/develop", detail_level="minimal")' in content
 
     def test_mentions_risk_scoring(self):
         result = pre_merge_check_prompt()

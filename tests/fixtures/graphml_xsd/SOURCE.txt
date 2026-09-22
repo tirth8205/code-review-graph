@@ -1,0 +1,11 @@
+Official GraphML 1.0 XML Schema, vendored so the export conformance checks
+validate offline and deterministically.
+
+Fetched from http://graphml.graphdrawing.org/xmlns/1.0/:
+  graphml.xsd, graphml-structure.xsd, graphml-attributes.xsd,
+  graphml-parseinfo.xsd, xlink.xsd
+
+The only edit is mechanical: every absolute
+"http://graphml.graphdrawing.org/xmlns/1.0/" schemaLocation prefix was
+removed so the files resolve one another from this directory. Target
+namespaces and all type definitions are untouched.

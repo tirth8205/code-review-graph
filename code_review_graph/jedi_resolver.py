@@ -87,7 +87,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
         except (OSError, PermissionError):
             continue
         tree = ts_parser.parse(source)
-        is_test = _parser_is_test_file(file_path)
+        is_test = _parser_is_test_file(file_path, repo_root)
         pending = _find_untracked_method_calls(tree.root_node, is_test)
         if pending:
             # Only keep calls whose method name exists in project code

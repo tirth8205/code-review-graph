@@ -5,16 +5,43 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
+from ..build_state import (
+    BUILD_COMPLETE,
+    BUILD_IN_PROGRESS,
+    BUILD_STATE_KEY,
+    INCOMPLETE_BUILD_STATES,
+    advance_to_postprocess_pending,
+    graph_contents_are_complete,
+    read_build_state,
+)
 from ..incremental import (
     full_build,
     incremental_update,
     resolve_incremental_base,
 )
+from ..parser import normalize_file_path
 from ._common import _get_store
 
 logger = logging.getLogger(__name__)
+
+# The build-state vocabulary is imported above rather than defined here:
+# ``full_build`` has to advance it as soon as the last file is stored, and it
+# cannot import this module without a cycle. See
+# :mod:`code_review_graph.build_state` for what each state means.
+
+
+def build_was_interrupted(store: Any) -> bool:
+    """True when the previous build died before it finished post-processing.
+
+    Both incomplete states answer yes: a build that never stored every file
+    and a build that stored them all but left the derived data unbuilt are
+    each a graph whose freshness metadata overstates it.  What separates them
+    is which repair works, which is :func:`graph_contents_are_complete`.
+    """
+    return read_build_state(store) in INCOMPLETE_BUILD_STATES
 
 
 def _run_embedding_refresh(
@@ -47,12 +74,85 @@ def _run_embedding_refresh(
         )
 
 
+# SQLITE_BUSY and SQLITE_LOCKED are the only two primary result codes that
+# mean "somebody else holds it, come back later".  Extended result codes carry
+# their detail in the high bits, so the low byte is what identifies the family.
+_CONTENTION_ERRORCODES = frozenset({5, 6})
+
+# ``sqlite_errorcode`` arrived in Python 3.11 and is only set on exceptions the
+# sqlite3 module itself raises, so the message is the fallback for 3.10 and for
+# any error re-raised by our own code.
+_CONTENTION_MESSAGES = (
+    "database is locked",
+    "database table is locked",
+    "database schema is locked",
+)
+
+
+def is_lock_contention(exc: BaseException) -> bool:
+    """True only for SQLite refusing a write because another process holds it.
+
+    Every other ``sqlite3.OperationalError`` — a malformed statement, a disk
+    I/O error, a read-only database file — is a genuine failure that the next
+    run will hit again in exactly the same way.  The distinction is not
+    cosmetic: contention deliberately leaves the ``build_state`` marker set so
+    the next run redoes the lost stage, so classifying a permanent error as
+    contention marks the graph incomplete forever and promotes every later
+    update to a full rebuild that cannot clear it.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    errorcode = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(errorcode, int):
+        return (errorcode & 0xFF) in _CONTENTION_ERRORCODES
+    message = str(exc).lower()
+    return any(text in message for text in _CONTENTION_MESSAGES)
+
+
+def _note_contention(build_result: dict[str, Any], exc: BaseException) -> None:
+    """Classify a post-processing stage that failed.
+
+    Contention is transient: another process held the SQLite write lock, and
+    the next run can redo the stage, so the build-state marker stays set.  A
+    genuine SQLite error is recorded separately — it downgrades the build to
+    ``partial`` instead of being retried forever.  Anything else (a missing
+    optional dependency, say) is left to the warning list alone: one absent
+    extra must not pin the repository into permanent full rebuilds.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return
+    if is_lock_contention(exc):
+        build_result["postprocess_contended"] = True
+    else:
+        build_result["postprocess_failed"] = True
+
+
+def _fts_file_hint(
+    repo_root: str | None,
+    changed_files: list[str] | None,
+) -> list[str] | None:
+    """Spell *changed_files* the way ``nodes.file_path`` stores them.
+
+    Change discovery reports repository-relative paths while the graph keys
+    nodes by their normalised absolute path. A hint that matches nothing is
+    harmless (the delta still repairs every added and removed row) but it
+    buys nothing either, so resolve it whenever the root is known.
+    """
+    if not changed_files:
+        return None
+    if repo_root is None:
+        return [normalize_file_path(path) for path in changed_files]
+    root = Path(repo_root)
+    return [normalize_file_path(root / path) for path in changed_files]
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
     postprocess: str,
     full_rebuild: bool = False,
     changed_files: list[str] | None = None,
+    repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
 ) -> list[str]:
@@ -79,6 +179,16 @@ def _run_postprocess(
             provider=embedding_provider,
             model=embedding_model,
         )
+        # No resolver runs at this level, but edges were still written, so
+        # the certainty column must not be left stale for the query layer.
+        try:
+            store.refresh_target_resolution()
+        except sqlite3.OperationalError as e:
+            logger.warning("Target-resolution refresh failed: %s", e)
+            _note_contention(build_result, e)
+            warnings.append(
+                f"Target-resolution refresh failed: {type(e).__name__}: {e}"
+            )
         return warnings
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
@@ -89,8 +199,12 @@ def _run_postprocess(
         build_result["cpp_scoped_edges_resolved"] = (
             store.resolve_cpp_scoped_call_targets()
         )
+        # Resolvers rewrite bare targets into qualified ones, so the stored
+        # certainty column is only correct once they have all run.
+        store.refresh_target_resolution()
     except sqlite3.OperationalError as e:
         logger.warning("Call-target resolution failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(
             f"Call-target resolution failed: {type(e).__name__}: {e}"
         )
@@ -100,6 +214,7 @@ def _run_postprocess(
     stage_started = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
+        signature_rows: list[tuple[str, int]] = []
         for row in rows:
             node_id, name, kind, params, ret = (
                 row[0],
@@ -116,11 +231,14 @@ def _run_postprocess(
                 sig = f"class {name}"
             else:
                 sig = name
-            store.update_node_signature(node_id, sig[:512])
-        store.commit()
+            signature_rows.append((sig[:512], node_id))
+        # Single transaction via executemany instead of one autocommitted
+        # UPDATE per node (issue #721).
+        store.update_node_signatures(signature_rows)
         build_result["signatures_updated"] = True
     except (sqlite3.OperationalError, TypeError, KeyError) as e:
         logger.warning("Signature computation failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
     timing["signatures_s"] = max(
         0.0,
@@ -129,13 +247,24 @@ def _run_postprocess(
 
     stage_started = time.perf_counter()
     try:
-        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.search import rebuild_fts_index, update_fts_index
 
-        fts_count = rebuild_fts_index(store)
-        build_result["fts_indexed"] = fts_count
-        build_result["fts_rebuilt"] = True
+        if full_rebuild:
+            build_result["fts_indexed"] = rebuild_fts_index(store)
+            build_result["fts_rebuilt"] = True
+        else:
+            # An update knows which files it re-parsed, so the index only has
+            # to rewrite those rows instead of being dropped and repopulated.
+            mode: list[str] = []
+            build_result["fts_indexed"] = update_fts_index(
+                store,
+                _fts_file_hint(repo_root, changed_files),
+                _out_mode=mode,
+            )
+            build_result["fts_rebuilt"] = mode == ["rebuild"]
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("FTS index rebuild failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
     timing["fts_s"] = max(
         0.0,
@@ -171,6 +300,7 @@ def _run_postprocess(
         build_result["flows_detected"] = count
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Flow detection failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
     timing["flows_s"] = max(
         0.0,
@@ -198,6 +328,7 @@ def _run_postprocess(
         build_result["communities_detected"] = count
     except (sqlite3.OperationalError, ImportError) as e:
         logger.warning("Community detection failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
     timing["communities_s"] = max(
         0.0,
@@ -211,6 +342,7 @@ def _run_postprocess(
         build_result["summaries_computed"] = True
     except (sqlite3.OperationalError, Exception) as e:
         logger.warning("Summary computation failed: %s", e)
+        _note_contention(build_result, e)
         warnings.append(f"Summary computation failed: {type(e).__name__}: {e}")
     timing["summaries_s"] = max(
         0.0,
@@ -505,6 +637,17 @@ def build_or_update_graph(
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
+        # A previous run that died between storing the last file and finishing
+        # post-processing left a current anchor over a half-derived graph.
+        # Trusting the anchor there is exactly what made that damage permanent,
+        # so repair it with a full rebuild instead of believing it.
+        interrupted = build_was_interrupted(store)
+        if interrupted and not full_rebuild:
+            logger.warning(
+                "Previous build did not finish post-processing; rebuilding to repair it"
+            )
+            full_rebuild = True
+
         # An automatic (base is None) incremental update resolves its diff base
         # to the last-synced commit. When no usable anchor exists, fall back to
         # a full rebuild rather than a wrong HEAD~1 diff that could report the
@@ -515,43 +658,93 @@ def build_or_update_graph(
             if base_resolved is None:
                 full_rebuild = True
 
+        previous_state = store.get_metadata(BUILD_STATE_KEY)
+        store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
+
         if full_rebuild:
             result = full_build(root, store, recurse_submodules)
+            failed = [str(item.get("file", "?")) for item in result["errors"]]
+            summary = (
+                f"Full build complete: parsed {result['files_parsed']} files, "
+                f"created {result['total_nodes']} nodes and "
+                f"{result['total_edges']} edges."
+            )
+            if failed:
+                summary += f" {len(failed)} file(s) failed to parse: {failed}."
             build_result = {
                 **result,
-                "status": "ok",
+                "status": "partial" if failed else "ok",
                 "build_type": "full",
                 "base_resolved": None,
-                "summary": (
-                    f"Full build complete: parsed {result['files_parsed']} files, "
-                    f"created {result['total_nodes']} nodes and "
-                    f"{result['total_edges']} edges."
-                ),
+                "summary": summary,
             }
         else:
-            result = incremental_update(root, store, base=base_resolved)
-            if result["files_updated"] == 0:
+            try:
+                result = incremental_update(root, store, base=base_resolved)
+            except RuntimeError as exc:
+                # Change discovery or root validation failed before anything was
+                # stored; report it the way every other failure is reported.
+                # Nothing was written, so the previous completeness verdict
+                # still holds — do not leave the graph flagged as half built.
+                if previous_state is not None:
+                    store.set_metadata(BUILD_STATE_KEY, previous_state)
+                return {
+                    "status": "error",
+                    "build_type": "incremental",
+                    "base_resolved": base_resolved,
+                    "files_updated": 0,
+                    "errors": [],
+                    "error": str(exc),
+                    "summary": f"Incremental update failed: {exc}",
+                    "postprocess_level": postprocess,
+                }
+            failed = [str(item.get("file", "?")) for item in result["errors"]]
+            if result["files_updated"] == 0 and not failed:
+                summary = (
+                    "No changes detected. Graph is up to date."
+                    if result.get("freshness_advanced")
+                    else "No graph changes detected. Freshness metadata was not advanced."
+                )
+                # Nothing changed, so there is nothing half built to repair;
+                # leaving the marker set would make every later update a full
+                # rebuild.
+                store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
                 return {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
-                    "summary": "No changes detected. Graph is up to date.",
+                    "summary": summary,
                     "postprocess_level": postprocess,
                 }
+            summary = (
+                f"Incremental update: {result['files_updated']} files re-parsed, "
+                f"{result['total_nodes']} nodes and "
+                f"{result['total_edges']} edges updated. "
+                f"Changed: {result['changed_files']}. "
+                f"Dependents also updated: {result['dependent_files']}."
+            )
+            if failed:
+                summary += (
+                    f" {len(failed)} file(s) failed to parse and keep their "
+                    f"previous graph rows: {failed}."
+                )
             build_result = {
                 **result,
-                "status": "ok",
+                "status": "partial" if failed else "ok",
                 "build_type": "incremental",
                 "base_resolved": base_resolved,
-                "summary": (
-                    f"Incremental update: {result['files_updated']} files re-parsed, "
-                    f"{result['total_nodes']} nodes and "
-                    f"{result['total_edges']} edges updated. "
-                    f"Changed: {result['changed_files']}. "
-                    f"Dependents also updated: {result['dependent_files']}."
-                ),
+                "summary": summary,
             }
+
+        # Every file that could be stored is stored, so what is still
+        # outstanding is derived data alone. Recording that distinction here is
+        # what lets an explicit ``postprocess`` tell a graph it can genuinely
+        # repair from one whose files never all landed. ``full_build`` already
+        # advances it before writing the anchor, so a kill in the gap between
+        # the two is on the right side of the line; this covers the
+        # incremental path and is a no-op when the state is already advanced.
+        advance_to_postprocess_pending(store)
 
         # Pass changed_files for incremental flow/community detection
         changed = result.get("changed_files") if not full_rebuild else None
@@ -561,11 +754,23 @@ def build_or_update_graph(
             postprocess,
             full_rebuild=full_rebuild,
             changed_files=changed,
+            repo_root=str(root),
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
         )
         if warnings:
             build_result["warnings"] = warnings
+        # A genuine SQLite failure is not something the next run repairs, so it
+        # is reported now rather than hidden behind an "ok" status.
+        if build_result.get("postprocess_failed"):
+            build_result["status"] = "partial"
+        # Last thing written, after post-processing: only now is the graph
+        # genuinely what its freshness metadata claims.  A stage that lost the
+        # write lock keeps the marker set so the next run redoes it, rather
+        # than leaving an empty FTS index behind a "complete" verdict.
+        if not build_result.get("postprocess_contended"):
+            store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+        build_result["repaired_interrupted_build"] = interrupted
         return build_result
     finally:
         store.close()
@@ -603,6 +808,12 @@ def run_postprocess(
     warnings: list[str] = []
 
     try:
+        # Read before anything runs: the stages below rebuild derived data
+        # from whatever nodes are stored, and none of them can put back a file
+        # the interrupted build never parsed.
+        state_before = read_build_state(store)
+        graph_complete = graph_contents_are_complete(state_before)
+
         try:
             resolved = store.resolve_bare_call_targets()
             resolved += store.resolve_bare_tested_by_sources()
@@ -610,14 +821,19 @@ def run_postprocess(
             result["cpp_scoped_edges_resolved"] = (
                 store.resolve_cpp_scoped_call_targets()
             )
+            # Resolvers rewrite bare targets into qualified ones, so the
+            # stored certainty column is only correct once they have run.
+            store.refresh_target_resolution()
         except sqlite3.OperationalError as e:
             logger.warning("Call-target resolution failed: %s", e)
+            _note_contention(result, e)
             warnings.append(
                 f"Call-target resolution failed: {type(e).__name__}: {e}"
             )
 
         try:
             rows = store.get_nodes_without_signature()
+            signature_rows: list[tuple[str, int]] = []
             for row in rows:
                 node_id, name, kind, params, ret = (
                     row[0],
@@ -634,11 +850,14 @@ def run_postprocess(
                     sig = f"class {name}"
                 else:
                     sig = name
-                store.update_node_signature(node_id, sig[:512])
-            store.commit()
+                signature_rows.append((sig[:512], node_id))
+            # Single transaction via executemany instead of one autocommitted
+            # UPDATE per node (issue #721).
+            store.update_node_signatures(signature_rows)
             result["signatures_updated"] = True
         except (sqlite3.OperationalError, TypeError, KeyError) as e:
             logger.warning("Signature computation failed: %s", e)
+            _note_contention(result, e)
             warnings.append(f"Signature computation failed: {type(e).__name__}: {e}")
 
         if fts:
@@ -650,6 +869,7 @@ def run_postprocess(
             except (sqlite3.OperationalError, ImportError) as e:
                 store.rollback()
                 logger.warning("FTS index rebuild failed: %s", e)
+                _note_contention(result, e)
                 warnings.append(f"FTS index rebuild failed: {type(e).__name__}: {e}")
 
         if flows:
@@ -663,6 +883,7 @@ def run_postprocess(
             except (sqlite3.OperationalError, ImportError) as e:
                 store.rollback()
                 logger.warning("Flow detection failed: %s", e)
+                _note_contention(result, e)
                 warnings.append(f"Flow detection failed: {type(e).__name__}: {e}")
 
         if communities:
@@ -680,6 +901,7 @@ def run_postprocess(
             except (sqlite3.OperationalError, ImportError) as e:
                 store.rollback()
                 logger.warning("Community detection failed: %s", e)
+                _note_contention(result, e)
                 warnings.append(f"Community detection failed: {type(e).__name__}: {e}")
 
         _run_embedding_refresh(
@@ -694,7 +916,39 @@ def run_postprocess(
             "last_postprocessed_at",
             time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
-        result["summary"] = "Post-processing complete."
+        # The marker clears when, and only when, post-processing finished over
+        # a graph that holds every file.  Two conditions, both explicit:
+        #
+        # * The build that stored the graph got as far as storing all of it.
+        #   An explicit postprocess is the hand repair for a build that died
+        #   after that point, and must be able to finish it. Refusing on any
+        #   warning meant it could not repair the very failures people reach
+        #   for it to repair.  But it cannot conjure back files a dead build
+        #   never parsed, so over an ``in-progress`` graph it is not a repair
+        #   at all: the derived data it writes is complete for a graph that is
+        #   missing files, and calling that healthy is the same lie from the
+        #   other side.
+        # * No stage lost the SQLite write lock.  Contention is transient and
+        #   the lost stage has to be redone, so the marker stays set for it.
+        if not graph_complete:
+            warning = (
+                "The last build stopped before every file was stored, so the "
+                "graph is still incomplete. Post-processing rebuilt what it "
+                "could from the stored nodes; run 'code-review-graph build' "
+                "to finish the graph itself."
+            )
+            logger.warning(warning)
+            warnings.append(warning)
+            result["build_incomplete"] = True
+            result["status"] = "partial"
+            result["summary"] = (
+                "Post-processing ran, but the graph is missing files from an "
+                "unfinished build. Run a full build to repair it."
+            )
+        else:
+            if not result.get("postprocess_contended"):
+                store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+            result["summary"] = "Post-processing complete."
         if warnings:
             result["warnings"] = warnings
         return result

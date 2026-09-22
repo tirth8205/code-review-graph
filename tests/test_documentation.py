@@ -75,3 +75,36 @@ def test_codebuddy_install_docs_cover_project_artifacts():
         ".codebuddy/skills/<name>/SKILL.md",
     ):
         assert artifact in usage
+
+
+def test_schema_version_is_current_everywhere_it_is_written_down():
+    """The places CI's schema-sync job does not reach.
+
+    schema-sync compares ``migrations.py`` against the VS Code extension only.
+    The schema version is also written down in prose that ships — ``docs/`` is
+    in the sdist — and in the Action's cache key, and each of those drifted
+    behind the migrations at least once.
+    """
+    from code_review_graph.migrations import LATEST_VERSION
+
+    schema_doc = (ROOT / "docs/schema.md").read_text(encoding="utf-8")
+    assert f"The current schema version is {LATEST_VERSION}," in schema_doc, (
+        f"docs/schema.md does not state schema version {LATEST_VERSION}"
+    )
+    assert f"| {LATEST_VERSION} |" in schema_doc, (
+        f"docs/schema.md has no migration table row for v{LATEST_VERSION}"
+    )
+
+    troubleshooting = (ROOT / "docs/TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    assert f"this build understands v{LATEST_VERSION})" in troubleshooting, (
+        "the sample newer-database error in docs/TROUBLESHOOTING.md names a "
+        f"version other than v{LATEST_VERSION}"
+    )
+
+    for name in ("action.yml", "docs/GITHUB_ACTION.md"):
+        content = (ROOT / name).read_text(encoding="utf-8")
+        segments = set(re.findall(r"schema(\d+)", content))
+        assert segments == {str(LATEST_VERSION)}, (
+            f"{name} names cache schema segment(s) {sorted(segments)}; "
+            f"expected only schema{LATEST_VERSION}"
+        )

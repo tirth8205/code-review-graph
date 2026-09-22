@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 - 2026-09-18
+
+### Changed
+- Accepts Python backend schema v13, shipped by code-review-graph 2.3.9.
+  Earlier builds accept v9 (0.2.2) or v6 (0.2.1, the last tagged release) and
+  answer a migrated database with "Database was created with a newer version".
+  code-review-graph 2.3.9 migrates the graph to v13 the first time any command
+  opens it, so this build has to be installed alongside it.
+
 ## 0.2.2 - 2026-04-11
 
 ### Fixed
