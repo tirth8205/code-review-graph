@@ -10187,6 +10187,30 @@ class CodeParser:
             return inner
         return None
 
+    def _js_in_test_body(
+        self,
+        nodes: list[NodeInfo],
+        file_path: str,
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+    ) -> bool:
+        """Whether a declaration sits in the body of a test (``it``, ``describe``, ...).
+
+        TESTED_BY edges are minted from the calls a test makes. A component a test
+        builds for itself, ``const Probe = React.forwardRef(function Probe(props, ref)
+        { ... useForkRef(handleOwnRef, ref) ... })`` inside ``it(...)``, is part of the
+        test: indexing it would move ``useForkRef``'s caller onto the fixture and take
+        the test out of ``tests_for(useForkRef)``. The enclosing function's node is
+        added before its body is walked, so it is already in ``nodes``.
+        """
+        if not enclosing_func:
+            return False
+        qualified = self._qualify(enclosing_func, file_path, enclosing_class)
+        return any(
+            node.is_test and self._node_qualified(node) == qualified
+            for node in reversed(nodes)
+        )
+
     def _extract_js_var_functions(
         self,
         child,
@@ -10240,10 +10264,14 @@ class CodeParser:
                     walk_node = sub
                 elif sub.type == "call_expression":
                     # Higher-order wrappers (forwardRef, memo, observer, ...) hide
-                    # the component's function inside the call's arguments.
+                    # the component's function inside the call's arguments. In a
+                    # test's body the component is a fixture and its calls stay the
+                    # test's, as they were before wrapped components were indexed.
                     chain: list = []
                     wrapped = self._js_wrapped_function(sub, chain=chain)
-                    if wrapped is not None:
+                    if wrapped is not None and not self._js_in_test_body(
+                        nodes, file_path, enclosing_class, enclosing_func,
+                    ):
                         func_node = wrapped
                         walk_node = wrapped
                         wrapper_calls = chain

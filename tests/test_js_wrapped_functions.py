@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
+from code_review_graph.graph import GraphStore
+from code_review_graph.incremental import full_build
 from code_review_graph.parser import CodeParser
+from code_review_graph.tools.query import query_graph
 
 
 def _parse(tmp_path: Path, name: str, source: str):
@@ -481,3 +484,76 @@ def test_a_directly_assigned_function_does_not_walk_its_annotation(tmp_path):
     assert set(_functions(nodes)) == {"setup", "Card"}
     assert _call_pairs(path, edges) == {("Card", "paint")}
     assert _reference_pairs(path, edges) == set()
+
+
+_FORK_REF_TEST = (
+    "import * as React from 'react';\n"
+    "import useForkRef from './useForkRef';\n"
+    "\n"
+    "describe('useForkRef', () => {\n"
+    "  const Probe = React.forwardRef(function Probe(props, ref) {\n"
+    "    return <div ref={useForkRef(ref, null)} />;\n"
+    "  });\n"
+    "\n"
+    "  it('forks if only one of the branches requires a ref', () => {\n"
+    "    const Component = React.forwardRef(function Component(props, ref) {\n"
+    "      const handleRef = useForkRef(handleOwnRef, ref);\n"
+    "      return <div ref={handleRef} />;\n"
+    "    });\n"
+    "    render(<Component />);\n"
+    "  });\n"
+    "\n"
+    "  it('does nothing if none of the forked branches requires a ref', () => {\n"
+    "    const Outer = React.memo(forwardRef((props, ref) => {\n"
+    "      return React.cloneElement(props.children, { ref: useForkRef(null, ref) });\n"
+    "    }));\n"
+    "    render(<Outer><Probe /></Outer>);\n"
+    "  });\n"
+    "});\n"
+)
+
+
+def test_a_component_built_in_a_test_body_keeps_its_calls_on_the_test(tmp_path):
+    """A test that builds its own probe component still tests what the probe calls.
+
+    material-ui builds probes as `React.forwardRef(function Component(props, ref) {
+    ... useForkRef(handleOwnRef, ref) ... })` inside `it()`. Indexing the probe moved
+    the call onto it, TESTED_BY followed the call, and `tests_for(useForkRef)` came
+    back empty (#972). In a test's body, `describe` included, a wrapped component is a
+    fixture and its calls stay the test's. One at module scope is still indexed.
+    """
+    repo = tmp_path.resolve()
+    (repo / "src").mkdir()
+    production = repo / "src" / "useForkRef.ts"
+    production.write_text(
+        "export default function useForkRef(...refs) { return refs; }\n",
+        encoding="utf-8",
+    )
+    test_file = repo / "src" / "useForkRef.test.tsx"
+    test_file.write_text(
+        "export const Frame = React.memo(() => <div>{useForkRef(null, null)}</div>);\n"
+        + _FORK_REF_TEST,
+        encoding="utf-8",
+    )
+
+    nodes, edges = CodeParser(repo).parse_file(test_file)
+
+    tested = {
+        edge.target.rsplit("::", 1)[-1]
+        for edge in edges
+        if edge.kind == "TESTED_BY" and edge.source == f"{production.as_posix()}::useForkRef"
+    }
+    assert tested == {
+        "describe:useForkRef@L5",
+        "it:forks if only one of the branches requires a ref@L10",
+        "it:does nothing if none of the forked branches requires a ref@L18",
+    }
+    assert set(_functions(nodes)) == {"Frame"}
+
+    graph_dir = repo / ".code-review-graph"
+    graph_dir.mkdir()
+    with GraphStore(graph_dir / "graph.db") as store:
+        assert full_build(repo, store)["errors"] == []
+    result = query_graph("tests_for", f"{production.as_posix()}::useForkRef", repo_root=str(repo))
+    assert result["status"] == "ok"
+    assert {node["name"] for node in result["results"]} == tested
