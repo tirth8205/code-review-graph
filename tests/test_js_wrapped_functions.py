@@ -246,6 +246,40 @@ def test_a_member_expression_wrapper_is_unwrapped(tmp_path):
     }
 
 
+def test_a_method_that_shares_a_wrapper_name_is_not_a_component(tmp_path):
+    """Only `React.*` members are wrappers. `pool.connect(cb)` and `utils.memo(fn)` call
+    methods that happen to share a wrapper's name; indexing them invented a `session`
+    function and took `logErr`'s caller away from `handle` (#972)."""
+    path, (nodes, edges) = _parse(
+        tmp_path,
+        "db.js",
+        "import { logErr } from './log';\n"
+        "export function handle(pool) {\n"
+        "  const session = pool.connect(function (err) { logErr(err); });\n"
+        "  return session;\n"
+        "}\n"
+        "export function open(utils) {\n"
+        "  const cached = utils.memo(() => compute());\n"
+        "  return cached;\n"
+        "}\n",
+    )
+
+    assert set(_functions(nodes)) == {"handle", "open"}
+    pairs = _call_pairs(path, edges)
+    assert ("handle", "logErr") in pairs
+    assert ("open", "compute") in pairs
+    assert not {caller for caller, _ in pairs} & {"session", "cached"}
+
+
+def test_a_curried_chain_past_the_depth_limit_is_not_followed(tmp_path):
+    """The wrapper name follows a curried callee no deeper than the unwrapping does, so a
+    pathological chain parses instead of raising RecursionError."""
+    source = "export const S = connect(a)" + "(b)" * 1000 + "(() => { paint(); });\n"
+    _path, (nodes, _edges) = _parse(tmp_path, "deep.js", source)
+
+    assert "S" not in _functions(nodes)
+
+
 def test_an_unknown_inner_wrapper_is_not_unwrapped(tmp_path):
     """`memo(wrap(fn))`: `wrap` is not a component wrapper, so `memo` does not receive a
     function and the declaration is not a definition. Every call stays on `setup`."""

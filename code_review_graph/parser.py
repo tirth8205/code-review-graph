@@ -10127,20 +10127,32 @@ class CodeParser:
         """
         return [arg for arg in arguments.named_children if arg.type not in self._JS_COMMENT_TYPES]
 
-    def _js_wrapper_name(self, call_node) -> Optional[str]:
-        """The wrapper a call applies, or None when the callee is not a plain name.
+    def _js_wrapper_name(self, call_node, _depth: int = 0) -> Optional[str]:
+        """The wrapper a call applies, or None when the callee is not one we can name.
 
         ``memo(fn)`` and ``React.memo(fn)`` both answer ``memo``; the curried
-        ``styled(Base)(fn)`` and ``connect(map)(fn)`` answer through their own callee.
+        ``styled(Base)(fn)`` and ``connect(map)(fn)`` answer through their own callee,
+        followed no deeper than {@link _JS_WRAPPER_MAX_DEPTH}, the same bound the
+        unwrapping keeps. A member callee answers only on ``React``: ``pool.connect(cb)``
+        and ``utils.memo(fn)`` call methods that share a wrapper's name, and losing a
+        namespace import such as ``ReactModule.forwardRef`` is the smaller mistake.
         """
         callee = call_node.children[0] if call_node.children else None
         if callee is None:
             return None
         if callee.type == "call_expression":
-            return self._js_wrapper_name(callee)
-        if callee.type not in ("identifier", "member_expression"):
-            return None
-        return callee.text.decode("utf-8", errors="replace").rsplit(".", 1)[-1]
+            if _depth >= self._JS_WRAPPER_MAX_DEPTH:
+                return None
+            return self._js_wrapper_name(callee, _depth + 1)
+        if callee.type == "identifier":
+            return callee.text.decode("utf-8", errors="replace")
+        if callee.type == "member_expression":
+            obj = callee.child_by_field_name("object")
+            prop = callee.child_by_field_name("property")
+            if obj is None or prop is None or obj.type != "identifier" or obj.text != b"React":
+                return None
+            return prop.text.decode("utf-8", errors="replace")
+        return None
 
     def _js_wrapped_function(self, call_node, _depth: int = 0, chain=None):
         """Return the function literal a component wrapper call receives, if any.
