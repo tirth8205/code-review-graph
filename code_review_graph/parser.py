@@ -84,6 +84,9 @@ _PYTHON_STAR_EXPORT_CACHE_LOCK = threading.RLock()
 # from a function body.
 _PYTHON_RETURN_ANNOTATION_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
 _PYTHON_RETURN_ANNOTATION_CACHE_LOCK = threading.RLock()
+_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE: dict[
+    tuple[str, int, int], dict[tuple[str, str], str],
+] = {}
 
 # Marker separating expression-receiver evidence from name-receiver evidence
 # in the receiver-evidence map. ``\x00`` cannot occur in a Python identifier,
@@ -113,7 +116,9 @@ class _PyReceiverContext(NamedTuple):
     imported_names: frozenset[str]
     module_bindings: dict[str, set[str]]
     symbol_origins: dict[str, str]
+    symbol_names: dict[str, str]
     local_returns: dict[str, str]
+    property_returns: dict[tuple[str, str], str]
 
 
 @lru_cache(maxsize=512)
@@ -3323,11 +3328,16 @@ class CodeParser:
             import_map,
             defined_names,
         )
-        python_receiver_evidence = (
-            self._collect_python_receiver_evidence(tree.root_node, file_path_str)
-            if language == "python"
-            else {}
-        )
+        if language == "python":
+            (
+                python_receiver_evidence,
+                python_property_read_edges,
+            ) = self._collect_python_receiver_evidence(
+                tree.root_node, file_path_str,
+            )
+        else:
+            python_receiver_evidence = {}
+            python_property_read_edges = []
 
         # Walk the tree
         self._extract_from_tree(
@@ -3354,6 +3364,7 @@ class CodeParser:
             edges = self._apply_python_receiver_evidence(
                 edges, python_receiver_evidence,
             )
+            edges.extend(python_property_read_edges)
 
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
@@ -6180,8 +6191,11 @@ class CodeParser:
 
     def _collect_python_receiver_evidence(
         self, root, file_path: str,
-    ) -> dict[tuple[int, str], tuple[str, str]]:
-        """Return ``{(line, receiver): (kind, detail)}`` for every member call.
+    ) -> tuple[
+        dict[tuple[int, str], tuple[str, str]],
+        list[EdgeInfo],
+    ]:
+        """Collect typed receiver evidence and edges for property reads.
 
         Scoped the way Python is scoped, because a file-wide answer is wrong
         often enough to matter: ``store`` is a ``GraphStore`` in fifteen test
@@ -6200,21 +6214,48 @@ class CodeParser:
         imported_names: set[str] = set()
         class_names: set[str] = set()
         symbol_origins: dict[str, str] = {}
+        symbol_names: dict[str, str] = {}
         local_returns: dict[str, str] = {}
+        property_returns: dict[tuple[str, str], str] = {}
         ambiguous_returns: set[str] = set()
 
-        def scan_declarations(node, in_class: bool, depth: int = 0) -> None:
+        def scan_declarations(
+            node, owner_class: Optional[str], in_function: bool = False,
+            depth: int = 0,
+        ) -> None:
             if depth > self._MAX_AST_DEPTH:
                 return
-            nested = in_class
             if node.type == "class_definition":
-                nested = True
                 name_node = node.child_by_field_name("name")
                 if name_node is not None:
-                    class_names.add(
-                        name_node.text.decode("utf-8", errors="replace"),
+                    owner_class = name_node.text.decode(
+                        "utf-8", errors="replace",
                     )
-            elif node.type == "function_definition" and not in_class:
+                    class_names.add(owner_class)
+                in_function = False
+            elif (
+                node.type == "function_definition"
+                and owner_class and not in_function
+            ):
+                name_node = node.child_by_field_name("name")
+                return_node = node.child_by_field_name("return_type")
+                decorators = _python_decorator_names(node)
+                if name_node is not None and any(
+                    decorator.rsplit(".", 1)[-1] == "property"
+                    for decorator in decorators
+                ):
+                    property_name = name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    property_returns[(owner_class, property_name)] = (
+                        return_node.text.decode("utf-8", errors="replace")
+                        if return_node is not None
+                        else ""
+                    )
+            elif (
+                node.type == "function_definition"
+                and owner_class is None and not in_function
+            ):
                 # A module-local ``def`` with a return annotation types every
                 # name assigned from a call to it. Only the annotation is
                 # read; a function body is never inspected for a return type.
@@ -6234,12 +6275,16 @@ class CodeParser:
             elif node.type == "import_from_statement":
                 self._python_from_import_bindings(
                     node, file_path, module_bindings, imported_names,
-                    symbol_origins,
+                    symbol_origins, symbol_names,
                 )
             for child in node.children:
-                scan_declarations(child, nested, depth + 1)
+                scan_declarations(
+                    child, owner_class,
+                    in_function or node.type == "function_definition",
+                    depth + 1,
+                )
 
-        scan_declarations(root, False)
+        scan_declarations(root, None)
         for name in ambiguous_returns:
             local_returns.pop(name, None)
 
@@ -6249,7 +6294,9 @@ class CodeParser:
             imported_names=frozenset(imported_names),
             module_bindings=module_bindings,
             symbol_origins=symbol_origins,
+            symbol_names=symbol_names,
             local_returns=local_returns,
+            property_returns=property_returns,
         )
 
         module_env: dict[str, tuple[str, str]] = {}
@@ -6267,12 +6314,16 @@ class CodeParser:
 
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
+        property_read_edges: list[EdgeInfo] = []
 
-        def bind_targets(left, value, type_node, env) -> None:
+        def bind_targets(
+            left, value, type_node, env, class_fields, current_class,
+        ) -> None:
             """Record what one binding form says about each name it binds."""
             for name, path in self._python_binding_targets(left):
                 bound = self._python_binding_evidence(
                     value, type_node, path, context,
+                    env, class_fields, current_class,
                 )
                 if bound is not None:
                     env[name] = bound
@@ -6281,6 +6332,8 @@ class CodeParser:
             node,
             env: dict[str, tuple[str, str]],
             class_fields: dict[str, tuple[str, str]],
+            current_class: Optional[str] = None,
+            current_function: Optional[str] = None,
             depth: int = 0,
         ) -> None:
             if depth > self._MAX_AST_DEPTH:
@@ -6288,10 +6341,19 @@ class CodeParser:
             node_type = node.type
             if node_type == "class_definition":
                 fields = self._collect_python_class_fields(node, context)
+                name_node = node.child_by_field_name("name")
+                nested_class = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else current_class
+                )
                 class_env = dict(env)
                 class_env.update(fields)
                 for child in node.children:
-                    walk(child, class_env, fields, depth + 1)
+                    walk(
+                        child, class_env, fields, nested_class,
+                        current_function, depth + 1,
+                    )
                 return
             if node_type == "function_definition":
                 scoped = dict(env)
@@ -6300,18 +6362,30 @@ class CodeParser:
                     node, "python",
                 ).items():
                     scoped[name] = ("class", type_name)
+                name_node = node.child_by_field_name("name")
+                function_name = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else current_function
+                )
                 for child in node.children:
-                    walk(child, scoped, class_fields, depth + 1)
+                    walk(
+                        child, scoped, class_fields, current_class,
+                        function_name, depth + 1,
+                    )
                 return
             if node_type == "assignment":
                 # The right-hand side is evaluated before the name is rebound.
                 for child in node.children:
-                    walk(child, env, class_fields, depth + 1)
+                    walk(
+                        child, env, class_fields, current_class,
+                        current_function, depth + 1,
+                    )
                 bind_targets(
                     node.child_by_field_name("left"),
                     node.child_by_field_name("right"),
                     node.child_by_field_name("type"),
-                    env,
+                    env, class_fields, current_class,
                 )
                 return
             if node_type == "as_pattern":
@@ -6321,7 +6395,10 @@ class CodeParser:
                 # differently. The value is the ``as_pattern``'s first child
                 # and the alias its ``alias`` field.
                 for child in node.children:
-                    walk(child, env, class_fields, depth + 1)
+                    walk(
+                        child, env, class_fields, current_class,
+                        current_function, depth + 1,
+                    )
                 alias = node.child_by_field_name("alias")
                 value = node.children[0] if node.children else None
                 if alias is not None and value is not None and value is not alias:
@@ -6331,9 +6408,45 @@ class CodeParser:
                         else alias,
                         value,
                         None,
-                        env,
+                        env, class_fields, current_class,
                     )
                 return
+            if node_type == "attribute":
+                owner = node.child_by_field_name("object")
+                property_name_node = node.child_by_field_name("attribute")
+                owner_evidence = self._python_expression_class_evidence(
+                    owner, env, class_fields, current_class, context,
+                )
+                if (
+                    owner_evidence is not None
+                    and owner_evidence[0] == "class"
+                    and property_name_node is not None
+                ):
+                    property_name = property_name_node.text.decode(
+                        "utf-8", errors="replace",
+                    )
+                    definition = self._python_property_definition(
+                        owner_evidence[1], property_name, context,
+                    )
+                    if definition is not None:
+                        target_file, target_class, _ = definition
+                        caller = (
+                            self._qualify(
+                                current_function, file_path, current_class,
+                            )
+                            if current_function
+                            else file_path
+                        )
+                        property_read_edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=caller,
+                            target=self._qualify(
+                                property_name, target_file, target_class,
+                            ),
+                            file_path=file_path,
+                            line=node.start_point[0] + 1,
+                            extra={"python_property_read": True},
+                        ))
             if node_type == "call":
                 receiver, method = self._get_member_call_receiver_method(
                     node, "python",
@@ -6349,6 +6462,18 @@ class CodeParser:
                     constructed = self._python_expression_receiver_evidence(
                         node, context,
                     )
+                    if constructed is None:
+                        callee = node.child_by_field_name("function")
+                        receiver_node = (
+                            callee.child_by_field_name("object")
+                            if callee is not None
+                            and callee.type == "attribute"
+                            else None
+                        )
+                        constructed = self._python_expression_class_evidence(
+                            receiver_node, env, class_fields,
+                            current_class, context,
+                        )
                     if constructed is not None:
                         key = (
                             node.start_point[0] + 1,
@@ -6358,14 +6483,17 @@ class CodeParser:
                             constructed,
                         )
             for child in node.children:
-                walk(child, env, class_fields, depth + 1)
+                walk(
+                    child, env, class_fields, current_class,
+                    current_function, depth + 1,
+                )
 
         walk(root, module_env, {})
         for key, found in expression_evidence.items():
             # Two expression receivers on one line sharing a method name are
             # indistinguishable downstream, so they must agree to count.
             evidence[key] = self._merge_python_evidence(found)
-        return evidence
+        return evidence, property_read_edges
 
     def _collect_python_class_fields(
         self,
@@ -6429,6 +6557,167 @@ class CodeParser:
             name: self._merge_python_evidence(found)
             for name, found in gathered.items()
         }
+
+    def _python_property_definition(
+        self,
+        owner_type: str,
+        property_name: str,
+        context: _PyReceiverContext,
+    ) -> Optional[tuple[str, str, str]]:
+        """Return the defining file, class, and return annotation of a property.
+
+        Cross-file metadata is read only from the file bound by a ``from``
+        import in the current module. An unresolved or ambiguous import never
+        supplies a property definition.
+        """
+        local_key = (owner_type, property_name)
+        if local_key in context.property_returns:
+            return context.file_path, owner_type, context.property_returns[local_key]
+
+        origin = context.symbol_origins.get(owner_type)
+        if not origin:
+            return None
+        actual_class = context.symbol_names.get(owner_type, owner_type)
+        annotations = self._python_module_property_return_annotations(origin)
+        key = (actual_class, property_name)
+        if key not in annotations:
+            return None
+        return origin, actual_class, annotations[key]
+
+    def _python_module_property_return_annotations(
+        self, module_file: str,
+    ) -> dict[tuple[str, str], str]:
+        """Read explicitly decorated property getters from one Python module."""
+        if not module_file.endswith(".py"):
+            return {}
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+        except (OSError, ValueError):
+            return {}
+        resolved = normalize_file_path(module_path)
+        if self._excluded_files and resolved in self._excluded_files:
+            return {}
+        cache_key = (resolved, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_RETURN_ANNOTATION_CACHE_LOCK:
+            cached = _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+            properties = self._read_python_property_return_annotations(module_path)
+            for stale in [
+                key for key in _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE
+                if key[0] == resolved and key != cache_key
+            ]:
+                _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.pop(stale, None)
+            if len(_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                for oldest in list(_PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE)[
+                    : _PYTHON_STAR_CACHE_MAX // 2
+                ]:
+                    _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.pop(oldest, None)
+            _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE[cache_key] = properties
+            return properties
+
+    def _read_python_property_return_annotations(
+        self, module_path: Path,
+    ) -> dict[tuple[str, str], str]:
+        """Parse class property declarations without evaluating their bodies."""
+        try:
+            source = module_path.read_bytes()
+        except (OSError, PermissionError):
+            return {}
+        parser = self._get_parser("python")
+        if not parser:
+            return {}
+        try:
+            tree = parser.parse(source)  # type: ignore[union-attr]
+        except (RecursionError, ValueError) as exc:  # pragma: no cover
+            logger.debug("Property-annotation parse failed for %s: %s", module_path, exc)
+            return {}
+
+        properties: dict[tuple[str, str], str] = {}
+
+        def visit(node, owner_class: Optional[str] = None, in_function: bool = False):
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                nested_class = (
+                    name_node.text.decode("utf-8", errors="replace")
+                    if name_node is not None
+                    else owner_class
+                )
+                for child in node.children:
+                    visit(child, nested_class, False)
+                return
+            if node.type == "function_definition":
+                if owner_class and not in_function:
+                    name_node = node.child_by_field_name("name")
+                    if name_node is not None and any(
+                        decorator.rsplit(".", 1)[-1] == "property"
+                        for decorator in _python_decorator_names(node)
+                    ):
+                        return_node = node.child_by_field_name("return_type")
+                        properties[(
+                            owner_class,
+                            name_node.text.decode("utf-8", errors="replace"),
+                        )] = (
+                            return_node.text.decode("utf-8", errors="replace")
+                            if return_node is not None
+                            else ""
+                        )
+                for child in node.children:
+                    visit(child, owner_class, True)
+                return
+            for child in node.children:
+                visit(child, owner_class, in_function)
+
+        visit(tree.root_node)
+        return properties
+
+    def _python_expression_class_evidence(
+        self,
+        expression,
+        env: dict[str, tuple[str, str]],
+        class_fields: dict[str, tuple[str, str]],
+        current_class: Optional[str],
+        context: _PyReceiverContext,
+    ) -> Optional[tuple[str, str]]:
+        """Infer a class only from a local binding, field, or property annotation."""
+        if expression is None:
+            return None
+        if expression.type == "identifier":
+            name = expression.text.decode("utf-8", errors="replace")
+            if name in ("self", "cls"):
+                return ("class", current_class) if current_class else None
+            if name in context.class_names or name in context.imported_names:
+                # A bare class symbol is a class receiver, not an instance on
+                # which Python invokes @property getters.
+                return None
+            return env.get(name)
+        if expression.type != "attribute":
+            return None
+        owner = expression.child_by_field_name("object")
+        attribute = expression.child_by_field_name("attribute")
+        if attribute is None:
+            return None
+        owner_evidence = self._python_expression_class_evidence(
+            owner, env, class_fields, current_class, context,
+        )
+        if owner_evidence is None or owner_evidence[0] != "class":
+            return None
+        member = attribute.text.decode("utf-8", errors="replace")
+        if owner_evidence[1] == current_class:
+            field_evidence = class_fields.get(member)
+            if field_evidence is not None and field_evidence[0] == "class":
+                return field_evidence
+        definition = self._python_property_definition(
+            owner_evidence[1], member, context,
+        )
+        if definition is None:
+            return None
+        annotation = definition[2]
+        if not annotation:
+            return ("unknown", "")
+        type_name = self._base_type_name(annotation)
+        return ("class", type_name) if type_name else ("builtin", "")
 
     @staticmethod
     def _merge_python_evidence(
@@ -6517,6 +6806,9 @@ class CodeParser:
         type_node,
         path: tuple[int, ...],
         context: _PyReceiverContext,
+        env: Optional[dict[str, tuple[str, str]]] = None,
+        class_fields: Optional[dict[str, tuple[str, str]]] = None,
+        current_class: Optional[str] = None,
     ) -> Optional[tuple[str, str]]:
         """What one binding says its target holds, or None for "nothing"."""
         if type_node is not None:
@@ -6548,6 +6840,10 @@ class CodeParser:
             return "builtin", ""
         if value.type == "call":
             return self._python_call_evidence(value, path, context)
+        if value.type == "attribute":
+            return self._python_expression_class_evidence(
+                value, env or {}, class_fields or {}, current_class, context,
+            ) or ("unknown", "")
         return "unknown", ""
 
     def _python_call_evidence(
@@ -6901,6 +7197,7 @@ class CodeParser:
         module_bindings: dict[str, set[str]],
         imported_names: set[str],
         symbol_origins: Optional[dict[str, str]] = None,
+        symbol_names: Optional[dict[str, str]] = None,
     ) -> None:
         """Record names bound by ``from X import a, b as c``.
 
@@ -6931,6 +7228,8 @@ class CodeParser:
                     module_bindings.setdefault(local, set()).add(target)
                     return
             imported_names.add(local)
+            if symbol_names is not None:
+                symbol_names[local] = imported
             if symbol_origins is not None and module_file:
                 # A package re-export names the file that really defines the
                 # symbol; a plain module names itself.
