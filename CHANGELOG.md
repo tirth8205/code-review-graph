@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
+
 ## [2.3.9] - 2026-09-18
 
 ### Added

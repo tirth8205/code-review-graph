@@ -41,6 +41,9 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # the variable to a temp directory instead of merely clearing it:
     # unset, a miss would be silently destructive; set, it cannot be.
     monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.mktemp("hermes-home")))
+    # Tests that exercise the Codex default patch Path.home() to a temporary
+    # directory; clear an external override so it cannot escape that scope.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     return home
 
 

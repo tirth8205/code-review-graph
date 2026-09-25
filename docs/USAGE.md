@@ -25,7 +25,7 @@ code-review-graph install --platform codebuddy
 
 | Platform | `--platform` | Config file |
 |----------|--------------|-------------|
-| Codex | `codex` | `~/.codex/config.toml` + `~/.codex/hooks.json` |
+| Codex | `codex` | `$CODEX_HOME/config.toml` + `$CODEX_HOME/hooks.json` + `$CODEX_HOME/skills/code-review-graph/` (defaults to `~/.codex`) |
 | Claude Code | `claude-code` | `.mcp.json` + `.claude/settings.json` |
 | CodeBuddy Code | `codebuddy` | `.mcp.json` + `CODEBUDDY.md` + `.codebuddy/settings.json` + `.codebuddy/skills/<name>/SKILL.md` |
 | Cursor | `cursor` | `.cursor/mcp.json` |
@@ -42,6 +42,10 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
 
+Codex also installs a global Skill that prefers MCP and uses a read-only CLI
+fallback when MCP is unavailable. Refresh or restart the active Codex runtime
+after installation. Windows and WSL use separate `CODEX_HOME` directories.
+
 The CodeBuddy layout follows its documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),
 [skills](https://www.codebuddy.ai/docs/cli/skills), and
@@ -57,6 +61,13 @@ so `core.hooksPath` setups work). The hook runs `update` and
 `detect-changes --brief` before each commit. It skips linked worktrees, so an
 implicit update does not build a second graph for another branch; set
 `CRG_HOOK_WORKTREES=1` to run it there too. `--no-hooks` skips the hook.
+
+Codex installs the CRG Skill in the active user Skill root and uses MCP first,
+with a bundled read-only CLI fallback when MCP is unavailable. The Skill checks
+graph health once per repository/task; a missing, empty, or stale graph never
+causes an implicit build or update. WSL and Windows Codex processes have
+separate `CODEX_HOME` directories and tool inventories, so install CRG in the
+runtime that will actually run the task and restart/refresh that runtime.
 
 ## Core Workflow
 

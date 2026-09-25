@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+from unittest.mock import patch
 
-from code_review_graph import skills, uninstall
+import pytest
+
+from code_review_graph import cli, skills, uninstall
 from code_review_graph.cli import _handle_init
 
 
@@ -20,6 +24,29 @@ def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
         no_skills=False,
         no_hooks=False,
     )
+
+
+def test_codex_skill_install_failure_is_reported_without_traceback(
+    monkeypatch, tmp_path, capsys
+):
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "skills").write_text("occupied\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    with patch.object(sys, "argv", [
+        "code-review-graph", "install", "--platform", "codex",
+        "--repo", str(repo), "--no-hooks", "--no-instructions", "--yes",
+    ]), pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    out = capsys.readouterr()
+    assert exc_info.value.code == 1
+    assert "Could not install Codex skill" in out.err
+    assert "Traceback" not in out.err
+    assert "Installed Codex skill" not in out.out
 
 
 def test_copilot_cli_install_reinstall_uninstall_lifecycle(
@@ -112,7 +139,12 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
         lambda repo_root, target, dry_run=False: ["Codex"],
     )
 
-    called = {"generate_skills": False, "codex_hooks": False, "git_hook": False}
+    called = {
+        "generate_skills": False,
+        "codex_skill": False,
+        "codex_hooks": False,
+        "git_hook": False,
+    }
 
     def _generate_skills(repo_root):
         called["generate_skills"] = True
@@ -122,11 +154,16 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
         called["codex_hooks"] = True
         return Path("/tmp/fake-codex-hooks.json")
 
+    def _install_codex_skill():
+        called["codex_skill"] = True
+        return tmp_path / "codex" / "skills" / "code-review-graph"
+
     def _install_git_hook(repo_root):
         called["git_hook"] = True
         return repo_root / ".git" / "hooks" / "pre-commit"
 
     monkeypatch.setattr("code_review_graph.skills.generate_skills", _generate_skills)
+    monkeypatch.setattr("code_review_graph.skills.install_codex_skill", _install_codex_skill)
     monkeypatch.setattr("code_review_graph.skills.install_codex_hooks", _install_codex_hooks)
     monkeypatch.setattr("code_review_graph.skills.install_git_hook", _install_git_hook)
 
@@ -134,9 +171,43 @@ def test_handle_init_codex_skips_claude_skills(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
 
     assert called["generate_skills"] is False
+    assert called["codex_skill"] is True
     assert called["codex_hooks"] is True
     assert called["git_hook"] is True
     assert "Installed Codex hooks" in out
+
+
+def test_handle_init_all_skips_codex_skill_when_not_detected(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "code_review_graph.incremental.ensure_repo_gitignore_excludes_crg",
+        lambda repo_root: "created",
+    )
+    monkeypatch.setattr(
+        "code_review_graph.skills.install_platform_configs",
+        lambda repo_root, target, dry_run=False: [],
+    )
+    monkeypatch.setitem(
+        skills.PLATFORMS,
+        "codex",
+        {**skills.PLATFORMS["codex"], "detect": lambda: False},
+    )
+    called = False
+
+    def _install_codex_skill():
+        nonlocal called
+        called = True
+        return tmp_path / "codex" / "skills" / "code-review-graph"
+
+    monkeypatch.setattr("code_review_graph.skills.install_codex_skill", _install_codex_skill)
+    args = _args(tmp_path, "all")
+    args.no_hooks = True
+    args.no_instructions = True
+
+    _handle_init(args)
+
+    assert called is False
 
 
 def test_handle_init_cursor_installs_cursor_hooks(monkeypatch, tmp_path, capsys):

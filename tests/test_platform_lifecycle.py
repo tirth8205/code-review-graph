@@ -277,7 +277,14 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
 # Files a single-platform install is expected to create for hooks and skills,
 # relative to the repo root ("repo:") or the throwaway home ("home:").
 EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
-    "codex": ("home:.codex/hooks.json", "repo:.git/hooks/pre-commit"),
+    "codex": (
+        "home:.codex/hooks.json",
+        "home:.codex/skills/code-review-graph/SKILL.md",
+        "home:.codex/skills/code-review-graph/agents/openai.yaml",
+        "home:.codex/skills/code-review-graph/scripts/crg_readonly.py",
+        "home:.codex/skills/code-review-graph/.code-review-graph-managed.json",
+        "repo:.git/hooks/pre-commit",
+    ),
     "claude": (
         "repo:.claude/settings.json",
         "repo:.claude/skills/explore-codebase/SKILL.md",

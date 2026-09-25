@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Review Graph"
+  short_description: "Safe graph context with CLI fallback"
+  default_prompt: "Use $code-review-graph to explore this repository with safe graph context."
