@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "zcode", "all",
 ]
 
 
@@ -351,6 +351,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
+        install_zcode_hooks,
+        install_zcode_skills,
     )
 
     if not skip_skills:
@@ -373,6 +375,13 @@ def _handle_init(args: argparse.Namespace) -> None:
         if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
             hermes_skills_dir = install_hermes_skills(repo_root)
             print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+
+        # ZCode discovers user-scope skills under ~/.zcode/skills/ (the
+        # generated skills are generic, and the ZCode MCP registration is
+        # user-scope too).
+        if target == "zcode" or (target == "all" and PLATFORMS["zcode"]["detect"]()):
+            zcode_skills_dir = install_zcode_skills()
+            print(f"Installed ZCode skills in {zcode_skills_dir}")
 
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
@@ -445,6 +454,16 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed Gemini CLI hooks in {gemini_settings}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
+
+    # ZCode hooks live in the same user-scope config as its MCP servers.
+    if not skip_hooks and (
+        target == "zcode" or (target == "all" and PLATFORMS["zcode"]["detect"]())
+    ):
+        try:
+            zcode_config = install_zcode_hooks(repo_root)
+            print(f"Installed ZCode hooks in {zcode_config}")
+        except Exception as exc:
+            logger.warning("Could not install ZCode hooks: %s", exc)
 
     # OpenCode plugin (user-level, gated by same detect() as MCP config)
     if not skip_hooks and target in ("all", "opencode") and PLATFORMS["opencode"]["detect"]():

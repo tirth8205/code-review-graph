@@ -249,6 +249,16 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         entry_type="stdio",
         expects_cwd=True,
     ),
+    "zcode": PlatformExpectation(
+        key="zcode",
+        scope="home",
+        relative_config=".zcode/cli/config.json",
+        # The one client whose server map is nested: mcp -> servers.
+        server_key="mcp.servers",
+        fmt="object",
+        entry_type=None,
+        expects_cwd=True,
+    ),
 }
 
 PLATFORM_KEYS = sorted(EXPECTATIONS)
@@ -272,6 +282,7 @@ EXPECTED_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
     "copilot-cli": (".github/instructions/code-review-graph.instructions.md",),
     "hermes": ("AGENTS.md",),
     "codebuddy": ("CODEBUDDY.md",),
+    "zcode": ("AGENTS.md",),
 }
 
 # Files a single-platform install is expected to create for hooks and skills,
@@ -307,6 +318,11 @@ EXPECTED_EXTRA_ARTIFACTS: dict[str, tuple[str, ...]] = {
         "repo:.codebuddy/settings.json",
         "repo:.codebuddy/skills/explore-codebase/SKILL.md",
     ),
+    "zcode": (
+        "home:.local/share/code-review-graph/hooks/crg-session-start.sh",
+        "home:.local/share/code-review-graph/hooks/crg-update.sh",
+        "home:.zcode/skills/explore-codebase/SKILL.md",
+    ),
 }
 
 
@@ -326,6 +342,7 @@ HOME_SUBDIRS = (
     ".kiro",
     ".copilot",
     ".config/opencode",
+    ".zcode/cli",
     str(Path(_zed_relative()).parent),
 )
 
@@ -404,6 +421,16 @@ def run_uninstall(sandbox: Sandbox, **kwargs: Any) -> uninstall.UninstallReport:
 # ---------------------------------------------------------------------------
 
 
+def _walk_bucket(data: dict[str, Any], server_key: str) -> Any:
+    """Resolve a possibly dotted server_key, e.g. ZCode's mcp.servers."""
+    node: Any = data
+    for part in server_key.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
 def read_entry(path: Path, expect: PlatformExpectation) -> dict[str, Any] | None:
     """Return the code-review-graph entry from a config, or None if absent."""
     if not path.exists():
@@ -418,9 +445,9 @@ def read_entry(path: Path, expect: PlatformExpectation) -> dict[str, Any] | None
         import yaml
 
         data = yaml.safe_load(raw) or {}
-        return (data.get(expect.server_key) or {}).get(ENTRY_NAME)
+        return (_walk_bucket(data, expect.server_key) or {}).get(ENTRY_NAME)
     data = json.loads(skills._strip_jsonc(raw))
-    bucket = data.get(expect.server_key)
+    bucket = _walk_bucket(data, expect.server_key)
     if expect.fmt == "array":
         if not isinstance(bucket, list):
             return None
@@ -441,7 +468,7 @@ def count_entries(path: Path, expect: PlatformExpectation) -> int:
     if expect.fmt == "yaml":
         return len(re.findall(rf"^\s+{ENTRY_NAME}:", raw, re.M))
     data = json.loads(skills._strip_jsonc(raw))
-    bucket = data.get(expect.server_key)
+    bucket = _walk_bucket(data, expect.server_key)
     if expect.fmt == "array":
         if not isinstance(bucket, list):
             return 0
@@ -463,9 +490,9 @@ def read_foreign(path: Path, expect: PlatformExpectation) -> tuple[Any, Any]:
         import yaml
 
         data = yaml.safe_load(raw) or {}
-        return data.get(FOREIGN_SETTING), (data.get(expect.server_key) or {}).get(FOREIGN_SERVER)
+        return data.get(FOREIGN_SETTING), (_walk_bucket(data, expect.server_key) or {}).get(FOREIGN_SERVER)
     data = json.loads(skills._strip_jsonc(raw))
-    bucket = data.get(expect.server_key)
+    bucket = _walk_bucket(data, expect.server_key)
     if expect.fmt == "array":
         matches = [
             e for e in (bucket or []) if isinstance(e, dict) and e.get("name") == FOREIGN_SERVER
@@ -504,8 +531,14 @@ def write_preexisting_config(path: Path, expect: PlatformExpectation) -> None:
         bucket: Any = [{"name": FOREIGN_SERVER, **FOREIGN_ENTRY}]
     else:
         bucket = {FOREIGN_SERVER: dict(FOREIGN_ENTRY)}
+    document: dict[str, Any] = {FOREIGN_SETTING: FOREIGN_VALUE}
+    parts = expect.server_key.split(".")
+    container = document
+    for part in parts[:-1]:
+        container = container.setdefault(part, {})
+    container[parts[-1]] = bucket
     path.write_text(
-        json.dumps({FOREIGN_SETTING: FOREIGN_VALUE, expect.server_key: bucket}, indent=2) + "\n",
+        json.dumps(document, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -548,8 +581,14 @@ def write_stale_config(path: Path, expect: PlatformExpectation) -> None:
         bucket: Any = [{"name": ENTRY_NAME, **stale}]
     else:
         bucket = {ENTRY_NAME: stale}
+    document: dict[str, Any] = {}
+    parts = expect.server_key.split(".")
+    container = document
+    for part in parts[:-1]:
+        container = container.setdefault(part, {})
+    container[parts[-1]] = bucket
     path.write_text(
-        json.dumps({expect.server_key: bucket}, indent=2) + "\n", encoding="utf-8"
+        json.dumps(document, indent=2) + "\n", encoding="utf-8"
     )
 
 
@@ -1051,7 +1090,17 @@ HOOK_PLATFORMS: dict[str, tuple[str, str, str, str]] = {
         "write_file|replace",
         f"bash {STALE_CWD}/.gemini/hooks/crg-update.sh",
     ),
+    "zcode": (
+        "home:.zcode/cli/config.json",
+        "PostToolUse",
+        "Write|Edit|Bash",
+        f"bash {STALE_CWD}/.zcode/hooks/crg-update.sh",
+    ),
 }
+
+# Platforms whose hook groups sit under a "hooks.events" wrapper (ZCode)
+# rather than directly under "hooks".
+HOOK_PLATFORMS_WITH_EVENTS = frozenset({"zcode"})
 
 def _is_crg_hook_command(command: str) -> bool:
     """Both spellings this project has ever put in a hook command."""
@@ -1068,25 +1117,25 @@ def test_step5b_stale_hook_shape_is_replaced(sandbox: Sandbox, key: str) -> None
     same event.
     """
     marker, event, stale_matcher, stale_command = HOOK_PLATFORMS[key]
+    with_events = key in HOOK_PLATFORMS_WITH_EVENTS
+    stale_groups: dict[str, Any] = {
+        event: [
+            {
+                "matcher": stale_matcher,
+                "hooks": [
+                    {"type": "command", "command": stale_command, "timeout": 30}
+                ],
+            }
+        ]
+    }
+    if with_events:
+        hooks_body: dict[str, Any] = {"enabled": True, "events": stale_groups}
+    else:
+        hooks_body = stale_groups
     settings_path = sandbox.resolve(marker)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    event: [
-                        {
-                            "matcher": stale_matcher,
-                            "hooks": [
-                                {"type": "command", "command": stale_command, "timeout": 30}
-                            ],
-                        }
-                    ]
-                }
-            },
-            indent=2,
-        )
-        + "\n",
+        json.dumps({"hooks": hooks_body}, indent=2) + "\n",
         encoding="utf-8",
     )
     assert stale_command in settings_path.read_text(encoding="utf-8")
@@ -1095,7 +1144,10 @@ def test_step5b_stale_hook_shape_is_replaced(sandbox: Sandbox, key: str) -> None
 
     body = settings_path.read_text(encoding="utf-8")
     data = json.loads(body)
-    groups = data["hooks"][event]
+    if with_events:
+        groups = data["hooks"]["events"][event]
+    else:
+        groups = data["hooks"][event]
     commands = [
         hook.get("command", "") for group in groups for hook in group.get("hooks", [])
     ]
@@ -1150,8 +1202,8 @@ def test_platform_list_does_not_drift() -> None:
     cli_surface = _cli_platform_keys()
     expected = set(EXPECTATIONS)
 
-    assert len(installer) == 16, (
-        f"the installer now supports {len(installer)} platforms, not 16: "
+    assert len(installer) == 17, (
+        f"the installer now supports {len(installer)} platforms, not 17: "
         f"{sorted(installer)}"
     )
 

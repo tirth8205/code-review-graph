@@ -41,6 +41,7 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot | `copilot` | `.vscode/mcp.json` |
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
+| ZCode | `zcode` | `~/.zcode/cli/config.json` (MCP under `mcp.servers` + hooks) + `~/.zcode/skills/<name>/SKILL.md` + `~/.local/share/code-review-graph/hooks/` |
 
 The CodeBuddy layout follows its documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),

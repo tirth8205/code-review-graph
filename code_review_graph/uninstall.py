@@ -206,11 +206,25 @@ def _remove_mcp_entry(
     if raw is None:
         return
     data = _parse_jsonc(path, raw, report)
-    if data is None or key not in data:
+    if data is None:
         return
 
+    # A dotted registry key (ZCode's "mcp.servers") names a walk from the
+    # document root to the server map; every level must be an object. Flat
+    # keys are the single-segment case and behave exactly as before.
+    parts = tuple(part for part in key.split(".") if part)
+    container = data
+    for part in parts[:-1]:
+        child = container.get(part) if isinstance(container, dict) else None
+        if not isinstance(child, dict):
+            return
+        container = child
+    if not isinstance(container, dict) or parts[-1] not in container:
+        return
+    leaf_key = parts[-1]
+
     expected_type = list if format_name == "array" else dict
-    container = data[key]
+    container = container[leaf_key]
     if not isinstance(container, expected_type):
         expected = "array" if expected_type is list else "object"
         report.skipped_paths.append(
@@ -218,15 +232,20 @@ def _remove_mcp_entry(
         )
         return
 
+    expected_data = copy.deepcopy(data)
+    # Re-walk the same chain inside the copy so only the leaf is mutated.
+    expected_container = expected_data
+    for part in parts[:-1]:
+        expected_container = expected_container[part]
+
     if format_name == "array":
         indices = [
             index
             for index, entry in enumerate(container)
             if isinstance(entry, dict) and entry.get("name") == _ENTRY_NAME
         ]
-        paths: list[tuple[str | int, ...]] = [(key, index) for index in indices]
-        expected_data = copy.deepcopy(data)
-        expected_data[key] = [
+        paths: list[tuple[str | int, ...]] = [(*parts, index) for index in indices]
+        expected_container[leaf_key] = [
             entry
             for entry in container
             if not (isinstance(entry, dict) and entry.get("name") == _ENTRY_NAME)
@@ -234,9 +253,28 @@ def _remove_mcp_entry(
     else:
         if _ENTRY_NAME not in container:
             return
-        paths = [(key, _ENTRY_NAME)]
-        expected_data = copy.deepcopy(data)
-        del expected_data[key][_ENTRY_NAME]
+        paths = [(*parts, _ENTRY_NAME)]
+        servers = expected_container[leaf_key]
+        del servers[_ENTRY_NAME]
+        # An emptied server map under a dotted path, and the wrapper that
+        # would otherwise be left holding nothing (an empty "mcp" object),
+        # was created for this chain, so take it back out. A wrapper that
+        # still holds sibling servers — or any other setting — stays. Flat
+        # keys keep the historical behaviour of leaving an emptied
+        # "mcpServers" object in place.
+        if len(parts) > 1 and isinstance(servers, dict) and not servers:
+            # lineage[depth] is the object at path parts[:depth].
+            lineage = [expected_data]
+            for part in parts[:-1]:
+                lineage.append(lineage[-1][part])
+            del lineage[-1][leaf_key]
+            paths.append(tuple(parts))
+            for depth in range(len(parts) - 1, 0, -1):
+                emptied = lineage[depth]
+                if emptied:
+                    break
+                del lineage[depth - 1][parts[depth - 1]]
+                paths.append(tuple(parts[:depth]))
     if not paths:
         return
 
@@ -461,9 +499,22 @@ def _clean_hook_data(
     if not isinstance(hooks_obj, dict):
         return expected, []
 
+    # ZCode keeps its event groups one level down, under "hooks.events",
+    # beside a master "enabled" switch; every other client keeps the groups
+    # directly under "hooks". The "enabled" flag is never touched: other
+    # tooling may still rely on it.
+    if isinstance(hooks_obj.get("events"), dict):
+        groups = hooks_obj["events"]
+        prefix: tuple[str, ...] = ("hooks", "events")
+    else:
+        groups = hooks_obj
+        prefix = ("hooks",)
+
     paths: list[tuple[str | int, ...]] = []
-    expected_hooks = expected["hooks"]
-    for event, entries in hooks_obj.items():
+    expected_groups = expected["hooks"]
+    for part in prefix[1:]:
+        expected_groups = expected_groups[part]
+    for event, entries in groups.items():
         if not isinstance(entries, list):
             continue
         new_entries: list[Any] = []
@@ -474,7 +525,7 @@ def _clean_hook_data(
                 continue
             direct_command = entry.get("command")
             if isinstance(direct_command, str) and direct_command in owned_commands:
-                entry_paths.append(("hooks", event, entry_index))
+                entry_paths.append((*prefix, event, entry_index))
                 continue
 
             nested = entry.get("hooks")
@@ -486,11 +537,13 @@ def _clean_hook_data(
             for nested_index, hook in enumerate(nested):
                 command = hook.get("command") if isinstance(hook, dict) else None
                 if isinstance(command, str) and command in owned_commands:
-                    nested_paths.append(("hooks", event, entry_index, "hooks", nested_index))
+                    nested_paths.append(
+                        (*prefix, event, entry_index, "hooks", nested_index)
+                    )
                 else:
                     kept_nested.append(copy.deepcopy(hook))
             if not kept_nested and nested_paths:
-                entry_paths.append(("hooks", event, entry_index))
+                entry_paths.append((*prefix, event, entry_index))
                 continue
             new_entry = copy.deepcopy(entry)
             if nested_paths:
@@ -499,15 +552,25 @@ def _clean_hook_data(
             new_entries.append(new_entry)
 
         if not new_entries and entry_paths:
-            expected_hooks.pop(event, None)
-            paths.append(("hooks", event))
+            expected_groups.pop(event, None)
+            paths.append((*prefix, event))
         elif entry_paths:
-            expected_hooks[event] = new_entries
+            expected_groups[event] = new_entries
             paths.extend(entry_paths)
 
-    if paths and not expected_hooks:
-        expected.pop("hooks", None)
-        paths = [("hooks",)]
+    if paths and not expected_groups:
+        if len(prefix) == 2:
+            # ZCode shape: only the emptied "events" object goes. "enabled"
+            # and any other settings under "hooks" stay, so other tooling
+            # keeps working exactly as before.
+            del expected["hooks"]["events"]
+            paths.append(("hooks", "events"))
+            if not expected["hooks"]:
+                del expected["hooks"]
+                paths.append(("hooks",))
+        else:
+            expected.pop("hooks", None)
+            paths = [("hooks",)]
     return expected, paths
 
 
@@ -1187,6 +1250,37 @@ def _process_user(
         _remove_skill_file(
             hermes_skills / slug / "SKILL.md",
             hermes_skills,
+            report,
+            dry_run=dry_run,
+        )
+
+    # ZCode keeps MCP servers and hooks in one user-scope config, its hook
+    # commands point at scripts this installer owns, and its skills are
+    # installed at user scope. All four artifact families go; everything in
+    # the config that other tooling wrote stays.
+    _remove_hooks(
+        home / ".zcode" / "cli" / "config.json",
+        _commands(skills.generate_zcode_hooks_config()),
+        home,
+        report,
+        dry_run=dry_run,
+    )
+    zcode_hooks_dir = home / ".local" / "share" / "code-review-graph" / "hooks"
+    for filename in skills._ZCODE_HOOK_SCRIPT_NAMES:
+        _remove_file(
+            zcode_hooks_dir / filename,
+            home,
+            report,
+            dry_run=dry_run,
+        )
+    _prune_empty_directory(zcode_hooks_dir, home)
+    _prune_empty_directory(zcode_hooks_dir.parent, home)
+
+    zcode_skills = home / ".zcode" / "skills"
+    for slug in _generated_skill_slugs():
+        _remove_skill_file(
+            zcode_skills / slug / "SKILL.md",
+            home,
             report,
             dry_run=dry_run,
         )

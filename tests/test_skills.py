@@ -2736,3 +2736,340 @@ class TestNonAsciiConfigPreservation:
         raw = (cursor_dir / "hooks.json").read_text(encoding="utf-8")
         assert self.NON_ASCII in raw
         assert "\\u" not in raw
+
+
+class TestZcodePlatform:
+    """ZCode: nested mcp.servers config, hooks.events merge, user-scope skills.
+
+    Every test runs against a throwaway home (Path.home is patched), so the
+    real ~/.zcode is never reachable.
+    """
+
+    FOREIGN_SERVER = {"command": "engram", "timeoutMs": 90000}
+
+    def _seed_config(self, tmp_path, document):
+        config_path = tmp_path / ".zcode" / "cli" / "config.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return config_path
+
+    def test_registry_metadata(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: None)
+        spec = skills_module.PLATFORMS["zcode"]
+        assert spec["name"] == "ZCode"
+        assert spec["key"] == "mcp.servers"
+        assert spec["format"] == "object"
+        assert spec["needs_type"] is False
+        assert spec["config_path"](tmp_path) == (
+            tmp_path / ".zcode" / "cli" / "config.json"
+        )
+        assert spec["detect"]() is False
+        (tmp_path / ".zcode").mkdir()
+        assert spec["detect"]() is True
+        (tmp_path / ".zcode").rmdir()
+        monkeypatch.setattr(
+            "code_review_graph.skills.shutil.which",
+            lambda name: "/usr/local/bin/zcode" if name == "zcode" else None,
+        )
+        assert spec["detect"]() is True
+
+    def test_install_writes_nested_servers_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        config_path = self._seed_config(
+            tmp_path,
+            {"provider": {"default": "glm"}, "plugins": {"enabled": True}},
+        )
+        configured = skills_module.install_platform_configs(tmp_path, target="zcode")
+        assert "ZCode" in configured
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["provider"] == {"default": "glm"}
+        assert data["plugins"] == {"enabled": True}
+        servers = data["mcp"]["servers"]
+        assert set(servers) == {"code-review-graph"}
+        entry = servers["code-review-graph"]
+        assert "type" not in entry
+        assert entry["args"][-1] == "serve"
+        assert entry["cwd"] == str(tmp_path)
+
+    def test_install_keeps_sibling_servers_and_key_order(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        config_path = self._seed_config(
+            tmp_path,
+            {
+                "provider": {"default": "glm"},
+                "mcp": {"servers": {"engram": dict(self.FOREIGN_SERVER)}},
+                "hooks": {"enabled": True},
+            },
+        )
+        skills_module.install_platform_configs(tmp_path, target="zcode")
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert list(data) == ["provider", "mcp", "hooks"]
+        assert list(data["mcp"]["servers"]) == ["engram", "code-review-graph"]
+        assert data["mcp"]["servers"]["engram"] == self.FOREIGN_SERVER
+
+    def test_install_is_byte_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        config_path = self._seed_config(tmp_path, {"provider": {"default": "glm"}})
+        skills_module.install_platform_configs(tmp_path, target="zcode")
+        skills_module.install_zcode_hooks(tmp_path)
+        first = config_path.read_bytes()
+        assert b"code-review-graph" in first
+
+        skills_module.install_platform_configs(tmp_path, target="zcode")
+        skills_module.install_zcode_hooks(tmp_path)
+        assert config_path.read_bytes() == first
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert len(data["mcp"]["servers"]) == 1
+        assert len(data["hooks"]["events"]["PostToolUse"]) == 1
+
+    def test_install_leaves_user_owned_entry_alone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        owned = {"command": "sh", "args": ["-c", "exec serve"], "timeoutMs": 90000}
+        config_path = self._seed_config(
+            tmp_path,
+            {"mcp": {"servers": {"code-review-graph": dict(owned)}}},
+        )
+        configured = skills_module.install_platform_configs(tmp_path, target="zcode")
+        assert "ZCode" not in configured
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert data["mcp"]["servers"]["code-review-graph"] == owned
+
+    def test_install_hooks_merge_and_enable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        foreign_session = {
+            "matcher": ".*",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "$HOME/.config/zcode/bin/inject-context.sh",
+                    "timeout": 5,
+                }
+            ],
+        }
+        foreign_post = {
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "$HOME/.config/zcode/hooks/log-tool.sh",
+                    "timeout": 5,
+                }
+            ],
+        }
+        config_path = self._seed_config(
+            tmp_path,
+            {
+                "mcp": {"servers": {"engram": dict(self.FOREIGN_SERVER)}},
+                "hooks": {
+                    "events": {
+                        "SessionStart": [foreign_session],
+                        "PostToolUse": [foreign_post],
+                    }
+                },
+            },
+        )
+        hooks_path = skills_module.install_zcode_hooks(tmp_path)
+        assert hooks_path == config_path
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        hooks = data["hooks"]
+        assert hooks["enabled"] is True
+        sessions = hooks["events"]["SessionStart"]
+        assert sessions[0] == foreign_session
+        ours_session = [
+            group
+            for group in sessions
+            if any(
+                "crg-session-start" in hook.get("command", "")
+                for hook in group["hooks"]
+            )
+        ]
+        assert len(ours_session) == 1
+        assert ours_session[0]["matcher"] == ".*"
+        assert ours_session[0]["hooks"][0]["timeout"] == 5
+        assert ours_session[0]["hooks"][0]["command"].startswith(
+            'bash "$HOME/.local/share/code-review-graph/hooks/'
+        )
+        posts = hooks["events"]["PostToolUse"]
+        assert posts[0] == foreign_post
+        ours_post = [
+            group
+            for group in posts
+            if any("crg-update" in hook.get("command", "") for hook in group["hooks"])
+        ]
+        assert len(ours_post) == 1
+        assert ours_post[0]["matcher"] == "Write|Edit|ApplyPatch|Bash"
+        assert ours_post[0]["hooks"][0]["timeout"] == 15
+        assert data["mcp"]["servers"] == {"engram": dict(self.FOREIGN_SERVER)}
+
+        script_dir = tmp_path / ".local" / "share" / "code-review-graph" / "hooks"
+        for name in ("crg-session-start.sh", "crg-update.sh"):
+            mode = (script_dir / name).stat().st_mode
+            assert mode & stat.S_IXUSR, f"{name} is not executable"
+
+    def test_install_hooks_preserve_explicit_disabled_switch(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        config_path = self._seed_config(
+            tmp_path,
+            {"hooks": {"enabled": False, "events": {}}},
+        )
+        skills_module.install_zcode_hooks(tmp_path)
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        # An explicit false is the user's choice; the groups merge but stay
+        # dormant until it is flipped back.
+        assert data["hooks"]["enabled"] is False
+        assert "crg-update" in json.dumps(data["hooks"]["events"]["PostToolUse"])
+
+    def test_session_start_script_skips_non_git_directory(self, tmp_path):
+        scripts = skills_module._zcode_hook_scripts()
+        script = tmp_path / "crg-session-start.sh"
+        script.write_text(scripts["crg-session-start.sh"], encoding="utf-8")
+        proc = subprocess.run(
+            ["bash", str(script)],
+            input=json.dumps({"cwd": str(tmp_path)}),
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            timeout=30,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+
+    def test_update_script_skips_missing_graph(self, tmp_path):
+        subprocess.run(
+            ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+        )
+        scripts = skills_module._zcode_hook_scripts()
+        script = tmp_path / "crg-update.sh"
+        script.write_text(scripts["crg-update.sh"], encoding="utf-8")
+        proc = subprocess.run(
+            ["bash", str(script)],
+            input=json.dumps({"cwd": str(tmp_path)}),
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            timeout=60,
+        )
+        assert proc.returncode == 0
+        assert proc.stdout == ""
+        assert not (tmp_path / ".code-review-graph").exists()
+        assert not (tmp_path / ".code-review-graph.db").exists()
+
+    def test_update_script_falls_back_to_tool_input_path(self, tmp_path):
+        subprocess.run(
+            ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+        )
+        (tmp_path / "sub").mkdir()
+        scripts = skills_module._zcode_hook_scripts()
+        script = tmp_path / "crg-update.sh"
+        script.write_text(scripts["crg-update.sh"], encoding="utf-8")
+        payload = json.dumps({"tool_input": {"file_path": str(tmp_path / "sub" / "x.py")}})
+        proc = subprocess.run(
+            ["bash", str(script)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            timeout=60,
+        )
+        assert proc.returncode == 0
+
+    def test_install_skills_user_scope(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        skills_dir = skills_module.install_zcode_skills()
+        assert skills_dir == tmp_path / ".zcode" / "skills"
+        for filename, skill in skills_module._SKILLS.items():
+            slug = filename.rsplit(".", 1)[0]
+            body = (skills_dir / slug / "SKILL.md").read_text(encoding="utf-8")
+            assert body.startswith("---\n")
+            assert f"name: {slug}" in body
+            assert f"description: {skill['description']}" in body
+
+    @pytest.mark.parametrize(
+        "seed",
+        [
+            # mcp.servers already holds another server.
+            (
+                "{\n"
+                "  // provider block\n"
+                '  "provider": { "default": "glm" },\n'
+                '  "mcp": {\n    "servers": {\n'
+                "      // keep this one\n"
+                '      "engram": {"command": "engram", "timeoutMs": 90000},\n'
+                "    },\n  },\n"
+                "  // trailing note\n"
+                '  "plugins": {"enabled": true},\n'
+                "}\n"
+            ),
+            # No mcp wrapper at all yet.
+            (
+                "{\n"
+                "  // only plugins so far\n"
+                '  "plugins": {"enabled": true},\n'
+                "}\n"
+            ),
+            # The mcp wrapper exists but is empty.
+            (
+                "{\n"
+                '  "mcp": { // nothing here yet\n'
+                "  },\n"
+                "}\n"
+            ),
+        ],
+        ids=["with_servers", "no_mcp", "mcp_empty"],
+    )
+    def test_install_splices_commented_config(self, tmp_path, monkeypatch, seed):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        config_path = tmp_path / "zcode.json"
+        config_path.write_text(seed, encoding="utf-8")
+        with patch.dict(
+            skills_module.PLATFORMS,
+            {
+                "zcode": {
+                    **skills_module.PLATFORMS["zcode"],
+                    "config_path": lambda root: config_path,
+                },
+            },
+        ):
+            configured = skills_module.install_platform_configs(tmp_path, target="zcode")
+        assert "ZCode" in configured
+        raw = config_path.read_text(encoding="utf-8")
+        data = json.loads(_strip_jsonc(raw))
+        servers = data["mcp"]["servers"]
+        assert "code-review-graph" in servers
+        assert "type" not in servers["code-review-graph"]
+        # Comments outside the spliced member survive it. The mcp_empty seed
+        # keeps its comment inside the very member being written, so
+        # set_member's empty-object rewrite consumes it by design.
+        if seed.count("//") > 1 or "engram" in seed:
+            assert "//" in raw
+        if "engram" in seed:
+            assert servers["engram"]["timeoutMs"] == 90000
+            assert "// keep this one" in raw
+            assert "// trailing note" in raw
+
+    def test_uninstall_removes_all_zcode_artifacts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        subprocess.run(
+            ["git", "init", "-q"], cwd=tmp_path, check=True, capture_output=True
+        )
+        config_path = self._seed_config(
+            tmp_path,
+            {"mcp": {"servers": {"engram": dict(self.FOREIGN_SERVER)}}},
+        )
+        skills_module.install_platform_configs(tmp_path, target="zcode")
+        skills_module.install_zcode_hooks(tmp_path)
+        skills_module.install_zcode_skills()
+        assert b"code-review-graph" in config_path.read_bytes()
+
+        from code_review_graph import uninstall
+
+        report = uninstall.run(repo=tmp_path, keep_data=True)
+        assert report.errors == []
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "code-review-graph" not in json.dumps(data)
+        # The foreign server survives; the emptied mcp.servers wrapper does not.
+        assert data["mcp"] == {"servers": {"engram": dict(self.FOREIGN_SERVER)}}
+        assert data["hooks"] == {"enabled": True}
+        assert not (tmp_path / ".local" / "share" / "code-review-graph").exists()
+        assert not (tmp_path / ".zcode" / "skills" / "explore-codebase").exists()

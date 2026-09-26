@@ -161,6 +161,66 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
+def _zcode_config_path() -> Path:
+    """Return ZCode's user-scope CLI config (MCP servers and hooks)."""
+    return Path.home() / ".zcode" / "cli" / "config.json"
+
+
+def _zcode_hook_script_dir() -> Path:
+    """Return the tool-owned directory holding the ZCode hook scripts.
+
+    Under ``$XDG_DATA_HOME`` conventions this is
+    ``$HOME/.local/share/code-review-graph/hooks``. The hook commands stored
+    in ZCode's config reference the scripts through ``$HOME`` (ZCode expands
+    it when it runs a hook), so the config never carries an absolute home
+    path and survives a home-directory rename.
+    """
+    return Path.home() / ".local" / "share" / "code-review-graph" / "hooks"
+
+
+def _split_config_key(server_key: str) -> tuple[str, ...]:
+    """Split a registry ``key`` into its nested path segments.
+
+    Every platform except ZCode keeps its server map under one flat
+    top-level key. ZCode nests it at ``mcp.servers``, so a dotted key names
+    the walk from the document root to the server map.
+    """
+    return tuple(part for part in server_key.split(".") if part)
+
+
+def _nested_server_container(
+    existing: dict[str, Any],
+    parts: tuple[str, ...],
+    platform_name: str,
+    config_path: Path,
+) -> dict[str, Any] | None:
+    """Return the server-map object at ``parts``, creating missing levels.
+
+    Each existing level along the path must already be a JSON object; a level
+    holding anything else means the config was written in a shape this
+    installer does not understand, and nothing is written (the refusal is
+    printed). Missing levels are created in place, so the returned dict is
+    the same object ``existing`` holds and mutations install the entry
+    without a further assignment.
+    """
+    node: dict[str, Any] = existing
+    for depth, part in enumerate(parts):
+        child = node.get(part)
+        if child is None:
+            child = {}
+            node[part] = child
+        elif not isinstance(child, dict):
+            print(
+                f"  {platform_name}: {config_path} setting {part!r} "
+                f"is {type(child).__name__}; expected a JSON object — "
+                f"skipping to avoid data loss. Please repair that setting "
+                f"or add the MCP config manually."
+            )
+            return None
+        node = child
+    return node
+
+
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
@@ -295,6 +355,21 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "detect": lambda: True,
         "format": "object",
         "needs_type": True,
+    },
+    "zcode": {
+        "name": "ZCode",
+        "config_path": lambda root: _zcode_config_path(),
+        # ZCode is the one client whose server map does not sit under a flat
+        # top-level key: the config nests it at "mcp" -> "servers". The dotted
+        # key is walked (and missing levels created) on install, and the same
+        # walk is used on uninstall. See _split_config_key.
+        "key": "mcp.servers",
+        "detect": lambda: (Path.home() / ".zcode").exists()
+        or bool(shutil.which("zcode")),
+        "format": "object",
+        # ZCode marks only remote transports with "type"; a stdio server is
+        # just {"command": ..., "args": [...]}.
+        "needs_type": False,
     },
 }
 
@@ -998,10 +1073,29 @@ def _splice_commented_config(
         text = jsonc.remove_paths(raw, removals) if removals else raw
         if server_entry is None:
             return text
+        parts = _split_config_key(server_key)
         try:
-            return jsonc.set_member(text, (server_key, "code-review-graph"), server_entry)
+            return jsonc.set_member(
+                text, (*parts, "code-review-graph"), server_entry
+            )
         except KeyError:
-            return jsonc.set_member(text, (server_key,), {"code-review-graph": server_entry})
+            pass
+        # Some level of the container chain is missing. Splice in the largest
+        # missing suffix in one go: find the shallowest missing level, then
+        # insert everything below it as one nested object.
+        existing_depth = 0
+        for depth in range(1, len(parts) + 1):
+            try:
+                jsonc.find_value(jsonc.tokenize(text), parts[:depth])
+            except (KeyError, ValueError, IndexError, RecursionError):
+                break
+            existing_depth = depth
+        value: Any = {"code-review-graph": server_entry}
+        # parts[existing_depth] is the first missing level and becomes the
+        # spliced member itself; only the levels below it are wrapped.
+        for part in reversed(parts[existing_depth + 1 :]):
+            value = {part: value}
+        return jsonc.set_member(text, parts[: existing_depth + 1], value)
     except (ValueError, KeyError, IndexError, RecursionError):
         return None
 
@@ -1128,17 +1222,30 @@ def install_platform_configs(
                 existing = parsed
 
         expected_container = list if plat["format"] == "array" else dict
-        if server_key in existing and not isinstance(
-            existing[server_key], expected_container
-        ):
-            expected_name = "array" if expected_container is list else "object"
-            actual_name = type(existing[server_key]).__name__
-            print(
-                f"  {plat['name']}: {config_path} setting {server_key!r} "
-                f"is {actual_name}; expected a JSON {expected_name} — "
-                f"skipping to avoid data loss. Please repair that setting "
-                f"or add the MCP config manually."
-            )
+        key_parts = _split_config_key(server_key)
+        # Walk the (possibly nested) container path up front so a mis-typed
+        # setting is refused before anything is merged. ZCode's ``mcp.servers``
+        # is the only dotted key; single-segment paths behave exactly as they
+        # always did.
+        container: dict[str, Any] = existing
+        container_shape_ok = True
+        for depth, part in enumerate(key_parts):
+            child = container.get(part)
+            if child is None:
+                break
+            wanted = expected_container if depth == len(key_parts) - 1 else dict
+            if not isinstance(child, wanted):
+                wanted_name = "array" if wanted is list else "object"
+                print(
+                    f"  {plat['name']}: {config_path} setting {part!r} "
+                    f"is {type(child).__name__}; expected a JSON {wanted_name} — "
+                    f"skipping to avoid data loss. Please repair that setting "
+                    f"or add the MCP config manually."
+                )
+                container_shape_ok = False
+                break
+            container = child
+        if not container_shape_ok:
             continue
 
         # Paths this write removes, recorded so a commented file can be
@@ -1147,6 +1254,14 @@ def install_platform_configs(
         wrote_entry = False
 
         if plat["format"] == "array":
+            if len(key_parts) > 1:
+                # No array-format client nests its server list; refuse rather
+                # than write a flat key the client would never read.
+                print(
+                    f"  {plat['name']}: nested container keys are not "
+                    f"supported for array-format configs — skipping."
+                )
+                continue
             arr = existing.get(server_key, [])
             arr_entry = {"name": "code-review-graph", **server_entry}
             ours = [
@@ -1192,7 +1307,13 @@ def install_platform_configs(
                         del existing[legacy_key]
                         removals[-1] = (legacy_key,)
                     migrated = True
-            servers = existing.get(server_key, {})
+            servers = _nested_server_container(
+                existing, key_parts, plat["name"], config_path
+            )
+            if servers is None:
+                # The walk refused: a level of the dotted path exists but is
+                # not an object. The reason was already printed.
+                continue
             current = servers.get("code-review-graph")
             user_owned = current is not None and not _is_generated_server_entry(current)
             if user_owned:
@@ -1205,8 +1326,9 @@ def install_platform_configs(
                 _record_configured(key, plat)
                 continue
             else:
+                # _nested_server_container creates missing levels in place, so
+                # the assignment into ``existing`` has already happened.
                 servers["code-review-graph"] = server_entry
-                existing[server_key] = servers
                 wrote_entry = True
 
         # Re-serialising a commented config deletes every comment in it, so a
@@ -1786,8 +1908,10 @@ _HOOK_MENTION_MARKERS = ("code-review-graph", "code_review_graph", "crg-")
 # other matcher belongs to whoever wrote it, even when a command inside it
 # resembles ours -- a user's PostToolUse hook on matcher ``Write`` is theirs.
 _GENERATED_HOOK_MATCHERS: dict[str, frozenset[str | None]] = {
-    "PostToolUse": frozenset({"Edit|Write", "Edit|Write|Bash", "Write|Edit|Bash"}),
-    "SessionStart": frozenset({"", None, "startup|resume"}),
+    "PostToolUse": frozenset(
+        {"Edit|Write", "Edit|Write|Bash", "Write|Edit|Bash", "Write|Edit|ApplyPatch|Bash"}
+    ),
+    "SessionStart": frozenset({"", None, "startup|resume", ".*"}),
     "AfterTool": frozenset({"write_file|replace"}),
 }
 
@@ -2327,7 +2451,7 @@ def inject_claude_md(repo_root: Path) -> str:
 # Used to filter writes when the user passes --platform <X>: only files
 # whose owner set includes the target (or "all") are written.
 _PLATFORM_INSTRUCTION_FILES: dict[str, tuple[str, ...]] = {
-    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes"),
+    "AGENTS.md": ("cursor", "opencode", "antigravity", "codex", "hermes", "zcode"),
     "GEMINI.md": ("antigravity", "gemini-cli"),
     ".cursorrules": ("cursor",),
     ".windsurfrules": ("windsurf",),
@@ -2532,6 +2656,324 @@ def install_codebuddy_skills(repo_root: Path) -> Path:
         logger.info("Wrote CodeBuddy skill: %s", skill_path)
 
     return skills_root
+
+
+# --- ZCode hooks + skills (user scope: ~/.zcode and ~/.local/share) ---------
+
+#: Hook scripts this installer writes for ZCode. Both names are in
+#: ``_GENERATED_HOOK_SCRIPTS`` so install and uninstall agree on ownership.
+_ZCODE_HOOK_SCRIPT_NAMES = ("crg-session-start.sh", "crg-update.sh")
+
+
+def generate_zcode_hooks_config() -> dict[str, list[dict[str, Any]]]:
+    """Generate ZCode hook groups for the ``hooks.events`` map.
+
+    ZCode reads the Claude-style events schema from ``hooks`` in
+    ``~/.zcode/cli/config.json``, with the groups nested one level down under
+    ``hooks.events`` and a master ``hooks.enabled`` switch. ``timeout`` is in
+    whole seconds for the ``command`` hook type (``timeoutMs`` belongs to the
+    separate ``process`` type and is not used here).
+
+    Commands reference the hook scripts through ``$HOME`` — ZCode expands the
+    variable when it runs a hook command — so the config carries no absolute
+    home path.
+    """
+    hooks_dir = "$HOME/.local/share/code-review-graph/hooks"
+    return {
+        "SessionStart": [
+            {
+                "matcher": ".*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            f'bash "{hooks_dir}/{_ZCODE_HOOK_SCRIPT_NAMES[0]}"'
+                        ),
+                        "timeout": 5,
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit|ApplyPatch|Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f'bash "{hooks_dir}/{_ZCODE_HOOK_SCRIPT_NAMES[1]}"',
+                        "timeout": 15,
+                    }
+                ],
+            }
+        ],
+    }
+    # The payload ZCode pipes to these hooks carries the session cwd at
+    # ``.cwd`` (SessionStart) and the tool arguments at ``.tool_input``.
+    # Both scripts read it the way the Claude Code hooks do; the repo itself
+    # is resolved at hook runtime with git, never embedded here.
+
+
+def _zcode_hook_scripts() -> dict[str, str]:
+    """Return filename -> shell source for the two ZCode hook scripts.
+
+    Both scripts drain stdin, resolve the repository from the payload's
+    ``.cwd`` (falling back to ``$PWD``), and exit 0 on every path so a hook
+    can never block or fail a session. The SessionStart script runs its
+    status call detached; the PostToolUse script updates the graph
+    best-effort and only when one has already been built.
+    """
+    read_cwd = (
+        "hook_cwd=\"$(printf '%s' \"$payload\" | python3 -c '\n"
+        "import json, sys\n"
+        "try:\n"
+        "    data = json.load(sys.stdin)\n"
+        "except Exception:\n"
+        "    data = {}\n"
+        "cwd = data.get(\"cwd\") or \"\"\n"
+        "if not cwd:\n"
+        "    tool_input = data.get(\"tool_input\") or {}\n"
+        "    if isinstance(tool_input, dict):\n"
+        "        candidate = tool_input.get(\"cwd\") or tool_input.get(\"file_path\") or \"\"\n"
+        "        if candidate:\n"
+        "            cwd = candidate if os.path.isdir(candidate) else os.path.dirname(candidate)\n"
+        "sys.stdout.write(cwd)\n"
+        "' 2>/dev/null || true)\"\n"
+        "[ -n \"$hook_cwd\" ] || hook_cwd=\"$PWD\"\n"
+    )
+    session_start = (
+        "#!/usr/bin/env bash\n"
+        "# code-review-graph: session-start status (ZCode hook)\n"
+        "# Installed by: code-review-graph install --platform zcode\n"
+        "# Never blocks session start: the status call runs detached and this\n"
+        "# script exits 0 on every path.\n"
+        "set -uo pipefail\n"
+        "\n"
+        "payload=\"$(cat 2>/dev/null || true)\"\n"
+        "\n"
+        + read_cwd
+        + "\n"
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0\n"
+        "\n"
+        "repo=\"$(git -C \"$hook_cwd\" rev-parse --show-toplevel 2>/dev/null)\" || exit 0\n"
+        "[ -n \"$repo\" ] || exit 0\n"
+        "\n"
+        "# Without a built graph there is nothing to report, and a first build\n"
+        "# is far too slow for a hook — skip silently instead.\n"
+        "if [ ! -d \"$repo/.code-review-graph\" ] && [ ! -f \"$repo/.code-review-graph.db\" ]; then\n"
+        "    exit 0\n"
+        "fi\n"
+        "\n"
+        "code-review-graph status --repo \"$repo\" >/dev/null 2>&1 </dev/null &\n"
+        "\n"
+        "exit 0\n"
+    )
+    update = (
+        "#!/usr/bin/env bash\n"
+        "# code-review-graph: incremental graph update after edits (ZCode hook)\n"
+        "# Installed by: code-review-graph install --platform zcode\n"
+        "# Best effort: every failure is swallowed and this script always\n"
+        "# exits 0 so an edit is never blocked.\n"
+        "set -uo pipefail\n"
+        "\n"
+        "payload=\"$(cat 2>/dev/null || true)\"\n"
+        "\n"
+        + read_cwd
+        + "\n"
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0\n"
+        "\n"
+        "repo=\"$(git -C \"$hook_cwd\" rev-parse --show-toplevel 2>/dev/null)\" || exit 0\n"
+        "[ -n \"$repo\" ] || exit 0\n"
+        "\n"
+        "# No graph yet: run `code-review-graph build` once instead of letting\n"
+        "# every edit trigger a from-scratch build inside a hook.\n"
+        "if [ ! -d \"$repo/.code-review-graph\" ] && [ ! -f \"$repo/.code-review-graph.db\" ]; then\n"
+        "    exit 0\n"
+        "fi\n"
+        "\n"
+        "code-review-graph update --skip-flows --repo \"$repo\" >/dev/null 2>&1 || true\n"
+        "\n"
+        "exit 0\n"
+    )
+    return {_ZCODE_HOOK_SCRIPT_NAMES[0]: session_start, _ZCODE_HOOK_SCRIPT_NAMES[1]: update}
+
+
+def install_zcode_skills() -> Path:
+    """Install skills into ZCode's user-scope skills directory.
+
+    ZCode discovers ``<scope>/skills/<name>/SKILL.md`` in the user scope
+    (``~/.zcode/skills``) and the workspace scope (``<repo>/.zcode/skills``).
+    The generated skills are generic — no checkout path is baked in — and the
+    ZCode MCP registration itself is user scope, so the skills are installed
+    beside it under ``~/.zcode/skills``.
+    """
+    skills_root = Path.home() / ".zcode" / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+
+    for filename, skill in _SKILLS.items():
+        slug = filename.rsplit(".", 1)[0]
+        skill_dir = skills_root / slug
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_dir / "SKILL.md"
+        content = (
+            "---\n"
+            f"name: {slug}\n"
+            f"description: {skill['description']}\n"
+            "---\n\n"
+            f"{skill['body']}\n"
+        )
+        skill_path.write_text(content, encoding="utf-8")
+        logger.info("Wrote ZCode skill: %s", skill_path)
+
+    return skills_root
+
+
+def _splice_zcode_hooks(
+    raw: str,
+    expected_document: dict[str, Any],
+    hooks_obj: dict[str, Any],
+) -> str | None:
+    """Splice the merged ``hooks`` object into a commented config.
+
+    Re-serialising a commented config deletes every comment in it, so the
+    edit is a splice: only the ``hooks`` member is rewritten and the rest of
+    the file is copied through byte for byte. ``None`` means the splice could
+    not be expressed safely and the caller must leave the file alone.
+    """
+    try:
+        if not jsonc.tokenize(raw):
+            # Comments but no JSON document yet: keep them above the config.
+            body = json.dumps(expected_document, indent=2, ensure_ascii=False)
+            return raw.rstrip("\n") + "\n" + body + "\n"
+        text = jsonc.set_member(raw, ("hooks",), hooks_obj)
+        reparsed = json.loads(_strip_jsonc(text))
+    except (ValueError, KeyError, IndexError, RecursionError, json.JSONDecodeError):
+        return None
+    if reparsed != expected_document:
+        return None
+    return text
+
+
+def install_zcode_hooks(repo_root: Path) -> Path:
+    """Install ZCode hooks into the user-scope ``~/.zcode/cli/config.json``.
+
+    The same file holds the ``mcp.servers`` map, provider settings and
+    plugin configuration, so the merge is surgical: existing hook groups from
+    other tooling are kept, groups this installer wrote are replaced in place
+    (re-running never duplicates), and unrelated top-level settings are
+    untouched. ``hooks.enabled`` is set because ZCode silently ignores every
+    config-file hook while it is off — a missing switch is flipped to true,
+    which is what the platform requires for any config-file hook to run; an
+    existing value is left as it is.
+
+    The hook scripts themselves are written to
+    ``~/.local/share/code-review-graph/hooks/`` and referenced through
+    ``$HOME``.
+
+    Args:
+        repo_root: Repository root directory (unused; the repo is resolved at
+            hook runtime via git, exactly like the Claude Code hooks).
+
+    Returns:
+        Path to the config file that holds the hooks.
+    """
+    config_path = _zcode_config_path()
+
+    existing: dict[str, Any] = {}
+    raw = ""
+    if config_path.exists():
+        raw = config_path.read_text(encoding="utf-8", errors="replace")
+        stripped = _strip_jsonc(raw)
+        if stripped.strip():
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                print(
+                    f"  ZCode: {config_path} contains unparseable JSON — "
+                    f"skipping hooks to avoid data loss."
+                )
+                return config_path
+            if not isinstance(parsed, dict):
+                print(
+                    f"  ZCode: {config_path} is valid JSON but not a top-level "
+                    f"object ({type(parsed).__name__}) — skipping hooks to "
+                    f"avoid data loss."
+                )
+                return config_path
+            existing = parsed
+
+    hooks_obj = existing.get("hooks")
+    if hooks_obj is not None and not isinstance(hooks_obj, dict):
+        print(
+            f"  ZCode: 'hooks' in {config_path} is "
+            f"{type(hooks_obj).__name__}; expected a JSON object — "
+            f"skipping hooks to avoid data loss."
+        )
+        return config_path
+    if not isinstance(hooks_obj, dict):
+        hooks_obj = {}
+
+    events = hooks_obj.get("events")
+    if events is not None and not isinstance(events, dict):
+        print(
+            f"  ZCode: 'hooks.events' in {config_path} is "
+            f"{type(events).__name__}; expected a JSON object — "
+            f"skipping hooks to avoid data loss."
+        )
+        return config_path
+    if not isinstance(events, dict):
+        events = {}
+
+    # The switch is required for any config-file hook to run: ZCode silently
+    # ignores every hook in the file while it is missing or off. An absent
+    # switch is set to true; an explicit false is a deliberate user choice
+    # and is left alone, with the merged groups staying dormant until the
+    # user flips it back.
+    if "enabled" not in hooks_obj:
+        hooks_obj["enabled"] = True
+    elif hooks_obj["enabled"] is False:
+        print(
+            f"  ZCode: 'hooks.enabled' is false in {config_path} — hook groups "
+            f"merged, but they stay dormant until it is set to true."
+        )
+
+    for event_name, entries in generate_zcode_hooks_config().items():
+        current = events.get(event_name)
+        events[event_name] = _merge_hook_entries(
+            current if isinstance(current, list) else [], entries, event_name
+        )
+
+    hooks_obj["events"] = events
+    existing["hooks"] = hooks_obj
+
+    if jsonc.has_comments(raw):
+        spliced = _splice_zcode_hooks(raw, existing, hooks_obj)
+        if spliced is None:
+            print(
+                f"  ZCode: {config_path} keeps comments that this installer "
+                f"cannot preserve through an edit — hooks left unchanged. "
+                f"Please add them manually."
+            )
+            return config_path
+        text = spliced
+    else:
+        text = json.dumps(existing, indent=2, ensure_ascii=False) + "\n"
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(text, encoding="utf-8")
+    logger.info("Wrote ZCode hooks config: %s", config_path)
+
+    hooks_dir = _zcode_hook_script_dir()
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for filename, content in _zcode_hook_scripts().items():
+        script_path = hooks_dir / filename
+        script_path.write_text(content, encoding="utf-8")
+        # Owner rwx, group/other rx — the scripts are run by name via bash.
+        script_path.chmod(
+            stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
+        )
+        logger.info("Wrote ZCode hook script: %s", script_path)
+
+    return config_path
 
 
 def inject_platform_instructions(repo_root: Path, target: str = "all") -> list[str]:
