@@ -257,6 +257,8 @@ async def build_or_update_graph_tool(
             When None (default), falls back to CRG_RECURSE_SUBMODULES env var.
         embedding_provider: Exact provider for an explicit post-build embedding
             refresh. Must be supplied with embedding_model. Default: disabled.
+            Refreshes an existing index only: on a graph with no embeddings
+            the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit post-build embedding
             refresh. Must be supplied with embedding_provider. Default: disabled.
     """
@@ -300,6 +302,8 @@ async def run_postprocess_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         embedding_provider: Exact provider for an explicit embedding refresh.
             Must be supplied with embedding_model. Default: disabled.
+            Refreshes an existing index only: on a graph with no embeddings
+            the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit embedding refresh.
             Must be supplied with embedding_provider. Default: disabled.
     """
