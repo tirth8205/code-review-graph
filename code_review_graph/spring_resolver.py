@@ -80,13 +80,22 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # this is overridden by the concrete-implementation lookup below.
     # -----------------------------------------------------------------------
     name_to_qual: dict[str, str] = {}
+    java_kinds: dict[str, str] = {}
     for row in conn.execute(
-        "SELECT name, qualified_name FROM nodes WHERE kind = 'Class' AND language = 'java'"
+        "SELECT name, qualified_name, extra FROM nodes "
+        "WHERE kind = 'Class' AND language = 'java'"
     ).fetchall():
         bare = row["name"]
         qual = row["qualified_name"]
         if bare not in name_to_qual or len(qual) < len(name_to_qual[bare]):
             name_to_qual[bare] = qual
+        try:
+            node_extra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            node_extra = {}
+        java_kind = node_extra.get("java_kind")
+        if isinstance(java_kind, str):
+            java_kinds[bare] = java_kind
 
     # Also index Function nodes so we can build "file::Class.method" targets.
     # key: (class_name, method_name) → full qualified_name of the method node
@@ -96,6 +105,11 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         "WHERE kind IN ('Function', 'Test') AND language = 'java' AND parent_name IS NOT NULL"
     ).fetchall():
         method_to_qual[(row["parent_name"], row["name"])] = row["qualified_name"]
+
+    node_is_test = {
+        row["qualified_name"]: bool(row["is_test"])
+        for row in conn.execute("SELECT qualified_name, is_test FROM nodes").fetchall()
+    }
 
     # -----------------------------------------------------------------------
     # Build implementors: bare interface name → list of implementing class quals
@@ -168,15 +182,26 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         if not injected_type:
             continue
 
-        # Resolve to concrete implementation if unique
-        impls = implementors.get(injected_type, [])
+        source_is_test = node_is_test.get(source_qual, False)
+        java_kind = java_kinds.get(injected_type)
+        impls = (
+            implementors.get(injected_type, [])
+            if java_kind is None or java_kind in {"interface", "abstract"}
+            else []
+        )
+        if not source_is_test:
+            impls = [
+                impl
+                for impl in impls
+                if not node_is_test.get(impl, False)
+            ]
         if len(impls) == 1:
             concrete_class = impls[0].split("::")[-1]
             fallback = f"{impls[0]}.{method_name}"
             new_target = method_to_qual.get((concrete_class, method_name)) or fallback
         else:
-            type_bare = injected_type.rsplit(".", 1)[-1]
             fallback = f"{injected_type}.{method_name}"
+            type_bare = injected_type.rsplit(".", 1)[-1]
             new_target = method_to_qual.get((type_bare, method_name)) or fallback
 
         extra["spring_resolved"] = True
