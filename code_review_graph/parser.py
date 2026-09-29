@@ -11672,6 +11672,18 @@ class CodeParser:
         # Java: detect Spring stereotype annotations and store as metadata
         class_annotations: list[str] = []
         if language == "java":
+            if child.type == "interface_declaration":
+                extra["java_kind"] = "interface"
+            else:
+                java_modifier_types = {
+                    grandchild.type
+                    for modifier in child.children
+                    if modifier.type == "modifiers"
+                    for grandchild in modifier.children
+                }
+                extra["java_kind"] = (
+                    "abstract" if "abstract" in java_modifier_types else "concrete"
+                )
             class_annotations = self._get_java_annotations(child)
             spring_stereotypes = [
                 a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
