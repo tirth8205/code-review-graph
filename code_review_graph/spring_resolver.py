@@ -80,9 +80,9 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # this is overridden by the concrete-implementation lookup below.
     # -----------------------------------------------------------------------
     name_to_qual: dict[str, str] = {}
-    type_metadata: dict[str, list[dict[str, object]]] = {}
+    java_kinds: dict[str, str] = {}
     for row in conn.execute(
-        "SELECT name, qualified_name, file_path, is_test, extra FROM nodes "
+        "SELECT name, qualified_name, extra FROM nodes "
         "WHERE kind = 'Class' AND language = 'java'"
     ).fetchall():
         bare = row["name"]
@@ -93,31 +93,18 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             node_extra = json.loads(row["extra"] or "{}")
         except (json.JSONDecodeError, TypeError):
             node_extra = {}
-        type_metadata.setdefault(bare, []).append({
-            "qualified_name": qual,
-            "file_path": row["file_path"],
-            "is_test": bool(row["is_test"]),
-            "java_kind": node_extra.get("java_kind"),
-        })
+        java_kind = node_extra.get("java_kind")
+        if isinstance(java_kind, str):
+            java_kinds[bare] = java_kind
 
     # Also index Function nodes so we can build "file::Class.method" targets.
     # key: (class_name, method_name) → full qualified_name of the method node
     method_to_qual: dict[tuple[str, str], str] = {}
-    methods_by_class: dict[tuple[str, str], str] = {}
     for row in conn.execute(
         "SELECT name, qualified_name, parent_name FROM nodes "
         "WHERE kind IN ('Function', 'Test') AND language = 'java' AND parent_name IS NOT NULL"
     ).fetchall():
         method_to_qual[(row["parent_name"], row["name"])] = row["qualified_name"]
-        if "::" in row["qualified_name"]:
-            class_qual = row["qualified_name"].rsplit(".", 1)[0]
-            methods_by_class[(class_qual, row["name"])] = row["qualified_name"]
-            class_tail = class_qual.rsplit(".", 1)[-1]
-            file_prefix = class_qual.split("::", 1)[0]
-            methods_by_class.setdefault(
-                (f"{file_prefix}::{class_tail}", row["name"]),
-                row["qualified_name"],
-            )
 
     node_is_test = {
         row["qualified_name"]: bool(row["is_test"])
@@ -136,8 +123,6 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     ).fetchall():
         iface = row["target_qualified"]
         impl = row["source_qualified"]
-        if impl.rsplit("::", 1)[-1] == iface:
-            continue
         implementors.setdefault(iface, []).append(impl)
 
     # -----------------------------------------------------------------------
@@ -197,24 +182,11 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         if not injected_type:
             continue
 
-        declared_types = type_metadata.get(injected_type, [])
-        java_type_found = bool(declared_types)
-        production_types = [item for item in declared_types if not item["is_test"]]
-        if len(production_types) == 1:
-            declared_type = production_types[0]
-        elif not production_types and len(declared_types) == 1:
-            declared_type = declared_types[0]
-        else:
-            declared_type = None
-        declared_kind = declared_type.get("java_kind") if declared_type else None
-        is_polymorphic = java_type_found and declared_kind in {"interface", "abstract"}
         source_is_test = node_is_test.get(source_qual, False)
-
-        # Java types with known metadata are resolved conservatively. Types that
-        # are absent from Java nodes preserve the legacy cross-language lookup.
+        java_kind = java_kinds.get(injected_type)
         impls = (
             implementors.get(injected_type, [])
-            if not java_type_found or is_polymorphic
+            if java_kind is None or java_kind in {"interface", "abstract"}
             else []
         )
         if not source_is_test:
@@ -229,23 +201,8 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             new_target = method_to_qual.get((concrete_class, method_name)) or fallback
         else:
             fallback = f"{injected_type}.{method_name}"
-            declared_qual_value = (
-                declared_type.get("qualified_name") if declared_type else None
-            )
-            declared_qual = (
-                declared_qual_value if isinstance(declared_qual_value, str) else None
-            )
-            if declared_qual:
-                new_target = methods_by_class.get((declared_qual, method_name))
-                if new_target is None and "." in declared_qual.split("::", 1)[-1]:
-                    file_prefix, _, symbol = declared_qual.partition("::")
-                    class_tail = symbol.rsplit(".", 1)[-1]
-                    new_target = methods_by_class.get(
-                        (f"{file_prefix}::{class_tail}", method_name)
-                    )
-                new_target = new_target or fallback
-            else:
-                new_target = fallback
+            type_bare = injected_type.rsplit(".", 1)[-1]
+            new_target = method_to_qual.get((type_bare, method_name)) or fallback
 
         extra["spring_resolved"] = True
         extra["injected_type"] = injected_type
