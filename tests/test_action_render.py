@@ -553,6 +553,19 @@ def test_written_artifact_never_exceeds_the_consumer_cap(tmp_path, offset):
     assert "Powered by [code-review-graph]" in out.read_text(encoding="utf-8")
 
 
+def test_output_file_preserves_the_bytes_measured_by_the_budget(tmp_path, report):
+    """Writing a report must not add platform-specific CRLF bytes."""
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+
+    expected = render.render_markdown(report)
+    assert render.main(
+        ["--input", str(source), "--output", str(out)]
+    ) == 0
+
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
 def test_a_body_that_still_fits_is_not_truncated(tmp_path):
     """The reservation costs one byte, not a whole report.
 
