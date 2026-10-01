@@ -160,6 +160,10 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+Terraform provider aliases have distinct names (`provider.aws.west`), while the default
+provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
+map values link to provider nodes; ordinary resource expressions retain resource references.
+
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 
