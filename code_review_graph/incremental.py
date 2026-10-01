@@ -547,8 +547,18 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     A line starting with ``!`` keeps a path out of the automatic nested
     build-output detection (see :data:`NESTED_OUTPUT_DIR_MARKERS`); it does not
     negate the explicit patterns, which keep their existing meaning.
+    The default vendor exclusion applies to Composer, Go and Ruby projects
+    identified by root manifests; other repositories can explicitly add
+    vendor/ to their ignore file.
     """
-    patterns = list(DEFAULT_IGNORE_PATTERNS)
+    vendor_dependencies = any(
+        (repo_root / manifest).is_file()
+        for manifest in ("composer.json", "go.mod", "go.work", "Gemfile", "Rakefile")
+    ) or any(path.is_file() for path in repo_root.glob("*.gemspec"))
+    patterns = [
+        pattern for pattern in DEFAULT_IGNORE_PATTERNS
+        if pattern != "**/vendor/**" or vendor_dependencies
+    ]
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
