@@ -1,4 +1,4 @@
-"""Composer-aware vendor exclusions, issue #1056."""
+"""Manifest-aware vendor exclusions, issue #1056."""
 
 import pytest
 
@@ -25,3 +25,9 @@ def test_other_dependency_defaults_are_unchanged(tmp_path):
     patterns = _load_ignore_patterns(tmp_path)
     assert _should_ignore("packages/app/node_modules/lib/index.js", patterns)
     assert _should_ignore("src/lib/__pycache__/app.pyc", patterns)
+
+
+@pytest.mark.parametrize("manifest", ["go.mod", "go.work", "Gemfile", "Rakefile", "app.gemspec"])
+def test_go_and_ruby_vendor_dependencies_remain_excluded(tmp_path, manifest):
+    (tmp_path / manifest).write_text("", encoding="utf-8")
+    assert _should_ignore("vendor/package/lib/source.rb", _load_ignore_patterns(tmp_path))
