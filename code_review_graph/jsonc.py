@@ -301,6 +301,28 @@ def remove_paths(raw: str, paths: Iterable[Sequence[str | int]]) -> str:
             merged.append((start, end))
     for start, end in reversed(merged):
         raw = raw[:start] + raw[end:]
+    # Adjacent removals use one snapshot: removing the last two siblings can
+    # leave the separator after the surviving sibling. Drop only newly exposed
+    # trailing commas; keep pre-existing JSONC trailing commas and all comments.
+    original_trailing = {
+        token.start
+        for index, token in enumerate(tokens[:-1])
+        if token.kind == "," and tokens[index + 1].kind in ("}", "]")
+    }
+    surviving = [
+        token for token in tokens
+        if not any(start <= token.start < end for start, end in merged)
+    ]
+    exposed = [
+        token.start
+        for index, token in enumerate(surviving[:-1])
+        if token.kind == "," and surviving[index + 1].kind in ("}", "]")
+        and token.start not in original_trailing
+    ]
+    # Offsets above refer to the original document, before the removed spans.
+    for offset in reversed(exposed):
+        rewritten_offset = offset - sum(end - start for start, end in merged if end <= offset)
+        raw = raw[:rewritten_offset] + raw[rewritten_offset + 1:]
     return raw
 
 
