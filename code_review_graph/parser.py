@@ -2686,8 +2686,12 @@ _HCL_REF_PREFIXES: frozenset[str] = frozenset({
 })
 
 
-def _hcl_ref_target(root: str, attrs: list[str]) -> Optional[str]:
+def _hcl_ref_target(
+    root: str, attrs: list[str], *, provider: bool = False,
+) -> Optional[str]:
     """Map a ``variable_expr.get_attr*`` chain to its canonical graph name."""
+    if provider and root not in _HCL_REF_PREFIXES:
+        return ".".join(["provider", root] + attrs[:1])
     if root == "var" and attrs:
         return f"var.{attrs[0]}"
     if root == "module" and attrs:
@@ -8559,6 +8563,11 @@ class CodeParser:
         if name is None:
             return True
 
+        if block_type == "provider" and body_node is not None:
+            alias = self._hcl_get_attribute_string(body_node, "alias")
+            if alias:
+                name += f".{alias}"
+
         qualified = self._qualify(name, file_path, None)
         nodes.append(NodeInfo(
             kind=kind, name=name, file_path=file_path,
@@ -8583,7 +8592,15 @@ class CodeParser:
                 ))
 
         if emit_refs:
-            self._walk_hcl_expressions(body_node, file_path, edges, name)
+            provider_attributes = (
+                frozenset({"provider"}) if block_type in ("resource", "data")
+                else frozenset({"providers"}) if block_type == "module"
+                else frozenset()
+            )
+            self._walk_hcl_expressions(
+                body_node, file_path, edges, name,
+                provider_body=body_node, provider_attributes=provider_attributes,
+            )
 
         return True
 
@@ -8646,6 +8663,10 @@ class CodeParser:
         edges: list[EdgeInfo],
         enclosing_name: str,
         local_names: frozenset[str] = frozenset(),
+        *,
+        provider_body=None,
+        provider_attributes: frozenset[str] = frozenset(),
+        provider_context: bool = False,
     ) -> None:
         """Emit REFERENCES edges for every HCL variable reference under *node*.
 
@@ -8659,7 +8680,7 @@ class CodeParser:
             for root, attrs, line in _hcl_variable_refs(node):
                 if root in local_names:
                     continue
-                ref = _hcl_ref_target(root, attrs)
+                ref = _hcl_ref_target(root, attrs, provider=provider_context)
                 if ref:
                     edges.append(EdgeInfo(
                         kind="REFERENCES",
@@ -8671,6 +8692,19 @@ class CodeParser:
         for child in node.children:
             if child.type not in _HCL_RECURSE_TYPES:
                 continue
+            # Module provider-map keys name the child's provider slots;
+            # only their values refer to providers in this module.
+            if provider_context and node.type == "object_elem":
+                if child == node.child_by_field_name("key"):
+                    continue
+            child_provider_context = provider_context
+            if child.type == "attribute":
+                key = _hcl_child(child, "identifier")
+                child_provider_context = (
+                    child.parent == provider_body
+                    and key is not None
+                    and _hcl_text(key) in provider_attributes
+                )
             child_local_names = local_names
             if child.type == "block":
                 iter_name = _hcl_dynamic_iterator_name(child)
@@ -8680,7 +8714,11 @@ class CodeParser:
                 child_local_names = (
                     local_names | _hcl_for_iterator_names(child)
                 )
-            self._walk_hcl_expressions(child, file_path, edges, enclosing_name, child_local_names)
+            self._walk_hcl_expressions(
+                child, file_path, edges, enclosing_name, child_local_names,
+                provider_body=provider_body, provider_attributes=provider_attributes,
+                provider_context=child_provider_context,
+            )
 
 
     def _extract_bash_source_command(
