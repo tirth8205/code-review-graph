@@ -547,8 +547,13 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     A line starting with ``!`` keeps a path out of the automatic nested
     build-output detection (see :data:`NESTED_OUTPUT_DIR_MARKERS`); it does not
     negate the explicit patterns, which keep their existing meaning.
+    The default vendor exclusion applies only with a root composer.json;
+    other repositories can explicitly add vendor/ to their ignore file.
     """
-    patterns = list(DEFAULT_IGNORE_PATTERNS)
+    patterns = [
+        pattern for pattern in DEFAULT_IGNORE_PATTERNS
+        if pattern != "**/vendor/**" or (repo_root / "composer.json").is_file()
+    ]
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():

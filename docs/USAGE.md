@@ -182,6 +182,10 @@ These paths are excluded by default. A leading `/` anchors the pattern at the re
 
 A nested `target/`, `build/`, `.next/` or `.nuxt/` directory is also ignored when a sibling manifest (for example `pom.xml`, `build.gradle` or `next.config.js`) shows it is build output.
 
+The default `**/vendor/**` exclusion applies only when `composer.json` exists at
+the repository root. Other repositories retain source packages named `vendor`;
+add `vendor/` to `.code-review-graphignore` to exclude them explicitly.
+
 To add patterns, create a `.code-review-graphignore` file in the repository root (same syntax as `.gitignore`):
 
 ```
