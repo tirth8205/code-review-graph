@@ -142,6 +142,11 @@ Then use `cross_repo_search_tool` to search every registered repository, or pass
 
 ## Context Savings
 
+Impact and review-context tools return `risk: "unknown"` when none of the requested file
+paths match the graph. Their `unmatched_files` field and summary identify missing paths.
+For a mix of indexed and missing files, risk describes the indexed subset; check the
+missing paths or rebuild the graph before treating that result as complete.
+
 Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
 
 The evaluation runner produces the benchmark numbers quoted in the README:
