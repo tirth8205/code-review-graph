@@ -1522,6 +1522,7 @@ _TEST_HELPER_DIR_PATTERNS = [
 
 # Filename conventions.  Matched against the basename alone, so they hold
 # whatever the repository root is.
+_STORYBOOK_FILE_RE = re.compile(r"\.stories\.[jt]sx?$")
 _TEST_NAME_PATTERNS = [
     # Python: pytest/unittest stems plus conftest, which holds fixtures.
     re.compile(r"^test_.*\.py$"),
@@ -1529,6 +1530,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"^conftest\.py$"),
     # JavaScript / TypeScript.
     re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$"),
+    # Storybook CSF files demonstrate components; they are not production callers.
+    _STORYBOOK_FILE_RE,
     # Go.
     re.compile(r"_test\.go$"),
     # Ruby.
