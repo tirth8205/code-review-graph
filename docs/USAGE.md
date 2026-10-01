@@ -160,6 +160,11 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+When Python or Ruby classes in one file share a leaf name, their methods use the full
+enclosing class/module chain (for example, `Alpha.Same.run` and `Beta.Same.run`). Local
+calls stay in that lexical class. Unique class-leaf method names retain their existing
+identities. Rebuild an existing graph to replace rows created with colliding identities.
+
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 

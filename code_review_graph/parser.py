@@ -3311,6 +3311,7 @@ class CodeParser:
         import_map, defined_names = self._collect_file_scope(
             tree.root_node, language, source, file_path_str,
         )
+        self._index_ambiguous_method_scopes(tree.root_node, language, import_map)
         if language == "python":
             self._expand_python_star_imports(
                 tree.root_node, file_path_str, import_map,
@@ -5301,6 +5302,11 @@ class CodeParser:
             for node in nodes
             if node.language == "go" and "go_receiver" in node.extra
         }
+        disambiguated_scopes = {
+            node.parent_name for node in nodes
+            if node.language in ("python", "ruby") and node.parent_name
+            and "." in node.parent_name and node.kind in ("Function", "Test")
+        }
 
         def candidate_entries(
             target: str,
@@ -5327,6 +5333,27 @@ class CodeParser:
             has_receiver = bool(receiver) or (
                 edge.extra.get("receiver_form") == "expression"
             )
+            scope = source_scopes.get(edge.source)
+            if (
+                scope in disambiguated_scopes
+                and edge.kind in ("CALLS", "REFERENCES")
+                and "::" not in edge.target
+                and (not has_receiver or receiver == "self")
+            ):
+                entries = candidate_entries(edge.target, edge.kind)
+                local = [qualified for qualified, parent in entries if parent == scope]
+                if len(local) == 1:
+                    edge = EdgeInfo(
+                        kind=edge.kind, source=edge.source, target=local[0],
+                        file_path=edge.file_path, line=edge.line, extra=edge.extra,
+                    )
+                    resolved.append(edge)
+                    continue
+                if entries and not any(parent is None for _, parent in entries):
+                    # A same-named member in a different lexical class is
+                    # not evidence of the target of this unbound call.
+                    resolved.append(edge)
+                    continue
             if (
                 is_go
                 and edge.kind == "CALLS"
@@ -11788,6 +11815,32 @@ class CodeParser:
         )
         return True
 
+    def _index_ambiguous_method_scopes(self, root, language: str, import_map: dict) -> None:
+        """Carry full method scopes only where legacy leaf scopes would collide.
+
+        The per-file import map already carries internal resolver metadata.
+        Keeping this index there avoids parser-instance state leaking between
+        files (including recursive parsing). The tree is visited once.
+        """
+        if language not in ("python", "ruby"):
+            return
+        scopes: dict[str, set[str]] = {}
+        methods: list[tuple[int, str, str]] = []
+        pending = [(root, "")]
+        while pending:
+            node, scope = pending.pop()
+            if node.type in self._class_types[language]:
+                name = self._get_name(node, language, "class")
+                if name:
+                    scope = f"{scope}.{name}" if scope else name
+                    scopes.setdefault(name, set()).add(scope)
+            if node.type in self._function_types[language] and scope:
+                methods.append((node.id, scope.rsplit(".", 1)[-1], scope))
+            pending.extend((child, scope) for child in reversed(node.named_children))
+        for node_id, leaf, scope in methods:
+            if len(scopes.get(leaf, ())) > 1:
+                import_map[f"__crg_method_scope__:{node_id}"] = scope
+
     def _extract_functions(
         self,
         child,
@@ -11882,6 +11935,10 @@ class CodeParser:
 
         parent_name = enclosing_class
         container_scope = enclosing_class
+        if language in ("python", "ruby") and import_map is not None:
+            parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
+            container_scope = parent_name
+            enclosing_class = parent_name
         julia_qualifier: Optional[str] = None
         if language == "julia":
             lexical_parent = self._julia_scope_join(
