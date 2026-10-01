@@ -1303,7 +1303,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # walker can't bridge the FnProto signature to its sibling Block body,
     # so the whole thing is dispatched via _extract_zig_constructs.
     "zig": [],
-    "powershell": ["function_statement"],
+    "powershell": ["function_statement", "class_method_definition"],
     # Julia: short-form functions `f(x) = expr` parse as `assignment` nodes
     # (not a dedicated definition node) and are handled in
     # _extract_julia_constructs.
@@ -1429,7 +1429,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     # SuffixExpr); calls are walked explicitly in
     # _extract_zig_calls_in_subtree from inside function bodies.
     "zig": [],
-    "powershell": ["command_expression"],
+    "powershell": ["command"],
     "julia": [
         "call_expression",
         "broadcast_call_expression",
@@ -11870,6 +11870,9 @@ class CodeParser:
             decorators = tuple(deco_list)
 
         is_test = _is_test_function(name, file_path, decorators, repo_root=self._repo_root)
+        # Test-* is an approved PowerShell verb, not a test declaration.
+        if language == "powershell" and name.casefold().startswith("test-"):
+            is_test = self._is_test_path(file_path)
         # PHPUnit's name convention is ``test*`` (not only ``test_*``).
         if (
             language == "php"
@@ -16988,6 +16991,11 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        if language == "powershell":
+            for child in node.children:
+                if child.type in ("function_name", "simple_name"):
+                    return child.text.decode("utf-8", errors="replace")
+            return None
         # Dart: function_signature has a return-type node before the identifier;
         # search only for 'identifier' to avoid returning the return type name.
         if language == "dart" and node.type == "function_signature":
@@ -18568,7 +18576,7 @@ class CodeParser:
                 return method_node.text.decode("utf-8", errors="replace")
 
         # Bash: `command` node's first child is the command name.
-        if language == "bash" and node.type == "command":
+        if language in ("bash", "powershell") and node.type == "command":
             for child in node.children:
                 if child.type == "command_name":
                     # command_name wraps a word — get its text
