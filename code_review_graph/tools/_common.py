@@ -232,6 +232,13 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
 def _resolve_graph_file_paths(
     store: GraphStore, root: Path, file_paths: list[str],
 ) -> list[str]:
+    """Compatibility wrapper returning only matched graph paths."""
+    return _resolve_graph_file_paths_with_unmatched(store, root, file_paths)[0]
+
+
+def _resolve_graph_file_paths_with_unmatched(
+    store: GraphStore, root: Path, file_paths: list[str],
+) -> tuple[list[str], list[str]]:
     """Resolve user-facing file paths to the paths stored in the graph.
 
     Graphs may contain absolute paths, repo-relative paths, or cwd-relative
@@ -239,6 +246,7 @@ def _resolve_graph_file_paths(
     repo root, so exact matching alone can miss existing graph nodes.
     """
     resolved: list[str] = []
+    unmatched: list[str] = []
     seen: set[str] = set()
 
     def add(path: str) -> None:
@@ -247,6 +255,7 @@ def _resolve_graph_file_paths(
             seen.add(path)
 
     for file_path in file_paths:
+        matched = False
         raw = file_path.replace("\\", "/")
         candidates = [raw]
         path = Path(file_path)
@@ -260,6 +269,7 @@ def _resolve_graph_file_paths(
 
         for candidate in candidates:
             if store.get_nodes_by_file(candidate):
+                matched = True
                 add(candidate)
 
         suffixes = []
@@ -270,9 +280,22 @@ def _resolve_graph_file_paths(
 
         for suffix in suffixes:
             for matched_path in store.get_files_matching(suffix):
+                matched = True
                 add(matched_path)
+        if not matched and file_path not in unmatched:
+            unmatched.append(file_path)
 
-    return resolved
+    return resolved, unmatched
+
+
+def _unmatched_file_warning(unmatched: list[str]) -> str:
+    """Explain incomplete path coverage without growing an unbounded summary."""
+    if not unmatched:
+        return ""
+    paths = ", ".join(unmatched[:5])
+    if len(unmatched) > 5:
+        paths += f" (+{len(unmatched) - 5} more)"
+    return f"  - {len(unmatched)} requested file(s) are not indexed: {paths}"
 
 
 # ---------------------------------------------------------------------------
