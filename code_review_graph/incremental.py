@@ -443,6 +443,9 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
     2. CRG_DATA_DIR environment variable (global override)
     3. Default: <repo>/.code-review-graph/
 
+    A missing registered directory is ignored when a local graph.db already
+    exists, so an expired temporary relocation cannot strand that graph.
+
     By default, ``<repo_root>/.code-review-graph``. If the
     ``CRG_DATA_DIR`` environment variable is set, it is used verbatim
     instead — letting you keep graphs outside the working tree (useful
@@ -463,9 +466,17 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
             registry_data_dir = Registry().get_data_dir_for_repo(str(repo_root))
             if registry_data_dir:
                 data_dir = Path(registry_data_dir).resolve()
-                if create:
-                    _create_data_dir(data_dir)
-                return data_dir
+                local_dir = repo_root / ".code-review-graph"
+                if not data_dir.exists() and (local_dir / "graph.db").is_file():
+                    logger.warning(
+                        "Registered graph directory %s is missing; falling back to "
+                        "normal resolution (local graph: %s).",
+                        data_dir, local_dir,
+                    )
+                else:
+                    if create:
+                        _create_data_dir(data_dir)
+                    return data_dir
     except Exception as exc:
         # If registry lookup fails, log and fall through to other methods
         logger.debug("Registry lookup failed for %s: %s", repo_root, exc)
