@@ -19,6 +19,11 @@ uv run pytest tests/test_parser.py -v                                           
 
 CI runs the suite on Python 3.10, 3.11, 3.12 and 3.13 and fails below 65% coverage.
 
+`tests/test_parser_grammar_contract.py` checks every built-in class, function, import,
+and call dispatch name against its bundled Tree-sitter grammar. When updating a grammar
+or adding dispatch entries, use the grammar's actual named node types. This contract
+checks configured dispatch names; language fixtures still verify extraction behavior.
+
 ## Linting and Type Checking
 
 ```bash

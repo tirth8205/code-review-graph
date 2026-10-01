@@ -1173,13 +1173,13 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
-        "record_declaration", "record_struct_declaration",
+        "record_declaration",
     ],
     "ruby": ["class", "module"],
     "r": [],  # Classes detected via call pattern-matching, not AST node types
     "perl": ["package_statement", "class_statement", "role_statement"],
     "kotlin": ["class_declaration", "object_declaration"],
-    "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
+    "swift": ["class_declaration", "protocol_declaration"],
     "php": [
         "class_declaration", "interface_declaration",
         "trait_declaration", "enum_declaration",
@@ -1197,7 +1197,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "luau": ["type_definition"],  # Luau type aliases; table-based OOP via constructs handler
     "objc": [
         "class_interface", "class_implementation",
-        "category_interface", "protocol_declaration",
+        "protocol_declaration",
     ],
     "bash": [],  # Shell has no classes
     # Elixir: `defmodule Name do ... end` is a ``call`` node whose first
@@ -1393,7 +1393,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "c": ["call_expression"],
     "cpp": ["call_expression"],
     "csharp": ["invocation_expression", "object_creation_expression"],
-    "ruby": ["call", "method_call"],
+    "ruby": ["call"],
     "r": ["call"],
     "perl": [
         "function_call_expression", "method_call_expression",
@@ -1429,7 +1429,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     # SuffixExpr); calls are walked explicitly in
     # _extract_zig_calls_in_subtree from inside function bodies.
     "zig": [],
-    "powershell": ["command_expression"],
+    "powershell": ["command"],
     "julia": [
         "call_expression",
         "broadcast_call_expression",
