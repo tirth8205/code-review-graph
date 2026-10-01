@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Optional, Union
 
 from .flows import _has_framework_decorator, _matches_entry_name
-from .graph import GraphStore, _sanitize_name
+from .graph import GraphStore, _compatible_edge_languages, _sanitize_name
 from .parser import is_test_file as _is_test_file
 from .parser import repo_relative_path as _repo_relative
 
@@ -300,22 +300,55 @@ def find_dead_code(
     # Build set of class names referenced in function type annotations.
     type_ref_names = _collect_type_referenced_names(store)
 
-    # Build class hierarchy: class_qualified_name -> [bare_base_names]
+    # Read edge evidence once. In particular, suffix/member LIKE lookups inside
+    # the candidate loop scan the entire edges table once per symbol (#982).
+    # Store only the fields needed for evidence, deduplicated across call sites.
+    incoming_kinds: dict[str, set[str]] = {}
+    bare_files_by_language: dict[tuple[str, str, str | None], set[str]] = {}
+    bare_files_all: dict[tuple[str, str], set[str]] = {}
+    suffix_call_files: dict[str, set[str]] = {}
+    tested_files: dict[str, set[str]] = {}
+    member_call_names: set[str] = set()
     class_bases: dict[str, list[str]] = {}
+    base_targets: dict[str, set[str]] = {}
+    importer_files: dict[str, set[str]] = {}
     conn = store._conn
     for row in conn.execute(
-        "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'INHERITS'"
-    ).fetchall():
-        base = row[1].rsplit("::", 1)[-1] if "::" in row[1] else row[1]
-        class_bases.setdefault(row[0], []).append(base)
+        "SELECT e.kind, e.source_qualified, e.target_qualified, e.file_path, n.language "
+        "FROM edges e LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+        "WHERE e.kind IN ('CALLS', 'TESTED_BY', 'IMPORTS_FROM', 'INHERITS', 'REFERENCES')"
+    ):
+        edge_kind, source, target, file_path, language = row
+        incoming_kinds.setdefault(target, set()).add(edge_kind)
+        if edge_kind in ("CALLS", "INHERITS"):
+            bare_files_by_language.setdefault((edge_kind, target, language), set()).add(file_path)
+            bare_files_all.setdefault((edge_kind, target), set()).add(file_path)
+        if edge_kind == "CALLS":
+            if "::" in target:
+                suffix_call_files.setdefault(target.rsplit("::", 1)[-1].lower(), set()).add(
+                    file_path,
+                )
+            # Preserve the old substring heuristic: Widget. also matches
+            # MyWidget. (conservative for dead-code deletion suggestions).
+            for match in re.finditer(r"([\w$]+)\.", target):
+                component = match.group(1).lower()
+                member_call_names.update(component[i:] for i in range(len(component)))
+        elif edge_kind == "TESTED_BY":
+            tested_files.setdefault(source, set()).add(file_path)
+        elif edge_kind == "INHERITS":
+            base = target.rsplit("::", 1)[-1]
+            class_bases.setdefault(source, []).append(base)
+            base_targets.setdefault(source, set()).add(target)
+        elif edge_kind == "IMPORTS_FROM":
+            importer_files.setdefault(file_path, set()).add(target)
 
-    # Build import graph: file_path -> set of file_paths it imports from.
-    # Used to filter bare-name caller matches to plausible callers.
-    importer_files: dict[str, set[str]] = {}
-    for row in conn.execute(
-        "SELECT file_path, target_qualified FROM edges WHERE kind = 'IMPORTS_FROM'"
-    ).fetchall():
-        importer_files.setdefault(row[0], set()).add(row[1])
+    def _bare_files(name: str, language: str, edge_kind: str = "CALLS") -> set[str]:
+        languages = _compatible_edge_languages(language) if language else None
+        if languages is None:
+            return bare_files_all.get((edge_kind, name), set())
+        return set().union(*(
+            bare_files_by_language.get((edge_kind, name, lang), set()) for lang in languages
+        ))
 
     # Build set of globally unique names (only one non-test node with that name).
     # For unique names, any bare-name CALLS edge is reliable — no ambiguity.
@@ -421,10 +454,9 @@ def find_dead_code(
             node.qualified_name.rsplit(".", 1)[0] if node.parent_name else None
         )
         if _check_qn:
-            outgoing = store.get_edges_by_source(_check_qn)
             base_names = {
-                e.target_qualified.rsplit("::", 1)[-1]
-                for e in outgoing if e.kind == "INHERITS"
+                target.rsplit("::", 1)[-1]
+                for target in base_targets.get(_check_qn, ())
             }
             if base_names & _FRAMEWORK_BASE_CLASSES:
                 _is_framework_class = True
@@ -470,10 +502,7 @@ def find_dead_code(
         # they are called polymorphically via the base class reference.
         if node.kind == "Function" and node.parent_name:
             parent_qn = node.qualified_name.rsplit(".", 1)[0]
-            parent_edges = store.get_edges_by_source(parent_qn)
-            base_class_names = [
-                e.target_qualified for e in parent_edges if e.kind == "INHERITS"
-            ]
+            base_class_names = list(base_targets.get(parent_qn, ()))
             for base_name in base_class_names:
                 # Try fully-qualified base first, then bare name match
                 base_method_qn = f"{base_name}.{node.name}"
@@ -495,73 +524,47 @@ def find_dead_code(
             if base_name is not None:
                 continue
 
-        incoming = store.get_edges_by_target(node.qualified_name)
+        incoming = set(incoming_kinds.get(node.qualified_name, ()))
         # Also check class-qualified edges (e.g. "ClassName::method") which
         # lack the file-path prefix used in node.qualified_name.
-        if not any(e.kind == "CALLS" for e in incoming) and node.parent_name:
+        if "CALLS" not in incoming and node.parent_name:
             class_qn = f"{node.parent_name}::{node.name}"
-            incoming = incoming + store.get_edges_by_target(class_qn)
+            incoming.update(incoming_kinds.get(class_qn, ()))
         # Also check bare-name and partially-qualified edges.
         # CALLS targets may be bare ("funcName"), class-qualified
         # ("Class::method"), or workspace-qualified ("pkg/dir::funcName").
-        if not any(e.kind == "CALLS" for e in incoming):
-            bare = store.search_edges_by_target_name(
-                node.name,
-                kind="CALLS",
-                language=node.language or None,
-            )
-            # Also search for partially-qualified targets ending with ::name
-            suffix_rows = conn.execute(
-                "SELECT * FROM edges WHERE kind = 'CALLS'"
-                " AND target_qualified LIKE ?",
-                (f"%::{node.name}",),
-            ).fetchall()
-            suffix_edges = [store._row_to_edge(r) for r in suffix_rows]
-            all_bare = bare + suffix_edges
-            all_bare = [
-                e for e in all_bare
-                if _is_plausible_caller(e.file_path, node.file_path, node.name)
-            ]
-            incoming = incoming + all_bare
+        if "CALLS" not in incoming:
+            bare_files = _bare_files(node.name, node.language or "")
+            suffix_files = suffix_call_files.get(node.name.lower(), set())
+            if any(_is_plausible_caller(file, node.file_path, node.name)
+                   for file in bare_files | suffix_files):
+                incoming.add("CALLS")
         # TESTED_BY edges are stored as source=production, target=test by the
         # parser, so a tested production node is the *source* of its TESTED_BY
         # edge -- look outgoing, not incoming. See: #515
-        outgoing_tb = [
-            e for e in store.get_edges_by_source(node.qualified_name)
-            if e.kind == "TESTED_BY"
-        ]
+        outgoing_tb = bool(tested_files.get(node.qualified_name))
         if not outgoing_tb and node.parent_name:
             # Class-qualified source (e.g. "ClassName::method") which lacks the
             # file-path prefix used in node.qualified_name.
             class_qn = f"{node.parent_name}::{node.name}"
-            outgoing_tb += [
-                e for e in store.get_edges_by_source(class_qn)
-                if e.kind == "TESTED_BY"
-            ]
+            outgoing_tb = bool(tested_files.get(class_qn))
         if not outgoing_tb:
             # Bare-name source fallback: unresolved TESTED_BY edges may store the
             # production function by its plain name (e.g. "authenticate").
-            bare_rows = conn.execute(
-                "SELECT * FROM edges WHERE kind = 'TESTED_BY' AND source_qualified = ?",
-                (node.name,),
-            ).fetchall()
-            outgoing_tb += [
-                e for e in (store._row_to_edge(r) for r in bare_rows)
-                if _is_plausible_caller(e.file_path, node.file_path, node.name)
-            ]
-        # Check INHERITS -- classes with subclasses are not dead.
-        if node.kind == "Class" and not any(e.kind == "INHERITS" for e in incoming):
-            bare_inh = store.search_edges_by_target_name(
-                node.name,
-                kind="INHERITS",
-                language=node.language or None,
+            outgoing_tb = any(
+                _is_plausible_caller(file, node.file_path, node.name)
+                for file in tested_files.get(node.name, ())
             )
-            incoming = incoming + bare_inh
-        has_callers = any(e.kind == "CALLS" for e in incoming)
+        # Check INHERITS -- classes with subclasses are not dead.
+        if node.kind == "Class" and "INHERITS" not in incoming:
+            if ("INHERITS" in incoming_kinds.get(node.name, ())
+                    and _bare_files(node.name, node.language or "", "INHERITS")):
+                incoming.add("INHERITS")
+        has_callers = "CALLS" in incoming
         has_test_refs = bool(outgoing_tb)
-        has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
-        has_references = any(e.kind == "REFERENCES" for e in incoming)
-        has_subclasses = any(e.kind == "INHERITS" for e in incoming)
+        has_importers = "IMPORTS_FROM" in incoming
+        has_references = "REFERENCES" in incoming
+        has_subclasses = "INHERITS" in incoming
 
         # For classes with no direct references, check if any member has callers.
         no_refs = not (
@@ -569,15 +572,7 @@ def find_dead_code(
             or has_references or has_subclasses
         )
         if node.kind == "Class" and no_refs:
-            member_prefix = node.qualified_name + "."
-            # Also check bare class-name pattern (unresolved CALLS targets)
-            bare_prefix = node.name + "."
-            member_calls = conn.execute(
-                "SELECT COUNT(*) FROM edges WHERE kind = 'CALLS'"
-                " AND (target_qualified LIKE ? OR target_qualified LIKE ?)",
-                (f"%{member_prefix}%", f"%{bare_prefix}%"),
-            ).fetchone()[0]
-            if member_calls > 0:
+            if node.name.lower() in member_call_names:
                 has_callers = True
 
         if not (
@@ -599,12 +594,7 @@ def find_dead_code(
                             (base_name, node.name),
                         ).fetchall()
                         for (base_method_qn,) in rows:
-                            if conn.execute(
-                                "SELECT 1 FROM edges "
-                                "WHERE target_qualified = ? AND kind = 'CALLS' "
-                                "LIMIT 1",
-                                (base_method_qn,),
-                            ).fetchone():
+                            if "CALLS" in incoming_kinds.get(base_method_qn, ()):
                                 has_callers = True
                                 break
                         if has_callers:
