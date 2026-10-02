@@ -525,6 +525,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` にするとクラウド埋め込みの送信警告を抑制 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True` を要する HuggingFace モデルを許可 | `0` |
+| `CRG_VECTOR_CACHE` | `1` にすると、デコード済みの埋め込みベクトルをセマンティック検索の合間もメモリに保持し、クエリごとに SQLite からすべて読み直さない。代わりに RAM（キャッシュするインデックスごとに ベクトル数 × 次元数 × 4 バイト）と、キャッシュ対象のデータベースごとにプロセス終了まで開いたままの読み取り接続 1 本を使う。Windows では開いている間 `graph.db` を削除・置換できない | - |
 | `CRG_MAX_IMPACT_NODES` | 影響分析に含める最大ノード数 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 影響範囲分析の探索の深さ | `2` |
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |
