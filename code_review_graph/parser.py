@@ -48,6 +48,7 @@ except ImportError:
     _YamlMapping = _YamlSequence = _YamlScalar = None  # type: ignore[assignment,misc]
 
 from .tsconfig_resolver import TsconfigResolver
+from .workspace_resolver import WorkspaceResolver
 
 
 class CellInfo(NamedTuple):
@@ -2985,6 +2986,9 @@ class CodeParser:
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
+        self._workspace_resolver = WorkspaceResolver(
+            repo_root=self._repo_root, file_exists=self._file_exists_exact,
+        )
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
         # Cargo discovery is shared by every Rust import/call in a source file.
@@ -15681,6 +15685,14 @@ class CodeParser:
                 # Non-relative import — try tsconfig path alias resolution
                 resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
                 if resolved:
+                    return resolved
+                # Then a sibling package of an npm/yarn/pnpm workspace (#1030),
+                # but never an edge to a file the build would not index.
+                resolved = self._workspace_resolver.resolve(module, file_path)
+                if resolved and (
+                    self._repo_root is None
+                    or self._path_is_indexed(Path(resolved), self._repo_root)
+                ):
                     return resolved
 
         elif language == "dart":
