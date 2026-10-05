@@ -13,6 +13,14 @@ Exit codes:
     0  rendered successfully (gate passed or disabled)
     2  the input file could not be read
     3  risk gate breached (``--fail-on-risk high|critical``)
+    4  detect-changes did not produce an analysis at all
+
+Exit 4 exists because "no changes" and "could not determine the changes"
+must not render as the same comment. ``detect-changes`` prints exactly
+``No changes detected.`` for a genuinely clean tree and exits 0; anything
+else non-JSON on its stdout means the analysis never happened, and a review
+gate that rendered a reassuring comment for that would be waving through a
+pull request nobody looked at.
 """
 
 from __future__ import annotations
@@ -40,8 +48,22 @@ RISK_THRESHOLDS: dict[str, float] = {"critical": 0.85, "high": 0.7, "medium": 0.
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_CELL = 120
-# GitHub rejects comment bodies over 65,536 characters; leave headroom.
+# GitHub rejects comment bodies over 65,536 characters, and the trusted
+# workflow that publishes this report (.github/workflows/pr-review-comment.yml)
+# rejects an artifact larger than MAX_REPORT_BYTES. This is that same budget,
+# and it is a budget for the *finished* body: the truncation notice and the
+# footer have to fit inside it, or every truncated report is rejected by the
+# consumer and the largest pull requests get no comment at all. Measured in
+# UTF-8 bytes, because that is what the consumer measures.
 _MAX_BODY = 60_000
+# main() writes the body followed by a newline, and the consumer measures the
+# file on disk, not the string this module returns. That newline is therefore
+# part of what is measured and one byte of the budget belongs to it: without
+# this reservation a report sized at exactly _MAX_BODY becomes a 60,001-byte
+# artifact and is rejected by the very check the budget exists to satisfy.
+_ARTIFACT_NEWLINE_BYTES = len(b"\n")
+#: What the body itself may occupy, once the artifact's newline is reserved.
+_MAX_BODY_TEXT = _MAX_BODY - _ARTIFACT_NEWLINE_BYTES
 
 
 def risk_level(score: float) -> str:
@@ -141,7 +163,10 @@ def _functions_table(
     priorities: list[dict[str, Any]],
     gap_names: set[str],
     max_functions: int,
+    indirect_names: set[str] | None = None,
+    gaps_truncated: bool = False,
 ) -> list[str]:
+    indirect_names = indirect_names or set()
     lines = [
         "### Risk-scored changes",
         "",
@@ -153,8 +178,17 @@ def _functions_table(
         name = entry.get("qualified_name") or entry.get("name") or "?"
         if entry.get("is_test"):
             tested = "(test)"
+        elif name in indirect_names:
+            # Distinct from both "no" and "yes": a test runs through this
+            # symbol but nothing asserts on it directly.
+            tested = "indirect"
         elif name in gap_names:
             tested = "no"
+        elif gaps_truncated:
+            # Absence from a truncated gap list proves nothing. Claiming "yes"
+            # here is the strongest possible overclaim: a symbol the report
+            # itself classified as a gap renders as one with its own tests.
+            tested = "?"
         else:
             tested = "yes"
         lines.append(
@@ -187,8 +221,7 @@ def _flows_section(flows: list[dict[str, Any]], max_flows: int) -> list[str]:
     return lines
 
 
-def _gaps_section(gaps: list[dict[str, Any]], max_gaps: int = 5) -> list[str]:
-    lines = ["### Test gaps", ""]
+def _dedup_gaps(gaps: list[dict[str, Any]], max_gaps: int) -> list[dict[str, Any]]:
     seen: set[str] = set()
     shown: list[dict[str, Any]] = []
     for gap in gaps:
@@ -199,12 +232,85 @@ def _gaps_section(gaps: list[dict[str, Any]], max_gaps: int = 5) -> list[str]:
         shown.append(gap)
         if len(shown) >= max_gaps:
             break
-    for gap in shown:
-        name = gap.get("qualified_name") or gap.get("name") or "?"
-        lines.append(f"- {md_escape(relativize_path(name))} ({_location(gap)})")
-    remaining = len(gaps) - len(shown)
-    if remaining > 0:
-        lines.append(f"- ...and {remaining} more without direct tests")
+    return shown
+
+
+def _gaps_section(
+    gaps: list[dict[str, Any]],
+    max_gaps: int = 5,
+    uncovered_total: int | None = None,
+    indirect_total: int | None = None,
+) -> list[str]:
+    """Render the gap list, keeping the two coverage claims apart.
+
+    A symbol with no tested caller anywhere near it and one a test only reaches
+    through its caller are different asks -- write a test versus add an
+    assertion -- so they get separate headings rather than one undifferentiated
+    "untested" list. Entries from an older report with no ``coverage`` key fall
+    into the unreached group, which is what they meant before the field existed.
+
+    The totals come from the report when it supplies them, because ``gaps`` is
+    bounded by every consumer and counting the rendered rows understates a
+    truncated report.
+    """
+    unreached = [g for g in gaps if g.get("coverage") != "indirect"]
+    indirect = [g for g in gaps if g.get("coverage") == "indirect"]
+    if not isinstance(uncovered_total, int):
+        uncovered_total = len(unreached)
+    if not isinstance(indirect_total, int):
+        indirect_total = len(indirect)
+
+    lines: list[str] = []
+    if unreached or not indirect:
+        lines.extend(["### Test gaps", ""])
+        shown = _dedup_gaps(unreached, max_gaps)
+        for gap in shown:
+            name = gap.get("qualified_name") or gap.get("name") or "?"
+            lines.append(f"- {md_escape(relativize_path(name))} ({_location(gap)})")
+        # "no direct test", not "no test in reach". The graph knows its own
+        # TESTED_BY edges and CALLS paths; it does not know the test suite. A
+        # test that reaches production code through importlib, a fixture or a
+        # subprocess leaves no edge, and two such symbols sit in this very
+        # list on the delta that motivated the split.
+        remaining = uncovered_total - len(shown)
+        if remaining > 0:
+            lines.append(f"- ...and {remaining} more with no direct test")
+
+    if indirect:
+        if lines:
+            lines.append("")
+        lines.extend([
+            "### Reached only through a caller",
+            "",
+            "No test names these directly, but a tested caller reaches them "
+            "along the call path shown. That is a path in the call graph, not "
+            "a record of execution -- the caller's tests may never take this "
+            "branch. Treat it as where to look, not as coverage: these count "
+            "as gaps and are scored as untested.",
+            "",
+        ])
+        shown = _dedup_gaps(indirect, max_gaps)
+        for gap in shown:
+            name = gap.get("qualified_name") or gap.get("name") or "?"
+            via = str(gap.get("covered_via") or "?")
+            depth = gap.get("covered_depth")
+            hops = f"{depth} hop(s)" if depth else "caller"
+            lines.append(
+                f"- {md_escape(relativize_path(name))} ({_location(gap)}) — via "
+                f"{md_escape(relativize_path(via))}, {hops}"
+            )
+        remaining = indirect_total - len(shown)
+        if remaining > 0:
+            lines.append(f"- ...and {remaining} more reached only through a caller")
+    elif indirect_total:
+        # The headline promised this class; say where it went rather than
+        # letting the section vanish and the two disagree.
+        if lines:
+            lines.append("")
+        lines.append(
+            f"_{indirect_total} more gap(s) are reached only through a caller; "
+            "the list above was truncated before them._"
+        )
     return lines
 
 
@@ -223,23 +329,61 @@ def render_markdown(
     gap_names = {
         str(g.get("qualified_name") or g.get("name") or "") for g in gaps
     }
+    indirect_names = {
+        str(g.get("qualified_name") or g.get("name") or "")
+        for g in gaps
+        if g.get("coverage") == "indirect"
+    }
+    # The counts come from the report when it supplies them: every consumer
+    # bounds ``test_gaps``, so counting the rendered list would understate a
+    # truncated report.
+    indirect_total = report.get("test_gaps_indirect")
+    if not isinstance(indirect_total, int):
+        indirect_total = len(indirect_names)
+    uncovered_total = report.get("test_gaps_uncovered")
+    if not isinstance(uncovered_total, int):
+        uncovered_total = len(gaps) - indirect_total
+    # The headline total has to come from the same place as the split, or a
+    # truncated report prints "25 test gap(s) (73 ..., 9 ...)" -- a number
+    # beside its own parts, which do not add up to it. ``test_gaps`` is
+    # bounded by every consumer; these counts are not.
+    gaps_total = report.get("test_gaps_total")
+    if not isinstance(gaps_total, int):
+        gaps_total = uncovered_total + indirect_total
+    truncated = gaps_total > len(gaps)
 
     lines: list[str] = [MARKER, "", "## code-review-graph review", ""]
+    gap_text = f"{gaps_total} test gap(s)"
+    if indirect_total:
+        gap_text += (
+            f" ({uncovered_total} with no tested caller found, "
+            f"{indirect_total} reached only through a caller)"
+        )
     lines.append(
         f"**Overall risk: {score:.2f} ({risk_level(score).upper()})** — "
         f"{len(changed)} changed function(s)/class(es), "
-        f"{len(flows)} affected flow(s), {len(gaps)} test gap(s)"
+        f"{len(flows)} affected flow(s), {gap_text}"
     )
 
     if priorities:
         lines.append("")
-        lines.extend(_functions_table(priorities, gap_names, max_functions))
+        lines.extend(
+            _functions_table(
+                priorities, gap_names, max_functions, indirect_names, truncated
+            )
+        )
     if flows:
         lines.append("")
         lines.extend(_flows_section(flows, max_flows))
     if gaps:
         lines.append("")
-        lines.extend(_gaps_section(gaps))
+        lines.extend(
+            _gaps_section(
+                gaps,
+                uncovered_total=uncovered_total,
+                indirect_total=indirect_total,
+            )
+        )
 
     savings = report.get("context_savings") or {}
     saved_tokens = savings.get("saved_tokens")
@@ -260,10 +404,38 @@ def render_markdown(
         )
 
     lines.extend(["", "---", "", FOOTER])
-    body = "\n".join(lines)
-    if len(body) > _MAX_BODY:
-        body = body[:_MAX_BODY] + "\n\n*Report truncated.*\n\n" + FOOTER
-    return body
+    return _fit_to_budget("\n".join(lines))
+
+
+def _fit_to_budget(body: str) -> str:
+    """Return *body* trimmed so the written artifact fits ``_MAX_BODY``.
+
+    Everything the consumer measures is inside the budget: the truncation
+    notice, the footer, and the newline ``main`` writes after the body. The
+    notice and footer are subtracted before the report is cut, and the cut
+    lands on a line boundary so the last row of a markdown table is never
+    left half-written.
+    """
+    encoded = body.encode("utf-8")
+    if len(encoded) <= _MAX_BODY_TEXT:
+        return body
+    suffix = "\n\n*Report truncated.*\n\n" + FOOTER
+    budget = _MAX_BODY_TEXT - len(suffix.encode("utf-8"))
+    head = encoded[:budget].decode("utf-8", "ignore")
+    newline = head.rfind("\n")
+    if newline > 0:
+        head = head[:newline]
+    return head + suffix
+
+
+def _artifact_text(body: str) -> str:
+    """The exact bytes written out for *body*.
+
+    The trailing newline is what a text file ends with, and it is also the
+    byte ``_MAX_BODY_TEXT`` reserves. Both callers below go through here so
+    the reservation and the write cannot drift apart.
+    """
+    return body + "\n"
 
 
 def render_no_changes() -> str:
@@ -283,6 +455,32 @@ def render_no_changes() -> str:
     )
 
 
+def render_not_analyzed(detail: str) -> str:
+    """Comment for output that is neither an analysis nor a clean tree."""
+    return "\n".join(
+        [
+            MARKER,
+            "",
+            "## code-review-graph review",
+            "",
+            "**The change analysis did not run, so this pull request has not "
+            "been reviewed by code-review-graph.** This is not an all-clear.",
+            "",
+            "```",
+            md_escape(detail, limit=400) or "(no output)",
+            "```",
+            "",
+            "---",
+            "",
+            FOOTER,
+        ]
+    )
+
+
+#: The exact line ``detect-changes`` prints for a genuinely unchanged tree.
+NO_CHANGES_MARKER = "No changes detected."
+
+
 def load_report(text: str) -> dict[str, Any] | None:
     """Parse detect-changes output; None when it is not a JSON object.
 
@@ -296,6 +494,16 @@ def load_report(text: str) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     return data
+
+
+def is_clean_tree(text: str) -> bool:
+    """True only for detect-changes' own "nothing changed" line.
+
+    Anything else that failed to parse as JSON — an error message, a partial
+    write, an empty file because the command died — is the analysis not
+    having happened, which is a different thing entirely.
+    """
+    return text.strip() == NO_CHANGES_MARKER
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -351,7 +559,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     report = load_report(text)
-    if report is None:
+    not_analyzed = report is None and not is_clean_tree(text)
+    if not_analyzed:
+        logger.error(
+            "detect-changes produced no analysis; this is NOT an all-clear: %s",
+            text.strip()[:400] or "(no output)",
+        )
+        body = render_not_analyzed(text)
+    elif report is None:
         body = render_no_changes()
     else:
         body = render_markdown(
@@ -362,13 +577,17 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.quiet:
         if args.output == "-":
-            sys.stdout.write(body + "\n")
+            sys.stdout.write(_artifact_text(body))
         else:
             try:
-                Path(args.output).write_text(body + "\n", encoding="utf-8")
+                Path(args.output).write_text(_artifact_text(body), encoding="utf-8")
             except OSError as exc:
                 logger.error("Cannot write output file %s: %s", args.output, exc)
                 return 2
+
+    if not_analyzed:
+        # Distinct from the risk gate: the risk is unknown, not low.
+        return 4
 
     if args.fail_on_risk != "none" and report is not None:
         score = float(report.get("risk_score") or 0.0)

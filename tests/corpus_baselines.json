@@ -1,0 +1,187 @@
+{
+  "_generated_by": "python -m tests.real_repo_corpus --record",
+  "bands": {
+    "_rationale": "A pinned commit parsed by a fixed build is deterministic, so these bands do not model measurement noise. They model how much intentional change the project may make before the baseline has to be re-recorded. Low factors are tight because losing nodes, files or edges is always a regression; high factors are loose because adding extraction is the normal direction of travel. build_seconds is the exception: wall clock varies with the machine, so its budget is set to catch an algorithmic blow-up, not a slower runner.",
+    "_files_parsed": "The inventory of a fixed commit only moves when the ignore rules or the supported-extension list change. -2% is 'must not lose files'; +25% leaves room for a newly supported extension.",
+    "_total_nodes": "-8% is several hundred nodes on every repo here, far outside any legitimate tidy-up; +40% admits a whole new node kind without a forced re-record but still catches runaway duplication.",
+    "_total_edges": "Wider than nodes in both directions because resolvers routinely trade edges for precision: -10% still means one relationship in ten stopped being recorded.",
+    "_resolved_edge_share": "A floor in percentage points, not a ratio, so a repo that starts near 0.20 and one near 0.60 get the same absolute protection. 5pp is roughly a thousand edges on the larger repos.",
+    "_build_seconds": "max(3x, +20s): 3x catches a quadratic resolver; the +20s term keeps the sub-2-second repos from failing on scheduler noise.",
+    "files_parsed_low": 0.98,
+    "files_parsed_high": 1.25,
+    "total_nodes_low": 0.92,
+    "total_nodes_high": 1.4,
+    "total_edges_low": 0.9,
+    "total_edges_high": 1.5,
+    "file_nodes_low": 0.98,
+    "file_nodes_high": 1.25,
+    "resolved_edge_share_drop": 0.05,
+    "imports_resolved_share_drop": 0.05,
+    "build_seconds_multiplier": 3.0,
+    "build_seconds_floor": 20.0
+  },
+  "repos": {
+    "fastapi": {
+      "repo": "fastapi",
+      "language": "python",
+      "commit": "22381558446c5d1ac376680a6581dd63b3a04119",
+      "files_parsed": 1179,
+      "parse_errors": 0,
+      "files_without_nodes": 51,
+      "total_nodes": 6287,
+      "total_edges": 32613,
+      "file_nodes": 1128,
+      "resolved_edge_share": 0.5112,
+      "imports_resolved_share": 0.4759,
+      "dangling_contains_edges": 0,
+      "control_char_names": 0,
+      "build_seconds": 5.45,
+      "languages": [
+        "bash",
+        "javascript",
+        "python"
+      ]
+    },
+    "gin": {
+      "repo": "gin",
+      "language": "go",
+      "commit": "5c00df8afadd06cc5be530dde00fe6d9fa4a2e4a",
+      "files_parsed": 109,
+      "parse_errors": 0,
+      "files_without_nodes": 11,
+      "total_nodes": 1591,
+      "total_edges": 17266,
+      "file_nodes": 98,
+      "resolved_edge_share": 0.5142,
+      "imports_resolved_share": 0.0,
+      "dangling_contains_edges": 1,
+      "control_char_names": 0,
+      "build_seconds": 2.5,
+      "languages": [
+        "go"
+      ]
+    },
+    "zod": {
+      "repo": "zod",
+      "language": "typescript",
+      "commit": "59bbc03e10c636b9eb3c393dfeb552819774ec21",
+      "files_parsed": 534,
+      "parse_errors": 0,
+      "files_without_nodes": 11,
+      "total_nodes": 7082,
+      "total_edges": 98833,
+      "file_nodes": 523,
+      "resolved_edge_share": 0.5287,
+      "imports_resolved_share": 0.4337,
+      "dangling_contains_edges": 0,
+      "control_char_names": 0,
+      "build_seconds": 13.9,
+      "languages": [
+        "bash",
+        "javascript",
+        "tsx",
+        "typescript"
+      ]
+    },
+    "gson": {
+      "repo": "gson",
+      "language": "java",
+      "commit": "854c8255b625cf1e13c701a83ea9ccb4caaa576a",
+      "files_parsed": 272,
+      "parse_errors": 0,
+      "files_without_nodes": 8,
+      "total_nodes": 4125,
+      "total_edges": 47564,
+      "file_nodes": 264,
+      "resolved_edge_share": 0.5254,
+      "imports_resolved_share": 0.1458,
+      "dangling_contains_edges": 693,
+      "control_char_names": 0,
+      "build_seconds": 10.75,
+      "languages": [
+        "java"
+      ]
+    },
+    "newtonsoft-json": {
+      "repo": "newtonsoft-json",
+      "language": "csharp",
+      "commit": "09bb545d72969ad7fb4ea07db0d5c34f4fc07877",
+      "files_parsed": 952,
+      "parse_errors": 0,
+      "files_without_nodes": 2,
+      "total_nodes": 9094,
+      "total_edges": 76052,
+      "file_nodes": 950,
+      "resolved_edge_share": 0.6005,
+      "imports_resolved_share": 0.0,
+      "dangling_contains_edges": 486,
+      "control_char_names": 0,
+      "build_seconds": 20.57,
+      "languages": [
+        "csharp",
+        "powershell"
+      ]
+    },
+    "ripgrep": {
+      "repo": "ripgrep",
+      "language": "rust",
+      "commit": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "files_parsed": 125,
+      "parse_errors": 0,
+      "files_without_nodes": 5,
+      "total_nodes": 3518,
+      "total_edges": 29256,
+      "file_nodes": 120,
+      "resolved_edge_share": 0.4613,
+      "imports_resolved_share": 0.2236,
+      "dangling_contains_edges": 17,
+      "control_char_names": 0,
+      "build_seconds": 3.52,
+      "languages": [
+        "bash",
+        "lua",
+        "python",
+        "ruby",
+        "rust"
+      ]
+    },
+    "sinatra": {
+      "repo": "sinatra",
+      "language": "ruby",
+      "commit": "cb22afd7902b566b6eaba6c4ea89739494a65d12",
+      "files_parsed": 157,
+      "parse_errors": 0,
+      "files_without_nodes": 10,
+      "total_nodes": 1224,
+      "total_edges": 14647,
+      "file_nodes": 147,
+      "resolved_edge_share": 0.1969,
+      "imports_resolved_share": 0.0,
+      "dangling_contains_edges": 615,
+      "control_char_names": 0,
+      "build_seconds": 2.14,
+      "languages": [
+        "ruby"
+      ]
+    },
+    "guzzle": {
+      "repo": "guzzle",
+      "language": "php",
+      "commit": "93939470950a9b11e2e84204166ef5e048c55fe4",
+      "files_parsed": 141,
+      "parse_errors": 0,
+      "files_without_nodes": 4,
+      "total_nodes": 3221,
+      "total_edges": 43443,
+      "file_nodes": 137,
+      "resolved_edge_share": 0.5759,
+      "imports_resolved_share": 0.4505,
+      "dangling_contains_edges": 0,
+      "control_char_names": 0,
+      "build_seconds": 6.45,
+      "languages": [
+        "php"
+      ]
+    }
+  }
+}

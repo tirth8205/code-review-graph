@@ -58,6 +58,9 @@ htmlcov/
 # mypy
 .mypy_cache/
 
+# ruff
+.ruff_cache/
+
 # Excalidraw source files (PNGs are tracked, sources are not)
 *.excalidraw
 diagrams/export_pngs.mjs
@@ -77,25 +80,13 @@ docs/superpowers/
 # Draft/duplicate assets
 docs/assets/marketing-diagram*
 
-# One-off docs (audits, analyses, plans, articles)
-medium/
-Quality-Audit-Report.docx
-accessibility-audit.md
-cross-audit-synthesis.md
-design-critique.md
-design-handoff.md
-design-system-audit.md
-research-synthesis.md
-code-review-graph-analysis.md
-SCALING_AND_TOKEN_EFFICIENCY_PLAN.md
+# Local scratch space for audits, analyses and drafts
+scratch/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
 .beads-credential-key
 
-# Local-only pending files (temporary — revisit before tracking)
+# Local tool configuration
 .codex/
-2026-06-10-194632-local-command-caveatcaveat-the-messages-below.txt
-OC3_TECHNICAL_CONTRIBUTION.md
-OC3_TECHNICAL_CONTRIBUTION.pdf
-PRESENTATION_BRIEF.md
+.serena/

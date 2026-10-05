@@ -8,11 +8,30 @@ from pathlib import Path
 from typing import Any
 
 from ..config_keys import normalize_spring_config_key
+from ..constants import IMPORT_SCOPE_KEY
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
-from ..graph import GraphNode, GraphStore, _sanitize_name, edge_to_dict, node_to_dict
+from ..errors import ChangeDiscoveryError
+from ..graph import (
+    IMPACT_RESOLUTIONS,
+    QUERY_RESOLUTIONS,
+    RESOLUTION_ALL,
+    RESOLUTION_DIRECT,
+    RESOLUTION_UNRESOLVED,
+    GraphEdge,
+    GraphNode,
+    GraphStore,
+    _compatible_edge_languages,
+    _sanitize_name,
+    edge_to_dict,
+    import_scope_ancestors,
+    node_to_dict,
+)
 from ..hints import generate_hints, get_session
-from ..incremental import get_changed_files, get_db_path, get_staged_and_unstaged
+from ..incremental import (
+    discover_review_changes,
+    get_db_path,
+)
 from ..parser import normalize_file_path
 from ..search import hybrid_search
 from ..uncertainty import (
@@ -20,9 +39,28 @@ from ..uncertainty import (
     empty_query_confidence,
     empty_search_confidence,
 )
-from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
+from ._common import (
+    _BUILTIN_CALL_NAMES,
+    _bounded,
+    _error_response,
+    _get_store,
+    _resolve_graph_file_paths,
+)
 
 logger = logging.getLogger(__name__)
+
+# Hard ceilings for the impact response, so its size is a constant rather
+# than a function of the repository. ``edges`` and ``changed_nodes`` had no
+# ceiling at all, and ``max_results`` is not exposed on the MCP tool, so a
+# single changed file of cli/cli returned 1,361 connecting edges and one of
+# kubernetes returned 500 impacted nodes -- 138k and 189k tokens against a
+# documented 12k budget for this tool. The numbers are ``get_review_context``'s
+# own, because it caps the same three lists of the same radius for the same
+# reason. ``total_impacted``, ``nodes_omitted``, ``edges_omitted`` and
+# ``changed_nodes_omitted`` still report the full counts.
+_MAX_IMPACT_NODES_SHOWN = 100
+_MAX_IMPACT_EDGES = 150
+_MAX_IMPACT_FILES = 200
 
 # ---------------------------------------------------------------------------
 # Tool 2: get_impact_radius
@@ -48,7 +86,59 @@ _QUERY_PATTERNS = {
 }
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
-_MAX_FQN_CANDIDATES = 100
+_MAX_DOTTED_TARGET_CANDIDATES = 100
+
+#: Patterns whose rows describe one edge, so a call site can be attached and
+#: the answer can be split by how certain that edge's target attribution is.
+_CALL_SITE_PATTERNS = frozenset({"callers_of", "callees_of", "references_to"})
+
+
+def _attach_call_site(
+    result: dict[str, Any], edge: GraphEdge,
+) -> dict[str, Any]:
+    """Record where the call is written, not just who writes it.
+
+    Every edge carries a file and a line. Without them on the row a reading
+    agent has a caller's name and must open the file to find the call, which
+    is the file read the graph exists to avoid.
+
+    ``file`` is present only when the call is written somewhere other than the
+    row's own ``file_path``: a repeated path is the single most expensive
+    string in a row, and the reader already has it on the same object, so
+    omitting the duplicate is lossless. Where the two differ -- a header, a
+    generated file, a mixin applied elsewhere -- the path is spelled out, so a
+    call is never silently mislocated. Read it as
+    ``call_site.get("file", row["file_path"])``.
+    """
+    call_site: dict[str, Any] = {"line": edge.line}
+    if edge.file_path != result.get("file_path"):
+        call_site["file"] = edge.file_path
+    result["call_site"] = call_site
+    return result
+
+
+def _interleave_call_sites(
+    sites: list[tuple[str, dict[str, Any], GraphEdge]],
+) -> list[tuple[dict[str, Any], GraphEdge]]:
+    """Order call sites so every distinct node is seen before any repeat.
+
+    One row per call site is what makes repeated calls visible, but it would
+    let a caller that calls the target forty times consume the whole
+    ``max_results`` window and hide every other caller. Emitting the first
+    call site of each node, then the second of each, keeps the truncated
+    prefix as wide as the un-truncated answer while still reporting repeats.
+    Ordering within a round is first-seen, so the result stays deterministic.
+    """
+    seen_order: dict[str, int] = {}
+    occurrence: dict[str, int] = {}
+    keyed: list[tuple[int, int, int, dict[str, Any], GraphEdge]] = []
+    for index, (key, result, edge) in enumerate(sites):
+        seen_order.setdefault(key, len(seen_order))
+        round_index = occurrence.get(key, 0)
+        occurrence[key] = round_index + 1
+        keyed.append((round_index, seen_order[key], index, result, edge))
+    keyed.sort(key=lambda item: item[:3])
+    return [(result, edge) for _, _, _, result, edge in keyed]
 
 
 def _looks_like_java_method_fqn(target: str) -> bool:
@@ -76,7 +166,9 @@ def _java_fqn_candidates(store: GraphStore, target: str) -> list[GraphNode] | No
     parts = target.split(".")
     class_name, method_name = parts[-2:]
     matches: list[GraphNode] = []
-    for candidate in store.search_nodes(method_name, limit=_MAX_FQN_CANDIDATES):
+    for candidate in store.search_nodes(
+        method_name, limit=_MAX_DOTTED_TARGET_CANDIDATES,
+    ):
         if candidate.language.lower() != "java" or candidate.name != method_name:
             continue
         parent_name = candidate.parent_name or ""
@@ -116,6 +208,7 @@ def get_impact_radius(
     repo_root: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
+    resolution: str = RESOLUTION_ALL,
 ) -> dict[str, Any]:
     """Analyze the blast radius of changed files.
 
@@ -127,20 +220,28 @@ def get_impact_radius(
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         detail_level: "standard" (full output) or "minimal" (summary only).
+        resolution: "all" (default) traverses every edge; "direct" refuses to
+            traverse a CALLS/REFERENCES edge whose target was never bound to
+            an indexed node.
 
     Returns:
         Changed nodes, impacted nodes, impacted files, connecting edges,
-        plus ``truncated`` flag and ``total_impacted`` count.
+        plus ``truncated`` flag and ``total_impacted`` count. An impacted node
+        that calls or references the changed code directly also carries the
+        ``call_site`` it does so at, and ``unresolved_call_sites`` counts the
+        call sites that name a changed symbol but were never bound to it.
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
+    if resolution not in IMPACT_RESOLUTIONS:
+        raise ValueError(
+            f"resolution must be one of {list(IMPACT_RESOLUTIONS)}, got {resolution!r}"
+        )
 
     store, root = _get_store(repo_root)
     try:
         if changed_files is None:
-            changed_files = get_changed_files(root, base)
-            if not changed_files:
-                changed_files = get_staged_and_unstaged(root)
+            changed_files, base = discover_review_changes(root, base)
 
         if not changed_files:
             return {
@@ -157,32 +258,99 @@ def get_impact_radius(
         original_tokens = estimate_file_tokens(root, changed_files)
         abs_files = _resolve_graph_file_paths(store, root, changed_files)
         result = store.get_impact_radius(
-            abs_files, max_depth=max_depth, max_nodes=max_results
+            abs_files, max_depth=max_depth, max_nodes=max_results,
+            resolution=resolution,
         )
 
         impact_scores = result.get("impact_scores", {})
         changed_dicts = [node_to_dict(n) for n in result["changed_nodes"]]
+        # Where a node reaches the changed code in one hop, say where: the
+        # connecting edge already carries the file and line, and it is the
+        # first thing a reviewer needs after "this is impacted". A node
+        # further out has no single call site, so it gets none.
+        changed_qns = {n.qualified_name for n in result["changed_nodes"]}
+        direct_sites: dict[str, list[Any]] = {}
+        for edge in result["edges"]:
+            if (
+                edge.kind in ("CALLS", "REFERENCES")
+                and edge.target_qualified in changed_qns
+                and edge.source_qualified not in changed_qns
+            ):
+                direct_sites.setdefault(edge.source_qualified, []).append(edge)
         impacted_dicts = []
-        for node in result["impacted_nodes"]:
+        shown_impacted, _total_shown, _cut = _bounded(
+            result["impacted_nodes"], max_results, _MAX_IMPACT_NODES_SHOWN,
+        )
+        for node in shown_impacted:
             node_dict = node_to_dict(node)
             score = impact_scores.get(node.qualified_name)
             if score is not None:
                 node_dict["impact_score"] = score
+            node_sites = direct_sites.get(node.qualified_name)
+            if node_sites:
+                # One site per node, plus a count: the blast radius is a list
+                # of what to look at, not the full call-site listing that
+                # query_graph("callers_of") returns.
+                first = min(node_sites, key=lambda e: (e.file_path, e.line))
+                _attach_call_site(node_dict, first)
+                if len(node_sites) > 1:
+                    node_dict["call_site_count"] = len(node_sites)
             impacted_dicts.append(node_dict)
-        edge_dicts = [edge_to_dict(e) for e in result["edges"]]
-        truncated = result["truncated"]
+        # Edges that touch the changed code are kept first: a truncated list
+        # has to keep the part that explains the radius rather than whichever
+        # rows happened to sort first.
+        ordered_edges = sorted(
+            result["edges"],
+            key=lambda e: (
+                e.source_qualified not in changed_qns
+                and e.target_qualified not in changed_qns,
+            ),
+        )
+        shown_edges, edges_total, _edges_cut = _bounded(
+            ordered_edges, max_results, _MAX_IMPACT_EDGES,
+        )
+        edge_dicts = [edge_to_dict(e) for e in shown_edges]
+        edges_omitted = edges_total - len(edge_dicts)
+        changed_dicts, changed_total, _cn_cut = _bounded(
+            changed_dicts, max_results, _MAX_IMPACT_NODES_SHOWN,
+        )
+        changed_nodes_omitted = changed_total - len(changed_dicts)
+        shown_files, files_total, _files_cut = _bounded(
+            result["impacted_files"], max_results, _MAX_IMPACT_FILES,
+        )
+        files_omitted = files_total - len(shown_files)
+        # The traversal joins qualified names, so a call site that only ever
+        # names the changed symbol is unreachable and silently absent above.
+        # Counting it is what stops an empty-looking radius reading as proof.
+        unresolved_call_sites = store.count_unresolved_call_sites({
+            n.name for n in result["changed_nodes"] if n.kind != "File"
+        })
+        # ``truncated`` has to mean "there is more", whichever cap bit.
+        truncated = (
+            result["truncated"]
+            or len(impacted_dicts) < len(result["impacted_nodes"])
+            or edges_omitted > 0
+            or changed_nodes_omitted > 0
+            or files_omitted > 0
+        )
         total_impacted = result["total_impacted"]
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
-            f"  - {len(changed_dicts)} nodes directly changed",
-            f"  - {len(impacted_dicts)} nodes impacted (within {max_depth} hops)",
-            f"  - {len(result['impacted_files'])} additional files affected",
+            f"  - {len(result['changed_nodes'])} nodes directly changed",
+            f"  - {total_impacted} nodes impacted (within {max_depth} hops)",
+            f"  - {files_total} additional files affected",
         ]
-        if truncated:
+        if len(impacted_dicts) < total_impacted:
             summary_parts.append(
                 f"  - Results truncated: showing {len(impacted_dicts)}"
                 f" of {total_impacted} impacted nodes"
+            )
+        if edges_omitted or changed_nodes_omitted or files_omitted:
+            summary_parts.append(
+                f"  - Also truncated: {edges_omitted} edges,"
+                f" {changed_nodes_omitted} changed nodes,"
+                f" {files_omitted} impacted files omitted"
             )
 
         # "Nothing is impacted" and "nothing about these files is indexed"
@@ -197,7 +365,9 @@ def get_impact_radius(
             )
 
         if detail_level == "minimal":
-            impacted_count = len(impacted_dicts)
+            # The full count, not the displayed one: the risk band must not
+            # change because a display cap trimmed the list.
+            impacted_count = total_impacted
             if impacted_count > 20:
                 risk = "high"
             elif impacted_count > 5:
@@ -215,6 +385,9 @@ def get_impact_radius(
                 "key_entities": key_entities,
                 "truncated": truncated,
                 "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
+                # One integer, and the only thing in this response that says
+                # the radius has a blind spot at all.
+                "unresolved_call_sites": unresolved_call_sites,
             }
             if confidence:
                 minimal_response["confidence"] = confidence
@@ -226,17 +399,28 @@ def get_impact_radius(
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
             "changed_nodes": changed_dicts,
+            "changed_nodes_omitted": changed_nodes_omitted,
             "impacted_nodes": impacted_dicts,
-            "impacted_files": result["impacted_files"],
+            "impacted_files": shown_files,
+            "impacted_files_omitted": files_omitted,
             "edges": edge_dicts,
+            "edges_omitted": edges_omitted,
             "truncated": truncated,
             "total_impacted": total_impacted,
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
+            "resolution": resolution,
+            "unresolved_call_sites": unresolved_call_sites,
         }
         if confidence:
             response["confidence"] = confidence
         attach_context_savings(response, original_tokens=original_tokens)
         return response
+    except ChangeDiscoveryError as exc:
+        # Distinct from the "no changed files" answer above, and deliberately
+        # so: that one is an all-clear a client will act on. Git that could
+        # not be run, or that overran the discovery budget, says nothing
+        # about the working tree (#262).
+        return _error_response(str(exc))
     finally:
         store.close()
 
@@ -252,6 +436,7 @@ def query_graph(
     repo_root: str | None = None,
     detail_level: str = "standard",
     max_results: int = 100,
+    resolution: str = RESOLUTION_ALL,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -265,12 +450,24 @@ def query_graph(
         detail_level: "standard" (full output) or "minimal" (summary only).
         max_results: Maximum results to return. Minimal mode additionally caps
             visible results at five and reports the exact omitted count.
+        resolution: For callers_of/callees_of/references_to, filter rows by how
+            certain the edge's target attribution is. "all" (default) keeps
+            both, "direct" keeps only calls bound to an indexed node, and
+            "unresolved" keeps only the bare-name matches.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
+        For callers_of, callees_of and references_to each row also carries the
+        ``call_site`` it was found at, one row per call site rather than one
+        per node, plus a ``resolution_split`` saying how much of the answer is
+        certain.
     """
     if isinstance(max_results, bool) or max_results < 1:
         raise ValueError("max_results must be an integer greater than or equal to 1")
+    if resolution not in QUERY_RESOLUTIONS:
+        raise ValueError(
+            f"resolution must be one of {list(QUERY_RESOLUTIONS)}, got {resolution!r}"
+        )
 
     store, root = _get_store(repo_root)
     try:
@@ -283,10 +480,14 @@ def query_graph(
                 ),
             }
 
-        response_limit = min(max_results, 5) if detail_level == "minimal" else max_results
+        minimal = detail_level == "minimal"
+        response_limit = min(max_results, 5) if minimal else max_results
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
         total_results = 0
+        # (dedupe key, row, edge) for the call-site patterns, collected before
+        # emission so repeats can be interleaved behind first sightings.
+        call_sites: list[tuple[str, dict[str, Any], GraphEdge]] = []
 
         def add_result(result: dict[str, Any], edge: Any | None = None) -> None:
             """Count every logical result but retain only the bounded prefix."""
@@ -297,6 +498,27 @@ def query_graph(
             results.append(result)
             if edge is not None:
                 edges_out.append(edge_to_dict(edge))
+
+        # One row per call site means the same node is looked up once per
+        # call, so memoize what used to be deduplicated away.
+        node_cache: dict[str, GraphNode | None] = {}
+
+        def lookup_node(qualified: str) -> GraphNode | None:
+            if qualified not in node_cache:
+                node_cache[qualified] = store.get_node(qualified)
+            return node_cache[qualified]
+
+        def add_call_site(
+            key: str, result: dict[str, Any], edge: GraphEdge, certain: bool,
+        ) -> None:
+            """Stage one call site, marking the uncertain ones."""
+            if not certain:
+                result["target_resolution"] = RESOLUTION_UNRESOLVED
+            if resolution == RESOLUTION_DIRECT and not certain:
+                return
+            if resolution == RESOLUTION_UNRESOLVED and certain:
+                return
+            call_sites.append((key, _attach_call_site(result, edge), edge))
 
         # For callers_of, skip common builtins early (bare names only)
         # "Who calls .map()?" returns hundreds of useless hits.
@@ -328,12 +550,35 @@ def query_graph(
                 abs_target = normalize_file_path(root / target)
                 node = store.get_node(abs_target)
             if not node:
+                qualified_tail_candidates = []
+                if "." in target:
+                    # Nested type paths are exact indexed tails but also look
+                    # Java-shaped; recognize the exact node before the Java
+                    # FQN guard, without changing bare-name disambiguation.
+                    qualified_tail_candidates = (
+                        store.search_nodes_by_qualified_tail(
+                            target, limit=_MAX_DOTTED_TARGET_CANDIDATES,
+                        )
+                    )
                 java_candidates = _java_fqn_candidates(store, target)
-                candidates = (
-                    java_candidates
-                    if java_candidates is not None
-                    else store.search_nodes(target, limit=20)
-                )
+                if java_candidates:
+                    # Established behavior: a Java-shaped target that has real
+                    # Java matches resolves against Java, and the unfiltered
+                    # tail lookup never gets to displace it.
+                    candidates = java_candidates
+                elif qualified_tail_candidates:
+                    # No Java match. An exact qualified-tail hit is a structural
+                    # match on the whole symbol path, not the fuzzy global-name
+                    # fallback the Java guard exists to block, so it is safe to
+                    # use here. This is what makes C# nested paths such as
+                    # ``Details.QueryHandler.Handle`` addressable (#934); they
+                    # are Java-FQN-shaped and have no Java candidates.
+                    candidates = qualified_tail_candidates
+                elif java_candidates is not None:
+                    # Java-shaped with no safe match: do not fall back.
+                    candidates = []
+                else:
+                    candidates = store.search_nodes(target, limit=20)
                 if pattern == "inheritors_of" and "::" not in target:
                     exact_type_candidates = [
                         candidate
@@ -348,11 +593,17 @@ def query_graph(
                     node = candidates[0]
                     target = node.qualified_name
                 elif len(candidates) > 1:
-                    candidate_count = (
-                        len(candidates)
-                        if java_candidates is not None
-                        else store.count_search_nodes(target)
-                    )
+                    # Count the population the candidates were drawn from, not
+                    # the truncated slice, so candidates_truncated stays honest
+                    # when more than _MAX_DOTTED_TARGET_CANDIDATES nodes match.
+                    if java_candidates:
+                        candidate_count = len(candidates)
+                    elif qualified_tail_candidates:
+                        candidate_count = store.count_nodes_by_qualified_tail(target)
+                    elif java_candidates is not None:
+                        candidate_count = len(candidates)
+                    else:
+                        candidate_count = store.count_search_nodes(target)
                     ranked = _rank_disambiguation_candidates(candidates, target)
                     return {
                         "status": "ambiguous",
@@ -388,14 +639,19 @@ def query_graph(
         qn = node.qualified_name if node else target
 
         if pattern == "callers_of":
+            # Sources reached through the qualified target. A source found
+            # here is proven, so the bare-name fallback below must not also
+            # claim it; repeated calls from one source stay separate rows.
             seen_sources: set[str] = set()
             for e in store.iter_edges_by_target(qn):
                 if e.kind == "CALLS":
-                    if e.source_qualified not in seen_sources:
+                    caller = lookup_node(e.source_qualified)
+                    if caller:
                         seen_sources.add(e.source_qualified)
-                        caller = store.get_node(e.source_qualified)
-                        if caller:
-                            add_result(node_to_dict(caller), e)
+                        add_call_site(
+                            e.source_qualified, node_to_dict(caller), e,
+                            certain=True,
+                        )
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
@@ -424,81 +680,127 @@ def query_graph(
                         continue
                     if cpp_overload_count > 1:
                         continue
-                    if e.source_qualified not in seen_sources:
-                        seen_sources.add(e.source_qualified)
-                        caller = store.get_node(e.source_qualified)
-                        if caller:
-                            caller_result = node_to_dict(caller)
-                            caller_result["target_resolution"] = "unresolved"
-                            add_result(caller_result, e)
+                    # A bare target plus a matching name is not evidence that
+                    # this node was called: `some_dict.get(...)` writes the
+                    # target `get`. Where the parser recorded what the
+                    # receiver is, hold the fallback to the same rule the
+                    # endpoint resolver applies. See: #997
+                    if not store.receiver_evidence_admits(e.extra, node):
+                        continue
+                    if e.source_qualified in seen_sources:
+                        continue
+                    caller = lookup_node(e.source_qualified)
+                    if caller:
+                        add_call_site(
+                            e.source_qualified, node_to_dict(caller), e,
+                            certain=False,
+                        )
 
         elif pattern == "references_to":
             seen_reference_sources: set[str] = set()
             for e in store.iter_edges_by_target(qn):
-                if (
-                    e.kind != "REFERENCES"
-                    or e.source_qualified in seen_reference_sources
-                ):
+                if e.kind != "REFERENCES":
                     continue
-                source = store.get_node(e.source_qualified)
+                source = lookup_node(e.source_qualified)
                 if source:
                     seen_reference_sources.add(e.source_qualified)
-                    add_result(node_to_dict(source), e)
+                    add_call_site(
+                        e.source_qualified, node_to_dict(source), e, certain=True,
+                    )
+            # Fallback: a module that imports the symbol through a specifier
+            # the parser cannot resolve (npm workspace alias, tsconfig path
+            # mapping) stores the REFERENCES target as a bare name rather than
+            # "<file>::<Symbol>". Without this pass those dependents are
+            # dropped silently, which reads as proof of absence. Only merge
+            # when the bare name identifies exactly one node, so a name shared
+            # by two symbols is never attributed to both.
+            if node and store.count_nodes_by_name(node.name) == 1:
+                for e in store.iter_edges_by_target_name(
+                    node.name,
+                    kind="REFERENCES",
+                    language=node.language or None,
+                ):
+                    if (
+                        "ambiguous_targets" in e.extra
+                        or e.source_qualified in seen_reference_sources
+                        or not store.receiver_evidence_admits(e.extra, node)
+                    ):
+                        continue
+                    source = lookup_node(e.source_qualified)
+                    if source:
+                        add_call_site(
+                            e.source_qualified, node_to_dict(source), e,
+                            certain=False,
+                        )
 
         elif pattern == "callees_of":
-            seen_targets: set[str] = set()
+            # The candidate list for an unresolved target is the same list at
+            # every call site, so it is spelled out once per target.
+            described_targets: set[str] = set()
             for e in store.iter_edges_by_source(qn):
-                if e.kind == "CALLS":
-                    if e.target_qualified not in seen_targets:
-                        seen_targets.add(e.target_qualified)
-                        callee = store.get_node(e.target_qualified)
-                        if callee:
-                            add_result(node_to_dict(callee), e)
-                        elif (
-                            isinstance(e.extra.get("ambiguous_targets"), list)
-                            or isinstance(e.extra.get("unresolved_targets"), list)
-                            or "::" not in e.target_qualified
-                            or (node is not None and node.language == "cpp")
-                        ):
-                            unresolved = (
-                                e.extra.get("ambiguous_targets")
-                                or e.extra.get("unresolved_targets")
+                if e.kind != "CALLS":
+                    continue
+                callee = lookup_node(e.target_qualified)
+                if callee:
+                    add_call_site(
+                        e.target_qualified, node_to_dict(callee), e, certain=True,
+                    )
+                elif (
+                    isinstance(e.extra.get("ambiguous_targets"), list)
+                    or isinstance(e.extra.get("unresolved_targets"), list)
+                    or "::" not in e.target_qualified
+                    or (node is not None and node.language == "cpp")
+                ):
+                    unresolved = (
+                        e.extra.get("ambiguous_targets")
+                        or e.extra.get("unresolved_targets")
+                    )
+                    result: dict[str, Any] = {
+                        "kind": "Function",
+                        "name": e.target_qualified,
+                        "qualified_name": e.target_qualified,
+                    }
+                    first_sighting = e.target_qualified not in described_targets
+                    described_targets.add(e.target_qualified)
+                    if isinstance(unresolved, list) and first_sighting:
+                        candidate_resolution = (
+                            "ambiguous"
+                            if e.extra.get("ambiguous_targets")
+                            else "unresolved"
+                        )
+                        result["resolution"] = candidate_resolution
+                        result["candidates"] = [
+                            _sanitize_name(candidate)
+                            for candidate in unresolved[:20]
+                            if isinstance(candidate, str)
+                        ]
+                        candidate_count = e.extra.get(
+                            f"{candidate_resolution}_target_count",
+                        )
+                        if not isinstance(candidate_count, int):
+                            candidate_count = len(unresolved)
+                        result["candidate_count"] = candidate_count
+                        result["candidates_truncated"] = bool(
+                            e.extra.get(
+                                f"{candidate_resolution}_targets_truncated",
                             )
-                            result: dict[str, Any] = {
-                                "kind": "Function",
-                                "name": e.target_qualified,
-                                "qualified_name": e.target_qualified,
-                            }
-                            if isinstance(unresolved, list):
-                                resolution = (
-                                    "ambiguous"
-                                    if e.extra.get("ambiguous_targets")
-                                    else "unresolved"
-                                )
-                                result["resolution"] = resolution
-                                result["candidates"] = [
-                                    _sanitize_name(candidate)
-                                    for candidate in unresolved[:20]
-                                    if isinstance(candidate, str)
-                                ]
-                                candidate_count = e.extra.get(
-                                    f"{resolution}_target_count",
-                                )
-                                if not isinstance(candidate_count, int):
-                                    candidate_count = len(unresolved)
-                                result["candidate_count"] = candidate_count
-                                result["candidates_truncated"] = bool(
-                                    e.extra.get(
-                                        f"{resolution}_targets_truncated",
-                                    )
-                                    or candidate_count > len(result["candidates"])
-                                )
-                            add_result(result, e)
+                            or candidate_count > len(result["candidates"])
+                        )
+                    add_call_site(
+                        e.target_qualified, result, e, certain=False,
+                    )
 
         elif pattern == "imports_of":
             for e in store.iter_edges_by_source(qn):
                 if e.kind == "IMPORTS_FROM":
-                    add_result({"import_target": e.target_qualified}, e)
+                    row: dict[str, Any] = {"import_target": e.target_qualified}
+                    scope = e.extra.get(IMPORT_SCOPE_KEY)
+                    if scope:
+                        # The target is a directory, not a file: say so
+                        # rather than let a reader take it for a path that
+                        # should have a node.
+                        row["import_target_kind"] = scope
+                    add_result(row, e)
 
         elif pattern == "importers_of":
             # Find edges where target matches this file.
@@ -517,6 +819,25 @@ def query_graph(
                     add_result({
                         "importer": e.source_qualified,
                         "file": e.file_path,
+                    }, e)
+            # A Go import names a package and a Ruby ``require_all`` names a
+            # tree, so those edges target a DIRECTORY. One edge per import
+            # rather than one per file in the package is what keeps the graph
+            # linear in imports; expanding the directory here is the other
+            # half of that trade. See IMPORT_SCOPE_KEY in constants.py.
+            for directory, scopes in import_scope_ancestors(abs_target):
+                for e in store.iter_edges_by_target(directory):
+                    if e.kind != "IMPORTS_FROM":
+                        continue
+                    if e.extra.get(IMPORT_SCOPE_KEY) not in scopes:
+                        continue
+                    if e.source_qualified in seen_importers:
+                        continue
+                    seen_importers.add(e.source_qualified)
+                    add_result({
+                        "importer": e.source_qualified,
+                        "file": e.file_path,
+                        "via_package": directory,
                     }, e)
             # C# fallback: `using X.Y;` directives produce IMPORTS_FROM edges
             # whose target is the raw namespace string, not a file path, so
@@ -597,13 +918,27 @@ def query_graph(
             # (e.g. "Animal") while qn is fully qualified
             # (e.g. "sample.dart::Animal"). Search by plain name too. See: #87
             if total_results == 0 and node:
+                # Ambiguity is measured on the indexed name alone: several
+                # declarations answer to this bare base name. Which one it
+                # binds to is #943's work — file namespaces and imports cannot
+                # prove it — so caveat the matches instead of guessing.
+                languages = (
+                    _compatible_edge_languages(node.language) if node.language else (None,)
+                )
+                ambiguous_base = sum(
+                    store.count_nodes_by_name(node.name, language=language, kinds=("Class", "Type"))
+                    for language in languages
+                ) > 1
                 for kind in ("INHERITS", "IMPLEMENTS"):
                     for e in store.iter_edges_by_target_name(
                         node.name, kind=kind, language=node.language or None,
                     ):
                         child = store.get_node(e.source_qualified)
                         if child:
-                            add_result(node_to_dict(child), e)
+                            child_result = node_to_dict(child)
+                            if ambiguous_base:
+                                child_result["inferred_by"] = "bare_name"
+                            add_result(child_result, e)
 
         elif pattern == "triggers_of":
             for edge in store.get_edges_by_source(qn):
@@ -675,11 +1010,34 @@ def query_graph(
                 for n in store.iter_nodes_by_file(graph_path):
                     add_result(node_to_dict(n))
 
+        resolution_split: dict[str, int] | None = None
+        distinct_nodes = 0
+        if pattern in _CALL_SITE_PATTERNS:
+            resolution_split = {RESOLUTION_DIRECT: 0, RESOLUTION_UNRESOLVED: 0}
+            distinct_keys: set[str] = set()
+            for key, row, _edge in call_sites:
+                distinct_keys.add(key)
+                bucket = (
+                    RESOLUTION_UNRESOLVED
+                    if row.get("target_resolution") == RESOLUTION_UNRESOLVED
+                    else RESOLUTION_DIRECT
+                )
+                resolution_split[bucket] += 1
+            distinct_nodes = len(distinct_keys)
+            for row, edge in _interleave_call_sites(call_sites):
+                add_result(row, edge)
+
         results_omitted = max(0, total_results - len(results))
-        summary = (
-            f"Found {total_results} result(s) "
-            f"for {pattern}('{target}')"
-        )
+        if pattern in _CALL_SITE_PATTERNS:
+            summary = (
+                f"Found {total_results} call site(s) across {distinct_nodes} "
+                f"node(s) for {pattern}('{target}')"
+            )
+        else:
+            summary = (
+                f"Found {total_results} result(s) "
+                f"for {pattern}('{target}')"
+            )
         if results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
 
@@ -694,10 +1052,18 @@ def query_graph(
         )
 
         if detail_level == "minimal":
+            result_fields: tuple[str, ...] = ("name", "kind", "file_path", "indirect")
+            if pattern == "inheritors_of":
+                result_fields += ("inferred_by",)
+            if pattern in _CALL_SITE_PATTERNS:
+                # The line is what turns a name into a location, and it costs
+                # one integer. ``target_resolution`` appears only on the rows
+                # that are guesses, so certain rows pay nothing for it.
+                result_fields += ("call_site", "target_resolution")
             minimal_results = [
                 {
                     k: r[k]
-                    for k in ("name", "kind", "file_path", "indirect")
+                    for k in result_fields
                     if k in r
                 }
                 for r in results
@@ -712,6 +1078,9 @@ def query_graph(
                 "results_omitted": results_omitted,
                 "results": minimal_results,
             }
+            if resolution_split is not None:
+                minimal_response["distinct_nodes"] = distinct_nodes
+                minimal_response["resolution_split"] = resolution_split
             if confidence:
                 minimal_response["confidence"] = confidence
             return minimal_response
@@ -727,6 +1096,9 @@ def query_graph(
             "results": results,
             "edges": edges_out,
         }
+        if resolution_split is not None:
+            response["distinct_nodes"] = distinct_nodes
+            response["resolution_split"] = resolution_split
         if confidence:
             response["confidence"] = confidence
         return response
@@ -819,7 +1191,7 @@ def semantic_search_nodes(
         if confidence:
             result["confidence"] = confidence
         result["_hints"] = generate_hints(
-            "semantic_search_nodes", result, get_session()
+            "semantic_search_nodes_tool", result, get_session()
         )
         return result
     finally:
@@ -861,6 +1233,17 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
         for kind, count in sorted(stats.edges_by_kind.items()):
             summary_parts.append(f"  {kind}: {count}")
 
+        # CALLS is the largest edge kind and the one a reader trusts most, so
+        # say up front how much of it is bound to a node and how much is a
+        # bare name the query layer can only match by name.
+        calls_by_resolution = store.count_edges_by_resolution("CALLS")
+        summary_parts.append("")
+        summary_parts.append(
+            "CALLS by target resolution: "
+            f"{calls_by_resolution['direct']} direct, "
+            f"{calls_by_resolution['unresolved']} unresolved"
+        )
+
         # Add embedding info if available
         emb_store = EmbeddingStore(get_db_path(root))
         try:
@@ -881,6 +1264,7 @@ def list_graph_stats(repo_root: str | None = None) -> dict[str, Any]:
             "total_edges": stats.total_edges,
             "nodes_by_kind": stats.nodes_by_kind,
             "edges_by_kind": stats.edges_by_kind,
+            "calls_by_resolution": calls_by_resolution,
             "languages": stats.languages,
             "files_count": stats.files_count,
             "last_updated": stats.last_updated,

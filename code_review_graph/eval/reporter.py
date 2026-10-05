@@ -75,7 +75,7 @@ def _read_csvs(results_dir: Path, prefix: str) -> list[dict[str, str]]:
     """Read all CSV files matching a prefix from the results directory."""
     rows: list[dict[str, str]] = []
     for p in sorted(results_dir.glob(f"*_{prefix}_*.csv")):
-        with open(p, newline="") as f:
+        with open(p, encoding="utf-8", newline="") as f:
             reader = csv.DictReader(f)
             rows.extend(reader)
     return rows
@@ -121,6 +121,12 @@ def generate_full_report(results_dir: str | Path) -> str:
         "Rows with `status=error` are kept for forensics but excluded "
         "from all aggregates."
     )
+    lines.append(
+        "Incremental fidelity compares an incrementally updated graph "
+        "against a clean rebuild of the same tree; `status=known_failure` "
+        "marks a divergence that is already recorded in "
+        "`incremental_fidelity.KNOWN_FAILURES`."
+    )
     lines.append("")
 
     benchmark_types = [
@@ -131,6 +137,7 @@ def generate_full_report(results_dir: str | Path) -> str:
         "search_quality",
         "build_performance",
         "multi_hop_retrieval",
+        "incremental_fidelity",
     ]
 
     for btype in benchmark_types:
@@ -273,6 +280,28 @@ def generate_readme_tables(results_dir: str | Path) -> str:
                 r.get("graph_tokens", "-"),
                 r.get("baseline_to_graph_ratio", "-"),
                 r.get("status", "ok") or "ok",
+            ])
+        lines.append(_md_table(headers, table_rows))
+        lines.append("")
+
+    # Table B3: Incremental Fidelity (incremental update vs clean rebuild)
+    if_rows = _read_csvs(results_dir, "incremental_fidelity")
+    if if_rows:
+        lines.append("### Incremental Fidelity (update vs clean rebuild)")
+        lines.append("")
+        headers = [
+            "Repo", "Edit", "Status", "Differing Rows", "Worst Table",
+            "Seconds",
+        ]
+        table_rows = []
+        for r in if_rows:
+            table_rows.append([
+                r.get("repo", "-"),
+                r.get("edit_kind", "-"),
+                r.get("status", "-"),
+                r.get("total_differing_rows", "-"),
+                r.get("worst_table", "-") or "-",
+                r.get("seconds", "-"),
             ])
         lines.append(_md_table(headers, table_rows))
         lines.append("")

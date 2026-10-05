@@ -210,10 +210,23 @@ def _get_store(repo_root: str | None = None) -> tuple[GraphStore, Path]:
 
     Callers own the returned store and must close it (try/finally or
     context manager) to avoid leaking SQLite file descriptors.
+
+    A graph built for another repository is refused here rather than
+    answered from: every tool wraps its body in ``except Exception`` and
+    reports ``{"status": "error"}``, so the caller is told which repository
+    the graph belongs to instead of being served its symbols.
     """
+    from ..incremental import assert_graph_serves_root
+
     root = _resolve_root(repo_root)
     db_path = get_db_path(root)
-    return GraphStore(db_path), root
+    store = GraphStore(db_path)
+    try:
+        assert_graph_serves_root(root, store)
+    except BaseException:
+        store.close()
+        raise
+    return store, root
 
 
 def _resolve_graph_file_paths(

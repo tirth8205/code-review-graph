@@ -264,6 +264,50 @@ class Plain:
         assert "os" in import_targets
         assert "pathlib" in import_targets
 
+    def test_parse_python_aliased_module_imports(self, tmp_path):
+        source = tmp_path / "aliases.py"
+        source.write_text(
+            "import b as B\nimport a.b as C\nimport x, y as z\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(source)
+
+        import_targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert import_targets == {"a.b", "b", "x", "y"}
+
+    def test_python_aliased_module_is_reported_by_queries(self, tmp_path):
+        from code_review_graph.tools.query import get_impact_radius, query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        target = tmp_path / "b.py"
+        target.write_text("def hi():\n    return 1\n", encoding="utf-8")
+        importer = tmp_path / "aliased.py"
+        importer.write_text("import b as B\nprint(B.hi())\n", encoding="utf-8")
+
+        store = GraphStore(tmp_path / ".code-review-graph" / "graph.db")
+        parser = CodeParser(tmp_path)
+        for path in (target, importer):
+            nodes, edges = parser.parse_file(path)
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+        store.commit()
+        store.close()
+
+        result = query_graph("importers_of", str(target), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        importers = {entry["file"] for entry in result.get("results", [])}
+        assert importer.as_posix() in importers
+
+        impact = get_impact_radius(
+            changed_files=[str(target)], repo_root=str(tmp_path), max_depth=1
+        )
+        assert impact["status"] == "ok"
+        assert importer.as_posix() in impact["impacted_files"]
+
     def test_parse_python_calls(self):
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_python.py")
         calls = [e for e in edges if e.kind == "CALLS"]
@@ -914,19 +958,25 @@ class Plain:
         from code_review_graph.parser import _is_test_file
         assert _is_test_file("src/__tests__/UserService.ts")
         assert _is_test_file("src\\__tests__\\UserService.ts")
+        assert _is_test_file("/repo/src/__tests__/UserService.ts", "/repo")
         # Negative: __tests__ as a substring without path separators must not match
         assert not _is_test_file("my__tests__notdir.ts")
 
     def test_jest_tests_dir_produces_test_nodes(self):
         """A vitest-style file under __tests__/ should yield Test nodes
-        and TESTED_BY edges, the same as a *.test.ts file."""
+        and TESTED_BY edges, the same as a *.test.ts file.
+
+        The parser is built with the repository root because directory
+        conventions such as ``__tests__/`` are read from the path relative to
+        it; see ``CodeParser._is_test_path``.
+        """
         fixture_path = FIXTURES / "__tests__" / "UserService.ts"
         fixture_code = fixture_path.read_text(encoding="utf-8")
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "src" / "__tests__" / "UserService.ts"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(fixture_code, encoding="utf-8")
-            nodes, edges = self.parser.parse_file(path)
+            nodes, edges = CodeParser(Path(tmpdir)).parse_file(path)
         tests = [n for n in nodes if n.kind == "Test"]
         test_names = {t.name for t in tests}
         assert any(n.startswith("describe") or n.startswith("describe:") for n in test_names), (
@@ -1264,7 +1314,11 @@ class Plain:
             assert len(jsx_calls) == 1
 
     def test_junit_annotation_marks_test(self):
-        """Java @Test annotation should mark functions as tests."""
+        """Java @Test annotation should mark functions as tests.
+
+        Both methods live in a test file, so both carry ``is_test``; it is
+        ``kind`` that records what the annotation detector decided.
+        """
         nodes, _ = self.parser.parse_bytes(
             Path("/src/MyTest.java"),
             b"class MyTest {\n"
@@ -1273,10 +1327,22 @@ class Plain:
             b"  void helperMethod() { }\n"
             b"}\n",
         )
-        test_nodes = [n for n in nodes if n.is_test]
-        test_names = {n.name for n in test_nodes}
-        assert "verifyBehavior" in test_names
-        assert "helperMethod" not in test_names
+        by_name = {n.name: n for n in nodes}
+        assert by_name["verifyBehavior"].kind == "Test"
+        assert by_name["helperMethod"].kind == "Function"
+        assert by_name["helperMethod"].is_test is True
+
+    def test_junit_annotation_absent_in_production_file(self):
+        """An unannotated method in a production file is not test code."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyService.java"),
+            b"class MyService {\n"
+            b"  void helperMethod() { }\n"
+            b"}\n",
+        )
+        by_name = {n.name: n for n in nodes}
+        assert by_name["helperMethod"].kind == "Function"
+        assert by_name["helperMethod"].is_test is False
 
     def test_kotlin_test_annotation_marks_test(self):
         """Kotlin @Test annotation should mark functions as tests."""
@@ -1287,10 +1353,10 @@ class Plain:
             b"  fun setup() { }\n"
             b"}\n",
         )
-        test_nodes = [n for n in nodes if n.is_test]
-        test_names = {n.name for n in test_nodes}
-        assert "checkResult" in test_names
-        assert "setup" not in test_names
+        by_name = {n.name: n for n in nodes}
+        assert by_name["checkResult"].kind == "Test"
+        assert by_name["setup"].kind == "Function"
+        assert by_name["setup"].is_test is True
 
     def test_detects_test_functions(self):
         """Functions with test-like names should be marked is_test=True."""
@@ -1299,10 +1365,22 @@ class Plain:
             b"def test_something(): pass\n"
             b"def helper(): pass\n",
         )
-        test_nodes = [n for n in nodes if n.is_test]
-        test_names = {n.name for n in test_nodes}
-        assert "test_something" in test_names
-        assert "helper" not in test_names
+        by_name = {n.name: n for n in nodes}
+        assert by_name["test_something"].kind == "Test"
+        # `helper` is not a test by name, but it is test code: it lives in
+        # a test file and exists only to serve the tests there.
+        assert by_name["helper"].kind == "Function"
+        assert by_name["helper"].is_test is True
+
+    def test_production_helper_is_not_test_code(self):
+        """The same helper in a production file stays production code."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/example.py"),
+            b"def helper(): pass\n",
+        )
+        by_name = {n.name: n for n in nodes}
+        assert by_name["helper"].kind == "Function"
+        assert by_name["helper"].is_test is False
 
     def test_c_dead_guard_if0_omits_dead_edges(self):
         """CALLS edges inside ``#if 0`` / ``#elif 0`` blocks in C are

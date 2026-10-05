@@ -108,7 +108,7 @@ def list_communities_func(
             "truncated": truncated,
         }
         result["_hints"] = generate_hints(
-            "list_communities", result, get_session()
+            "list_communities_tool", result, get_session()
         )
         return result
     except Exception as exc:
@@ -194,7 +194,7 @@ def get_community_func(
             "community": community,
         }
         result["_hints"] = generate_hints(
-            "get_community", result, get_session()
+            "get_community_tool", result, get_session()
         )
         return result
     except Exception as exc:
@@ -329,7 +329,7 @@ def get_architecture_overview_func(
             "truncated": truncated,
         }
         result["_hints"] = generate_hints(
-            "get_architecture_overview", result, get_session()
+            "get_architecture_overview_tool", result, get_session()
         )
         if detail_level == "minimal":
             attach_context_savings(result, original_context=full_overview)

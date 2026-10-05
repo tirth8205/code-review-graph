@@ -203,6 +203,175 @@ def test_test_gaps_section(report):
     assert "(auth/session.py:42)" in body
 
 
+# ---------------------------------------------------------------------------
+# Indirect coverage (#1047): reached through a caller vs. no test in reach
+# ---------------------------------------------------------------------------
+
+
+def _indirect_report() -> dict:
+    """One unreached gap and one reached only through its caller."""
+    return {
+        "risk_score": 0.80,
+        "review_priorities": [
+            {
+                "qualified_name": "code_review_graph/main.py::_offload",
+                "name": "_offload",
+                "file_path": "code_review_graph/main.py",
+                "line_start": 130,
+                "risk_score": 0.62,
+                "is_test": False,
+            },
+            {
+                "qualified_name": "code_review_graph/incremental.py::orphan",
+                "name": "orphan",
+                "file_path": "code_review_graph/incremental.py",
+                "line_start": 900,
+                "risk_score": 0.55,
+                "is_test": False,
+            },
+        ],
+        "affected_flows": [],
+        "test_gaps": [
+            {
+                "name": "orphan",
+                "qualified_name": "code_review_graph/incremental.py::orphan",
+                "file": "code_review_graph/incremental.py",
+                "line_start": 900,
+                "line_end": 929,
+                "coverage": "none",
+            },
+            {
+                "name": "_offload",
+                "qualified_name": "code_review_graph/main.py::_offload",
+                "file": "code_review_graph/main.py",
+                "line_start": 130,
+                "line_end": 140,
+                "coverage": "indirect",
+                "covered_via": "code_review_graph/main.py::_run_off_loop",
+                "covered_depth": 1,
+                "covered_by": ["tests/test_main.py::test_offload"],
+            },
+        ],
+        "test_gaps_uncovered": 1,
+        "test_gaps_indirect": 1,
+    }
+
+
+def test_headline_splits_the_two_gap_kinds():
+    body = render.render_markdown(_indirect_report())
+    assert (
+        "2 test gap(s) (1 with no tested caller found, "
+        "1 reached only through a caller)"
+    ) in body
+
+
+def test_headline_never_claims_more_than_the_graph_knows():
+    """"No test in reach" is a claim about the suite; the graph reads edges.
+
+    Two symbols on the delta of #1047 are exercised by tests that load the
+    file through importlib, so no edge records it. They are correctly listed
+    as gaps, and describing them as having no test in reach was false.
+    """
+    body = render.render_markdown(_indirect_report())
+    assert "no test in reach" not in body
+    assert "That is execution" not in body
+    assert "not a record of execution" in body
+
+
+def test_indirect_gaps_get_their_own_section_naming_the_caller():
+    body = render.render_markdown(_indirect_report())
+    assert "### Test gaps" in body
+    assert "### Reached only through a caller" in body
+    gaps_at = body.index("### Test gaps")
+    indirect_at = body.index("### Reached only through a caller")
+    assert gaps_at < indirect_at
+    # The unreached one is under the first heading, not the second.
+    assert body.index(render.md_escape("incremental.py::orphan")) < indirect_at
+    assert render.md_escape("main.py::_run_off_loop") in body
+    assert "1 hop(s)" in body
+
+
+def test_tested_column_says_indirect_not_no():
+    body = render.render_markdown(_indirect_report())
+    offload_row = next(
+        line for line in body.splitlines() if "_offload" in line and "| 0.62" in line
+    )
+    assert offload_row.rstrip().endswith("| indirect |")
+    orphan_row = next(
+        line for line in body.splitlines() if "orphan" in line and "| 0.55" in line
+    )
+    assert orphan_row.rstrip().endswith("| no |")
+
+
+def test_a_report_without_coverage_keys_renders_as_before(report):
+    """Back-compat: a pre-#1047 report has no ``coverage`` field at all."""
+    body = render.render_markdown(report)
+    assert "### Test gaps" in body
+    assert "Covered only through a caller" not in body
+    assert "1 test gap(s)" in body
+    assert "no test in reach" not in body
+
+
+def test_truncated_report_uses_the_reported_counts():
+    """The gap list is bounded upstream; the split must not be recounted."""
+    payload = _indirect_report()
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    body = render.render_markdown(payload)
+    assert "60 with no tested caller found, 14 reached only through a caller" in body
+
+
+def test_truncated_headline_total_equals_its_own_parts():
+    """The total and the split have to come from the same place.
+
+    The headline used ``len(test_gaps)`` -- which every consumer bounds --
+    beside a split taken from the untruncated counts, so a bounded report
+    printed "25 test gap(s) (73 ..., 9 ...)": a number next to parts that do
+    not add up to it.
+    """
+    payload = _indirect_report()
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    headline = next(line for line in body.splitlines() if "Overall risk" in line)
+    assert "74 test gap(s)" in headline
+    assert "1 test gap(s)" not in headline
+
+
+def test_a_truncated_table_does_not_claim_a_symbol_is_tested():
+    """Absence from a bounded gap list is not evidence of having tests.
+
+    The Tested column is derived from the shipped ``test_gaps`` rows, so a
+    symbol the report itself classified as a gap rendered as "yes" once
+    truncation dropped its row -- the strongest possible overclaim.
+    """
+    payload = _indirect_report()
+    payload["test_gaps"] = []
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    rows = [line for line in body.splitlines() if line.startswith("| 0.")]
+    assert rows
+    assert not any(row.rstrip().endswith("| yes |") for row in rows)
+    assert all(row.rstrip().endswith("| ? |") for row in rows)
+
+
+def test_a_truncated_report_still_accounts_for_the_indirect_class():
+    """The headline promises the class; the body must not simply omit it."""
+    payload = _indirect_report()
+    # Only the unreached row survives truncation.
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    assert "14 more gap(s) are reached only through a caller" in body
+
+
 def test_token_savings_line(report):
     body = render.render_markdown(report)
     assert "**Token savings:**" in body
@@ -279,6 +448,158 @@ def test_body_size_capped():
 
 
 # ---------------------------------------------------------------------------
+# The byte budget, at the byte
+# ---------------------------------------------------------------------------
+#
+# _MAX_BODY is the cap .github/workflows/pr-review-comment.yml enforces, and
+# that workflow measures the artifact on disk -- which is the body plus the
+# newline main() writes after it. A body sized at exactly _MAX_BODY is
+# therefore a 60,001-byte file and is rejected. These tests pin the boundary
+# from both sides so the reservation cannot quietly go missing again.
+
+# Tail of the report's markdown table, in bytes, for a row whose symbol name
+# is one character: "| 0.50 | medium | m.py::a | m.py:1 | yes |" plus "\n".
+_TABLE_ROW_BYTES = 43
+
+
+def _padded_report(rows: int, tail_name_len: int) -> dict:
+    """A report whose rendered body grows one byte per unit of *tail_name_len*.
+
+    ``rows`` identical one-character rows get the body into the right
+    neighbourhood; the final row's symbol name is the fine adjustment. Both
+    stay inside ``md_escape``'s 120-character cell cap, so a name of length
+    *n* costs exactly *n* bytes.
+    """
+    def entry(name: str, line: int) -> dict:
+        return {
+            "qualified_name": f"m.py::{name}",
+            "risk_score": 0.5,
+            "file_path": "m.py",
+            "line_start": line,
+        }
+
+    priorities = [entry("a", 1) for _ in range(rows)]
+    priorities.append(entry("a" * tail_name_len, 1))
+    return {"risk_score": 0.5, "review_priorities": priorities}
+
+
+#: Every module global ``_fit_to_budget`` consults. Named rather than hard
+#: coded so lifting the budget keeps working if the cap is ever split again.
+_BUDGET_GLOBALS = ("_MAX_BODY", "_MAX_BODY_TEXT")
+
+
+def _untruncated_size(report: dict) -> int:
+    """Byte length of *report*'s body with the budget lifted out of the way."""
+    saved = {
+        name: getattr(render, name)
+        for name in _BUDGET_GLOBALS
+        if hasattr(render, name)
+    }
+    for name in saved:
+        setattr(render, name, 1 << 30)
+    try:
+        body = render.render_markdown(report, max_functions=1 << 20)
+    finally:
+        for name, value in saved.items():
+            setattr(render, name, value)
+    return len(body.encode("utf-8"))
+
+
+def report_rendering_to_exactly(target_bytes: int) -> dict:
+    """A report whose untruncated body is exactly *target_bytes* long.
+
+    Shared with ``tests/test_action_e2e.py``, which feeds the rendered
+    artifact to the privileged workflow's own validator.
+    """
+    low, high = 0, 4000
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _untruncated_size(_padded_report(mid, 1)) <= target_bytes:
+            low = mid
+        else:
+            high = mid - 1
+    for tail in range(1, _TABLE_ROW_BYTES + 121):
+        report = _padded_report(low, tail)
+        if _untruncated_size(report) == target_bytes:
+            return report
+    raise AssertionError(f"could not build a report of exactly {target_bytes} bytes")
+
+
+def test_boundary_fixture_is_exact():
+    """Teeth for the two tests below: the fixture really hits the byte.
+
+    Without this, a tuner that silently landed 200 bytes short would make
+    every boundary assertion below pass vacuously.
+    """
+    for target in (render._MAX_BODY - 1, render._MAX_BODY, render._MAX_BODY + 1):
+        assert _untruncated_size(report_rendering_to_exactly(target)) == target
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_written_artifact_never_exceeds_the_consumer_cap(tmp_path, offset):
+    """One byte under the cap, exactly on it, and one byte over it.
+
+    The consumer stats the file, so the file is what is measured here.
+    """
+    target = render._MAX_BODY + offset
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report_rendering_to_exactly(target)), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    code = render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    )
+    assert code == 0
+    assert out.stat().st_size <= render._MAX_BODY, out.stat().st_size
+    assert "Powered by [code-review-graph]" in out.read_text(encoding="utf-8")
+
+
+def test_a_body_that_still_fits_is_not_truncated(tmp_path):
+    """The reservation costs one byte, not a whole report.
+
+    A body of _MAX_BODY - 1 leaves exactly room for the newline, so it must
+    come through whole; truncating it would trade one bug for another.
+    """
+    report = report_rendering_to_exactly(render._MAX_BODY - 1)
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    ) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "*Report truncated.*" not in text
+    assert out.stat().st_size == render._MAX_BODY
+
+
+def test_a_body_that_only_fits_without_its_newline_is_truncated(tmp_path):
+    """And the byte on the other side of the line is cut.
+
+    A body of exactly _MAX_BODY would be a 60,001-byte artifact, which is
+    one byte over the cap the consumer enforces.
+    """
+    report = report_rendering_to_exactly(render._MAX_BODY)
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    ) == 0
+    assert "*Report truncated.*" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_fit_to_budget_reserves_the_newline_the_artifact_carries(offset):
+    """The same boundary, straight at ``_fit_to_budget``."""
+    size = render._MAX_BODY + offset
+    body = ("line\n" * (size // 5)) + "x" * (size % 5)
+    assert len(body.encode("utf-8")) == size
+    fitted = render._fit_to_budget(body)
+    assert len((fitted + "\n").encode("utf-8")) <= render._MAX_BODY
+    if offset < 0:
+        assert fitted == body, "a body that already fits must not be cut"
+
+
+# ---------------------------------------------------------------------------
 # load_report / no-changes fallback
 # ---------------------------------------------------------------------------
 
@@ -323,6 +644,47 @@ def test_main_no_changes_input(tmp_path):
     code = render.main(["--input", str(src), "--output", str(out)])
     assert code == 0
     assert "No analyzable code changes" in out.read_text(encoding="utf-8")
+
+
+def test_is_clean_tree_only_matches_detect_changes_own_line():
+    """Anything else non-JSON is the analysis not having happened."""
+    assert render.is_clean_tree("No changes detected.\n")
+    assert not render.is_clean_tree("")
+    assert not render.is_clean_tree("Error: could not determine the changes: ...")
+    assert not render.is_clean_tree("No changes detected. Also: git exploded.")
+
+
+def test_main_not_analyzed_returns_4_and_says_so(tmp_path):
+    """A detect-changes failure must not render as an all-clear."""
+    src = tmp_path / "report.json"
+    src.write_text(
+        "Error: could not determine the changes: git could not be run.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(src), "--output", str(out)])
+    assert code == 4
+    body = out.read_text(encoding="utf-8")
+    assert body.startswith(render.MARKER)
+    assert "has not been reviewed" in body
+    assert "not an all-clear" in body
+    assert "No analyzable code changes" not in body
+
+
+def test_empty_detect_changes_output_is_not_an_all_clear(tmp_path):
+    """A command that died before printing anything is not a clean tree."""
+    src = tmp_path / "report.json"
+    src.write_text("", encoding="utf-8")
+    code = render.main(["--input", str(src), "--quiet"])
+    assert code == 4
+
+
+def test_not_analyzed_beats_fail_on_risk_none(tmp_path):
+    """An unknown risk is not a low one, so `none` cannot switch it off."""
+    src = tmp_path / "report.json"
+    src.write_text("Error: boom\n", encoding="utf-8")
+    code = render.main(["--input", str(src), "--quiet", "--fail-on-risk", "none"])
+    assert code == 4
 
 
 def test_main_missing_input_returns_2(tmp_path):

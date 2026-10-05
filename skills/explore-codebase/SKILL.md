@@ -5,25 +5,20 @@ description: Navigate and understand codebase structure using the knowledge grap
 
 ## Explore Codebase
 
-Use the code-review-graph MCP tools to explore and understand the codebase.
+Use the code-review-graph MCP tools to find your way around the codebase.
 
 ### Steps
 
-1. Run `list_graph_stats_tool` to see overall codebase metrics.
-2. Run `get_architecture_overview_tool` for high-level community structure.
-3. Use `list_communities_tool` to find major modules, then `get_community_tool` for details.
-4. Use `semantic_search_nodes_tool` to find specific functions or classes.
-5. Use `query_graph_tool` with patterns like `callers_of`, `callees_of`, `imports_of` to trace relationships.
-6. Use `list_flows_tool` and `get_flow_tool` to understand execution paths.
-
-### Tips
-
-- Start broad (stats, architecture) then narrow down to specific areas.
-- Use `children_of` on a file to see all its functions and classes.
-- Use `find_large_functions_tool` to identify complex code.
+1. Call `get_architecture_overview_tool` for the community structure. Call `list_communities_tool`, then `get_community_tool`, only for the modules you need.
+2. Call `semantic_search_nodes_tool` to find a function or class by name or keyword.
+3. Call `query_graph_tool` with `callers_of`, `callees_of` or `imports_of` to trace relationships. `children_of` on a file lists its functions and classes.
+4. Call `list_flows_tool`, then `get_flow_tool` for one flow, to follow an execution path.
+5. Call `find_large_functions_tool` to find oversized functions.
+6. Call `list_graph_stats_tool` only when you need node, edge and language counts.
 
 ## Token Efficiency Rules
-- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
-- Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
-- Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.
+- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when minimal is not enough.
+- Prefer a targeted `query_graph_tool` call over a broad listing call.
+- Budget: about five tool calls and 800 tokens of graph output per task.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

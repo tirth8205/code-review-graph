@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -258,6 +259,51 @@ class TestSymbolDisambiguation:
             for candidate in result["disambiguation"]
         )
 
+    def test_qualified_tail_filter_runs_before_candidate_limit(self, tmp_path):
+        root, store = _make_repo(tmp_path)
+        target_path = root / "Target.cs"
+        target = f"{target_path}::Details.QueryHandler"
+        try:
+            for index in range(100):
+                store.upsert_node(NodeInfo(
+                    kind="Class",
+                    name="QueryHandler",
+                    parent_name=f"Outer{index}",
+                    file_path=str(root / f"Decoy{index}.cs"),
+                    line_start=1,
+                    line_end=1,
+                    language="csharp",
+                ))
+            store.upsert_node(NodeInfo(
+                kind="Class",
+                name="QueryHandler",
+                parent_name="Details",
+                file_path=str(target_path),
+                line_start=1,
+                line_end=5,
+                language="csharp",
+            ))
+            store.commit()
+            assert [
+                node.qualified_name
+                for node in store.search_nodes_by_qualified_tail(
+                    "Details.QueryHandler", limit=100,
+                )
+            ] == [target]
+            assert store.count_nodes_by_qualified_tail(
+                "Details.QueryHandler",
+            ) == 1
+        finally:
+            store.close()
+
+        result = query_graph(
+            "children_of", "Details.QueryHandler", str(root),
+        )
+
+        assert result["status"] == "ok"
+        assert result["target"] == target
+        assert result["results"] == []
+
     def test_java_fqn_requires_matching_language_and_class(self, tmp_path):
         root, store = _make_repo(tmp_path)
         try:
@@ -330,6 +376,116 @@ class TestSymbolDisambiguation:
             str(root),
         )
         assert result["status"] == "not_found"
+
+    @pytest.mark.parametrize(
+        ("language", "parent_name", "file_name", "method", "target"),
+        [
+            ("go", "Handler", "handler.go", "Process", "Handler.Process"),
+            ("go", "pkg.Handler", "handler.go", "Process", "pkg.Handler.Process"),
+            ("python", "Handler", "service.py", "process", "Handler.process"),
+            ("kotlin", "Handler", "Handler.kt", "process", "Handler.process"),
+            ("typescript", "Handler", "handler.ts", "process", "Handler.process"),
+            (
+                "csharp", "Details.QueryHandler", "Details.cs", "Handle",
+                "Details.QueryHandler.Handle",
+            ),
+        ],
+    )
+    def test_dotted_target_resolves_for_every_language(
+        self, tmp_path, language, parent_name, file_name, method, target,
+    ):
+        """A dotted target is Java-FQN-shaped in every language, so the Java
+        guard must not withhold an exact qualified-tail match from Go, Python,
+        Kotlin, TypeScript or C# when no Java node competes for it."""
+        root, store = _make_repo(tmp_path)
+        try:
+            store.upsert_node(NodeInfo(
+                kind="Function",
+                name=method,
+                parent_name=parent_name,
+                file_path=str(root / file_name),
+                line_start=1,
+                line_end=5,
+                language=language,
+            ))
+            store.commit()
+        finally:
+            store.close()
+
+        result = query_graph("callers_of", target, str(root))
+
+        assert result["status"] == "ok"
+        assert result["target"] == f"{root / file_name}::{parent_name}.{method}"
+
+    def test_java_fqn_not_displaced_by_same_tail_in_another_language(
+        self, tmp_path,
+    ):
+        """The dotted-tail lookup is not language-filtered, so a non-Java node
+        whose qualified tail happens to equal a Java FQN must not silently win
+        over a genuine Java match."""
+        root, store = _make_repo(tmp_path)
+        try:
+            store.upsert_node(NodeInfo(
+                kind="Function",
+                name="process",
+                parent_name="OrderHandler",
+                file_path=str(root / "com" / "example" / "OrderHandler.java"),
+                line_start=10,
+                line_end=20,
+                language="java",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function",
+                name="process",
+                parent_name="com.example.OrderHandler",
+                file_path=str(root / "Impostor.cs"),
+                line_start=1,
+                line_end=5,
+                language="csharp",
+            ))
+            store.commit()
+        finally:
+            store.close()
+
+        result = query_graph(
+            "callers_of",
+            "com.example.OrderHandler.process",
+            str(root),
+        )
+
+        # The Java match wins outright: the unfiltered tail lookup must not
+        # displace it, exactly as before the dotted-tail lookup existed.
+        assert result["status"] == "ok"
+        assert result["target"] == (
+            f"{root / 'com' / 'example' / 'OrderHandler.java'}"
+            "::OrderHandler.process"
+        )
+
+    def test_dotted_ambiguity_count_survives_the_candidate_cap(self, tmp_path):
+        """``candidate_count`` must describe the whole matching population, not
+        the capped slice, or ``candidates_truncated`` silently under-reports."""
+        root, store = _make_repo(tmp_path)
+        over_cap = query_module._MAX_DOTTED_TARGET_CANDIDATES + 1
+        try:
+            for index in range(over_cap):
+                store.upsert_node(NodeInfo(
+                    kind="Function",
+                    name="Process",
+                    parent_name="Handler",
+                    file_path=str(root / f"pkg{index}" / "handler.go"),
+                    line_start=1,
+                    line_end=5,
+                    language="go",
+                ))
+            store.commit()
+        finally:
+            store.close()
+
+        result = query_graph("callers_of", "Handler.Process", str(root))
+
+        assert result["status"] == "ambiguous"
+        assert f"matches {over_cap} node(s)" in result["summary"]
+        assert result["candidates_truncated"] is True
 
     def test_duplicate_java_class_method_stays_ambiguous(self, tmp_path):
         root, store = _make_repo(tmp_path)
@@ -458,7 +614,25 @@ def test_mcp_query_wrapper_forwards_max_results(monkeypatch):
 
     tool = getattr(main_module.query_graph_tool, "fn", None)
     underlying = tool or main_module.query_graph_tool
-    result = underlying("callers_of", "target", max_results=7)
+    # The wrapper is a coroutine: the query runs on a worker thread so
+    # the stdio event loop stays answerable (#262).
+    result = asyncio.run(underlying("callers_of", "target", max_results=7))
 
     assert result["status"] == "ok"
     assert captured["max_results"] == 7
+
+
+def test_dotted_lookup_survives_batched_file_replacement(tmp_path):
+    """#942 and #858: production batch writes must maintain the lookup index."""
+    path = str(tmp_path / "handler.py")
+    with GraphStore(tmp_path / "graph.db") as store:
+        for end in (3, 7):
+            node = NodeInfo(
+                kind="Function", name="process", parent_name="Handler",
+                file_path=path, line_start=1, line_end=end, language="python",
+            )
+            store.store_file_batch([(path, [node], [], "hash")])
+            matches = store.search_nodes_by_qualified_tail("Handler.process")
+            assert len(matches) == 1
+            assert matches[0].line_end == end
+            assert store.count_nodes_by_qualified_tail("Handler.process") == 1
