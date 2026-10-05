@@ -370,7 +370,11 @@ def test_a_base_ref_that_does_not_resolve_is_not_an_unrunnable_git(git_repo):
 
     with patch("code_review_graph.incremental.subprocess.run", side_effect=fake_run):
         assert get_changed_files(git_repo, "HEAD~1", require_vcs=True) == []
-    assert len(calls) == 2, "the --cached fallback was skipped"
+    assert len(calls) == 3
+    assert calls[1] == ["git", "diff", "--name-status", "-z", "--cached"]
+    assert calls[2] == [
+        "git", "ls-files", "--others", "--exclude-standard", "-z",
+    ]
 
 
 def test_analyze_changes_degrades_rather_than_failing_on_a_partial_diff(tmp_path):

@@ -554,18 +554,25 @@ class TestIsBinary:
 class TestGitOperations:
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files(self, mock_run, tmp_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=b"M\0src/a.py\0A\0src/b.py\0",
-        )
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout=b"M\0src/a.py\0A\0src/b.py\0",
+            ),
+            MagicMock(returncode=0, stdout=b""),
+        ]
         result = get_changed_files(tmp_path)
         assert result == ["src/a.py", "src/b.py"]
-        mock_run.assert_called_once()
-        call_args = mock_run.call_args
-        assert "git" in call_args[0][0]
-        assert "-z" in call_args[0][0]
-        assert call_args[1].get("timeout") == 30
-        assert "text" not in call_args[1]
+        assert mock_run.call_count == 2
+        diff_call = mock_run.call_args_list[0]
+        assert "git" in diff_call.args[0]
+        assert "-z" in diff_call.args[0]
+        assert diff_call.kwargs.get("timeout") == 30
+        assert "text" not in diff_call.kwargs
+        untracked_call = mock_run.call_args_list[1]
+        assert untracked_call.args[0] == [
+            "git", "ls-files", "--others", "--exclude-standard", "-z",
+        ]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_fallback(self, mock_run, tmp_path):
@@ -573,11 +580,24 @@ class TestGitOperations:
         mock_run.side_effect = [
             MagicMock(returncode=1, stdout=b""),
             MagicMock(returncode=0, stdout=b"A\0staged.py\0"),
+            MagicMock(returncode=0, stdout=b""),
         ]
         result = get_changed_files(tmp_path)
         assert result == ["staged.py"]
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == 3
         assert "-z" in mock_run.call_args_list[1].args[0]
+        assert "--others" in mock_run.call_args_list[2].args[0]
+
+    @patch("code_review_graph.incremental.subprocess.run")
+    def test_get_changed_files_includes_untracked_paths(self, mock_run, tmp_path):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=b"M\0tracked.py\0"),
+            MagicMock(returncode=0, stdout=b"new.py\0nested/new.py\0"),
+        ]
+
+        assert get_changed_files(tmp_path) == [
+            "tracked.py", "new.py", "nested/new.py",
+        ]
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_strict_failure_does_not_fallback(self, mock_run, tmp_path):
@@ -1821,14 +1841,15 @@ class TestRenamePurgeParity:
 
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files_reports_both_sides_of_rename(self, mock_run, tmp_path):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=b"R100\0old.py\0new.py\0",
-        )
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=b"R100\0old.py\0new.py\0"),
+            MagicMock(returncode=0, stdout=b""),
+        ]
         assert get_changed_files(tmp_path) == ["old.py", "new.py"]
 
     def test_rename_purges_old_path_end_to_end(self, tmp_path):
         self._git(tmp_path, "init", "-q")
+        (tmp_path / ".gitignore").write_text("g.db*\n")
         (tmp_path / "a.py").write_text("def foo():\n    return 1\n")
         self._git(tmp_path, "add", ".")
         self._git(tmp_path, "commit", "-qm", "init")
