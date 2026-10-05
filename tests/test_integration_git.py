@@ -145,6 +145,28 @@ def test_get_staged_and_unstaged_preserves_unicode_path(
     assert get_staged_and_unstaged(git_repo_with_unicode_path) == ["café.py"]
 
 
+def test_get_changed_files_includes_untracked_but_not_ignored_files(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Automatic Git discovery sees new source paths and honors .gitignore."""
+    (git_repo_with_unicode_path / ".gitignore").write_text(
+        "ignored.py\n", encoding="utf-8",
+    )
+    _git_ok(git_repo_with_unicode_path, "add", ".gitignore")
+    _git_ok(git_repo_with_unicode_path, "commit", "-m", "ignore generated file")
+
+    nested = git_repo_with_unicode_path / "new" / "nested.py"
+    nested.parent.mkdir()
+    nested.write_text("def nested():\n    return 1\n", encoding="utf-8")
+    (git_repo_with_unicode_path / "ignored.py").write_text(
+        "def ignored():\n    return 1\n", encoding="utf-8",
+    )
+
+    assert get_changed_files(git_repo_with_unicode_path, base="HEAD") == [
+        "new/nested.py",
+    ]
+
+
 def test_get_staged_and_unstaged_expands_new_untracked_directories(
     git_repo_with_unicode_path: Path,
 ) -> None:
@@ -405,6 +427,42 @@ def test_incremental_update_real_git(git_repo: Path) -> None:
         store.close()
     finally:
         Path(db_path).unlink(missing_ok=True)
+
+
+def test_untracked_source_is_indexed_by_incremental_and_full_build(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """A newly created, unstaged source file reaches both build paths."""
+    _git_ok(git_repo, "config", "user.email", "test@test.com")
+    _git_ok(git_repo, "config", "user.name", "Test")
+    (git_repo / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    _git_ok(git_repo, "add", ".gitignore")
+    _git_ok(git_repo, "commit", "-m", "ignore generated file")
+
+    incremental_store = GraphStore(tmp_path / "incremental-untracked.db")
+    full_store = GraphStore(tmp_path / "full-untracked.db")
+    try:
+        full_build(git_repo, incremental_store)
+        new_file = git_repo / "new_module.py"
+        new_file.write_text(
+            "def newly_visible():\n    return 'indexed'\n", encoding="utf-8",
+        )
+        (git_repo / "ignored.py").write_text(
+            "def should_stay_ignored():\n    return None\n", encoding="utf-8",
+        )
+
+        result = incremental_update(git_repo, incremental_store)
+        assert "new_module.py" in result["changed_files"]
+        assert incremental_store.get_nodes_by_file(str(new_file))
+        assert not incremental_store.get_nodes_by_file(str(git_repo / "ignored.py"))
+
+        full_build(git_repo, full_store)
+        assert full_store.get_nodes_by_file(str(new_file))
+        assert not full_store.get_nodes_by_file(str(git_repo / "ignored.py"))
+    finally:
+        incremental_store.close()
+        full_store.close()
 
 
 # ------------------------------------------------------------------

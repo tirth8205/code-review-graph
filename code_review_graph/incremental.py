@@ -1047,6 +1047,9 @@ def get_changed_files(
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
+    Git results also include untracked, non-ignored files so newly created
+    source files reach incremental indexing before they are staged.
+
     For SVN working copies the *base* parameter is ignored; modified/added/
     deleted files are detected from ``svn status``.  Pass an SVN revision
     range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
@@ -1115,7 +1118,13 @@ def get_changed_files(
         if result.returncode != 0:
             logger.warning("git diff failed while discovering changed files")
             return []
-        return _decode_name_status_paths(result.stdout)
+        changed = _decode_name_status_paths(result.stdout)
+        untracked = _get_untracked_files(
+            repo_root,
+            timeout=timeout,
+            require_vcs=require_vcs or strict,
+        )
+        return list(dict.fromkeys([*changed, *untracked]))
     except (OSError, subprocess.TimeoutExpired) as exc:
         if strict:
             raise ChangeDiscoveryError("git change discovery failed") from exc
@@ -1406,6 +1415,38 @@ def get_all_tracked_files(
     except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
+
+def _get_untracked_files(
+    repo_root: Path,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> list[str]:
+    """Return Git's untracked, non-ignored files using NUL-delimited paths."""
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            logger.warning("git ls-files failed while discovering untracked files")
+            if require_vcs:
+                raise ChangeDiscoveryError(
+                    "git ls-files failed while discovering untracked files "
+                    f"(rc={result.returncode})"
+                )
+            return []
+        return [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+        return []
+
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.
 
@@ -1449,11 +1490,15 @@ def collect_all_files(
     parser = CodeParser(repo_root)
     files = []
 
-    # Prefer git ls-files for tracked files
+    # Prefer Git's tracked-file inventory, augmented with untracked files so
+    # a full build and an incremental update see the same source tree.
+    vcs = detect_vcs(repo_root)
     tracked = get_all_tracked_files(repo_root, recurse_submodules)
-    if tracked:
-        candidates = tracked
+    if vcs == "git":
+        candidates = list(dict.fromkeys([*tracked, *_get_untracked_files(repo_root)]))
     else:
+        candidates = tracked
+    if not candidates:
         # Fallback: walk directory
         candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
 
