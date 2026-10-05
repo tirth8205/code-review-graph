@@ -62,6 +62,15 @@ _OPT_IN_MARKERS = frozenset({
 _OPT_IN_ENV_OVERRIDES = {"packaging": "CRG_RUN_PACKAGING_TESTS"}
 
 
+def pytest_configure(config):
+    # Parent runners (e.g. CLI wrappers) may inject GIT_CONFIG_* variables
+    # (such as diff.external="" or empty core.hooksPath) that break subprocess
+    # Git invocations in test fixtures.
+    for key in list(os.environ):
+        if key.startswith("GIT_CONFIG_"):
+            del os.environ[key]
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip opt-in suites unless the run explicitly selects their marker."""
     expression = config.getoption("-m", default="") or ""

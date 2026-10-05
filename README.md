@@ -139,7 +139,7 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other YAML and other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), value-free generic YAML structure, Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references, and Laravel Route and Eloquent edges when the source shows explicit framework imports, model inheritance and receiver evidence.
 
@@ -299,7 +299,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Execution flows** | Call chains from entry points, sorted by weighted criticality |
 | **Community detection** | Leiden clustering with resolution scaled to graph size |
 | **Architecture overview** | Community-based architecture map with coupling warnings |
-| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, flows and test gaps |
+| **Risk-scored reviews** | `detect_changes` maps diffs to affected functions, YAML paths, flows and test gaps |
 | **Custom languages** | New languages via `.code-review-graph/languages.toml`, no fork needed |
 | **GitHub Action** | Sticky risk-scored PR review comments in CI, with an optional `fail-on-risk` merge gate |
 | **Refactoring tools** | Rename preview, framework-aware dead code detection, community-driven suggestions |

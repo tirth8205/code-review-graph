@@ -85,6 +85,24 @@ A synthesised node for a Spring application event, created after the build by
 `event_resolver.py` from `PUBLISHES` and `HANDLES` edges. Its `file_path` is the placeholder
 `event` and `extra` carries `{"event_type": ..., "virtual": true}`.
 
+### YamlPath
+A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
+
+The persisted `extra` JSON is the internal source of truth. Query, search, and change-analysis responses expose its safe public subset under one nested `yaml` object:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| schema_path | string | Aggregated structural path, such as `$.services[*].metadata.tier` |
+| example_path | string | One concrete occurrence used as a navigation example |
+| value_type / value_types | string / string[] | Structural or scalar YAML tag types; never scalar values |
+| document_index | int | Zero-based YAML document index |
+| occurrence_count | int | Number of occurrences represented by this node |
+| line_samples | int[] | Bounded occurrence-line samples |
+| duplicate_key / duplicate_group_count | bool / int | Mapping-scoped duplicate-key diagnostics |
+| is_alias / anchor_definition / yaml_merge | bool | Alias, anchor, and merge relationship metadata |
+
+`CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
+
 ## Edge Types
 
 Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship
@@ -115,10 +133,12 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 ## Qualified Name Format
 
 ```text
-/absolute/path/to/file.py                                  # File
-/absolute/path/to/file.py::function_name                   # top-level function
-/absolute/path/to/file.py::ClassName.method_name           # method
-/absolute/path/to/file.py::OuterClass.InnerClass.method    # nested class method
+/absolute/path/to/file.py                                      # File
+/absolute/path/to/file.py::function_name                       # top-level function
+/absolute/path/to/file.py::ClassName.method_name               # method
+/absolute/path/to/file.py::OuterClass.InnerClass.method        # nested class method
+/absolute/path/to/file.yml::yaml:0:$.services[*].metadata.tier # aggregated YAML path in document 0
+/absolute/path/to/file.yml::yaml:0:alias:$.service["<<"]@12    # alias or anchor identity
 ```
 
 `nodes.symbol` stores the part after the first `::` (or the whole name when there is none)
