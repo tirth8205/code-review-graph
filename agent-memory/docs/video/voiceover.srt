@@ -1,0 +1,80 @@
+1
+00:00:00,250 --> 00:00:03,100
+What if you could see
+what your agent remembers?
+
+2
+00:00:03,100 --> 00:00:07,000
+Meet code-review-graph.
+
+3
+00:00:07,250 --> 00:00:11,000
+You ask: “Reply in British English,
+and use em dashes.”
+
+4
+00:00:11,000 --> 00:00:17,000
+The prompt is captured
+before the agent starts work.
+
+5
+00:00:17,250 --> 00:00:20,000
+Two preferences become memory nodes.
+
+6
+00:00:20,000 --> 00:00:22,200
+Only your prompts create memories.
+
+7
+00:00:22,200 --> 00:00:26,000
+The agent’s replies are never used
+to invent them.
+
+8
+00:00:26,250 --> 00:00:30,750
+Then say: “Forget em dashes.
+That was just for this task.”
+
+9
+00:00:30,750 --> 00:00:34,000
+The preference is forgotten,
+while British English stays.
+
+10
+00:00:34,000 --> 00:00:37,000
+You’re in control.
+
+11
+00:00:37,250 --> 00:00:43,500
+The agent checks your memory,
+then the existing code graph, then works.
+
+12
+00:00:43,500 --> 00:00:45,000
+Two separate stores.
+
+13
+00:00:45,000 --> 00:00:48,000
+No permanent cross-graph edges.
+
+14
+00:00:48,250 --> 00:00:50,250
+Lovable shows your memory graph.
+
+15
+00:00:50,250 --> 00:00:54,250
+As you chat across tools,
+new nodes join the same graph.
+
+16
+00:00:54,250 --> 00:00:56,000
+You can inspect and edit it.
+
+17
+00:00:56,150 --> 00:00:57,050
+code-review-graph.
+
+18
+00:00:57,050 --> 00:01:00,000
+Your memory.
+Your control.

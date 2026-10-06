@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="820" viewBox="0 0 1600 820">
+<rect width="1600" height="820" fill="#f7f7f5"/>
+<text x="800" y="78" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="42" font-weight="700">How the two graphs work</text>
+<text x="800" y="125" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="25" font-weight="400">Memory first. Code context second.</text>
+<text x="540" y="195" fill="#087f74" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="700">1  /  NEW LAYER</text>
+<text x="980" y="195" fill="#3e64a8" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="700">2  /  EXISTING LAYER</text>
+<rect x="50" y="260" width="235" height="190" rx="20" fill="#ffffff" stroke="#dededb" stroke-width="2"/>
+<rect x="365" y="235" width="350" height="255" rx="20" fill="#ffffff" stroke="#afd5cf" stroke-width="2"/>
+<rect x="805" y="235" width="350" height="255" rx="20" fill="#ffffff" stroke="#bfcee5" stroke-width="2"/>
+<rect x="1235" y="260" width="315" height="190" rx="20" fill="#ffffff" stroke="#dededb" stroke-width="2"/>
+<text x="167" y="319" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="27" font-weight="700">Your prompt</text>
+<text x="167" y="363" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="20" font-weight="400">CLI · editor · chat</text>
+<text x="167" y="399" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="400">Any connected tool</text>
+<text x="540" y="287" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="28" font-weight="700">Chat memory graph</text>
+<text x="540" y="328" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="400">Facts · decisions · preferences</text>
+<text x="980" y="287" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="28" font-weight="700">Codebase graph</text>
+<text x="980" y="328" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="400">Files · functions · dependencies</text>
+<polyline points="466,413 535,389" fill="none" stroke="#afd5cf" stroke-width="2" stroke-linejoin="round" />
+<polyline points="535,389 609,426" fill="none" stroke="#afd5cf" stroke-width="2" stroke-linejoin="round" />
+<polyline points="466,413 548,451" fill="none" stroke="#afd5cf" stroke-width="2" stroke-linejoin="round" />
+<circle cx="466" cy="413" r="9" fill="#087f74"/>
+<circle cx="535" cy="389" r="9" fill="#087f74"/>
+<circle cx="609" cy="426" r="9" fill="#087f74"/>
+<circle cx="548" cy="451" r="9" fill="#087f74"/>
+<polyline points="901,420 965,385" fill="none" stroke="#bfcee5" stroke-width="2" stroke-linejoin="round" />
+<polyline points="965,385 1045,407" fill="none" stroke="#bfcee5" stroke-width="2" stroke-linejoin="round" />
+<polyline points="965,385 974,450" fill="none" stroke="#bfcee5" stroke-width="2" stroke-linejoin="round" />
+<polyline points="974,450 1050,455" fill="none" stroke="#bfcee5" stroke-width="2" stroke-linejoin="round" />
+<circle cx="901" cy="420" r="9" fill="#3e64a8"/>
+<circle cx="965" cy="385" r="9" fill="#3e64a8"/>
+<circle cx="1045" cy="407" r="9" fill="#3e64a8"/>
+<circle cx="974" cy="450" r="9" fill="#3e64a8"/>
+<circle cx="1050" cy="455" r="9" fill="#3e64a8"/>
+<text x="1392" y="319" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="26" font-weight="700">Agent does the work</text>
+<text x="1392" y="363" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="21" font-weight="400">Uses both contexts</text>
+<text x="1392" y="399" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="18" font-weight="400">Code changes · answers</text>
+<polyline points="285,355 355,355" fill="none" stroke="#202123" stroke-width="2" stroke-linejoin="round" />
+<polygon points="355,355 344,349 344,361" fill="#202123"/>
+<polyline points="715,355 795,355" fill="none" stroke="#202123" stroke-width="2" stroke-linejoin="round" />
+<polygon points="795,355 784,349 784,361" fill="#202123"/>
+<polyline points="1155,355 1225,355" fill="none" stroke="#202123" stroke-width="2" stroke-linejoin="round" />
+<polygon points="1225,355 1214,349 1214,361" fill="#202123"/>
+<text x="320" y="318" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="16" font-weight="400">Capture</text>
+<text x="760" y="315" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="16" font-weight="400">Handoff</text>
+<text x="1195" y="318" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="16" font-weight="400">Context</text>
+<text x="1030" y="555" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="23" font-weight="400">Only user prompts add memories.</text>
+<text x="1030" y="595" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="23" font-weight="400">Human edits change the memory layer.</text>
+<rect x="365" y="650" width="350" height="90" rx="20" fill="#ffffff" stroke="#dededb" stroke-width="2"/>
+<text x="540" y="682" fill="#202123" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="22" font-weight="700">Natural-language memory edits</text>
+<text x="540" y="713" fill="#66686b" text-anchor="middle" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="19" font-weight="400">Add · correct · connect · forget</text>
+<polyline points="450,650 450,499" fill="none" stroke="#087f74" stroke-width="2" stroke-linejoin="round" />
+<polygon points="450,499 444,510 456,510" fill="#087f74"/>
+<text x="80" y="780" fill="#66686b" text-anchor="start" dominant-baseline="middle" font-family="Arial,Inter,system-ui,sans-serif" font-size="22" font-weight="400">Two independent stores. Only relevant context passes between the layers.</text>
+</svg>
