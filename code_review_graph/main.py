@@ -210,14 +210,38 @@ async def _offload(
         )
 
 
+# What an agent reads before it loads any of these tools: with deferred tool
+# loading (Claude Code's default once many tools are installed) it sees the
+# tool names and this text, nothing else, while Grep's description is always
+# in context. So this text decides when the graph gets picked over text
+# search. It routes by question type rather than introducing the server as a
+# code-review tool, which kept agents on Grep for callers, importers and
+# covering tests everywhere outside a review. Claude Code truncates server
+# instructions at 2,048 characters.
+SERVER_INSTRUCTIONS = (
+    "Code knowledge graph of this repo (Tree-sitter AST + call / import / test edges). "
+    "Use it whenever the question is about RELATIONSHIPS between pieces of code, in any "
+    "phase of work - coding, debugging, planning, brainstorming, refactoring, review - "
+    "not only code review:\n"
+    "- who calls / references symbol X -> query_graph_tool pattern=callers_of / "
+    "references_to\n"
+    "- which files import module or file X -> query_graph_tool pattern=importers_of\n"
+    "- which tests cover X -> query_graph_tool pattern=tests_for\n"
+    "- what breaks if X changes (blast radius) -> get_impact_radius_tool\n"
+    "- what a diff or branch touches -> detect_changes_tool, get_review_context_tool\n"
+    "- how modules depend on each other -> get_architecture_overview_tool, "
+    "list_communities_tool\n"
+    "- follow an execution flow -> list_flows_tool, get_flow_tool\n"
+    "Graph answers include dependents reached through re-exports and barrel files that "
+    "never spell the name, which text search silently misses.\n"
+    "For plain text - string literals, log messages, env var names, comments, config "
+    "keys - use Grep; the graph does not index text."
+)
+
 mcp = FastMCP(
     "code-review-graph",
     version=__version__,
-    instructions=(
-        "Persistent incremental knowledge graph for token-efficient, "
-        "context-aware code reviews. Parses your codebase with Tree-sitter, "
-        "builds a structural graph, and provides smart impact analysis."
-    ),
+    instructions=SERVER_INSTRUCTIONS,
 )
 
 
