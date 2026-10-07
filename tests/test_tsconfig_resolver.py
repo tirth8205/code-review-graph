@@ -133,6 +133,46 @@ class TestJsconfigResolution:
             assert Path(result) == target.resolve()
 
 
+class TestBaseUrlResolution:
+    """Non-relative specifiers resolve against baseUrl, as tsc resolves them."""
+
+    def setup_method(self):
+        self.resolver = TsconfigResolver()
+
+    def _project(self, root: Path, compiler_options: dict) -> Path:
+        (root / "tsconfig.json").write_text(
+            json.dumps({"compilerOptions": compiler_options}), encoding="utf-8",
+        )
+        target = root / "src" / "lib" / "util.ts"
+        target.parent.mkdir(parents=True)
+        target.write_text("export const util = 1;\n", encoding="utf-8")
+        return target
+
+    def test_base_url_without_paths_resolves(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": "./"})
+        importer = tmp_path / "src" / "app.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_base_url_resolves_when_no_paths_pattern_matches(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": ".", "paths": {"@/*": ["src/*"]}})
+        importer = tmp_path / "src" / "app.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_base_url_leaves_packages_unresolved(self, tmp_path):
+        self._project(tmp_path, {"baseUrl": "./"})
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("react", str(importer)) is None
+
+    def test_no_base_url_and_no_paths_returns_none(self, tmp_path):
+        self._project(tmp_path, {"strict": True})
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("src/lib/util", str(importer)) is None
+
+
 def test_resolve_alias_probes_mts_and_cts(tmp_path):
     _write_config(tmp_path, "tsconfig.json", {"@lib/*": ["src/lib/*"]})
     lib = tmp_path / "src" / "lib"

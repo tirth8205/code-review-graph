@@ -1,8 +1,10 @@
 """TypeScript tsconfig.json / jsconfig.json path alias resolver.
 
 Resolves TypeScript path aliases (e.g., ``@/ -> src/``) declared in
-``compilerOptions.paths`` so that ``IMPORTS_FROM`` edges can point to
-real file paths instead of raw alias strings. Plain-JS projects (Vue,
+``compilerOptions.paths``, and non-relative specifiers against
+``compilerOptions.baseUrl`` when no ``paths`` entry resolves them, so that
+``IMPORTS_FROM`` edges can point to real file paths instead of raw alias
+strings. Plain-JS projects (Vue,
 Nuxt, Vite) declare the same aliases in ``jsconfig.json``, which shares
 the ``compilerOptions`` schema, so it is handled by the same parser.
 """
@@ -52,15 +54,21 @@ class TsconfigResolver:
             paths: dict[str, list[str]] = config.get("paths", {})
             tsconfig_dir: str = config.get("_tsconfig_dir", "")
 
-            if not paths:
-                return None
-
             if base_url:
                 base_dir = (Path(tsconfig_dir) / base_url).resolve()
             else:
                 base_dir = Path(tsconfig_dir).resolve()
 
-            return self._match_and_probe(import_str, paths, base_dir)
+            if paths:
+                resolved = self._match_and_probe(import_str, paths, base_dir)
+                if resolved:
+                    return resolved
+
+            # Like tsc, resolve a specifier no paths entry resolved against baseUrl.
+            if base_url:
+                found = _probe_path((base_dir / import_str).resolve())
+                return str(found) if found else None
+            return None
         except (OSError, ValueError, TypeError):
             logger.debug(
                 "TsconfigResolver: unexpected error for %s", file_path, exc_info=True,
