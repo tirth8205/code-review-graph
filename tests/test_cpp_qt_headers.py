@@ -3,6 +3,7 @@
 import shutil
 from pathlib import Path
 
+from code_review_graph import parser as parser_module
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import CodeParser
@@ -131,6 +132,31 @@ typedef int value;
     for name, source in sources.items():
         _, nodes, _ = _parse(tmp_path, name, source)
         assert _file_language(nodes) == "c", name
+
+
+def test_long_elif_chain_does_not_walk_ancestors_per_node(monkeypatch) -> None:
+    lines = ["#if defined(START_WITH_IF)"]
+    for index in range(256):
+        lines.extend([
+            f"#elif defined(START_{index})",
+            f"#undef START_{index}",
+            "#pragma section",
+        ])
+    lines.extend(["#endif", "typedef int value;"])
+
+    tree_parser = CodeParser()._get_parser("c")
+    assert tree_parser is not None
+    tree = tree_parser.parse("\n".join(lines).encode())
+
+    def unexpected_ancestor_walk(node) -> bool:
+        raise AssertionError("header evidence scan walked each node's ancestors")
+
+    monkeypatch.setattr(
+        parser_module,
+        "_is_in_static_dead_guard",
+        unexpected_ancestor_walk,
+    )
+    assert CodeParser._has_cpp_header_evidence(tree.root_node) is False
 
 
 def test_c_auto_and_c23_constexpr_are_not_cpp_evidence(tmp_path: Path) -> None:
