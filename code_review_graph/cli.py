@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "dsh", "all",
 ]
 
 
@@ -301,12 +301,21 @@ def _handle_init(args: argparse.Namespace) -> None:
     skip_instructions = getattr(args, "no_instructions", False)
 
     print("Installing MCP server config...")
-    configured = install_platform_configs(repo_root, target=target, dry_run=dry_run)
+    configured = install_platform_configs(
+        repo_root, target=target, dry_run=dry_run,
+        **({"dsh_profile": args.dsh_profile}
+           if getattr(args, "dsh_profile", "web") != "web" else {}),
+    )
 
     if not configured:
         print("No platforms detected.")
     else:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
+
+    if target == "dsh":
+        print("DSH uses its native bundle for tools, skills, prompts and lifecycle.")
+        print("Prepare the isolated engine once with: npx dsh-code-review-graph@0.1.0 prepare")
+        return
 
     # Preview the instruction files that would be touched (#173).
     instr_targets = _instruction_files_to_modify(repo_root, target)
@@ -979,9 +988,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Target platform for MCP config (default: all detected)",
     )
 
+    for command in (install_cmd, init_cmd):
+        command.add_argument("--dsh-profile", default="web", help="DSH profile (default: web)")
+
     uninstall_cmd = sub.add_parser(
         "uninstall",
         help="Safely remove code-review-graph data, configs, hooks, and generated skills",
+    )
+    uninstall_cmd.add_argument(
+        "--dsh-profile", default="web", help="DSH profile to unbind (default: web)",
     )
     uninstall_cmd.add_argument(
         "--repo",
@@ -1834,6 +1849,8 @@ def _dispatch() -> None:
             "keep_user_configs": args.keep_user_configs,
             "platforms": scoped_platforms,
         }
+        if getattr(args, "dsh_profile", "web") != "web":
+            options["dsh_profile"] = args.dsh_profile
 
         def _print_report(report: UninstallReport) -> None:
             for action in report.removed_paths:

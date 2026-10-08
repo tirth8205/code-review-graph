@@ -51,6 +51,7 @@ from .tools import (
     get_impact_radius,
     get_knowledge_gaps_func,
     get_minimal_context,
+    get_refactor_edit_plan_func,
     get_review_context,
     get_suggested_questions_func,
     get_surprising_connections_func,
@@ -1023,6 +1024,23 @@ async def apply_refactor_tool(
         # anyway leaves the caller a modified tree and a retry that cannot
         # work: the refactor id is consumed. See _offload.
         bounded=False,
+    )
+
+
+@mcp.tool()
+async def get_refactor_edit_plan_tool(
+    refactor_id: str, repo_root: Optional[str] = None,
+) -> dict:
+    """Return a complete read-only UTF-8 edit plan for a host-controlled commit.
+
+    Each file includes path, before_sha256, after_content and edit_count.
+    Plans are not truncated. Hosts must recheck paths and byte hashes and
+    obtain filesystem permission before applying; no source files are written.
+    """
+    root = _resolve_repo_root(repo_root)
+    return await _offload(
+        "get_refactor_edit_plan_tool",
+        lambda: get_refactor_edit_plan_func(refactor_id, root), root,
     )
 
 

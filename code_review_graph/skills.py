@@ -28,7 +28,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     # runtime, so neither spelling has to be imported where it is deprecated.
     from importlib.resources.abc import Traversable
 
-from . import jsonc
+from . import dsh, jsonc
 from ._legacy_instructions import LEGACY_INSTRUCTION_SECTIONS
 
 logger = logging.getLogger(__name__)
@@ -162,6 +162,14 @@ def _opencode_config_path(repo_root: Path) -> Path:
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
+    "dsh": {
+        "name": "DeepSeek Harness",
+        "config_path": dsh.config_path,
+        "key": "dsh.profile.bundles",
+        "detect": lambda: shutil.which("dsh") is not None,
+        "format": "native-bundle",
+        "needs_type": False,
+    },
     "codex": {
         "name": "Codex",
         "config_path": lambda root: Path.home() / ".codex" / "config.toml",
@@ -1010,6 +1018,7 @@ def install_platform_configs(
     repo_root: Path,
     target: str = "all",
     dry_run: bool = False,
+    dsh_profile: str = "web",
 ) -> list[str]:
     """Install MCP config for one or all detected platforms.
 
@@ -1058,6 +1067,11 @@ def install_platform_configs(
         configured.extend(PLATFORMS[alias]["name"] for alias in shared_aliases.get(key, ()))
 
     for key, plat in platforms_to_install.items():
+        if plat["format"] == "native-bundle":
+            from .dsh import config_path, configure
+            if configure(config_path(repo_root, dsh_profile), install=True, dry_run=dry_run):
+                _record_configured(key, plat)
+            continue
         if key == "opencode":
             _warn_legacy_opencode_config(repo_root)
         config_path: Path = plat["config_path"](repo_root)

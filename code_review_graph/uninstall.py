@@ -890,19 +890,28 @@ def _process_platform_configs(
     scope: str,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
+    dsh_profile: str = "web",
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
     for platform_name, spec in skills.PLATFORMS.items():
         if platforms is not None and platform_name not in platforms:
             continue
         try:
-            path = _absolute(spec["config_path"](repo_root))
+            path = _absolute(spec["config_path"](repo_root, dsh_profile) if platform_name == "dsh"
+                             else spec["config_path"](repo_root))
             key = str(spec["key"])
             format_name = str(spec["format"])
         except (KeyError, OSError, TypeError, ValueError) as exc:
             report.skipped_paths.append(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
+            continue
+        if format_name == "native-bundle":
+            from . import dsh
+            if scope == "user" and dsh.configure(path, install=False, dry_run=dry_run):
+                _record_edit(
+                    report, path, "removed CRG-owned DSH bundle through native CLI", dry_run,
+                )
             continue
         destination = _scope_for_config(path, repo_root, home)
         if destination is None:
@@ -1011,9 +1020,11 @@ def _process_repo(
     keep_data: bool,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
+    dsh_profile: str = "web",
 ) -> None:
     _process_platform_configs(
-        repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms
+        repo_root, home, report, scope="repo", dry_run=dry_run, platforms=platforms,
+        dsh_profile=dsh_profile,
     )
     if platforms is not None:
         # Platform-scoped unbind: remove only the MCP registration for the
@@ -1131,9 +1142,11 @@ def _process_user(
     keep_data: bool,
     dry_run: bool,
     platforms: frozenset[str] | None = None,
+    dsh_profile: str = "web",
 ) -> None:
     _process_platform_configs(
-        reference_repo, home, report, scope="user", dry_run=dry_run, platforms=platforms
+        reference_repo, home, report, scope="user", dry_run=dry_run, platforms=platforms,
+        dsh_profile=dsh_profile,
     )
     if platforms is not None:
         # See _process_repo: platform-scoped unbind touches MCP config only.
@@ -1281,6 +1294,7 @@ def run(
     keep_user_configs: bool = False,
     dry_run: bool = False,
     platforms: Sequence[str] | None = None,
+    dsh_profile: str = "web",
 ) -> UninstallReport:
     """Uninstall CRG artifacts and return a precise action report.
 
@@ -1309,6 +1323,7 @@ def run(
             keep_data=keep_data,
             dry_run=dry_run,
             platforms=platform_filter,
+            dsh_profile=dsh_profile,
         )
 
     if not keep_user_configs:
@@ -1320,5 +1335,6 @@ def run(
             keep_data=keep_data,
             dry_run=dry_run,
             platforms=platform_filter,
+            dsh_profile=dsh_profile,
         )
     return report

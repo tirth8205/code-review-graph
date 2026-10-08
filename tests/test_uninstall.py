@@ -56,11 +56,28 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
     platform_name: str,
     fake_repo: Path,
     fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The uninstall inventory follows PLATFORMS, including future path changes."""
     spec = skills.PLATFORMS[platform_name]
     config_path = spec["config_path"](fake_repo)
-    if spec["format"] == "toml":
+    if spec["format"] == "native-bundle":
+        from code_review_graph import dsh
+        _write_json(config_path, {"dependencies": {dsh.BUNDLE: "0.1.0", "other": "1"},
+                                 "dsh": {"profile": {"bundles": [dsh.BUNDLE, "other"]}},
+                                 "theme": "dark"})
+
+        def remove(path: Path, *, install: bool, dry_run: bool = False) -> bool:
+            assert path == config_path and not install
+            if not dry_run:
+                data = _read_jsonc(path)
+                data["dependencies"].pop(dsh.BUNDLE)
+                data["dsh"]["profile"]["bundles"].remove(dsh.BUNDLE)
+                _write_json(path, data)
+            return True
+
+        monkeypatch.setattr(dsh, "configure", remove)
+    elif spec["format"] == "toml":
         _write(
             config_path,
             "theme = \"dark\"\n\n"
@@ -94,7 +111,12 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
     report = uninstall.run(repo=fake_repo, keep_data=True)
 
     assert report.errors == []
-    if spec["format"] == "toml":
+    if spec["format"] == "native-bundle":
+        data = _read_jsonc(config_path)
+        assert data["dependencies"] == {"other": "1"}
+        assert data["dsh"]["profile"]["bundles"] == ["other"]
+        assert data["theme"] == "dark"
+    elif spec["format"] == "toml":
         text = config_path.read_text(encoding="utf-8")
         assert "[mcp_servers.code-review-graph]" not in text
         assert "[mcp_servers.other]" in text
@@ -728,6 +750,7 @@ def test_atomic_config_replace_preserves_file_mode(
     config = fake_repo / ".mcp.json"
     _write_json(config, {"mcpServers": {"code-review-graph": {}, "other": {}}})
     config.chmod(0o640)
+    original_mode = stat.S_IMODE(config.stat().st_mode)
 
     report = uninstall.run(
         repo=fake_repo,
@@ -736,7 +759,7 @@ def test_atomic_config_replace_preserves_file_mode(
     )
 
     assert report.errors == []
-    assert stat.S_IMODE(config.stat().st_mode) == 0o640
+    assert stat.S_IMODE(config.stat().st_mode) == original_mode
     assert _read_jsonc(config) == {"mcpServers": {"other": {}}}
 
 
@@ -792,7 +815,12 @@ def test_symlink_and_out_of_boundary_paths_are_skipped(
     outside_data = tmp_path / "outside-data"
     outside_data.mkdir()
     _write(outside_data / "keep.txt", "keep")
-    os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    try:
+        os.symlink(outside_data, fake_repo / ".code-review-graph", target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows account lacks symbolic-link privilege")
+        raise
 
     outside_config = tmp_path / "outside-config.json"
     _write_json(outside_config, {"servers": {"code-review-graph": {}, "other": {}}})

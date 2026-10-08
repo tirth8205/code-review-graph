@@ -29,6 +29,7 @@ from ._common import (
     _get_store,
     _resolve_graph_file_paths,
     _shown_of,
+    _source_path,
     _validate_positive_int,
 )
 
@@ -623,8 +624,8 @@ def get_review_context(
             regions_by_file: dict[str, list[tuple[int, int]]] = {}
             snippets: dict[str, str] = {}
             for rel_path in shown_files:
-                full_path = root / rel_path
-                if not full_path.is_file():
+                full_path = _source_path(root, rel_path)
+                if full_path is None or not full_path.is_file():
                     continue
                 try:
                     lines = full_path.read_text(
@@ -1038,8 +1039,8 @@ def detect_changes_func(
                 ls = func.get("line_start")
                 le = func.get("line_end")
                 if fp and ls and le:
-                    file_path = Path(fp)
-                    if file_path.is_file():
+                    file_path = _source_path(root, fp)
+                    if file_path is not None and file_path.is_file():
                         try:
                             lines = file_path.read_text(encoding="utf-8",
                                 errors="replace"

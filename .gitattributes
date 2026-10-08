@@ -1,0 +1,2 @@
+# Keep the vendored renderer byte-identical to its pinned SRI digest on Windows.
+code_review_graph/assets/d3.v7.min.js -text

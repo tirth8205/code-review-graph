@@ -735,6 +735,8 @@ def apply_refactor(
     refactor_id: str,
     repo_root: Path,
     dry_run: bool = False,
+    *,
+    _plan_only: bool = False,
 ) -> dict[str, Any]:
     """Apply a previously previewed refactoring to source files.
 
@@ -780,6 +782,9 @@ def apply_refactor(
 
     edits = preview.get("edits", [])
     if not edits:
+        if _plan_only:
+            return {"status": "ok", "refactor_id": refactor_id,
+                    "repo_root": str(repo_root), "files": []}
         if dry_run:
             return {
                 "status": "ok", "dry_run": True, "applied": 0,
@@ -816,11 +821,16 @@ def apply_refactor(
     for file_str, file_edits in edits_by_file.items():
         file_path = Path(file_str)
         if not file_path.is_file():
+            if _plan_only:
+                return {"status": "error", "error": f"File not found: {file_path}"}
             logger.warning("apply_refactor: file not found: %s", file_path)
             continue
         try:
-            original = file_path.read_text(encoding="utf-8", errors="replace")
+            original = (file_path.read_bytes().decode("utf-8") if _plan_only
+                        else file_path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, UnicodeDecodeError) as exc:
+            if _plan_only:
+                return {"status": "error", "error": f"Cannot read {file_path}: {exc}"}
             logger.warning("apply_refactor: could not read %s: %s", file_path, exc)
             continue
 
@@ -830,6 +840,8 @@ def apply_refactor(
             old_text = edit["old"]
             new_text = edit["new"]
             if old_text not in content:
+                if _plan_only:
+                    return {"status": "error", "error": f"Stale edit in {file_path}"}
                 logger.warning(
                     "apply_refactor: old text %r not found in %s",
                     old_text, file_path,
@@ -850,6 +862,19 @@ def apply_refactor(
 
         if file_edits_applied > 0:
             planned[file_str] = (original, content, file_edits_applied)
+
+    if _plan_only:
+        import hashlib
+
+        return {
+            "status": "ok", "refactor_id": refactor_id, "repo_root": str(repo_root),
+            "files": [
+                {"path": str(Path(path).resolve()),
+                 "before_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+                 "after_content": content, "edit_count": count}
+                for path, (original, content, count) in sorted(planned.items())
+            ],
+        }
 
     # --- Dry-run path: return diffs, no writes ---
     if dry_run:
@@ -907,3 +932,12 @@ def apply_refactor(
     }
     logger.info("apply_refactor: completed %s — %d edits applied", refactor_id, edits_applied)
     return result
+
+
+def get_refactor_edit_plan(refactor_id: str, repo_root: Path) -> dict[str, Any]:
+    """Return all edits without writing or consuming the pending refactor.
+
+    Hashes cover the original UTF-8 bytes; replacement text retains BOM and
+    line endings. Missing, invalid and stale files reject the complete plan.
+    """
+    return apply_refactor(refactor_id, repo_root, dry_run=True, _plan_only=True)
