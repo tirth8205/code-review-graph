@@ -81,6 +81,97 @@ def test_update_after_failed_file_stays_incremental(repo, monkeypatch):
     assert result["changed_files"] == ["c.py"]
 
 
+def test_noop_update_repairs_fts_drift_without_rebuilding(repo):
+    from code_review_graph.build_state import BUILD_COMPLETE, BUILD_STATE_KEY
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+    with GraphStore(get_db_path(repo)) as store:
+        anchor = store.get_metadata("git_head_sha")
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+
+    _commit(repo, "a.py", "def a():\n    return 11\n\ndef gammaHelper():\n    return a()\n")
+    with GraphStore(get_db_path(repo)) as store:
+        changed = incremental_update(repo, store, base=anchor)
+        assert changed["files_updated"] == 1
+        # Simulate a graph written by the previous release, which kept the
+        # complete marker even though post-processing was skipped.
+        store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] > 0
+
+    repaired = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="minimal"
+    )
+    assert repaired["status"] == "ok"
+    assert repaired["build_type"] == "incremental"
+    assert repaired["files_updated"] == 0
+    assert repaired["fts_rebuilt"] is False
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts_docsize d "
+            "LEFT JOIN nodes n ON n.id = d.id "
+            "WHERE n.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts f "
+            "JOIN nodes n ON n.id = f.rowid "
+            "WHERE nodes_fts MATCH ?",
+            ("gammaHelper",),
+        ).fetchone()[0] == 1
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+
+
+def test_skip_postprocess_marks_pending_and_noop_update_repairs_fts(repo):
+    from code_review_graph.build_state import BUILD_COMPLETE, BUILD_STATE_KEY, POSTPROCESS_PENDING
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+    _commit(repo, "a.py", "def a():\n    return 11\n\ndef gammaHelper():\n    return a()\n")
+
+    skipped = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="none"
+    )
+    assert skipped["build_type"] == "incremental"
+    assert skipped["files_updated"] == 1
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == POSTPROCESS_PENDING
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] > 0
+
+    repaired = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="minimal"
+    )
+    assert repaired["status"] == "ok"
+    assert repaired["build_type"] == "incremental"
+    assert repaired["files_updated"] == 0
+    assert repaired["postprocess_level"] == "minimal"
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts f "
+            "JOIN nodes n ON n.id = f.rowid "
+            "WHERE nodes_fts MATCH ?",
+            ("gammaHelper",),
+        ).fetchone()[0] == 1
+
+
 def test_watch_batch_after_commit_records_head(repo):
     with GraphStore(get_db_path(repo)) as store:
         full_build(repo, store)
