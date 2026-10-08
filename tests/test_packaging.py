@@ -506,8 +506,14 @@ def test_no_package_module_reads_a_hook_template(sdist_names: list[str]) -> None
     assert "hooks/hooks.json" in sdist_names
     assert "hooks/session-start.sh" in sdist_names
     shipped = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    assert set(shipped) == {"SessionStart", "PostToolUse"}, (
-        f"shipped hook template declares unexpected events: {sorted(shipped)}"
+    # Claude Code only loads a plugin hooks file whose event map sits under a
+    # top-level "hooks" key; a bare event map fails with "hooks.json must have
+    # `hooks` (the hook matchers) or `modules` (hooks modules), or both".
+    assert set(shipped) == {"hooks"}, (
+        f"shipped hook template must wrap its events in 'hooks': {sorted(shipped)}"
+    )
+    assert set(shipped["hooks"]) == {"SessionStart", "PostToolUse"}, (
+        f"shipped hook template declares unexpected events: {sorted(shipped['hooks'])}"
     )
 
 

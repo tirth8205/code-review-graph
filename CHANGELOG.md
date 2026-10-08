@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The Claude Code plugin's hooks load again. `hooks/hooks.json` held a bare
+  event map, which current Claude Code rejects with "hooks.json must have
+  `hooks` (the hook matchers) or `modules` (hooks modules), or both", so the
+  SessionStart and PostToolUse hooks never ran. The events now sit under a
+  top-level `"hooks"` key, the shape the plugins reference documents.
+
 ## [2.3.9] - 2026-09-18
 
 ### Added

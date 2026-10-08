@@ -365,7 +365,7 @@ class TestShippedHooksFiles:
         )
         commands = [
             hook["command"]
-            for entries in data.values()
+            for entries in data["hooks"].values()
             for entry in entries
             for hook in entry.get("hooks", [])
             if hook.get("type") == "command"
