@@ -56,6 +56,9 @@ The adapter derives the canonical root from `agent.session.header.cwd`, removes
 Cross-repository access uses only the user's configured authorized roots.
 Backend workers and incremental watchers are shared within the Host by canonical
 root and released when the final owning Agent exits.
+Core build, review and flow source reads also validate filesystem identity,
+including source paths retrieved from cached graph records, so linked parent
+directories cannot bypass the adapter's argument checks.
 
 `get_refactor_edit_plan_tool` is an additional **read-only** core interface. It
 reuses the current refactor calculation and returns every
@@ -74,5 +77,8 @@ The adapter repository publishes release-tagged deterministic session transcript
 from actual DSH ToolRuntime, Session and AgentRegistry packages invoking a real
 CRG engine. They explicitly record **no real model inference**. Its CI matrix
 covers Windows, Linux, macOS, both releases, native Web/headless profile lifecycle
-and the shared Web/Desktop client graph contribution. Upstream reviewers decide
-whether this evidence meets the platform contribution requirement.
+and the shared Web/Desktop client graph contribution. See the adapter's
+`docs/validation.md` for completed checks and pending platform runs. The browser
+check mounts the actual client contribution with workspace-reader fixtures; it
+does not launch the Electron application. Upstream reviewers decide whether this
+evidence meets the platform contribution requirement.
