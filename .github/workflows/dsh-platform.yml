@@ -30,13 +30,23 @@ jobs:
           }
           $gitBashDirectory >> $env:GITHUB_PATH
           @'
-          import os, subprocess
+          import os, subprocess, tempfile
           from pathlib import Path
           payload = ("x" * 1024 + "\n") * 20000
-          for directory in ("bin", "usr/bin"):
-              shell = Path(os.environ["ProgramFiles"]) / "Git" / directory / "bash.exe"
-              proc = subprocess.Popen([str(shell), "-lc", "cat >/dev/null || true"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-              stdout, stderr = proc.communicate(payload)
-              print(f"{shell}: exit={proc.returncode}, stdout={stdout[:200]!r}, stderr={stderr[:500]!r}")
+          shell = Path(os.environ["ProgramFiles"]) / "Git/usr/bin/bash.exe"
+          with tempfile.TemporaryDirectory() as directory:
+              for command in ("cat >/dev/null || true", "cat | wc -c"):
+                  for chunk in (len(payload), 65536):
+                      proc = subprocess.Popen([str(shell), "-lc", command], cwd=directory, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                      error = None
+                      try:
+                          for offset in range(0, len(payload), chunk):
+                              proc.stdin.write(payload[offset:offset + chunk])
+                          proc.stdin.close()
+                      except BrokenPipeError as exc:
+                          error = str(exc)
+                      proc.stdin = None
+                      stdout, stderr = proc.communicate()
+                      print(f"command={command!r}, chunk={chunk}, error={error}, exit={proc.returncode}, stdout={stdout[:200]!r}, stderr={stderr[:500]!r}")
           '@ | uv run python -X utf8 -
       - run: uv run python -X utf8 -m pytest tests/test_cli_install.py tests/test_dsh.py tests/test_uninstall.py tests/test_refactor_edit_plan.py tests/test_refactor.py tests/test_skills.py tests/test_main.py tests/test_prompts.py tests/test_dsh_renderer.py tests/test_visualization.py tests/test_dsh_source_fence.py tests/test_incremental.py tests/test_flows.py tests/test_tools.py tests/test_review_utf8_content.py -q
