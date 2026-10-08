@@ -22,8 +22,8 @@ def profile(tmp_path, monkeypatch):
         calls.append(args)
         data = json.loads(path.read_text())
         if args[4] == "add":
-            assert args[5] == dsh.BUNDLE + "@0.1.1"
-            data["dependencies"][dsh.BUNDLE] = "0.1.1"
+            assert args[5] == dsh.BUNDLE + "@0.1.2"
+            data["dependencies"][dsh.BUNDLE] = "0.1.2"
             data["dsh"]["profile"]["bundles"].append(dsh.BUNDLE)
         else:
             data["dependencies"].pop(dsh.BUNDLE, None)

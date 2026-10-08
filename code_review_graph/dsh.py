@@ -62,7 +62,7 @@ def configure(path: Path, *, install: bool, dry_run: bool = False) -> bool:
         return False
     try:
         subprocess.run([executable, "plugin", "--profile", profile, action,
-                        BUNDLE + "@0.1.1" if install else BUNDLE],
+                        BUNDLE + "@0.1.2" if install else BUNDLE],
                        check=True, shell=False)
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"  DSH: native bundle {action} failed: {exc}")

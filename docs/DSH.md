@@ -17,16 +17,16 @@ so refactors pass through DSH's filesystem intents and session policy.
 ```sh
 code-review-graph install --platform dsh                 # profile web
 code-review-graph install --platform dsh --dsh-profile headless
-npx dsh-code-review-graph@0.1.1 prepare                  # explicit one-time setup
+npx dsh-code-review-graph@0.1.2 prepare                  # optional CLI setup; UI also prepares it
 ```
 
-The installer invokes `dsh plugin --profile <name> add dsh-code-review-graph@0.1.1`.
+The installer invokes `dsh plugin --profile <name> add dsh-code-review-graph@0.1.2`.
 DSH owns the profile manifest at `$DSH_HOME/profiles/<name>/package.json`, defaulting
 to `~/.dsh/profiles/<name>/package.json`. Its relevant native schema is:
 
 ```json
 {
-  "dependencies": { "dsh-code-review-graph": "0.1.1" },
+  "dependencies": { "dsh-code-review-graph": "0.1.2" },
   "dsh": { "profile": { "bundles": ["dsh-code-review-graph"] } }
 }
 ```
@@ -41,7 +41,7 @@ Desktop profile ownership belongs to the running application. Use the matching
 release's native plugin manager; an external CLI cannot modify `desktop`.
 The installer reports this requirement and leaves the profile untouched.
 After native Desktop installation, choose **Enable now**. Existing 0.1.0 users
-should remove that version through the native manager before installing 0.1.1;
+should remove that version through the native manager before installing 0.1.2;
 an already-registered bundle remains an idempotent no-op for this installer.
 
 ```sh
@@ -53,6 +53,21 @@ graph data, user settings and other plugins. The adapter never installs reposito
 instruction files or legacy hooks for a DSH-only installation.
 
 ## Workspace and refactors
+
+### Direct graph controls
+
+In the project session, open the right sidebar → New tab → Start → Code graph.
+Click **Set up and generate graph**. This prepares the isolated pinned Python
+engine on the first explicit action, then generates and displays the graph.
+Later use **Update graph**, or export the standalone HTML. The operation supports
+cancellation and retry; no model prompt or JSON parameters are needed.
+
+Native user commands `/crg-setup` and `/crg-graph` perform the same preparation
+and generation without arguments or model inference. First preparation needs
+uv or real Python 3.10+ and network access. Ordinary startup and model tool calls
+do not download dependencies; custom engine configurations remain user-managed.
+
+### Workspace binding and refactors
 
 The adapter derives the canonical root from `agent.session.header.cwd`, removes
 `repo_root` from model schemas and confines paths and symlinks to that root.
