@@ -12,7 +12,7 @@ from ..build_state import (
     BUILD_COMPLETE,
     BUILD_IN_PROGRESS,
     BUILD_STATE_KEY,
-    INCOMPLETE_BUILD_STATES,
+    POSTPROCESS_PENDING,
     advance_to_postprocess_pending,
     graph_contents_are_complete,
     read_build_state,
@@ -34,14 +34,13 @@ logger = logging.getLogger(__name__)
 
 
 def build_was_interrupted(store: Any) -> bool:
-    """True when the previous build died before it finished post-processing.
+    """True when file storage stopped before the graph contents were whole.
 
-    Both incomplete states answer yes: a build that never stored every file
-    and a build that stored them all but left the derived data unbuilt are
-    each a graph whose freshness metadata overstates it.  What separates them
-    is which repair works, which is :func:`graph_contents_are_complete`.
+    A ``postprocess-pending`` graph has all source rows stored, so a normal
+    update can repair its derived data without forcing a full graph rebuild.
+    Only ``in-progress`` needs a full rebuild to restore missing source rows.
     """
-    return read_build_state(store) in INCOMPLETE_BUILD_STATES
+    return read_build_state(store) == BUILD_IN_PROGRESS
 
 
 def _run_embedding_refresh(
@@ -705,18 +704,56 @@ def build_or_update_graph(
                     if result.get("freshness_advanced")
                     else "No graph changes detected. Freshness metadata was not advanced."
                 )
-                # Nothing changed, so there is nothing half built to repair;
-                # leaving the marker set would make every later update a full
-                # rebuild.
-                store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-                return {
+                if postprocess == "none":
+                    # An explicit skip should not turn an existing state into
+                    # a claim that derived data was checked. No source rows
+                    # changed, so restore the state that was present before
+                    # this no-op update began.
+                    store.set_metadata(BUILD_STATE_KEY, previous_state or "")
+                    return {
+                        **result,
+                        "status": "ok",
+                        "build_type": "incremental",
+                        "base_resolved": base_resolved,
+                        "summary": summary,
+                        "postprocess_level": postprocess,
+                    }
+
+                # Older builds could leave FTS drift behind a complete marker.
+                # Reconcile it even when Git has no source changes, while
+                # keeping the no-op path away from the expensive flow and
+                # community passes. A pending marker may also mean flows or
+                # communities were interrupted; honor the requested level in
+                # that case so a default update can finish the full repair.
+                postprocess_level = (
+                    postprocess
+                    if previous_state == POSTPROCESS_PENDING
+                    else "minimal"
+                )
+                build_result = {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
                     "base_resolved": base_resolved,
                     "summary": summary,
-                    "postprocess_level": postprocess,
                 }
+                advance_to_postprocess_pending(store)
+                warnings = _run_postprocess(
+                    store,
+                    build_result,
+                    postprocess_level,
+                    full_rebuild=False,
+                    changed_files=None,
+                    repo_root=str(root),
+                )
+                if warnings:
+                    build_result["warnings"] = warnings
+                if build_result.get("postprocess_failed"):
+                    build_result["status"] = "partial"
+                if not build_result.get("postprocess_contended"):
+                    store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+                build_result["postprocess_level"] = postprocess_level
+                return build_result
             summary = (
                 f"Incremental update: {result['files_updated']} files re-parsed, "
                 f"{result['total_nodes']} nodes and "
@@ -768,8 +805,13 @@ def build_or_update_graph(
         # genuinely what its freshness metadata claims.  A stage that lost the
         # write lock keeps the marker set so the next run redoes it, rather
         # than leaving an empty FTS index behind a "complete" verdict.
-        if not build_result.get("postprocess_contended"):
+        if not build_result.get("postprocess_contended") and postprocess != "none":
             store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+        elif postprocess == "none" and failed:
+            # A parse failure is already represented by the partial result.
+            # Keep the prior marker so one unparseable file does not turn the
+            # next otherwise-incremental update into a full rebuild.
+            store.set_metadata(BUILD_STATE_KEY, previous_state or "")
         build_result["repaired_interrupted_build"] = interrupted
         return build_result
     finally:
