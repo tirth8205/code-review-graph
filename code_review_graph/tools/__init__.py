@@ -93,7 +93,7 @@ from .query import (
 )
 
 # -- refactor_tools ---------------------------------------------------------
-from .refactor_tools import apply_refactor_func, refactor_func
+from .refactor_tools import apply_refactor_func, get_refactor_edit_plan_func, refactor_func
 
 # -- registry_tools ---------------------------------------------------------
 from .registry_tools import cross_repo_search_func, list_repos_func
