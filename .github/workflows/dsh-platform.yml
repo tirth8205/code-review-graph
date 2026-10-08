@@ -19,4 +19,14 @@ jobs:
         with:
           python-version: '3.11'
       - run: uv sync --extra dev
+      - name: Select Git Bash for Windows shell contract tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Write-Host "Default Bash: $((Get-Command bash).Source)"
+          $gitBashDirectory = Join-Path $env:ProgramFiles 'Git\bin'
+          if (!(Test-Path (Join-Path $gitBashDirectory 'bash.exe'))) {
+            throw 'Git Bash is required for the existing shell hook contracts.'
+          }
+          $gitBashDirectory >> $env:GITHUB_PATH
       - run: uv run python -X utf8 -m pytest tests/test_cli_install.py tests/test_dsh.py tests/test_uninstall.py tests/test_refactor_edit_plan.py tests/test_refactor.py tests/test_skills.py tests/test_main.py tests/test_prompts.py tests/test_dsh_renderer.py tests/test_visualization.py tests/test_dsh_source_fence.py tests/test_incremental.py tests/test_flows.py tests/test_tools.py tests/test_review_utf8_content.py -q
