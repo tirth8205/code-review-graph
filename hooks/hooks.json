@@ -1,35 +1,37 @@
 {
-  "SessionStart": [
-    {
-      "matcher": "",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "cat >/dev/null || true; code-review-graph status",
-          "timeout": 10
-        }
-      ]
-    }
-  ],
-  "PostToolUse": [
-    {
-      "matcher": "EnterWorktree",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "cat >/dev/null || true; code-review-graph build >/dev/null 2>&1 &"
-        }
-      ]
-    },
-    {
-      "matcher": "Write|Edit|Bash",
-      "hooks": [
-        {
-          "type": "command",
-          "command": "cat >/dev/null || true; code-review-graph update --skip-flows",
-          "timeout": 30
-        }
-      ]
-    }
-  ]
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null || true; code-review-graph status",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null || true; code-review-graph build >/dev/null 2>&1 &"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cat >/dev/null || true; code-review-graph update --skip-flows",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
 }
