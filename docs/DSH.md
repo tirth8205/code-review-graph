@@ -17,16 +17,16 @@ so refactors pass through DSH's filesystem intents and session policy.
 ```sh
 code-review-graph install --platform dsh                 # profile web
 code-review-graph install --platform dsh --dsh-profile headless
-npx dsh-code-review-graph@0.1.0 prepare                  # explicit one-time setup
+npx dsh-code-review-graph@0.1.1 prepare                  # explicit one-time setup
 ```
 
-The installer invokes `dsh plugin --profile <name> add dsh-code-review-graph@0.1.0`.
+The installer invokes `dsh plugin --profile <name> add dsh-code-review-graph@0.1.1`.
 DSH owns the profile manifest at `$DSH_HOME/profiles/<name>/package.json`, defaulting
 to `~/.dsh/profiles/<name>/package.json`. Its relevant native schema is:
 
 ```json
 {
-  "dependencies": { "dsh-code-review-graph": "0.1.0" },
+  "dependencies": { "dsh-code-review-graph": "0.1.1" },
   "dsh": { "profile": { "bundles": ["dsh-code-review-graph"] } }
 }
 ```
@@ -40,6 +40,9 @@ does not call DSH when both owned entries exist, leaving bytes unchanged.
 Desktop profile ownership belongs to the running application. Use the matching
 release's native plugin manager; an external CLI cannot modify `desktop`.
 The installer reports this requirement and leaves the profile untouched.
+After native Desktop installation, choose **Enable now**. Existing 0.1.0 users
+should remove that version through the native manager before installing 0.1.1;
+an already-registered bundle remains an idempotent no-op for this installer.
 
 ```sh
 code-review-graph uninstall --platform dsh --dsh-profile web --yes
@@ -79,6 +82,9 @@ CRG engine. They explicitly record **no real model inference**. Its CI matrix
 covers Windows, Linux, macOS, both releases, native Web/headless profile lifecycle
 and the shared Web/Desktop client graph contribution. See the adapter's
 `docs/validation.md` for completed checks and pending platform runs. The browser
-check mounts the actual client contribution with workspace-reader fixtures; it
-does not launch the Electron application. Upstream reviewers decide whether this
-evidence meets the platform contribution requirement.
+check executes the published Client factory with workspace-reader fixtures.
+A separate check uses the actual Windows Desktop 0.2.0-rc.2 application for
+isolated install/enable/remove/reinstall, native graph reading/search/HTML export,
+and preservation of other plugins and settings. Other Desktop platforms/releases
+have not been exercised as complete applications. Upstream reviewers decide
+whether this evidence meets the platform contribution requirement.
