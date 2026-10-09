@@ -11,6 +11,7 @@ import pytest
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
@@ -34,7 +35,6 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
-from code_review_graph.errors import ChangeDiscoveryError
 
 
 class TestParseExecutorSelection:
@@ -1068,6 +1068,65 @@ class TestIncrementalUpdate:
             )
             after_names = {f["name"] for f in get_flows(store)}
             assert "nested_entry" in after_names
+        finally:
+            store.close()
+
+    def test_failed_replacement_parse_preserves_existing_flows(
+        self, tmp_path, monkeypatch,
+    ):
+        """A failed replacement parse must keep prior flows and nodes."""
+        from code_review_graph.flows import get_flows, store_flows, trace_flows
+        from code_review_graph.parser import CodeParser
+
+        routes = tmp_path / "routes.py"
+        routes.write_text(
+            "def handler():\n    return helper()\n\n"
+            "def helper():\n    return 1\n"
+        )
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+            full_build(tmp_path, store)
+            store_flows(store, trace_flows(store))
+            before = get_flows(store)
+            assert len(before) >= 1
+            before_names = {f["name"] for f in before}
+            assert "handler" in before_names
+            before_nodes = store.get_nodes_by_file(str(routes.resolve()))
+            assert before_nodes
+
+            routes.write_text(
+                "def handler():\n    return helper()\n\n"
+                "def helper():\n    return 1\n\n"
+                "def extra():\n    return 2\n"
+            )
+
+            real_parse_bytes = CodeParser.parse_bytes
+
+            def boom(self, path, source):  # noqa: ANN001
+                raise RuntimeError("simulated replacement parse failure")
+
+            monkeypatch.setattr(CodeParser, "parse_bytes", boom)
+            result = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert result.get("errors")
+            after = get_flows(store)
+            assert {f["name"] for f in after} == before_names
+            after_nodes = store.get_nodes_by_file(str(routes.resolve()))
+            assert {n.qualified_name for n in after_nodes} == {
+                n.qualified_name for n in before_nodes
+            }
+
+            # Recovery: a later successful parse must still be able to replace.
+            monkeypatch.setattr(CodeParser, "parse_bytes", real_parse_bytes)
+            recovered = incremental_update(
+                tmp_path, store, changed_files=["routes.py"],
+            )
+            assert recovered["files_updated"] >= 1
+            assert not recovered.get("errors")
         finally:
             store.close()
 
