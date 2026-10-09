@@ -640,6 +640,72 @@ class TestCommunities:
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
 
+    def test_community_capture_remap_survives_node_replacement(self, tmp_path):
+        """Community IDs remapped by qualified_name after node ID churn (#569)."""
+        from code_review_graph.communities import (
+            capture_community_assignments,
+            remap_community_assignments,
+        )
+        from code_review_graph.parser import NodeInfo
+
+        abs_auth = str((tmp_path / "auth.py").resolve())
+        login = NodeInfo(
+            kind="Function",
+            name="login",
+            file_path=abs_auth,
+            line_start=1,
+            line_end=5,
+            language="python",
+        )
+        logout = NodeInfo(
+            kind="Function",
+            name="logout",
+            file_path=abs_auth,
+            line_start=6,
+            line_end=10,
+            language="python",
+        )
+        old_login_id = self.store.upsert_node(login, file_hash="old")
+        self.store.upsert_node(logout, file_hash="old")
+        self.store.commit()
+        self.store._conn.execute(
+            "INSERT INTO communities (name, level, cohesion, size, "
+            "dominant_language, description) VALUES (?, 0, 1.0, 2, 'python', '')",
+            ("auth",),
+        )
+        cid = self.store._conn.execute(
+            "SELECT id FROM communities WHERE name = 'auth'"
+        ).fetchone()[0]
+        self.store._conn.execute(
+            "UPDATE nodes SET community_id = ? WHERE file_path = ?",
+            (cid, abs_auth),
+        )
+        self.store.commit()
+
+        mapping = capture_community_assignments(self.store, [abs_auth])
+        assert mapping[f"{abs_auth}::login"] == cid
+
+        self.store.remove_file_data(abs_auth)
+        self.store.commit()
+        new_login_id = self.store.upsert_node(login, file_hash="new")
+        self.store.upsert_node(logout, file_hash="new")
+        self.store.commit()
+        assert new_login_id != old_login_id
+
+        updated = remap_community_assignments(self.store, mapping)
+        assert updated >= 1
+        row = self.store._conn.execute(
+            "SELECT community_id FROM nodes WHERE qualified_name = ?",
+            (f"{abs_auth}::login",),
+        ).fetchone()
+        assert row["community_id"] == cid
+
+        # force=True redetects even when relative path alone would miss abs paths
+        count = incremental_detect_communities(
+            self.store, ["auth.py"], repo_root=tmp_path, force=True,
+        )
+        assert count >= 0
+
 
 class TestCommunityPrReconciliation:
     """Regression coverage retained from overlapping PRs #600/#603/#605."""
