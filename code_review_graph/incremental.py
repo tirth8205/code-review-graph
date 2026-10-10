@@ -3199,7 +3199,7 @@ def watch(
         store: Graph database to update.
         on_files_updated: Optional callback invoked after each debounced
             batch of file updates completes.  Receives the store as its
-            only argument.  Used by the CLI to run post-processing
+            only argument.  Used by the CLI and MCP auto-watch to run post-processing
             (FTS, flows, communities) after watch updates.
         stop_event: Optional event that ends the loop cleanly, for callers
             that run ``watch`` on a thread they need to shut down.
@@ -3326,8 +3326,13 @@ def start_watch_thread(
     repo_root: Path,
     store: GraphStore,
     daemon: bool = True,
+    *,
+    on_files_updated: Optional[Callable] = None,
 ) -> threading.Thread | None:
     """Start watch mode in a background thread.
+
+    ``on_files_updated`` is forwarded to ``watch`` for post-processing
+    after changed batches, including startup reconciliation.
 
     Returns the started thread, or None if watchdog is unavailable.
     """
@@ -3341,7 +3346,7 @@ def start_watch_thread(
         # A thread cannot take the process down, so the one thing it must not
         # do is die quietly: the server would keep serving a frozen graph.
         try:
-            watch(repo_root, store)
+            watch(repo_root, store, on_files_updated=on_files_updated)
         except RuntimeError as exc:
             logger.error("Auto-watch for %s stopped: %s", repo_root, exc)
 
