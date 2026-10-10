@@ -1462,8 +1462,12 @@ def main(
     watch_store: GraphStore | None = None
     try:
         if auto_watch:
+            from .postprocessing import run_post_processing
+
             watch_store = GraphStore(get_db_path(root))
-            thread = start_watch_thread(root, watch_store, daemon=True)
+            thread = start_watch_thread(
+                root, watch_store, daemon=True, on_files_updated=run_post_processing,
+            )
             if thread is None:
                 logger.warning("Auto-watch was requested but could not be started")
 
