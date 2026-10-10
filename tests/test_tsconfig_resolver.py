@@ -133,6 +133,87 @@ class TestJsconfigResolution:
             assert Path(result) == target.resolve()
 
 
+class TestExtendsAnchoring:
+    """``baseUrl``/``paths`` inherited through ``extends`` stay anchored to the
+    config that declared them, as tsc resolves them.
+
+    The jsconfig test above keeps the base and the child in one directory, where
+    both anchors coincide; an Nx/Turborepo layout puts the base at the root and
+    each app's config two levels down.
+    """
+
+    def _monorepo(self, root: Path, base_options: dict) -> Path:
+        (root / "tsconfig.base.json").write_text(
+            json.dumps({"compilerOptions": base_options}), encoding="utf-8",
+        )
+        target = root / "libs" / "shared" / "src" / "index.ts"
+        target.parent.mkdir(parents=True)
+        target.write_text("export const shared = 1;\n", encoding="utf-8")
+        (root / "apps" / "api" / "src").mkdir(parents=True)
+        return target
+
+    def _app_config(self, root: Path, compiler_options: dict) -> Path:
+        (root / "apps" / "api" / "tsconfig.json").write_text(
+            json.dumps({
+                "extends": "../../tsconfig.base.json",
+                "compilerOptions": compiler_options,
+            }),
+            encoding="utf-8",
+        )
+        importer = root / "apps" / "api" / "src" / "main.ts"
+        importer.write_text("import { shared } from '@acme/shared';\n", encoding="utf-8")
+        return importer
+
+    def test_inherited_base_url_resolves_from_the_base_config(self, tmp_path):
+        target = self._monorepo(tmp_path, {
+            "baseUrl": ".",
+            "paths": {"@acme/shared": ["libs/shared/src/index.ts"]},
+        })
+        importer = self._app_config(tmp_path, {"outDir": "../../dist/apps/api"})
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_inherited_paths_without_base_url_resolve_from_the_base_config(self, tmp_path):
+        target = self._monorepo(tmp_path, {
+            "paths": {"@acme/shared": ["./libs/shared/src/index.ts"]},
+        })
+        importer = self._app_config(tmp_path, {})
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_child_that_redeclares_paths_keeps_its_own_anchor(self, tmp_path):
+        target = self._monorepo(tmp_path, {
+            "baseUrl": ".",
+            "paths": {"@acme/shared": ["libs/shared/src/index.ts"]},
+        })
+        importer = self._app_config(tmp_path, {
+            "baseUrl": ".",
+            "paths": {"@acme/shared": ["../../libs/shared/src/index.ts"]},
+        })
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_child_base_url_rebases_inherited_paths(self, tmp_path):
+        self._monorepo(tmp_path, {
+            "baseUrl": ".",
+            "paths": {"@acme/local/*": ["lib/*"]},
+        })
+        local = tmp_path / "apps" / "api" / "src" / "lib" / "helper.ts"
+        local.parent.mkdir(parents=True)
+        local.write_text("export const helper = 1;\n", encoding="utf-8")
+        importer = self._app_config(tmp_path, {"baseUrl": "src"})
+
+        result = TsconfigResolver().resolve_alias("@acme/local/helper", str(importer))
+        assert result is not None
+        assert Path(result) == local.resolve()
+
+
 def test_resolve_alias_probes_mts_and_cts(tmp_path):
     _write_config(tmp_path, "tsconfig.json", {"@lib/*": ["src/lib/*"]})
     lib = tmp_path / "src" / "lib"
