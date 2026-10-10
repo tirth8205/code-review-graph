@@ -48,19 +48,20 @@ class TsconfigResolver:
             if config is None:
                 return None
 
-            base_url: Optional[str] = config.get("baseUrl")
             paths: dict[str, list[str]] = config.get("paths", {})
-            tsconfig_dir: str = config.get("_tsconfig_dir", "")
-
             if not paths:
                 return None
 
-            if base_url:
-                base_dir = (Path(tsconfig_dir) / base_url).resolve()
-            else:
-                base_dir = Path(tsconfig_dir).resolve()
-
-            return self._match_and_probe(import_str, paths, base_dir)
+            # Like tsc: ``paths`` resolve against ``baseUrl`` when the extends
+            # chain sets one, otherwise against the config that declared
+            # ``paths``. Both anchors are fixed by _resolve_extends() where
+            # they were declared, not where the nearest config sits.
+            anchor: str = (
+                config.get("_base_url_dir")
+                or config.get("_paths_dir")
+                or config.get("_tsconfig_dir", "")
+            )
+            return self._match_and_probe(import_str, paths, Path(anchor).resolve())
         except (OSError, ValueError, TypeError):
             logger.debug(
                 "TsconfigResolver: unexpected error for %s", file_path, exc_info=True,
@@ -109,7 +110,14 @@ class TsconfigResolver:
         return self._resolve_extends(tsconfig_path, seen)
 
     def _resolve_extends(self, tsconfig_path: Path, seen: set[str]) -> dict:
-        """Recursively resolve the tsconfig extends chain."""
+        """Recursively resolve the tsconfig extends chain.
+
+        ``baseUrl`` and ``paths`` are relative to the config file that declares
+        them, so a root ``tsconfig.base.json`` extended from ``apps/api/`` still
+        maps ``libs/*`` to ``<root>/libs/*``. The absolute anchors are kept in
+        ``_base_url_dir`` and ``_paths_dir`` and inherited unchanged until a
+        config down the chain declares its own.
+        """
         canonical = str(tsconfig_path.resolve())
         if canonical in seen:
             logger.debug("TsconfigResolver: cycle detected at %s", canonical)
@@ -140,9 +148,18 @@ class TsconfigResolver:
                 parent_config = self._resolve_extends(parent_path, seen)
                 parent_opts = parent_config.get("compilerOptions", {})
                 result.setdefault("compilerOptions", {}).update(parent_opts)
+                for anchor in ("_base_url_dir", "_paths_dir"):
+                    if anchor in parent_config:
+                        result[anchor] = parent_config[anchor]
 
         child_opts: dict = data.get("compilerOptions", {})
         result.setdefault("compilerOptions", {}).update(child_opts)
+        if isinstance(child_opts, dict):
+            config_dir = tsconfig_path.parent.resolve()
+            if isinstance(child_opts.get("baseUrl"), str):
+                result["_base_url_dir"] = str((config_dir / child_opts["baseUrl"]).resolve())
+            if "paths" in child_opts:
+                result["_paths_dir"] = str(config_dir)
 
         compiler_options = result.get("compilerOptions", {})
         if "baseUrl" in compiler_options:
