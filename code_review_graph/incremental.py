@@ -353,12 +353,31 @@ def find_repo_root(
 
 
 def detect_vcs(root: Path) -> str:
-    """Return ``'git'``, ``'svn'``, or ``'none'`` based on VCS markers at *root*."""
-    if (root / ".git").exists():
-        return "git"
-    if (root / ".svn").exists():
-        return "svn"
+    """Return the nearest Git or SVN working copy containing *root*."""
+    current = root
+    while True:
+        if (current / ".git").exists():
+            return "git"
+        if (current / ".svn").exists():
+            return "svn"
+        if current == current.parent:
+            break
+        current = current.parent
     return "none"
+
+
+def _git_worktree_prefix(repo_root: Path) -> str:
+    """Return the path from the Git root to a requested subproject root."""
+    requested_root = Path(repo_root).expanduser().resolve()
+    current = requested_root
+    while True:
+        if (current / ".git").exists():
+            if current == requested_root:
+                return ""
+            return requested_root.relative_to(current).as_posix()
+        if current == current.parent:
+            return ""
+        current = current.parent
 
 
 def find_project_root(
@@ -1047,6 +1066,9 @@ def get_changed_files(
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
+    Git results also include untracked, non-ignored files so newly created
+    source files reach incremental indexing before they are staged.
+
     For SVN working copies the *base* parameter is ignored; modified/added/
     deleted files are detected from ``svn status``.  Pass an SVN revision
     range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
@@ -1093,7 +1115,7 @@ def get_changed_files(
         # --name-status (not --name-only): renames/copies must report BOTH
         # paths, or the old path never reaches the purge loop (issue #684).
         result = subprocess.run(
-            ["git", "diff", "--name-status", "-z", base, "--"],
+            ["git", "diff", "--relative", "--name-status", "-z", base, "--", "."],
             capture_output=True,
             cwd=str(repo_root),
             timeout=timeout,
@@ -1104,18 +1126,24 @@ def get_changed_files(
                 raise ChangeDiscoveryError(
                     f"git diff failed while discovering changed files (rc={result.returncode})"
                 )
-            # Fallback: try diff against empty tree (initial commit)
-            result = subprocess.run(
-                ["git", "diff", "--name-status", "-z", "--cached"],
-                capture_output=True,
-                cwd=str(repo_root),
+            # An unresolved base (for example HEAD~1 in a one-commit repo)
+            # cannot describe working-tree edits. Fall back to status so both
+            # staged and unstaged tracked changes, plus untracked files, survive.
+            return get_staged_and_unstaged(
+                repo_root,
                 timeout=timeout,
-                stdin=subprocess.DEVNULL,
+                require_vcs=require_vcs,
             )
         if result.returncode != 0:
             logger.warning("git diff failed while discovering changed files")
             return []
-        return _decode_name_status_paths(result.stdout)
+        changed = _decode_name_status_paths(result.stdout)
+        untracked = _get_untracked_files(
+            repo_root,
+            timeout=timeout,
+            require_vcs=require_vcs or strict,
+        )
+        return list(dict.fromkeys([*changed, *untracked]))
     except (OSError, subprocess.TimeoutExpired) as exc:
         if strict:
             raise ChangeDiscoveryError("git change discovery failed") from exc
@@ -1272,6 +1300,8 @@ def get_staged_and_unstaged(
                 "--porcelain=v1",
                 "-z",
                 "--untracked-files=all",
+                "--",
+                ".",
             ],
             capture_output=True,
             cwd=str(repo_root),
@@ -1282,13 +1312,17 @@ def get_staged_and_unstaged(
             logger.warning("git status failed while discovering working-tree files")
             return []
         files: list[str] = []
+        prefix = _git_worktree_prefix(repo_root)
+        prefix_with_separator = f"{prefix}/" if prefix else ""
         records = result.stdout.split(b"\0")
         index = 0
         while index < len(records):
             record = records[index]
             if len(record) > 3:
                 status = record[:2]
-                files.append(os.fsdecode(record[3:]))
+                path = os.fsdecode(record[3:])
+                if not prefix or path.startswith(prefix_with_separator):
+                    files.append(path[len(prefix_with_separator):] if prefix else path)
                 # With porcelain -z, a rename/copy record stores the
                 # destination first and its source in the following record.
                 if b"R" in status or b"C" in status:
@@ -1406,6 +1440,38 @@ def get_all_tracked_files(
     except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
+
+def _get_untracked_files(
+    repo_root: Path,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> list[str]:
+    """Return Git's untracked, non-ignored files using NUL-delimited paths."""
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            capture_output=True,
+            cwd=str(repo_root),
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            logger.warning("git ls-files failed while discovering untracked files")
+            if require_vcs:
+                raise ChangeDiscoveryError(
+                    "git ls-files failed while discovering untracked files "
+                    f"(rc={result.returncode})"
+                )
+            return []
+        return [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
+        return []
+
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.
 
@@ -1449,11 +1515,15 @@ def collect_all_files(
     parser = CodeParser(repo_root)
     files = []
 
-    # Prefer git ls-files for tracked files
+    # Prefer Git's tracked-file inventory, augmented with untracked files so
+    # a full build and an incremental update see the same source tree.
+    vcs = detect_vcs(repo_root)
     tracked = get_all_tracked_files(repo_root, recurse_submodules)
-    if tracked:
-        candidates = tracked
+    if vcs == "git":
+        candidates = list(dict.fromkeys([*tracked, *_get_untracked_files(repo_root)]))
     else:
+        candidates = tracked
+    if not candidates:
         # Fallback: walk directory
         candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
 
@@ -2005,7 +2075,7 @@ def incremental_update(
                     })
             continue
         abs_path = repo_root / rel_path
-        if not abs_path.is_file():
+        if abs_path.is_symlink() or not abs_path.is_file():
             remaining_identity.discard(rel_path)
             if normalize_file_path(abs_path) not in stale_files:
                 missing_paths.add(normalize_file_path(abs_path))

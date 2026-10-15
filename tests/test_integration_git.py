@@ -145,6 +145,44 @@ def test_get_staged_and_unstaged_preserves_unicode_path(
     assert get_staged_and_unstaged(git_repo_with_unicode_path) == ["café.py"]
 
 
+def test_get_changed_files_includes_untracked_but_not_ignored_files(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Automatic Git discovery sees new source paths and honors .gitignore."""
+    (git_repo_with_unicode_path / ".gitignore").write_text(
+        "ignored.py\n", encoding="utf-8",
+    )
+    _git_ok(git_repo_with_unicode_path, "add", ".gitignore")
+    _git_ok(git_repo_with_unicode_path, "commit", "-m", "ignore generated file")
+
+    nested = git_repo_with_unicode_path / "new" / "nested.py"
+    nested.parent.mkdir()
+    nested.write_text("def nested():\n    return 1\n", encoding="utf-8")
+    (git_repo_with_unicode_path / "ignored.py").write_text(
+        "def ignored():\n    return 1\n", encoding="utf-8",
+    )
+
+    assert get_changed_files(git_repo_with_unicode_path, base="HEAD") == [
+        "new/nested.py",
+    ]
+
+
+def test_discovery_keeps_unstaged_edits_when_base_does_not_resolve(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """A one-commit repo must report tracked edits alongside new files."""
+    (git_repo_with_unicode_path / "café.py").write_text(
+        "value = 2\n", encoding="utf-8",
+    )
+    (git_repo_with_unicode_path / "new.py").write_text(
+        "value = 3\n", encoding="utf-8",
+    )
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+
+    assert set(files) == {"café.py", "new.py"}
+
+
 def test_get_staged_and_unstaged_expands_new_untracked_directories(
     git_repo_with_unicode_path: Path,
 ) -> None:
@@ -405,6 +443,103 @@ def test_incremental_update_real_git(git_repo: Path) -> None:
         store.close()
     finally:
         Path(db_path).unlink(missing_ok=True)
+
+
+def test_untracked_source_is_indexed_by_incremental_and_full_build(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """A newly created, unstaged source file reaches both build paths."""
+    _git_ok(git_repo, "config", "user.email", "test@test.com")
+    _git_ok(git_repo, "config", "user.name", "Test")
+    (git_repo / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    _git_ok(git_repo, "add", ".gitignore")
+    _git_ok(git_repo, "commit", "-m", "ignore generated file")
+
+    incremental_store = GraphStore(tmp_path / "incremental-untracked.db")
+    full_store = GraphStore(tmp_path / "full-untracked.db")
+    try:
+        full_build(git_repo, incremental_store)
+        new_file = git_repo / "new_module.py"
+        new_file.write_text(
+            "def newly_visible():\n    return 'indexed'\n", encoding="utf-8",
+        )
+        (git_repo / "ignored.py").write_text(
+            "def should_stay_ignored():\n    return None\n", encoding="utf-8",
+        )
+
+        result = incremental_update(git_repo, incremental_store)
+        assert "new_module.py" in result["changed_files"]
+        assert incremental_store.get_nodes_by_file(str(new_file))
+        assert not incremental_store.get_nodes_by_file(str(git_repo / "ignored.py"))
+
+        full_build(git_repo, full_store)
+        assert full_store.get_nodes_by_file(str(new_file))
+        assert not full_store.get_nodes_by_file(str(git_repo / "ignored.py"))
+    finally:
+        incremental_store.close()
+        full_store.close()
+
+
+def test_full_build_and_update_keep_untracked_files_in_monorepo_subproject(
+    tmp_path: Path,
+) -> None:
+    """Full and incremental builds use paths relative to a monorepo subproject."""
+    repo = tmp_path / "monorepo"
+    module = repo / "module"
+    module.mkdir(parents=True)
+    _git_ok(repo, "init")
+    _git_ok(repo, "config", "user.email", "test@test.com")
+    _git_ok(repo, "config", "user.name", "Test")
+    (module / "seed.py").write_text(
+        "def seed():\n    return 'seed'\n", encoding="utf-8",
+    )
+    _git_ok(repo, "add", "module/seed.py")
+    _git_ok(repo, "commit", "-m", "add monorepo module")
+
+    store = GraphStore(tmp_path / "monorepo.db")
+    full_build_file = module / "new_module.py"
+    update_file = module / "incremental_module.py"
+    try:
+        full_build(module, store)
+        full_build_file.write_text(
+            "def newly_visible():\n    return 'indexed'\n", encoding="utf-8",
+        )
+        full_build(module, store)
+        assert store.get_nodes_by_file(str(full_build_file))
+
+        update_file.write_text(
+            "def updated_incrementally():\n    return 'indexed'\n", encoding="utf-8",
+        )
+        result = incremental_update(module, store)
+        assert "incremental_module.py" in result["changed_files"]
+        assert store.get_nodes_by_file(str(update_file))
+
+        full_build(module, store)
+        assert store.get_nodes_by_file(str(full_build_file))
+        assert store.get_nodes_by_file(str(update_file))
+    finally:
+        store.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges")
+def test_incremental_update_skips_untracked_symlinks(
+    git_repo: Path,
+    tmp_path: Path,
+) -> None:
+    """Untracked symlinks stay out of the graph across repeated updates."""
+    store = GraphStore(tmp_path / "symlink.db")
+    link = git_repo / "link.py"
+    try:
+        full_build(git_repo, store)
+        link.symlink_to("hello.py")
+
+        for _ in range(2):
+            result = incremental_update(git_repo, store)
+            assert "link.py" in result["changed_files"]
+            assert not store.get_nodes_by_file(str(link))
+    finally:
+        store.close()
 
 
 # ------------------------------------------------------------------
