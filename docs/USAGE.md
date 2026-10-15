@@ -140,6 +140,13 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset.
 
+`code-review-graph repos` lists each repository's registered `data_dir`, marking
+missing directories with `[MISSING]`. If a registered directory disappears and
+the repository still has a local `.code-review-graph/graph.db`, graph commands
+warn and use normal resolution (`CRG_DATA_DIR`, then the local directory).
+Registering a fresh external directory for a repository with no local graph
+still creates that directory on the next write.
+
 ## Context Savings
 
 Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
