@@ -213,6 +213,15 @@ graph by accident. To keep the database outside the working tree (ephemeral
 workspaces, network shares), pass `--data-dir <path>` to `build`, `update`,
 `status` and the other graph commands, or set `CRG_DATA_DIR`.
 
+For parallel PR reviews in one stdio MCP session, use the opt-in
+`code-review-graph serve --multi-worktree --repo <primary-root>` mode. Each
+tool call must pass the linked worktree root in `repo_root`; the server routes
+it to a child MCP process dedicated to that worktree. The router authorizes
+only the primary root and active linked worktrees from the same Git common
+directory, and starts children lazily. Do not use `CRG_DATA_DIR` with this
+mode; use one Registry `data_dir` per worktree when graph files must live
+outside the checkouts.
+
 **Multiple repos.** A registry at `~/.code-review-graph/registry.json` (or
 under `$CRG_HOME`) lets MCP clients search across projects:
 
