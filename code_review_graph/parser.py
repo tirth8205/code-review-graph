@@ -10536,6 +10536,7 @@ class CodeParser:
         language: str,
         file_path: str,
         edges: list[EdgeInfo],
+        import_map: Optional[dict[str, str]] = None,
     ) -> None:
         """Emit INJECTS edges for Spring DI injection points in a Java class.
 
@@ -10560,11 +10561,11 @@ class CodeParser:
                 if member.type == "field_declaration":
                     self._emit_spring_field_injection(
                         member, qualified_source, file_path,
-                        edges, has_required_args, has_all_args,
+                        edges, has_required_args, has_all_args, import_map,
                     )
                 elif member.type == "constructor_declaration":
                     self._emit_spring_constructor_injection(
-                        member, qualified_source, file_path, edges,
+                        member, qualified_source, file_path, edges, import_map,
                     )
 
     def _emit_spring_field_injection(
@@ -10575,6 +10576,7 @@ class CodeParser:
         edges: list[EdgeInfo],
         has_required_args: bool,
         has_all_args: bool,
+        import_map: Optional[dict[str, str]],
     ) -> None:
         """Emit one INJECTS edge per field selected by Spring/Lombok."""
         field_annotations: list[str] = []
@@ -10638,16 +10640,21 @@ class CodeParser:
             else:
                 continue
 
+            extra = {
+                "injection_type": injection_type,
+                "field_name": field_name,
+            }
+            if import_map is not None:
+                extra["java_type"] = self._resolve_java_type_identity(
+                    field_type, import_map,
+                )
             edges.append(EdgeInfo(
                 kind="INJECTS",
                 source=qualified_source,
                 target=field_type,
                 file_path=file_path,
                 line=field_node.start_point[0] + 1,
-                extra={
-                    "injection_type": injection_type,
-                    "field_name": field_name,
-                },
+                extra=extra,
             ))
 
     def _emit_spring_constructor_injection(
@@ -10656,6 +10663,7 @@ class CodeParser:
         qualified_source: str,
         file_path: str,
         edges: list[EdgeInfo],
+        import_map: Optional[dict[str, str]],
     ) -> None:
         """Emit INJECTS edges for @Autowired constructor parameters."""
         ctor_annotations = self._get_java_annotations(ctor_node)
@@ -10679,6 +10687,10 @@ class CodeParser:
                     extra: dict = {"injection_type": "constructor"}
                     if param_name:
                         extra["field_name"] = param_name
+                    if import_map is not None:
+                        extra["java_type"] = self._resolve_java_type_identity(
+                            param_type, import_map,
+                        )
                     edges.append(EdgeInfo(
                         kind="INJECTS",
                         source=qualified_source,
@@ -11693,6 +11705,17 @@ class CodeParser:
         # Java: detect Spring stereotype annotations and store as metadata
         class_annotations: list[str] = []
         if language == "java":
+            package = (import_map or {}).get(_JAVA_PACKAGE_KEY)
+            if package:
+                extra["java_package"] = package
+            if child.type == "interface_declaration":
+                extra["java_kind"] = "interface"
+            else:
+                extra["java_kind"] = "abstract" if any(
+                    grandchild.type == "abstract"
+                    for modifier in child.children if modifier.type == "modifiers"
+                    for grandchild in modifier.children
+                ) else "concrete"
             class_annotations = self._get_java_annotations(child)
             spring_stereotypes = [
                 a for a in class_annotations if a in _SPRING_STEREOTYPE_ANNOTATIONS
@@ -11773,6 +11796,11 @@ class CodeParser:
         # Inheritance edges
         bases = self._get_bases(child, language, source)
         for base in bases:
+            inheritance_extra = {}
+            if language == "java" and import_map is not None:
+                inheritance_extra["java_type"] = self._resolve_java_type_identity(
+                    base, import_map,
+                )
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
@@ -11781,12 +11809,14 @@ class CodeParser:
                 target=base,
                 file_path=file_path,
                 line=child.start_point[0] + 1,
+                extra=inheritance_extra,
             ))
 
         # Spring DI: emit INJECTS edges for injected dependencies
         if language == "java":
             self._emit_spring_injections(
                 child, name, class_annotations, language, file_path, edges,
+                import_map,
             )
             self._emit_spring_config_edges(
                 child, name, enclosing_class, file_path, edges,

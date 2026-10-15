@@ -51,7 +51,7 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # Build field_map: (source_qualified_class, field_name) → injected_type
     # from INJECTS edges that carry extra.field_name
     # -----------------------------------------------------------------------
-    field_map: dict[tuple[str, str], str] = {}
+    field_map: dict[tuple[str, str], tuple[str, str | None]] = {}
     injects_rows = conn.execute(
         "SELECT source_qualified, target_qualified, extra FROM edges WHERE kind = 'INJECTS'"
     ).fetchall()
@@ -65,51 +65,82 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             continue
         # source_qualified is the full class qualified name
         class_qual = row["source_qualified"]
-        field_map[(class_qual, fname)] = row["target_qualified"]
+        java_type = extra.get("java_type")
+        field_map[(class_qual, fname)] = (
+            row["target_qualified"],
+            java_type if isinstance(java_type, str) else None,
+        )
 
     if not field_map:
         logger.info("Spring resolver: no INJECTS edges with field_name found, skipping")
         return {"files_indexed": len(java_files), "calls_resolved": 0}
 
     # -----------------------------------------------------------------------
-    # Build class_name → qualified_name lookup from nodes.
-    # Keyed by bare class name; value is the full "file_path::ClassName" form
-    # that callers_of uses for its target_qualified exact-match lookup.
-    # When a name appears in multiple files (e.g. same interface in several
-    # services), we keep the entry with the shortest path as a tiebreaker —
-    # this is overridden by the concrete-implementation lookup below.
+    # Build package-qualified Java type indexes from class nodes.  Bare names
+    # remain available only for old graphs that predate the Java metadata.
     # -----------------------------------------------------------------------
-    name_to_qual: dict[str, str] = {}
+    java_kinds: dict[str, set[str]] = {}
+    class_quals_by_type: dict[str, set[str]] = {}
     for row in conn.execute(
-        "SELECT name, qualified_name FROM nodes WHERE kind = 'Class' AND language = 'java'"
+        "SELECT name, qualified_name, extra FROM nodes "
+        "WHERE kind = 'Class' AND language = 'java'"
     ).fetchall():
         bare = row["name"]
         qual = row["qualified_name"]
-        if bare not in name_to_qual or len(qual) < len(name_to_qual[bare]):
-            name_to_qual[bare] = qual
+        try:
+            node_extra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            node_extra = {}
+        package = node_extra.get("java_package")
+        java_type = f"{package}.{bare}" if isinstance(package, str) and package else bare
+        class_quals_by_type.setdefault(java_type, set()).add(qual)
+        java_kind = node_extra.get("java_kind")
+        if isinstance(java_kind, str):
+            java_kinds.setdefault(java_type, set()).add(java_kind)
+            # Older graphs do not have java_package.  Keep a bare-name index
+            # for their compatibility fallback, but never use it to override
+            # an unambiguous package-qualified identity.
+            if java_type != bare:
+                java_kinds.setdefault(bare, set()).add(java_kind)
 
-    # Also index Function nodes so we can build "file::Class.method" targets.
-    # key: (class_name, method_name) → full qualified_name of the method node
+    # Also index Function nodes so selected implementations resolve to their
+    # exact file/class method, without homonym collisions.
     method_to_qual: dict[tuple[str, str], str] = {}
     for row in conn.execute(
-        "SELECT name, qualified_name, parent_name FROM nodes "
+        "SELECT name, qualified_name, parent_name, file_path FROM nodes "
         "WHERE kind IN ('Function', 'Test') AND language = 'java' AND parent_name IS NOT NULL"
     ).fetchall():
-        method_to_qual[(row["parent_name"], row["name"])] = row["qualified_name"]
+        class_qual = f"{row['file_path']}::{row['parent_name']}"
+        method_to_qual[(class_qual, row["name"])] = row["qualified_name"]
+        bare_key = (row["parent_name"].split(".")[-1], row["name"])
+        previous = method_to_qual.get(bare_key)
+        if previous is None or len(row["qualified_name"]) < len(previous):
+            method_to_qual[bare_key] = row["qualified_name"]
+
+    node_is_test = {
+        row["qualified_name"]: bool(row["is_test"])
+        for row in conn.execute("SELECT qualified_name, is_test FROM nodes").fetchall()
+    }
 
     # -----------------------------------------------------------------------
-    # Build implementors: bare interface name → list of implementing class quals
-    # from INHERITS edges (Java uses INHERITS for both extends and implements)
+    # Build implementors: package-qualified Java type → implementing class quals
+    # from INHERITS edges (Java uses INHERITS for both extends and implements).
+    # JVM edges without Java metadata stay keyed by their historical bare name.
     # -----------------------------------------------------------------------
-    implementors: dict[str, list[str]] = {}
+    implementors: dict[str, set[str]] = {}
     for row in conn.execute(
-        "SELECT e.source_qualified, e.target_qualified FROM edges e "
+        "SELECT e.source_qualified, e.target_qualified, e.extra FROM edges e "
         "JOIN nodes n ON n.qualified_name = e.source_qualified "
         "WHERE e.kind = 'INHERITS' AND n.language IN ('java', 'kotlin', 'scala')"
     ).fetchall():
-        iface = row["target_qualified"]
+        try:
+            edge_extra = json.loads(row["extra"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            edge_extra = {}
+        java_type = edge_extra.get("java_type")
+        iface = java_type if isinstance(java_type, str) else row["target_qualified"]
         impl = row["source_qualified"]
-        implementors.setdefault(iface, []).append(impl)
+        implementors.setdefault(iface, set()).add(impl)
 
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
@@ -164,23 +195,54 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             continue
 
         # Look up receiver in field_map for this class
-        injected_type = field_map.get((enclosing_class_qual, receiver))
-        if not injected_type:
+        injection = field_map.get((enclosing_class_qual, receiver))
+        if not injection:
             continue
+        injected_type, java_type = injection
+        type_key = java_type or injected_type
 
-        # Resolve to concrete implementation if unique
-        impls = implementors.get(injected_type, [])
+        source_is_test = node_is_test.get(source_qual, False)
+        kind_values = java_kinds.get(type_key)
+        if not kind_values and type_key != injected_type:
+            # A graph written before qualified Java metadata existed can still
+            # resolve through its historical bare-name indexes.
+            kind_values = java_kinds.get(injected_type)
+        java_kind = next(iter(kind_values)) if kind_values and len(kind_values) == 1 else None
+        impl_values = implementors.get(type_key)
+        if not impl_values and type_key != injected_type:
+            # Kotlin/Scala inheritance edges historically use bare names.  Use
+            # them only when the qualified Java identity has no candidates.
+            impl_values = implementors.get(injected_type)
+        impls = (
+            sorted(impl_values or [])
+            if java_kind is None or java_kind in {"interface", "abstract"}
+            else []
+        )
+        if not source_is_test:
+            impls = [
+                impl
+                for impl in impls
+                if not node_is_test.get(impl, False)
+            ]
         if len(impls) == 1:
-            concrete_class = impls[0].split("::")[-1]
             fallback = f"{impls[0]}.{method_name}"
-            new_target = method_to_qual.get((concrete_class, method_name)) or fallback
+            new_target = method_to_qual.get((impls[0], method_name)) or fallback
         else:
             type_bare = injected_type.rsplit(".", 1)[-1]
-            fallback = f"{injected_type}.{method_name}"
-            new_target = method_to_qual.get((type_bare, method_name)) or fallback
+            declared_classes = class_quals_by_type.get(type_key, set())
+            if len(declared_classes) == 1:
+                declared_class = next(iter(declared_classes))
+                new_target = method_to_qual.get(
+                    (declared_class, method_name),
+                ) or f"{declared_class}.{method_name}"
+            else:
+                fallback = f"{injected_type}.{method_name}"
+                new_target = method_to_qual.get((type_bare, method_name)) or fallback
 
         extra["spring_resolved"] = True
         extra["injected_type"] = injected_type
+        if java_type:
+            extra["java_type"] = java_type
         new_extra = json.dumps(extra)
 
         conn.execute(
