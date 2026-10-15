@@ -2,6 +2,9 @@
 
 import json
 import os
+import random
+import sqlite3
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -228,6 +231,283 @@ class TestEmbeddingStore:
             with pytest.raises(RuntimeError, match="rate limited"):
                 store.embed_nodes(nodes, batch_size=2)
             assert store.count() == 2
+            store.close()
+
+
+class TestEmbeddingStoreSearch:
+    """``search`` scores with numpy when it can, and ranks like the Python loop."""
+
+    PROVIDER = "test:provider"
+
+    @pytest.fixture(autouse=True)
+    def _vector_cache_env(self, monkeypatch):
+        # The uncached path, even when the developer exports the variable.
+        monkeypatch.delenv("CRG_VECTOR_CACHE", raising=False)
+
+    class _Provider:
+        name = "test:provider"
+
+        def __init__(self, query_vec):
+            self.query_vec = query_vec
+
+        def embed(self, texts):
+            raise AssertionError("search must not embed stored vectors")
+
+        def embed_query(self, text):
+            return list(self.query_vec)
+
+        @property
+        def dimension(self):
+            return len(self.query_vec)
+
+    def _store(self, tmp_path, query_vec, name="embeddings.db"):
+        provider = self._Provider(query_vec)
+        with patch("code_review_graph.embeddings.get_provider", return_value=provider):
+            return EmbeddingStore(tmp_path / name)
+
+    @staticmethod
+    def _insert(store, name, vec, provider=PROVIDER):
+        store._conn.execute(
+            "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+            "VALUES (?, ?, ?, ?)",
+            (name, _encode_vector(vec), "hash", provider),
+        )
+
+    def test_matches_the_python_loop(self, tmp_path):
+        pytest.importorskip("numpy")
+        rng = random.Random(7)
+        query = [rng.uniform(-1.0, 1.0) for _ in range(24)]
+        store = self._store(tmp_path, query)
+        try:
+            # 1234 rows cross the 500-row chunk boundary twice.
+            for i in range(1234):
+                vec = [rng.uniform(-1.0, 1.0) for _ in range(24)]
+                self._insert(store, f"file.py::func_{i}", vec)
+
+            expected = store._search_pure_python(query, self.PROVIDER, 1234)
+            results = store.search("query", limit=1234)
+
+            assert [name for name, _ in results] == [name for name, _ in expected]
+            for (_, score), (_, want) in zip(results, expected):
+                assert score == pytest.approx(want, abs=1e-12)
+        finally:
+            store.close()
+
+    def test_zero_norm_and_other_dimensions_score_zero_in_read_order(self, tmp_path):
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [1.0, 0.0, 0.0])
+        try:
+            self._insert(store, "zero_norm", [0.0, 0.0, 0.0])
+            self._insert(store, "two_dims", [1.0, 0.0])
+            self._insert(store, "orthogonal", [0.0, 1.0, 0.0])
+            self._insert(store, "aligned", [2.0, 0.0, 0.0])
+            self._insert(store, "other_provider", [1.0, 0.0, 0.0], provider="other:x")
+
+            results = store.search("query", limit=10)
+
+            assert results == [
+                ("aligned", 1.0),
+                ("zero_norm", 0.0),
+                ("two_dims", 0.0),
+                ("orthogonal", 0.0),
+            ]
+            assert results == store._search_pure_python([1.0, 0.0, 0.0], self.PROVIDER, 10)
+        finally:
+            store.close()
+
+    def test_zero_query_scores_every_row_zero_and_limit_applies(self, tmp_path):
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [0.0, 0.0])
+        try:
+            for name in ("a", "b", "c"):
+                self._insert(store, name, [1.0, 2.0])
+
+            assert store.search("query", limit=2) == [("a", 0.0), ("b", 0.0)]
+            assert store.search("query", limit=0) == []
+        finally:
+            store.close()
+
+    def test_empty_index_returns_nothing(self, tmp_path):
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            assert store.search("query") == []
+        finally:
+            store.close()
+
+    def test_falls_back_to_the_python_loop_without_numpy(self, tmp_path):
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [0.0, 1.0])
+            self._insert(store, "b", [1.0, 1.0])
+
+            with patch.dict(sys.modules, {"numpy": None}), patch.object(
+                store, "_search_pure_python", wraps=store._search_pure_python,
+            ) as loop:
+                results = store.search("query", limit=5)
+
+            loop.assert_called_once_with([1.0, 0.0], self.PROVIDER, 5)
+            assert [name for name, _ in results] == ["b", "a"]
+            assert results[0][1] == pytest.approx(2 ** -0.5)
+            assert results[1][1] == 0.0
+        finally:
+            store.close()
+
+
+class TestEmbeddingStoreVectorCache(TestEmbeddingStoreSearch):
+    """``CRG_VECTOR_CACHE=1``: every search test above, plus the cache's own.
+
+    The inherited tests run with the cache on, so they pin that it ranks
+    exactly like the uncached path and the Python loop.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _vector_cache_env(self, monkeypatch):
+        monkeypatch.setenv("CRG_VECTOR_CACHE", "1")
+        EmbeddingStore.clear_vector_cache()
+        yield
+        # Also closes the watcher connections, which on Windows would keep
+        # tmp_path's databases from being deleted.
+        EmbeddingStore.clear_vector_cache()
+
+    @staticmethod
+    def _entry():
+        (entry,) = EmbeddingStore._vector_cache.values()
+        return entry
+
+    def test_off_without_the_variable(self, tmp_path, monkeypatch):
+        pytest.importorskip("numpy")
+        monkeypatch.delenv("CRG_VECTOR_CACHE")
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [1.0, 0.0])
+            assert [name for name, _ in store.search("query")] == ["a"]
+            assert EmbeddingStore._vector_cache == {}
+            assert EmbeddingStore._vector_cache_watchers == {}
+        finally:
+            store.close()
+
+    def test_a_second_store_reuses_the_decoded_vectors(self, tmp_path):
+        pytest.importorskip("numpy")
+        first = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(first, "a", [1.0, 0.0])
+            first.search("query")
+            entry = self._entry()
+        finally:
+            first.close()
+
+        second = self._store(tmp_path, [1.0, 0.0])
+        try:
+            assert second.search("query") == [("a", 1.0)]
+            assert self._entry() is entry
+        finally:
+            second.close()
+
+    def test_a_commit_from_another_connection_refreshes_the_cache(self, tmp_path):
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [0.0, 1.0])
+            assert [name for name, _ in store.search("query")] == ["a"]
+
+            other = sqlite3.connect(tmp_path / "embeddings.db")
+            other.execute(
+                "INSERT INTO embeddings VALUES ('b', ?, 'hash', ?)",
+                (_encode_vector([1.0, 0.0]), self.PROVIDER),
+            )
+            other.commit()
+            other.close()
+
+            assert [name for name, _ in store.search("query")] == ["b", "a"]
+        finally:
+            store.close()
+
+    def test_uncommitted_rows_bypass_the_cache(self, tmp_path):
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [0.0, 1.0])
+            store.search("query")
+            entry = self._entry()
+
+            store._conn.execute("BEGIN")
+            self._insert(store, "b", [1.0, 0.0])
+            assert [name for name, _ in store.search("query")] == ["b", "a"]
+            store._conn.execute("ROLLBACK")
+
+            assert [name for name, _ in store.search("query")] == ["a"]
+            assert self._entry() is entry
+        finally:
+            store.close()
+
+    def test_evicting_a_database_closes_its_watcher(self, tmp_path, monkeypatch):
+        pytest.importorskip("numpy")
+        monkeypatch.setattr(EmbeddingStore, "_VECTOR_CACHE_MAX_ENTRIES", 1)
+        one = self._store(tmp_path, [1.0, 0.0], name="one.db")
+        two = self._store(tmp_path, [1.0, 0.0], name="two.db")
+        try:
+            self._insert(one, "a", [1.0, 0.0])
+            self._insert(two, "b", [1.0, 0.0])
+            one.search("query")
+            (watcher,) = [conn for _, conn in EmbeddingStore._vector_cache_watchers.values()]
+
+            two.search("query")
+
+            assert len(EmbeddingStore._vector_cache) == 1
+            assert list(EmbeddingStore._vector_cache_watchers) == [
+                os.path.normcase(os.path.realpath(tmp_path / "two.db")),
+            ]
+            with pytest.raises(sqlite3.ProgrammingError):
+                watcher.execute("SELECT 1")
+        finally:
+            one.close()
+            two.close()
+
+    def test_a_new_file_identity_gets_a_fresh_watcher(self, tmp_path):
+        # Stands in for graph.db being replaced, say restored from a backup.
+        # Windows refuses the real replacement while the watcher holds the
+        # file open, so the new inode is simulated.
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [1.0, 0.0])
+            store.search("query")
+            entry = self._entry()
+            ((old_id, old_watcher),) = EmbeddingStore._vector_cache_watchers.values()
+
+            real_stat = os.stat
+
+            def replaced(path, *args, **kwargs):
+                st = real_stat(path, *args, **kwargs)
+                return os.stat_result((st.st_mode, st.st_ino + 1) + tuple(st)[2:])
+
+            with patch.object(os, "stat", replaced):
+                assert store.search("query") == [("a", 1.0)]
+
+            ((new_id, new_watcher),) = EmbeddingStore._vector_cache_watchers.values()
+            assert new_id != old_id
+            assert new_watcher is not old_watcher
+            with pytest.raises(sqlite3.ProgrammingError):
+                old_watcher.execute("SELECT 1")
+            assert self._entry() is not entry
+        finally:
+            store.close()
+
+    def test_clear_vector_cache_closes_the_watchers(self, tmp_path):
+        pytest.importorskip("numpy")
+        store = self._store(tmp_path, [1.0, 0.0])
+        try:
+            self._insert(store, "a", [1.0, 0.0])
+            store.search("query")
+            (watcher,) = [conn for _, conn in EmbeddingStore._vector_cache_watchers.values()]
+
+            EmbeddingStore.clear_vector_cache()
+
+            assert EmbeddingStore._vector_cache == {}
+            assert EmbeddingStore._vector_cache_watchers == {}
+            with pytest.raises(sqlite3.ProgrammingError):
+                watcher.execute("SELECT 1")
+        finally:
             store.close()
 
 

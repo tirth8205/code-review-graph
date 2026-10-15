@@ -525,6 +525,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | Default model for local vector embeddings | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | Set to `1` to suppress the cloud embedding egress warning | - |
 | `CRG_ALLOW_REMOTE_CODE` | Allow HuggingFace models that require `trust_remote_code=True` | `0` |
+| `CRG_VECTOR_CACHE` | Set to `1` to keep the decoded embedding vectors in memory between semantic searches instead of reading them all back from SQLite on every query. Costs RAM (vectors × dimensions × 4 bytes per cached index) and one open read connection per cached database for the life of the process: on Windows, `graph.db` cannot be deleted or replaced while it is open | - |
 | `CRG_MAX_IMPACT_NODES` | Maximum nodes in impact analysis | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | Search depth for blast-radius analysis | `2` |
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |

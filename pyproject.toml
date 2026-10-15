@@ -85,6 +85,9 @@ enrichment = [
 ]
 dev = [
     "mypy>=1.10,<3",
+    # Optional at runtime (the "embeddings" extra pulls it in), but
+    # EmbeddingStore.search() has a numpy path the test job has to exercise.
+    "numpy>=1.26,<3",
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",

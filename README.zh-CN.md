@@ -525,6 +525,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | 本地向量嵌入的默认模型 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | 设为 `1` 可抑制云端嵌入的出网警告 | - |
 | `CRG_ALLOW_REMOTE_CODE` | 允许需要 `trust_remote_code=True` 的 HuggingFace 模型 | `0` |
+| `CRG_VECTOR_CACHE` | 设为 `1` 时，在多次语义搜索之间把解码后的嵌入向量保留在内存中，不再每次查询都从 SQLite 全部重新读取。代价是内存（每个缓存的索引占 向量数 × 维度 × 4 字节），以及每个缓存的数据库在进程存续期间保持打开的一个读取连接：在 Windows 上，连接打开期间无法删除或替换 `graph.db` | - |
 | `CRG_MAX_IMPACT_NODES` | 影响分析中的最大节点数 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 影响半径分析的搜索深度 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |

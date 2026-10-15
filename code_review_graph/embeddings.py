@@ -1069,6 +1069,39 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+# Rows scored per numpy step: the fetchmany() size of the search, and the
+# slice of a cached matrix converted to float64 at a time.
+_SEARCH_CHUNK_ROWS = 500
+
+
+def _decode_rows(blobs: list[bytes], dims: int) -> Any:
+    """Stack vector blobs of *dims* components into a float32 matrix (needs numpy)."""
+    import numpy as np
+
+    return np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(blobs), dims)
+
+
+def _row_norms(matrix: Any) -> Any:
+    """Each row's norm in float64, with ``inf`` for a zero row (needs numpy).
+
+    ``inf`` turns the division in :func:`_cosine_scores` into 0.0 for a zero
+    vector, which is what :func:`_cosine_similarity` returns for it.
+    """
+    import numpy as np
+
+    rows = matrix.astype(np.float64)
+    norms = np.sqrt(np.einsum("ij,ij->i", rows, rows))
+    norms[norms == 0.0] = np.inf
+    return norms
+
+
+def _cosine_scores(matrix: Any, norms: Any, query: Any, query_norm: float) -> Any:
+    """Cosine of each float32 row of *matrix* with *query*, in float64."""
+    import numpy as np
+
+    return (matrix.astype(np.float64) @ query) / (norms * query_norm)
+
+
 _IDENTIFIER_SPLIT_RE = re.compile(r"([a-z])([A-Z])|[_./\-]+")
 _MAX_EMBEDDED_DOCSTRING_CHARS = 400
 
@@ -1245,13 +1278,211 @@ class EmbeddingStore:
         return embedded
 
     def search(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
-        """Search for nodes by semantic similarity."""
+        """Search for nodes by semantic similarity.
+
+        Every stored vector of the current provider is scored against the
+        query. With numpy installed (the ``embeddings`` extra pulls it in),
+        each chunk of rows is scored with one matrix-vector product instead of
+        a Python loop over every component of every row, which took tens of
+        seconds per search over tens of thousands of high-dimensional vectors.
+        Without numpy, :meth:`_search_pure_python` runs that loop instead.
+
+        Both return the same ranking: a vector whose dimensionality differs
+        from the query's, or whose norm is zero, scores 0.0, and equal scores
+        keep the order the rows were read in.
+
+        With ``CRG_VECTOR_CACHE=1`` the decoded vectors stay in memory between
+        searches instead of being read back from SQLite every time; see
+        :meth:`_cached_vectors`. The ranking is the same either way.
+        """
         if not self.provider:
             return []
 
         provider_name = self.provider.name
         query_vec = self.provider.embed_query(query)
 
+        try:
+            import numpy as np
+        except ImportError:
+            return self._search_pure_python(query_vec, provider_name, limit)
+
+        # float64, like the loop's Python floats: the stored components are
+        # float32, so every product is exact and only the summation order
+        # differs between the two paths.
+        query_arr = np.asarray(query_vec, dtype=np.float64)
+        dims = int(query_arr.shape[0])
+        query_norm = float(np.sqrt(query_arr @ query_arr))
+
+        cached = self._cached_vectors(provider_name, dims)
+        if cached is None:
+            names, all_scores = self._stream_scores(provider_name, query_arr, query_norm)
+        else:
+            names, rows, matrix, norms = cached
+            all_scores = np.zeros(len(names))
+            if query_norm:
+                for start in range(0, len(rows), _SEARCH_CHUNK_ROWS):
+                    end = start + _SEARCH_CHUNK_ROWS
+                    all_scores[rows[start:end]] = _cosine_scores(
+                        matrix[start:end], norms[start:end], query_arr, query_norm,
+                    )
+
+        if not names:
+            return []
+        # Stable, like list.sort(reverse=True): equal scores keep read order.
+        order = np.argsort(-all_scores, kind="stable")[:limit]
+        return [(names[i], float(all_scores[i])) for i in order]
+
+    def _stream_scores(
+        self, provider_name: str, query_arr: Any, query_norm: float,
+    ) -> tuple[list[str], Any]:
+        """Score the stored vectors chunk by chunk, keeping none of them."""
+        import numpy as np
+
+        dims = int(query_arr.shape[0])
+        blob_size = dims * 4  # float32 components, see _encode_vector
+        names: list[str] = []
+        chunk_scores: list[Any] = []
+        cursor = self._conn.execute(
+            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
+            (provider_name,),
+        )
+        while True:
+            rows = cursor.fetchmany(_SEARCH_CHUNK_ROWS)
+            if not rows:
+                break
+            scores = np.zeros(len(rows))
+            same_dims = [i for i, row in enumerate(rows) if len(row["vector"]) == blob_size]
+            if same_dims and query_norm:
+                matrix = _decode_rows([rows[i]["vector"] for i in same_dims], dims)
+                scores[same_dims] = _cosine_scores(
+                    matrix, _row_norms(matrix), query_arr, query_norm,
+                )
+            names.extend(row["qualified_name"] for row in rows)
+            chunk_scores.append(scores)
+        return names, np.concatenate(chunk_scores) if chunk_scores else np.zeros(0)
+
+    # Opt-in (CRG_VECTOR_CACHE=1) cache of decoded vectors, shared by every
+    # store of the process: _embedding_search() opens and closes a store per
+    # query, so a cache kept on the instance would never be hit twice.
+    # (database, provider, dims) -> (token, names, rows, matrix, norms), with
+    # the least recently used entry first.
+    _vector_cache: dict[tuple[str, str, int], tuple[Any, ...]] = {}
+    # database -> (file identity, connection that only reads data_version)
+    _vector_cache_watchers: dict[str, tuple[tuple[int, int], sqlite3.Connection]] = {}
+    _vector_cache_lock = threading.Lock()
+    _VECTOR_CACHE_MAX_ENTRIES = 4
+
+    def _cached_vectors(self, provider_name: str, dims: int) -> tuple[Any, ...] | None:
+        """``(names, rows, matrix, norms)`` from the process-wide cache, or None.
+
+        *names* lists every stored vector of *provider_name* in read order,
+        *rows* the positions in *names* of those with *dims* components,
+        *matrix* their float32 components and *norms* their norms (``inf`` for
+        a zero vector).
+
+        None, and the caller reads SQLite instead, unless ``CRG_VECTOR_CACHE``
+        is ``1``. Also None for a database that is not a file, and while this
+        connection holds an uncommitted transaction whose rows only it can
+        see.
+
+        An entry is valid while ``PRAGMA data_version`` on a long-lived
+        watcher connection stays put. That value moves whenever any other
+        connection commits, this store's included. It is read before the rows,
+        so a commit that races the load costs one extra reload, never a stale
+        answer. The watcher stays open while its database has a cached entry.
+        On Windows that means ``graph.db`` cannot be deleted or replaced
+        while it is open; :meth:`clear_vector_cache` releases it.
+        """
+        if os.environ.get("CRG_VECTOR_CACHE", "").strip() != "1":
+            return None
+        if self._conn.in_transaction:
+            return None
+        path = str(self.db_path)
+        if path == ":memory:" or not os.path.isfile(path):
+            return None
+        db = os.path.normcase(os.path.realpath(path))
+
+        cls = EmbeddingStore
+        with cls._vector_cache_lock:
+            try:
+                token = cls._vector_cache_token(db)
+            except (sqlite3.Error, OSError) as exc:
+                logger.warning("Vector cache unavailable for %s: %s", db, exc)
+                return None
+
+            key = (db, provider_name, dims)
+            entry = cls._vector_cache.pop(key, None)
+            if entry is not None and entry[0] != token:
+                entry = None  # release the stale matrix before decoding a new one
+            if entry is None:
+                entry = (token, *self._load_vectors(provider_name, dims))
+            cls._vector_cache[key] = entry  # most recently used goes last
+
+            while len(cls._vector_cache) > cls._VECTOR_CACHE_MAX_ENTRIES:
+                evicted = next(iter(cls._vector_cache))
+                del cls._vector_cache[evicted]
+                if all(other[0] != evicted[0] for other in cls._vector_cache):
+                    cls._close_vector_cache_watcher(evicted[0])
+            return entry[1:]
+
+    def _load_vectors(self, provider_name: str, dims: int) -> tuple[Any, ...]:
+        """Decode every stored vector of *provider_name* for the cache."""
+        import numpy as np
+
+        blob_size = dims * 4
+        names: list[str] = []
+        rows: list[int] = []
+        blobs: list[bytes] = []
+        for name, blob in self._conn.execute(
+            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
+            (provider_name,),
+        ):
+            if len(blob) == blob_size:
+                rows.append(len(names))
+                blobs.append(blob)
+            names.append(name)
+
+        matrix = _decode_rows(blobs, dims)
+        norms = np.concatenate([
+            _row_norms(matrix[start:start + _SEARCH_CHUNK_ROWS])
+            for start in range(0, len(blobs), _SEARCH_CHUNK_ROWS)
+        ]) if blobs else np.zeros(0)
+        return names, np.asarray(rows, dtype=np.intp), matrix, norms
+
+    @classmethod
+    def _vector_cache_token(cls, db: str) -> tuple[tuple[int, int], int]:
+        """(file identity, data_version) of *db*. The caller holds the lock."""
+        stat = os.stat(db)
+        file_id = (stat.st_dev, stat.st_ino)
+        watcher = cls._vector_cache_watchers.get(db)
+        if watcher is None or watcher[0] != file_id:
+            # A replaced file gets a fresh watcher: data_version only compares
+            # commits seen by one connection on one file.
+            cls._close_vector_cache_watcher(db)
+            watcher = (file_id, sqlite3.connect(db, timeout=30, check_same_thread=False))
+            cls._vector_cache_watchers[db] = watcher
+        # fetchall() runs the statement to completion: one left open would pin
+        # a read snapshot and freeze data_version on this connection.
+        return file_id, watcher[1].execute("PRAGMA data_version").fetchall()[0][0]
+
+    @classmethod
+    def _close_vector_cache_watcher(cls, db: str) -> None:
+        watcher = cls._vector_cache_watchers.pop(db, None)
+        if watcher is not None:
+            watcher[1].close()
+
+    @classmethod
+    def clear_vector_cache(cls) -> None:
+        """Drop every cached matrix and close the connections that watch them."""
+        with cls._vector_cache_lock:
+            cls._vector_cache.clear()
+            for db in list(cls._vector_cache_watchers):
+                cls._close_vector_cache_watcher(db)
+
+    def _search_pure_python(
+        self, query_vec: list[float], provider_name: str, limit: int,
+    ) -> list[tuple[str, float]]:
+        """Score every stored vector one component at a time (no numpy)."""
         # Process in chunks, only matching current provider
         scored: list[tuple[str, float]] = []
         cursor = self._conn.execute(
