@@ -17,6 +17,13 @@
 
 ### Fixed
 
+- The OpenCode plugin template is an OpenCode 2.x definition
+  (`id` + `setup`, hooks via `ctx.event.subscribe` and `ctx.tool.hook`,
+  subprocesses via `node:child_process`). The plugin package is imported
+  only for types, so OpenCode 2.0.0–2.0.24 can load it without resolving
+  `@opencode/plugin` at runtime. This also fixes the V2 loader error
+  `Plugin must export a default definition with an id and an effect or
+  setup function` (#1038).
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
