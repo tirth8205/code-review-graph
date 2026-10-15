@@ -46,3 +46,32 @@ def test_kotlin_implementor_of_java_interface_resolves_call(tmp_path, framework)
             if edge.kind == "CALLS"
         ]
     assert calls == ["sample.kt::KotlinWorkActivity.work"]
+
+
+def test_packaged_java_interface_keeps_bare_kotlin_implementor_compatibility(tmp_path):
+    parser = CodeParser()
+    java_nodes, java_edges = parser.parse_bytes(
+        Path("sample.java"),
+        b"package app; interface WorkActivity { void work(); }\n"
+        b"class Client { @Autowired WorkActivity dep; "
+        b"void run() { dep.work(); } }\n",
+    )
+    kotlin_nodes, kotlin_edges = parser.parse_bytes(
+        Path("sample.kt"),
+        b"package app\nclass KotlinWorkActivity : WorkActivity { override fun work() {} }\n",
+    )
+    with GraphStore(tmp_path / "graph.db") as store:
+        for node in [*java_nodes, *kotlin_nodes]:
+            store.upsert_node(node)
+        for edge in [*java_edges, *kotlin_edges]:
+            store.upsert_edge(edge)
+        store.commit()
+        from code_review_graph.spring_resolver import resolve_spring_di_calls
+
+        assert resolve_spring_di_calls(store)["calls_resolved"] == 1
+        calls = [
+            edge.target_qualified
+            for edge in store.get_edges_by_source("sample.java::Client.run")
+            if edge.kind == "CALLS"
+        ]
+    assert calls == ["sample.kt::KotlinWorkActivity.work"]
