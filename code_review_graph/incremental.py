@@ -270,6 +270,7 @@ DEFAULT_IGNORE_PATTERNS = [
 # being parsed and watched, so the root anchoring from #91/#92 still protects
 # everyone whose nested ``build/`` or ``dist/`` holds real sources.  See: #811.
 NESTED_OUTPUT_DIR_MARKERS: dict[str, frozenset[str]] = {
+    "vendor": frozenset({"composer.json", "go.mod", "go.work", "Gemfile", "Rakefile"}),
     "target": frozenset({"pom.xml", "Cargo.toml", "build.sbt"}),
     "build": frozenset({
         "build.gradle",
@@ -547,8 +548,18 @@ def _load_ignore_patterns(repo_root: Path) -> list[str]:
     A line starting with ``!`` keeps a path out of the automatic nested
     build-output detection (see :data:`NESTED_OUTPUT_DIR_MARKERS`); it does not
     negate the explicit patterns, which keep their existing meaning.
+    The default vendor exclusion applies to Composer, Go and Ruby projects
+    identified by root manifests. Nested manifests exclude their sibling
+    vendor/ directory; other repositories can explicitly ignore vendor/.
     """
-    patterns = list(DEFAULT_IGNORE_PATTERNS)
+    vendor_dependencies = any(
+        (repo_root / manifest).is_file()
+        for manifest in ("composer.json", "go.mod", "go.work", "Gemfile", "Rakefile")
+    ) or any(path.is_file() for path in repo_root.glob("*.gemspec"))
+    patterns = [
+        pattern for pattern in DEFAULT_IGNORE_PATTERNS
+        if pattern != "**/vendor/**" or vendor_dependencies
+    ]
     keep: list[str] = []
     ignore_file = repo_root / ".code-review-graphignore"
     if ignore_file.exists():
@@ -663,7 +674,10 @@ def _scan_nested_output_dirs(
             for output_dir, markers in NESTED_OUTPUT_DIR_MARKERS.items():
                 # A watch can start before the first build creates its output.
                 # Reserve that path now, without rescanning on each file event.
-                if file_names & markers and output_dir not in file_names:
+                has_marker = bool(file_names & markers) or (
+                    output_dir == "vendor" and any(name.endswith(".gemspec") for name in file_names)
+                )
+                if has_marker and output_dir not in file_names:
                     relative = (directory / output_dir).relative_to(repo_root).as_posix()
                     patterns.append(f"/{relative}/**")
                     flagged.add(output_dir)
@@ -2983,6 +2997,7 @@ def _create_watch_handler(
                                 and event.event_type in {"created", "deleted", "moved"}
                             )
                             or Path(relative).name in manifest_names
+                            or Path(relative).name.endswith(".gemspec")
                         )
                     ):
                         invalidate = True
