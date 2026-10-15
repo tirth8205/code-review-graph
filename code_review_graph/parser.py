@@ -1307,7 +1307,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     # walker can't bridge the FnProto signature to its sibling Block body,
     # so the whole thing is dispatched via _extract_zig_constructs.
     "zig": [],
-    "powershell": ["function_statement"],
+    "powershell": ["function_statement", "class_method_definition"],
     # Julia: short-form functions `f(x) = expr` parse as `assignment` nodes
     # (not a dedicated definition node) and are handled in
     # _extract_julia_constructs.
@@ -2937,6 +2937,19 @@ def _ansible_is_play_item(item: object) -> bool:
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
+
+
+# Numeric endpoints accepted in PowerShell range expressions. Match the entire
+# literal so command names such as 1..3.ps1 and malformed suffixes stay calls.
+# https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_numeric_literals
+_POWERSHELL_NUMBER_PATTERN = (
+    r"[+-]?(?:(?:0x[0-9a-f]+|0b[01]+)(?:u[ysl]?|[ysln])?"
+    r"|\d+(?:u[ysl]?|[yslnd])?"
+    r"|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?d?)(?:[kmgtp]b)?"
+)
+_POWERSHELL_RANGE_RE = re.compile(
+    rf"{_POWERSHELL_NUMBER_PATTERN}\.\.{_POWERSHELL_NUMBER_PATTERN}", re.IGNORECASE,
+)
 
 
 class CodeParser:
@@ -11891,6 +11904,10 @@ class CodeParser:
             decorators = tuple(deco_list)
 
         is_test = _is_test_function(name, file_path, decorators, repo_root=self._repo_root)
+        # PowerShell's Test-* verb and DSC Test() methods are production
+        # declarations unless the containing file is test code.
+        if language == "powershell":
+            is_test = self._is_test_path(file_path)
         # PHPUnit's name convention is ``test*`` (not only ``test_*``).
         if (
             language == "php"
@@ -17009,6 +17026,11 @@ class CodeParser:
 
     def _get_name(self, node, language: str, kind: str) -> Optional[str]:
         """Extract the name from a class/function definition node."""
+        if language == "powershell":
+            for child in node.children:
+                if child.type in ("function_name", "simple_name"):
+                    return child.text.decode("utf-8", errors="replace")
+            return None
         # Dart: function_signature has a return-type node before the identifier;
         # search only for 'identifier' to avoid returning the return type name.
         if language == "dart" and node.type == "function_signature":
@@ -18589,11 +18611,15 @@ class CodeParser:
                 return method_node.text.decode("utf-8", errors="replace")
 
         # Bash: `command` node's first child is the command name.
-        if language == "bash" and node.type == "command":
+        if language in ("bash", "powershell") and node.type == "command":
             for child in node.children:
                 if child.type == "command_name":
                     # command_name wraps a word — get its text
                     txt = child.text.decode("utf-8", errors="replace").strip()
+                    # The PowerShell grammar can wrap a numeric range in a
+                    # command_name even though it is a pipeline expression.
+                    if language == "powershell" and _POWERSHELL_RANGE_RE.fullmatch(txt):
+                        return None
                     return txt or None
             return None
 
