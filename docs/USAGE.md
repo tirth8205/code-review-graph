@@ -160,6 +160,10 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+Terraform provider aliases have distinct names (`provider.aws.west`), while the default
+provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
+map values link to provider nodes; ordinary resource expressions retain resource references.
+
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
