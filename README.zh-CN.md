@@ -97,6 +97,51 @@ Build the code review graph for this project
 构建时间随仓库规模增长；一个约 3,000 个文件的仓库冷构建约需 40 秒（[实测](docs/REPRODUCING.md#incremental-update-latency)）。之后由钩子和 watch 模式保持图谱更新。如果部分文件解析失败，结果状态为 `partial` 并在摘要中列出这些文件；CLI 还会在 stderr 上打印一行 `Warning:`，这些文件保留原有的图谱记录。
 
 
+### 使用 Docker 或 Podman 运行
+
+在项目仓库根目录构建镜像：
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+在要分析的仓库目录中运行：
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+挂载的仓库必须可写。上述命令使用你的用户 ID 和组 ID，
+使生成的 `.code-review-graph/` 目录仍归你的用户所有。
+请以非 root 主机用户运行这些命令。
+
+使用 Podman 时，构建同一个 Dockerfile 并保留用户映射：
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+图会保存在挂载仓库的 `.code-review-graph/` 中，并记录 `/workspace/app.py` 等容器内的绝对路径。
+请通过 Docker 或 Podman 使用相同的 `/workspace` 挂载路径运行 `update` 和 `detect-changes`。
+在宿主机上对该图运行 `update` 可能会报错 "built with a different repository root"。
+如需改用宿主机命令，请先在宿主机上运行 `code-review-graph build`，使用宿主机路径重新构建图。
+
+将 `build` 替换为 `status` 可查看已保存的图。
+镜像包含 Git，默认以非 root 用户运行。
+构建镜像时不会生成图。
+
+这些示例使用 macOS/Linux shell 语法。在 macOS 上，
+运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
+
 ## 工作原理
 
 <p align="center">

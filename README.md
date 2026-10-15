@@ -97,6 +97,53 @@ Build the code review graph for this project
 Build time scales with repository size; a cold build of a ~3,000-file repository took about 40 seconds ([measured](docs/REPRODUCING.md#incremental-update-latency)). After that, hooks and watch mode keep the graph updated. If some files fail to parse, the result has status `partial` and names them in its summary; the CLI also prints a `Warning:` line on stderr, and those files keep their previous graph rows.
 
 
+### Run with Docker or Podman
+
+Build the image from the repository root:
+
+```bash
+docker build -t code-review-graph:local .
+```
+
+From the repository you want to analyze, run:
+
+```bash
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The mounted repository must be writable. The command above uses your
+user and group IDs so the generated `.code-review-graph/` directory
+remains owned by your user. Run these commands as a non-root host user.
+
+For Podman, build the same Dockerfile and preserve your user mapping:
+
+```bash
+podman build -t code-review-graph:local .
+podman run --rm \
+  --userns=keep-id \
+  --env HOME=/tmp \
+  --volume "$PWD:/workspace" \
+  code-review-graph:local build
+```
+
+The graph persists in `.code-review-graph/` in the mounted repository and stores
+absolute container paths such as `/workspace/app.py`. Run `update` and
+`detect-changes` through Docker or Podman with the same `/workspace` mount.
+A host `update` on this graph can fail with "built with a different repository
+root". To switch to host commands, run `code-review-graph build` on the host
+to rebuild the graph with host paths.
+
+Replace `build` with `status` to inspect the saved graph.
+The image includes Git and defaults to a non-root user.
+No graph is generated during image construction.
+
+These examples use macOS/Linux shell syntax. On macOS, start your
+Docker-compatible engine or Podman machine before running them.
+
 ## How It Works
 
 <p align="center">
