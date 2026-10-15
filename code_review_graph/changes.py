@@ -787,10 +787,13 @@ def analyze_changes(
     # still gives the right answer: those rows carry ``is_test = 0`` and used
     # to be reported back to the author as their own tests needing tests
     # (issue #1014).
+    # TypeScript interfaces and type aliases have no runtime behavior to test,
+    # so they are never gap candidates (issue #1109).
     gap_candidates = [
         node for node in changed_funcs
         if not (node.is_test or is_test_file(node.file_path, gap_root))
         and node.name not in _TEST_GAP_EXEMPT_NAMES
+        and not node.extra.get("typescript_kind")
     ]
     # TESTED_BY edges are stored as source=production, target=test by the
     # parser, so a changed production function finds its tests by source.

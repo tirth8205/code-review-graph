@@ -2185,10 +2185,22 @@ def _raise_watch_update_errors(result: dict, context: str) -> None:
 
 
 def _raise_watch_postprocess_warnings(result: object) -> None:
-    """Treat structured post-processing warnings as a failed watch update."""
+    """Treat structured post-processing warnings as a failed watch update.
+
+    One warning is exempt: an explicit embedding refresh that found no index
+    to refresh. The graph update itself succeeded and the post-processing step
+    has already logged the notice, so the watch keeps running. A refresh that
+    fails against an existing index still fails the update.
+    """
     if not isinstance(result, dict):
         return
-    warnings = result.get("warnings") or []
+    from .embeddings import REFRESH_SKIPPED_WARNING
+
+    warnings = [
+        warning
+        for warning in result.get("warnings") or []
+        if warning != REFRESH_SKIPPED_WARNING
+    ]
     if warnings:
         details = "; ".join(str(warning) for warning in warnings)
         raise RuntimeError(f"post-processing reported warnings: {details}")

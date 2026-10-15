@@ -1,17 +1,24 @@
 """Explicit, provider-scoped embedding refresh and orphan cleanup."""
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from code_review_graph.embeddings import EmbeddingStore, embed_all_nodes, refresh_embeddings
+from code_review_graph.embeddings import (
+    REFRESH_SKIPPED_WARNING,
+    EmbeddingStore,
+    embed_all_nodes,
+    refresh_embeddings,
+)
 from code_review_graph.graph import GraphStore
+from code_review_graph.incremental import get_db_path
 from code_review_graph.parser import NodeInfo
 from code_review_graph.postprocessing import run_post_processing
-from code_review_graph.tools.build import _run_postprocess
+from code_review_graph.tools.build import _run_postprocess, build_or_update_graph, run_postprocess
 from code_review_graph.tools.docs import embed_graph
 
 
@@ -312,6 +319,162 @@ class TestExplicitRefresh:
             graph.close()
 
 
+def _graph_without_vectors(tmp_path, *, empty_table: bool):
+    """A graph with nodes and no vectors: no embeddings table, or an empty one."""
+    graph, _ = _graph_with_function(tmp_path)
+    if empty_table:
+        # Any EmbeddingStore creates the table; list_graph_stats does this too.
+        with patch("code_review_graph.embeddings.get_provider", return_value=None):
+            EmbeddingStore(graph.db_path).close()
+    return graph
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.invalid", "-c", "user.name=T", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+
+def _git_repo(tmp_path: Path, monkeypatch) -> Path:
+    """A committed one-file git repository, parsed serially."""
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "app.py").write_text("def hello():\n    return 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "init")
+    return repo
+
+
+class TestRefreshWithoutVectors:
+    """An explicit refresh on a never-embedded graph reports that it embedded nothing."""
+
+    @pytest.mark.parametrize("empty_table", [False, True])
+    @pytest.mark.parametrize("level", ["none", "minimal", "full"])
+    def test_build_postprocess_reports_skip_at_every_level(self, tmp_path, level, empty_table):
+        graph = _graph_without_vectors(tmp_path, empty_table=empty_table)
+        try:
+            with patch("code_review_graph.embeddings.get_provider") as get_provider:
+                result: dict = {}
+                warnings = _run_postprocess(
+                    graph,
+                    result,
+                    level,
+                    embedding_provider="local",
+                    embedding_model="test-model",
+                )
+            get_provider.assert_not_called()
+            assert result["embeddings_refresh_skipped"] is True
+            assert "embeddings_refreshed" not in result
+            assert REFRESH_SKIPPED_WARNING in warnings
+        finally:
+            graph.close()
+
+    @pytest.mark.parametrize("empty_table", [False, True])
+    def test_shared_postprocessing_reports_skip(self, tmp_path, empty_table):
+        graph = _graph_without_vectors(tmp_path, empty_table=empty_table)
+        try:
+            with patch("code_review_graph.embeddings.get_provider") as get_provider:
+                result = run_post_processing(
+                    graph,
+                    embedding_provider="local",
+                    embedding_model="test-model",
+                )
+            get_provider.assert_not_called()
+            assert result["embeddings_refresh_skipped"] is True
+            assert "embeddings_refreshed" not in result
+            assert REFRESH_SKIPPED_WARNING in result["warnings"]
+        finally:
+            graph.close()
+
+    def test_run_postprocess_reports_skip(self, tmp_path):
+        graph = _graph_without_vectors(tmp_path, empty_table=False)
+        db_path = graph.db_path
+        graph.close()
+        with (
+            patch("code_review_graph.embeddings.get_provider") as get_provider,
+            patch(
+                "code_review_graph.tools.build._get_store",
+                side_effect=lambda root: (GraphStore(db_path), tmp_path),
+            ),
+        ):
+            result = run_postprocess(
+                repo_root=str(tmp_path),
+                embedding_provider="local",
+                embedding_model="test-model",
+            )
+        get_provider.assert_not_called()
+        assert result["embeddings_refresh_skipped"] is True
+        assert REFRESH_SKIPPED_WARNING in result["warnings"]
+
+    def test_build_result_tells_the_caller_nothing_was_embedded(self, tmp_path, monkeypatch):
+        repo = _git_repo(tmp_path, monkeypatch)
+
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
+            result = build_or_update_graph(
+                full_rebuild=True,
+                repo_root=str(repo),
+                embedding_provider="local",
+                embedding_model="test-model",
+            )
+        get_provider.assert_not_called()
+        assert result["status"] == "ok"
+        assert result["embeddings_refresh_skipped"] is True
+        assert "embeddings_refreshed" not in result
+        assert REFRESH_SKIPPED_WARNING in result["warnings"]
+
+    def test_update_with_no_changes_still_reports_the_missing_index(self, tmp_path, monkeypatch):
+        repo = _git_repo(tmp_path, monkeypatch)
+
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
+            build_or_update_graph(full_rebuild=True, repo_root=str(repo))
+            default = build_or_update_graph(repo_root=str(repo))
+            explicit = build_or_update_graph(
+                repo_root=str(repo),
+                embedding_provider="local",
+                embedding_model="test-model",
+            )
+        get_provider.assert_not_called()
+        assert default["build_type"] == explicit["build_type"] == "incremental"
+        assert default["files_updated"] == explicit["files_updated"] == 0
+        assert "embeddings_refresh_skipped" not in default
+        assert "warnings" not in default
+        assert explicit["status"] == "ok"
+        assert explicit["embeddings_refresh_skipped"] is True
+        assert explicit["warnings"] == [REFRESH_SKIPPED_WARNING]
+
+    def test_update_with_no_changes_on_an_embedded_graph_reports_nothing(
+        self, tmp_path, monkeypatch,
+    ):
+        repo = _git_repo(tmp_path, monkeypatch)
+        build_or_update_graph(full_rebuild=True, repo_root=str(repo))
+        graph = GraphStore(get_db_path(repo))
+        try:
+            with patch(
+                "code_review_graph.embeddings.get_provider",
+                return_value=_StubProvider(),
+            ):
+                with EmbeddingStore(graph.db_path, provider="local", model="test-model") as store:
+                    assert embed_all_nodes(graph, store) > 0
+        finally:
+            graph.close()
+
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
+            result = build_or_update_graph(
+                repo_root=str(repo),
+                embedding_provider="local",
+                embedding_model="test-model",
+            )
+        get_provider.assert_not_called()
+        assert result["files_updated"] == 0
+        assert "embeddings_refresh_skipped" not in result
+        assert "warnings" not in result
+
+
 class TestRefreshWiring:
     def test_shared_postprocessing_is_default_off(self, tmp_path):
         graph, _ = _graph_with_function(tmp_path)
@@ -319,8 +482,10 @@ class TestRefreshWiring:
             with patch(
                 "code_review_graph.embeddings.refresh_embeddings",
             ) as refresh:
-                run_post_processing(graph)
+                result = run_post_processing(graph)
             refresh.assert_not_called()
+            assert "embeddings_refresh_skipped" not in result
+            assert "warnings" not in result
         finally:
             graph.close()
 
@@ -343,6 +508,7 @@ class TestRefreshWiring:
             )
             assert result["embeddings_refreshed"] == 3
             assert result["embeddings_purged"] == 2
+            assert "embeddings_refresh_skipped" not in result
 
             with patch(
                 "code_review_graph.embeddings.refresh_embeddings",
@@ -365,8 +531,9 @@ class TestRefreshWiring:
                 return_value={"embedded": 1, "purged": 1},
             ) as refresh:
                 default_result: dict = {}
-                _run_postprocess(graph, default_result, "none")
+                assert _run_postprocess(graph, default_result, "none") == []
                 refresh.assert_not_called()
+                assert "embeddings_refresh_skipped" not in default_result
 
                 explicit_result: dict = {}
                 _run_postprocess(
@@ -383,6 +550,7 @@ class TestRefreshWiring:
             )
             assert explicit_result["embeddings_refreshed"] == 1
             assert explicit_result["embeddings_purged"] == 1
+            assert "embeddings_refresh_skipped" not in explicit_result
         finally:
             graph.close()
 
