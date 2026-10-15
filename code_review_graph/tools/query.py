@@ -45,6 +45,8 @@ from ._common import (
     _error_response,
     _get_store,
     _resolve_graph_file_paths,
+    _resolve_graph_file_paths_with_unmatched,
+    _unmatched_file_warning,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,7 +258,12 @@ def get_impact_radius(
 
         # Resolve user-facing paths to the file paths stored in the graph.
         original_tokens = estimate_file_tokens(root, changed_files)
-        abs_files = _resolve_graph_file_paths(store, root, changed_files)
+        abs_files, unmatched_files = _resolve_graph_file_paths_with_unmatched(
+            store, root, changed_files,
+        )
+        shown_unmatched, unmatched_total, unmatched_cut = _bounded(
+            unmatched_files, 5 if detail_level == "minimal" else max_results, _MAX_IMPACT_FILES,
+        )
         result = store.get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results,
             resolution=resolution,
@@ -334,6 +341,11 @@ def get_impact_radius(
             or files_omitted > 0
         )
         total_impacted = result["total_impacted"]
+        risk = (
+            "unknown" if not abs_files else
+            "high" if total_impacted > 20 else
+            "medium" if total_impacted > 5 else "low"
+        )
 
         summary_parts = [
             f"Blast radius for {len(changed_files)} changed file(s):",
@@ -341,6 +353,8 @@ def get_impact_radius(
             f"  - {total_impacted} nodes impacted (within {max_depth} hops)",
             f"  - {files_total} additional files affected",
         ]
+        if unmatched_files:
+            summary_parts.append(_unmatched_file_warning(unmatched_files))
         if len(impacted_dicts) < total_impacted:
             summary_parts.append(
                 f"  - Results truncated: showing {len(impacted_dicts)}"
@@ -367,13 +381,6 @@ def get_impact_radius(
         if detail_level == "minimal":
             # The full count, not the displayed one: the risk band must not
             # change because a display cap trimmed the list.
-            impacted_count = total_impacted
-            if impacted_count > 20:
-                risk = "high"
-            elif impacted_count > 5:
-                risk = "medium"
-            else:
-                risk = "low"
             key_entities = [
                 n["name"] for n in impacted_dicts[:5]
             ]
@@ -381,9 +388,12 @@ def get_impact_radius(
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
+                "unmatched_files": shown_unmatched,
+                "unmatched_files_total": unmatched_total,
+                "unmatched_files_truncated": unmatched_cut,
                 "impacted_file_count": len(result["impacted_files"]),
                 "key_entities": key_entities,
-                "truncated": truncated,
+                "truncated": truncated or unmatched_cut,
                 "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
                 # One integer, and the only thing in this response that says
                 # the radius has a blind spot at all.
@@ -396,6 +406,10 @@ def get_impact_radius(
 
         response: dict[str, Any] = {
             "status": "ok",
+            "risk": risk,
+            "unmatched_files": shown_unmatched,
+            "unmatched_files_total": unmatched_total,
+            "unmatched_files_truncated": unmatched_cut,
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
             "changed_nodes": changed_dicts,
@@ -405,7 +419,7 @@ def get_impact_radius(
             "impacted_files_omitted": files_omitted,
             "edges": edge_dicts,
             "edges_omitted": edges_omitted,
-            "truncated": truncated,
+            "truncated": truncated or unmatched_cut,
             "total_impacted": total_impacted,
             "nodes_omitted": max(0, total_impacted - len(impacted_dicts)),
             "resolution": resolution,
