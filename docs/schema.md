@@ -3,7 +3,7 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 13, the highest key in `MIGRATIONS`. A database
+The current schema version is 14, the highest key in `MIGRATIONS`. A database
 below that is migrated on open, in order, by every migration above its own
 version.
 
@@ -345,3 +345,4 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 11 | `edges.target_resolution`, back-filled for `CALLS`/`REFERENCES`, and `idx_edges_kind_target_resolution` |
 | 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
 | 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |
+| 14 | No schema change: `file_hash` cleared on Ruby `File` nodes so the next update re-parses them under the new namespaced class identities |

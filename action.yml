@@ -51,16 +51,16 @@ runs:
       shell: bash
       run: python -m pip install --quiet code-review-graph
 
-    # Cache the SQLite knowledge graph between runs. The "schema13" segment
+    # Cache the SQLite knowledge graph between runs. The "schema14" segment
     # tracks LATEST_VERSION in code_review_graph/migrations.py — bump it when
     # the database schema changes so stale caches are not restored.
     - name: Cache knowledge graph
       uses: actions/cache@v6
       with:
         path: .code-review-graph
-        key: code-review-graph-schema13-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
+        key: code-review-graph-schema14-${{ runner.os }}-${{ hashFiles('**/uv.lock', '**/poetry.lock', '**/requirements*.txt', '**/Pipfile.lock', '**/package-lock.json', '**/pnpm-lock.yaml', '**/yarn.lock', '**/go.sum', '**/Cargo.lock', '**/Gemfile.lock', '**/composer.lock') }}
         restore-keys: |
-          code-review-graph-schema13-${{ runner.os }}-
+          code-review-graph-schema14-${{ runner.os }}-
 
     - name: Resolve diff base
       shell: bash

@@ -11668,6 +11668,34 @@ class CodeParser:
 
         class_parent = enclosing_class
 
+        # Ruby: a compact declaration (``class Foo::Bar``) carries its own
+        # scope, so the enclosing lexical scope is not the whole story. Append
+        # the compact scope chain to the full enclosing scope chain, so the
+        # compact form lands on the same identity as the nested form at any
+        # depth: ``module A; class B::C`` and ``module A; module B; class C``
+        # both qualify to ``A.B.C``. Without this, ``class A::Same`` and
+        # ``class B::Same`` in one file collapse onto a single
+        # ``file.rb::Same``.
+        #
+        # A leading ``::`` (``class ::Root``, ``class ::A::B``) anchors the
+        # name at the top level, so the enclosing scope is dropped instead of
+        # stacked, and the leading separator must not leave an empty segment.
+        if language == "ruby" and child.type in ("class", "module"):
+            _name_child = child.child_by_field_name("name")
+            if _name_child is not None and _name_child.type == "scope_resolution":
+                _scope = _name_child.child_by_field_name("scope")
+                _chain = (
+                    _scope.text.decode("utf-8", errors="replace").replace("::", ".")
+                    if _scope is not None
+                    else ""
+                ).lstrip(".")
+                if _name_child.text.lstrip().startswith(b"::"):
+                    class_parent = _chain or None
+                elif _chain:
+                    class_parent = (
+                        f"{class_parent}.{_chain}" if class_parent else _chain
+                    )
+
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
@@ -11799,6 +11827,14 @@ class CodeParser:
         # Recurse into class body
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
+        elif language == "ruby" and class_parent:
+            # The class node is keyed ``_qualify(name, file, class_parent)``,
+            # i.e. ``file::Parent.Name``. Descend with that same scope string so
+            # its methods qualify to ``file::Parent.Name.method`` and the
+            # CONTAINS edge points at a node that exists. Passing the bare leaf
+            # leaves every class with a parent_name pointing its methods at a
+            # ``file::Name`` container that was never emitted.
+            recursive_class = f"{class_parent}.{name}"
         else:
             recursive_class = name
         self._extract_from_tree(
@@ -17281,6 +17317,25 @@ class CodeParser:
             name_child = node.child_by_field_name("name")
             if name_child is not None:
                 return name_child.text.decode("utf-8", errors="replace")
+
+        # Ruby: compact namespace declarations (``class Foo::Bar`` /
+        # ``module Foo::Bar``) put the name in a ``scope_resolution`` node, not
+        # a bare ``constant``, so the generic loop below misses them and
+        # _extract_classes drops the whole Class node. Take the rightmost
+        # ``constant`` so the emitted name matches the nested form
+        # (``module Foo`` + ``class Bar`` -> Class "Bar").
+        if language == "ruby" and node.type in ("class", "module"):
+            name_child = node.child_by_field_name("name")
+            if name_child is not None and name_child.type == "scope_resolution":
+                # Only a constant scope names a namespace. ``class klass::Inner``
+                # (identifier) and ``class self::Foo`` (self) resolve their scope
+                # at runtime, so there is no static namespace to record -- fall
+                # through and emit nothing, as before this branch existed.
+                scope = name_child.child_by_field_name("scope")
+                if scope is None or scope.type in ("constant", "scope_resolution"):
+                    for sub in reversed(name_child.children):
+                        if sub.type == "constant":
+                            return sub.text.decode("utf-8", errors="replace")
 
         # Most built-in languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
