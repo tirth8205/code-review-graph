@@ -4,7 +4,7 @@
 review journey across about seven tools. This module extends that idea to
 everything the server publishes:
 
-* every registered ``@mcp.tool()`` (the server advertises 30; the count is
+* every registered ``@mcp.tool()`` (the server advertises 31; the count is
   read from ``tools/list`` at run time, never hard-coded), called with
   realistic arguments against a real built graph, asserting on the CONTENT
   that comes back rather than on the absence of an exception;
@@ -461,7 +461,7 @@ class Walk:
 
 
 async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> None:
-    """Drive all 30 tools through one client session and assert on payloads.
+    """Drive all 31 tools through one client session and assert on payloads.
 
     The canary is at the bottom: the set of tools exercised here has to equal
     the set the server advertises over ``tools/list``. A tool added to
@@ -480,8 +480,8 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
         async with _client(fixture, embed_env) as session:
             listed = await asyncio.wait_for(session.list_tools(), timeout=CALL_TIMEOUT)
             registered = {tool.name for tool in listed.tools}
-            assert len(registered) == 30, (
-                f"expected the documented 30 tools, tools/list advertised {len(registered)}"
+            assert len(registered) == 31, (
+                f"expected the documented 31 tools, tools/list advertised {len(registered)}"
             )
 
             # --- 1. build -------------------------------------------------
@@ -764,6 +764,30 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             refactor_id = preview["refactor_id"]
             walk.verify("refactor_tool", ["dead_code", "suggest", "rename"])
 
+            plan = await _call(
+                session, "get_refactor_edit_plan_tool", {"refactor_id": refactor_id}
+            )
+            assert plan["status"] == "ok", plan
+            assert plan["refactor_id"] == refactor_id, plan
+            plan_rows = plan["files"]
+            assert plan_rows, plan
+            assert all(
+                row["edit_count"] >= 1
+                and len(row["before_sha256"]) == 64
+                and isinstance(row["after_content"], str)
+                and row["after_content"]
+                for row in plan_rows
+            ), plan_rows
+            assert any("renamed_helper" in row["after_content"] for row in plan_rows), (
+                "plan does not contain the previewed replacement"
+            )
+            planned = (fixture.repo / "pkg0" / "mod1.py").read_text(encoding="utf-8")
+            assert "renamed_helper" not in planned, "get_refactor_edit_plan wrote to disk"
+            walk.verify(
+                "get_refactor_edit_plan_tool",
+                ["status-ok", "files", "after_content", "read-only"],
+            )
+
             dry = await _call(
                 session, "apply_refactor_tool", {"refactor_id": refactor_id, "dry_run": True}
             )
@@ -1009,6 +1033,7 @@ MISSING_ARG_CASES: dict[str, dict[str, Any]] = {
     "semantic_search_nodes_tool": {},
     "get_docs_section_tool": {},
     "apply_refactor_tool": {},
+    "get_refactor_edit_plan_tool": {},
     "get_wiki_page_tool": {},
     "traverse_graph_tool": {},
     "cross_repo_search_tool": {},
@@ -1036,6 +1061,7 @@ WRONG_TYPE_CASES: dict[str, dict[str, Any]] = {
     "detect_changes_tool": {"max_results": "lots"},
     "refactor_tool": {"mode": 3},
     "apply_refactor_tool": {"refactor_id": 5},
+    "get_refactor_edit_plan_tool": {"refactor_id": 5},
     "generate_wiki_tool": {"force": [1]},
     "get_wiki_page_tool": {"community_name": "x", "max_chars": "big"},
     "get_hub_nodes_tool": {"top_n": "ten"},
@@ -1061,6 +1087,7 @@ OUT_OF_RANGE_REFUSED: dict[str, dict[str, Any]] = {
     "detect_changes_tool": {"max_results": 0},
     "refactor_tool": {"mode": "dead_code", "max_results": 0},
     "apply_refactor_tool": {"refactor_id": "nope", "max_diff_files": 0},
+    "get_refactor_edit_plan_tool": {"refactor_id": "nope"},
     "get_wiki_page_tool": {"community_name": "pkg0-helper", "max_chars": 0},
     "get_hub_nodes_tool": {"top_n": 0},
     "get_bridge_nodes_tool": {"top_n": -5},
@@ -1229,6 +1256,7 @@ REPO_ROOT_TOOLS: dict[str, dict[str, Any]] = {
     "detect_changes_tool": {},
     "refactor_tool": {"mode": "dead_code"},
     "apply_refactor_tool": {"refactor_id": "deadbeef"},
+    "get_refactor_edit_plan_tool": {"refactor_id": "deadbeef"},
     "generate_wiki_tool": {},
     "get_wiki_page_tool": {"community_name": "pkg0-helper"},
     "get_hub_nodes_tool": {},
@@ -1608,7 +1636,7 @@ def test_spec_conformance_requirements_from_issue_919(built: Fixture) -> None:
         # tools/list after the handshake must be served rather than refused.
         tools = server.request("tools/list", {}, req_id=5)
         assert tools is not None and "result" in tools, tools
-        assert len(tools["result"]["tools"]) == 30, len(tools["result"]["tools"])
+        assert len(tools["result"]["tools"]) == 31, len(tools["result"]["tools"])
 
         # The checker's SHOULD-level finding on the older revision: an
         # unrecognised pagination cursor is answered with a first page rather

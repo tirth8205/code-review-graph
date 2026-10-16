@@ -79,6 +79,17 @@ def _make_executor(max_workers: int):
 
 logger = logging.getLogger(__name__)
 
+
+def _source_path(root: Path, value: str | Path) -> Path | None:
+    """Resolve a source path only when its filesystem identity stays in the repo."""
+    try:
+        path = Path(value)
+        candidate = (path if path.is_absolute() else root / path).resolve()
+        candidate.relative_to(root.resolve())
+        return candidate
+    except (ValueError, OSError, RuntimeError):
+        return None
+
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
@@ -1151,6 +1162,8 @@ def _find_content_mismatches(
             path = repo_root / path
         try:
             relative_path = path.relative_to(repo_root).as_posix()
+            if _source_path(repo_root, path) is None:
+                continue
             raw = path.read_bytes()
             current_hash = hashlib.sha256(raw).hexdigest()
             current_hashes[relative_path] = current_hash
@@ -1474,6 +1487,8 @@ def collect_all_files(
             continue
         if full_path.is_symlink():
             continue
+        if _source_path(repo_root, full_path) is None:
+            continue
         if parser.detect_language(full_path) is None:
             continue
         if _is_binary(full_path):
@@ -1717,6 +1732,8 @@ def _parse_single_file(
     rel_path, repo_root_str = args
     abs_path = Path(repo_root_str) / rel_path
     try:
+        if _source_path(Path(repo_root_str), abs_path) is None:
+            raise ValueError("Source path escapes repository root")
         raw = abs_path.read_bytes()
         fhash = hashlib.sha256(raw).hexdigest()
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
@@ -1773,6 +1790,8 @@ def full_build(
             full_path = repo_root / rel_path
             parsed: tuple[list, list, str] | None = None
             try:
+                if _source_path(repo_root, full_path) is None:
+                    raise ValueError("Source path escapes repository root")
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(full_path, source)
@@ -2005,6 +2024,9 @@ def incremental_update(
                     })
             continue
         abs_path = repo_root / rel_path
+        if _source_path(repo_root, abs_path) is None:
+            errors.append({"file": rel_path, "error": "Source path escapes repository root"})
+            continue
         if not abs_path.is_file():
             remaining_identity.discard(rel_path)
             if normalize_file_path(abs_path) not in stale_files:

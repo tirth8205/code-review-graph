@@ -77,6 +77,13 @@ def _write_d3_asset(directory: Path) -> Path | None:
         logger.warning("Bundled D3 asset unavailable (%s); page will use the CDN fallback.", exc)
         return None
     digest = base64.b64encode(hashlib.sha384(data).digest()).decode()
+    if f"sha384-{digest}" != D3_SRI_HASH and b"\r\n" in data:
+        # Git checkouts created before .gitattributes may have converted LF to CRLF.
+        # Accept only a normalization that still verifies against the original SRI.
+        normalized = data.replace(b"\r\n", b"\n")
+        normalized_digest = base64.b64encode(hashlib.sha384(normalized).digest()).decode()
+        if f"sha384-{normalized_digest}" == D3_SRI_HASH:
+            data, digest = normalized, normalized_digest
     if f"sha384-{digest}" != D3_SRI_HASH:
         logger.error(
             "Bundled D3 asset does not match the pinned SRI hash; refusing to write %s. "

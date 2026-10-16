@@ -252,7 +252,7 @@ async def test_mcp_client_full_review_journey(tmp_path: Path) -> None:
                 "list_repos_tool",
             }
             assert expected <= names, f"missing tools: {sorted(expected - names)}"
-            # The server advertises 30 tools; assert the floor, not the exact
+            # The server advertises 31 tools; assert the floor, not the exact
             # number, so adding a tool does not break this test.
             assert len(names) >= 30, f"only {len(names)} tools registered"
             build_schema = next(

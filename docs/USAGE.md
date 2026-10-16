@@ -41,6 +41,7 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot | `copilot` | `.vscode/mcp.json` |
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
+| DeepSeek Harness | `dsh` | `$DSH_HOME/profiles/<profile>/package.json` (default `~/.dsh/profiles/web/package.json`); native bundle, see [DSH](DSH.md) |
 
 The CodeBuddy layout follows its documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),

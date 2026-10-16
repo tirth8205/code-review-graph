@@ -11,6 +11,7 @@ import pytest
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
@@ -34,7 +35,6 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
-from code_review_graph.errors import ChangeDiscoveryError
 
 
 class TestParseExecutorSelection:
@@ -1582,7 +1582,12 @@ class TestWatchReconciliation:
         target = tmp_path / "target.py"
         target.write_text("def target():\n    pass\n")
         linked_file = tmp_path / "linked.py"
-        linked_file.symlink_to(target)
+        try:
+            linked_file.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
         real_dir = tmp_path / "real"
         real_dir.mkdir()
         (real_dir / "inside.py").write_text("def inside():\n    pass\n")
@@ -1607,7 +1612,12 @@ class TestWatchReconciliation:
         outside_file = outside / "escaped.py"
         outside_file.write_text("def escaped():\n    pass\n")
         linked_dir = tmp_path / "linked"
-        linked_dir.symlink_to(outside, target_is_directory=True)
+        try:
+            linked_dir.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
         store = GraphStore(tmp_path / "graph.db")
         callback = MagicMock()
         handler = _create_watch_handler(tmp_path, store, callback)

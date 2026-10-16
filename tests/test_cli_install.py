@@ -22,6 +22,46 @@ def _args(tmp_path: Path, platform: str) -> argparse.Namespace:
     )
 
 
+def test_dsh_install_reinstall_uninstall_lifecycle(monkeypatch, tmp_path):
+    """Native bundles belong to DSH; the public installer edits no repository files."""
+    from code_review_graph import dsh
+
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh"))
+    config = dsh.config_path(repo)
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"dependencies": {"other": "1"},
+                                  "dsh": {"profile": {"bundles": ["other"]}},
+                                  "theme": "dark"}), encoding="utf-8")
+    calls = []
+
+    def native_cli(argv, **kwargs):
+        assert argv[:4] == ["fake-dsh", "plugin", "--profile", "web"]
+        calls.append(argv)
+        data = json.loads(config.read_text())
+        if argv[4] == "add":
+            data["dependencies"][dsh.BUNDLE] = "0.1.0"
+            data["dsh"]["profile"]["bundles"].append(dsh.BUNDLE)
+        else:
+            data["dependencies"].pop(dsh.BUNDLE)
+            data["dsh"]["profile"]["bundles"].remove(dsh.BUNDLE)
+        config.write_text(json.dumps(data), encoding="utf-8")
+
+    monkeypatch.setattr(dsh.shutil, "which", lambda _: "fake-dsh")
+    monkeypatch.setattr(dsh.subprocess, "run", native_cli)
+    _handle_init(_args(repo, "dsh"))
+    first = config.read_bytes()
+    _handle_init(_args(repo, "dsh"))
+    assert config.read_bytes() == first and len(calls) == 1
+    assert not (repo / "CLAUDE.md").exists() and not (repo / ".gitignore").exists()
+    report = uninstall.run(repo=repo, platforms=["dsh"])
+    assert not report.errors and len(calls) == 2
+    assert json.loads(config.read_text()) == {"dependencies": {"other": "1"},
+                                            "dsh": {"profile": {"bundles": ["other"]}},
+                                            "theme": "dark"}
+
+
 def test_copilot_cli_install_reinstall_uninstall_lifecycle(
     monkeypatch, tmp_path
 ):

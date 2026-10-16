@@ -10,6 +10,7 @@ from ..incremental import find_project_root
 from ..refactor import (
     apply_refactor,
     find_dead_code,
+    get_refactor_edit_plan,
     rename_preview,
     suggest_refactorings,
 )
@@ -183,6 +184,17 @@ def refactor_func(
 # ---------------------------------------------------------------------------
 # Tool 18: apply_refactor_tool  [REFACTOR]
 # ---------------------------------------------------------------------------
+
+
+def get_refactor_edit_plan_func(
+    refactor_id: str, repo_root: str | None = None,
+) -> dict[str, Any]:
+    """Return the complete read-only plan for a host-controlled refactor commit."""
+    try:
+        root = _validate_repo_root(Path(repo_root)) if repo_root else find_project_root()
+        return get_refactor_edit_plan(refactor_id, root)
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {"status": "error", "error": str(exc)}
 
 
 def apply_refactor_func(

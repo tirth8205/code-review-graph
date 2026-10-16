@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..graph import GraphStore
-from ..incremental import find_project_root, get_db_path
+from ..incremental import _source_path, find_project_root, get_db_path  # noqa: F401
 from ..parser import normalize_file_path
 
 _PROVENANCE_READ_TIMEOUT_SECONDS = 0.05

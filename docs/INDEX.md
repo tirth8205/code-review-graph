@@ -1,7 +1,7 @@
 # Documentation Index
 
 - [USAGE.md](USAGE.md): install, configure, and use the CLI and MCP tools
-- [COMMANDS.md](COMMANDS.md): reference for the 30 MCP tools, 5 MCP prompts, skills, and CLI commands
+- [COMMANDS.md](COMMANDS.md): reference for the 31 MCP tools, 5 MCP prompts, skills, and CLI commands
 - [FAQ.md](FAQ.md): how it compares to LSP, RAG, grep, and similar tools; when not to use it
 - [FEATURES.md](FEATURES.md): release highlights by version
 - [GITHUB_ACTION.md](GITHUB_ACTION.md): risk-scored PR review comments in GitHub Actions

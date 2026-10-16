@@ -68,7 +68,7 @@ All modules live in `code_review_graph/`.
 | `embeddings.py` | Embedding providers and the `embeddings` table |
 | `changes.py`, `refactor.py`, `analysis.py`, `hints.py`, `uncertainty.py`, `context_savings.py` | Change risk analysis, refactoring helpers, hub/bridge/gap analysis, response hints, empty-result markers, savings estimates |
 | `tools/` | MCP tool implementations, split by domain |
-| `main.py`, `prompts.py` | FastMCP server (30 tools, 5 prompts) |
+| `main.py`, `prompts.py` | FastMCP server (31 tools, 5 prompts) |
 | `cli.py`, `daemon.py`, `daemon_cli.py` | CLI and the multi-repo watch daemon |
 | `visualization.py`, `exports.py`, `wiki.py`, `graph_diff.py`, `memory.py`, `forget.py` | HTML visualisation, export formats, wiki generation, snapshot diffing, Q&A memory, file removal |
 | `skills.py`, `uninstall.py`, `registry.py`, `enrich.py`, `http_origin_guard.py`, `config_keys.py`, `constants.py` | Platform install/uninstall, multi-repo registry, hook enrichment, HTTP Host/Origin checks, shared helpers |

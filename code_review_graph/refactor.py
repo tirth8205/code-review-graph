@@ -2473,6 +2473,8 @@ def apply_refactor(
     refactor_id: str,
     repo_root: Path,
     dry_run: bool = False,
+    *,
+    _plan_only: bool = False,
 ) -> dict[str, Any]:
     """Apply a previously previewed refactoring to source files.
 
@@ -2518,6 +2520,9 @@ def apply_refactor(
 
     edits = preview.get("edits", [])
     if not edits:
+        if _plan_only:
+            return {"status": "ok", "refactor_id": refactor_id,
+                    "repo_root": str(repo_root), "files": []}
         if dry_run:
             return {
                 "status": "ok", "dry_run": True, "applied": 0,
@@ -2556,16 +2561,27 @@ def apply_refactor(
     for file_str, file_edits in edits_by_file.items():
         file_path = Path(file_str)
         if not file_path.is_file():
+            if _plan_only:
+                return {"status": "error", "error": f"File not found: {file_path}"}
             logger.warning("apply_refactor: file not found: %s", file_path)
             edits_skipped += len(file_edits)
             continue
         try:
             decoded = _decode_source(file_path.read_bytes())
         except OSError as exc:
+            if _plan_only:
+                return {"status": "error", "error": f"Cannot read {file_path}: {exc}"}
             logger.warning("apply_refactor: could not read %s: %s", file_path, exc)
             edits_skipped += len(file_edits)
             continue
         if decoded is None:
+            if _plan_only:
+                # The plan must be complete: a host cannot commit an edit it
+                # cannot see, so an undecodable file rejects the whole plan.
+                return {
+                    "status": "error",
+                    "error": f"Cannot read {file_path}: file is not valid UTF-8",
+                }
             # Rewriting a file that is not UTF-8 would replace every byte
             # that failed to decode, so it is left untouched.
             logger.warning("apply_refactor: %s is not UTF-8; not rewritten", file_path)
@@ -2573,6 +2589,10 @@ def apply_refactor(
             continue
         original, had_bom = decoded
         content, applied, skipped = _apply_file_edits(original, file_edits)
+        if _plan_only and skipped:
+            # A stale preview rejects the plan instead of silently dropping
+            # edits a host would then commit incomplete.
+            return {"status": "error", "error": f"Stale edit in {file_path}"}
         edits_skipped += skipped
         if skipped:
             logger.warning(
@@ -2581,6 +2601,24 @@ def apply_refactor(
             )
         if applied > 0:
             planned[file_str] = (original, content, applied, had_bom)
+
+    if _plan_only:
+        import hashlib
+
+        return {
+            "status": "ok", "refactor_id": refactor_id, "repo_root": str(repo_root),
+            "files": [
+                {"path": str(Path(path).resolve()),
+                 # The hash and the content both keep the original BOM: the
+                 # host re-reads the bytes on disk, which still carry it.
+                 "before_sha256": hashlib.sha256(
+                     (("\ufeff" if had_bom else "") + original).encode("utf-8")
+                 ).hexdigest(),
+                 "after_content": ("\ufeff" if had_bom else "") + content,
+                 "edit_count": count}
+                for path, (original, content, count, had_bom) in sorted(planned.items())
+            ],
+        }
 
     # --- Dry-run path: return diffs, no writes ---
     if dry_run:
@@ -2644,3 +2682,12 @@ def apply_refactor(
         result["edits_skipped"] = edits_skipped
     logger.info("apply_refactor: completed %s — %d edits applied", refactor_id, edits_applied)
     return result
+
+
+def get_refactor_edit_plan(refactor_id: str, repo_root: Path) -> dict[str, Any]:
+    """Return all edits without writing or consuming the pending refactor.
+
+    Hashes cover the original UTF-8 bytes; replacement text retains BOM and
+    line endings. Missing, invalid and stale files reject the complete plan.
+    """
+    return apply_refactor(refactor_id, repo_root, dry_run=True, _plan_only=True)
