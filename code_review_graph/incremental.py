@@ -1971,7 +1971,15 @@ def incremental_update(
         else []
     )
 
-    if not changed_files and not stale_files and not identity_pending:
+    # Authoritative empty syncs (``base`` equals the last-stored HEAD) must
+    # still fall through to the freshness write below — otherwise an empty
+    # commit leaves the graph looking stale (#952 / PR #673 review).
+    if (
+        not changed_files
+        and not stale_files
+        and not identity_pending
+        and not authoritative_git_sync
+    ):
         return {
             "files_updated": 0,
             "total_nodes": 0,
@@ -1982,6 +1990,7 @@ def incremental_update(
             "flow_entry_point_qns": [],
             "communities_were_affected": False,
             "errors": [],
+            "freshness_advanced": False,
         }
 
     # Find dependent files (files that import from changed files)
