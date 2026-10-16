@@ -355,8 +355,44 @@ This benchmark simulates an agent without the graph:
 
 Output: `evaluate/results/<repo>_agent_baseline_<date>.csv` with a `baseline_to_graph_ratio`
 per question. Rows where either side is zero get `status=no_graph_results` or
-`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`. No canonical
-capture exists yet; numbers will be added above once measured.
+`status=no_baseline_match` and are excluded from `agent_baseline.aggregate()`.
+
+### Canonical capture, 2026-09-22
+
+18 questions, 3 per repo, from the `agent_questions:` lists. Local `all-MiniLM-L6-v2`
+embeddings, clean clones at the pinned SHAs, every row `status=ok`.
+
+| Repo | Questions | avg grep top-3 tokens | avg graph tokens | median ratio |
+|------|----------:|----------------------:|-----------------:|-------------:|
+| fastapi | 3 | 158,560 | 3,439 | **52.1x** |
+| flask | 3 | 27,611 | 2,432 | **11.5x** |
+| gin | 3 | 25,257 | 3,110 | **6.6x** |
+| httpx | 3 | 26,174 | 4,021 | **6.5x** |
+| code-review-graph | 3 | 26,134 | 3,773 | **6.4x** |
+| express | 3 | 17,086 | 3,726 | **4.5x** |
+
+Across all 18 questions: **median 6.65x, mean 14.81x, range 4.2x to 72.6x**.
+
+Reproduce with:
+
+```bash
+code-review-graph eval --benchmark agent_baseline --embed
+```
+
+Two things this number is not:
+
+- **It is not the whole-corpus ratio.** The standalone benchmark's ~63x compares a graph
+  query against reading every source file, which no agent does. Against a grep-and-read
+  agent the honest figure is the 6.65x above. Quote whichever you mean, and say which.
+- **It is not an end-to-end agent saving.** Both sides here are measured as *retrieval*
+  cost: the tokens needed to locate the answer. A real coding agent may still open the
+  files the graph named, in which case the graph cost is additive rather than a
+  substitute. `semantic_search_nodes_tool(include_source=True)` exists so the agent can
+  answer from the response instead; measuring that path end-to-end is open work.
+
+The ratio tracks repo size, because the graph answer stays flat (2,432 to 4,021 tokens
+here) while the grep baseline grows with the corpus. On a small repo the graph saves
+little; on fastapi it saves a lot.
 
 ## Incremental fidelity (`code_review_graph/eval/benchmarks/incremental_fidelity.py`)
 

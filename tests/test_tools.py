@@ -172,6 +172,132 @@ class TestTools:
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
 
+    def test_include_source_returns_the_code(self, monkeypatch, tmp_path):
+        """include_source attaches the node's own lines, so a caller can
+        answer without opening the file itself."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text(
+            "import os\n"
+            "\n"
+            "def login(user):\n"
+            "    return check(user)\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=3, line_end=4, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        # Each call closes the store it is given, so hand out a fresh one.
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        plain = semantic_search_nodes("login")
+        assert "source" not in plain["results"][0]
+
+        withsrc = semantic_search_nodes("login", include_source=True)
+        hit = withsrc["results"][0]
+        assert hit["source"] == "def login(user):\n    return check(user)"
+        assert hit["source_lines"] == [3, 4]
+
+    def test_expand_neighbors_returns_caller_source(self, monkeypatch, tmp_path):
+        """One call answers "how does X work": the hit plus the code each side."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "app.py"
+        src.write_text(
+            "def wsgi_app(env):\n"
+            "    return dispatch(env)\n"
+            "\n"
+            "def dispatch(env):\n"
+            "    return 200\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        for name, ls, le in (("wsgi_app", 1, 2), ("dispatch", 4, 5)):
+            store.upsert_node(NodeInfo(
+                kind="Function", name=name, file_path=str(src),
+                line_start=ls, line_end=le, language="python",
+            ))
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=f"{src}::wsgi_app", target=f"{src}::dispatch",
+            file_path=str(src), line=2,
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        hit = semantic_search_nodes(
+            "dispatch", include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert hit["name"] == "dispatch"
+        callers = hit.get("callers") or []
+        assert [c["name"] for c in callers] == ["wsgi_app"]
+        assert "return dispatch(env)" in callers[0]["source"]
+
+    def test_include_source_caps_long_nodes(self, monkeypatch, tmp_path):
+        """A huge node is truncated and says so rather than blowing the budget."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "big.py"
+        src.write_text("\n".join(f"line{i}" for i in range(500)), encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="sprawl", file_path=str(src),
+            line_start=1, line_end=500, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        hit = semantic_search_nodes("sprawl", include_source=True)["results"][0]
+        assert hit["source_truncated"] is True
+        assert len(hit["source"].splitlines()) <= 60
+
+    def test_include_source_ignored_for_minimal(self, monkeypatch, tmp_path):
+        """detail_level="minimal" stays minimal."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text("def login(user):\n    return 1\n", encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=1, line_end=2, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        out = semantic_search_nodes(
+            "login", include_source=True, detail_level="minimal",
+        )
+        assert all("source" not in r for r in out["results"])
+
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""
         # Add an edge with bare target name

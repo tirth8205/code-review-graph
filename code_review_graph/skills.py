@@ -2124,12 +2124,12 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 _INSTRUCTION_GUARDRAILS = """### Verify in the source
 
-- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
-- For any non-trivial change, read the implementation and the relevant tests before concluding.
+- Answer from `include_source=True, expand_neighbors=True`; read a file only if truncated.
+- Do not change code from graph output alone: for any non-trivial change,
+  read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
-- When the graph and the source disagree, the source wins. The graph may be stale or may not
-  model that relationship.
+- When the graph and the source disagree, the source wins. The graph may be stale.
 - An empty graph result can mean "not indexed" or "not statically visible", not "does not exist"."""
 
 _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
@@ -2139,7 +2139,7 @@ _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Exploring code**: `semantic_search_nodes_tool(include_source=True, expand_neighbors=True)`
 - **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
 - **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for

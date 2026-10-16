@@ -31,11 +31,20 @@ import statistics
 from collections.abc import Iterator
 from pathlib import Path
 
+from code_review_graph.parser import is_test_file
 from code_review_graph.token_benchmark import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TOP_K = 3
+
+# Mirrors search._TEST_RANK_PENALTY so the grep baseline and the graph are
+# ranked on the same footing.
+_TEST_FILE_PENALTY = 0.4
+_TEST_INTENT_TERMS = frozenset({
+    "test", "tests", "tested", "testing", "spec", "specs", "fixture",
+    "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
+})
 
 _SOURCE_EXTS = (
     ".py", ".js", ".ts", ".tsx", ".go", ".rs", ".java",
@@ -94,21 +103,36 @@ def grep_rank(
 
     Pure python — no external grep/rg dependency. Deterministic: ties break
     on the relative path. Files with zero matches are dropped.
+
+    Test files are down-weighted by :data:`_TEST_FILE_PENALTY` unless the
+    question is about tests. A test names a symbol far more often than the
+    one place it is defined, so raw match count puts the whole test suite
+    above the implementation; left uncorrected this benchmark would compare
+    the graph against a grep nobody would accept, and overstate the ratio in
+    the graph's favour. The graph's own search carries the same correction
+    (``search._TEST_RANK_PENALTY``), so both sides are ranked on the same
+    footing.
     """
     lowered = [t.lower() for t in terms if t]
     if not lowered:
         return []
-    scores: list[tuple[str, int]] = []
+    test_intent = bool(set(lowered) & _TEST_INTENT_TERMS)
+    scores: list[tuple[str, float]] = []
     for path in iter_source_files(repo_path):
         try:
             text = path.read_text(encoding="utf-8", errors="replace").lower()
         except OSError:
             continue
         count = sum(text.count(term) for term in lowered)
-        if count > 0:
-            scores.append((str(path.relative_to(repo_path)), count))
+        if count <= 0:
+            continue
+        rel = str(path.relative_to(repo_path))
+        score = float(count)
+        if not test_intent and is_test_file(rel):
+            score *= _TEST_FILE_PENALTY
+        scores.append((rel, score))
     scores.sort(key=lambda item: (-item[1], item[0]))
-    return scores[:k]
+    return [(rel, int(round(score))) for rel, score in scores[:k]]
 
 
 def run(repo_path: Path, store, config: dict) -> list[dict]:

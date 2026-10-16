@@ -339,3 +339,66 @@ class TestHybridSearch:
         # Verify search still works after double-rebuild.
         results = hybrid_search(self.store, "auth")
         assert isinstance(results, list)
+
+
+class TestTestFileRanking:
+    """Production code should outrank test code for a production question.
+
+    A test that merely names the same symbol scores as well on keywords as
+    the implementation, so a two-line stub under tests/ could come back
+    first. That is what these tests pin.
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+        nodes = [
+            NodeInfo(
+                kind="Function", name="dispatch_request",
+                file_path="src/app.py", line_start=100, line_end=140,
+                language="python",
+            ),
+            NodeInfo(
+                kind="Test", name="dispatch_request",
+                file_path="tests/test_views.py", line_start=10, line_end=11,
+                language="python",
+            ),
+        ]
+        for node in nodes:
+            self.store.upsert_node(node, file_hash="abc123")
+        self.store._conn.commit()
+        rebuild_fts_index(self.store)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _paths(self, query, **kw):
+        return [r["file_path"] for r in hybrid_search(self.store, query, **kw)]
+
+    def test_production_symbol_outranks_test_symbol(self):
+        paths = self._paths("dispatch_request")
+        assert paths, "expected at least one hit"
+        assert paths[0] == "src/app.py"
+
+    def test_test_intent_lifts_the_penalty(self):
+        """A test-shaped query must not demote test code.
+
+        Lifting the penalty does not promote tests above production code, so
+        this compares the test symbol's standing against the same query
+        without the intent word rather than asserting it ranks first.
+        """
+        def ratio(query):
+            scores = {
+                r["file_path"]: r["score"]
+                for r in hybrid_search(self.store, query)
+            }
+            return scores["tests/test_views.py"] / scores["src/app.py"]
+
+        assert ratio("dispatch_request fixture") > ratio("dispatch_request")
+
+    def test_kind_filter_test_is_not_penalised(self):
+        """kind="Test" is an explicit request for test code."""
+        paths = self._paths("dispatch_request", kind="Test")
+        assert paths == ["tests/test_views.py"]

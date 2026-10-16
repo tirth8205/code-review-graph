@@ -22,7 +22,7 @@ from .migrations import (
     NODES_FTS_STATE_TABLE,
     ensure_nodes_fts_state,
 )
-from .parser import normalize_file_path
+from .parser import is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,16 @@ _EXACT_SYMBOL_BOOST = 3.0
 # multiply a hit by how much of the query its own symbol name accounts for.
 _NAME_COVERAGE_BOOST = 1.0
 _NAME_EXACT_COVERAGE_BOOST = 2.0
+
+# A question about production code is usually answered by production code, but
+# a test that names the same symbol scores just as well on keywords alone: a
+# two-line stub in tests/ could outrank the implementation. Rank test symbols
+# below production ones unless the caller is actually asking about tests.
+_TEST_RANK_PENALTY = 0.4
+_TEST_INTENT_WORDS = frozenset({
+    "test", "tests", "tested", "testing", "spec", "specs", "fixture",
+    "fixtures", "mock", "mocks", "stub", "stubs", "coverage",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +967,12 @@ def hybrid_search(
 
     query_words = identifier_words(query)
 
+    # Asking for kind="Test", or using a word like "spec" or "fixture", means
+    # test code is what was wanted; do not push it down in that case.
+    test_intent = kind == "Test" or bool(
+        {w.lower() for w in query_words} & _TEST_INTENT_WORDS
+    )
+
     # Batch-fetch all candidate nodes in one query
     candidate_ids = [node_id for node_id, _ in merged]
     node_rows: dict[int, Any] = {}
@@ -1010,6 +1026,14 @@ def hybrid_search(
                 boost *= _EXACT_SYMBOL_BOOST
         if context_set and file_path in context_set:
             boost *= 1.5
+
+        if not test_intent:
+            row_keys = row.keys()
+            is_test = bool(row["is_test"]) if "is_test" in row_keys else False
+            if not is_test and file_path:
+                is_test = is_test_file(file_path)
+            if is_test:
+                boost *= _TEST_RANK_PENALTY
 
         boosted.append((node_id, score * boost))
 

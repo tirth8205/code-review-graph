@@ -62,6 +62,20 @@ _MAX_IMPACT_NODES_SHOWN = 100
 _MAX_IMPACT_EDGES = 150
 _MAX_IMPACT_FILES = 200
 
+# Source snippets attached to search hits when include_source is set. Without
+# them a caller only gets names and line numbers, so it has to open the files
+# itself and the graph query becomes additive rather than a substitute.
+_MAX_SEARCH_SOURCE_LINES = 240
+_MAX_SEARCH_SOURCE_LINES_PER_NODE = 60
+
+# Expanding a hit to its callers and callees costs more lines, but it is what
+# turns a search result into an answer: "how does X work" is nearly always
+# answered by X plus the code on either side of it. Without this the caller
+# reads those files itself and the graph has saved nothing.
+_MAX_EXPANDED_SOURCE_LINES = 700
+_MAX_EXPANDED_HITS = 3
+_MAX_NEIGHBORS_PER_HIT = 4
+
 # ---------------------------------------------------------------------------
 # Tool 2: get_impact_radius
 # ---------------------------------------------------------------------------
@@ -1111,6 +1125,127 @@ def query_graph(
 # ---------------------------------------------------------------------------
 
 
+class _SourceBudget:
+    """Hands out source snippets until a shared line budget runs out.
+
+    One budget is shared by the hits and by any neighbours expanded from
+    them, so a response cannot grow without bound no matter how many edges a
+    hot symbol has. Files are read once and reused.
+    """
+
+    def __init__(self, root: Path, total: int, per_node: int) -> None:
+        self._root = root
+        self._root_resolved = root.resolve()
+        self._left = total
+        self._per_node = per_node
+        self._files: dict[str, list[str]] = {}
+        self.omitted = 0
+
+    def _lines(self, raw_path: str) -> list[str]:
+        lines = self._files.get(raw_path)
+        if lines is not None:
+            return lines
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = self._root / path
+        try:
+            # The graph stores paths it parsed from inside the repo, but a
+            # stale row must never be able to read outside it.
+            path.resolve().relative_to(self._root_resolved)
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            logger.warning(
+                "Could not read %s for a source snippet: %s", raw_path, exc,
+            )
+            lines = []
+        self._files[raw_path] = lines
+        return lines
+
+    def attach(
+        self, target: dict[str, Any], raw_path: Any, start: Any, end: Any,
+    ) -> bool:
+        """Attach ``source`` to *target*; return whether anything was added."""
+        if not raw_path or not start or not end or end < start:
+            return False
+        if self._left <= 0:
+            self.omitted += 1
+            return False
+        lines = self._lines(raw_path)
+        if not lines:
+            return False
+        span = min(end - start + 1, self._per_node, self._left)
+        if span <= 0:
+            self.omitted += 1
+            return False
+        snippet = lines[start - 1:start - 1 + span]
+        if not snippet:
+            return False
+        target["source"] = "\n".join(snippet)
+        target["source_lines"] = [start, start + len(snippet) - 1]
+        if end - start + 1 > len(snippet):
+            target["source_truncated"] = True
+        self._left -= len(snippet)
+        return True
+
+
+def _neighbor_entry(node: GraphNode) -> dict[str, Any]:
+    return {
+        "name": _sanitize_name(node.name),
+        "qualified_name": _sanitize_name(node.qualified_name),
+        "kind": node.kind,
+        "file_path": node.file_path,
+        "line_start": node.line_start,
+        "line_end": node.line_end,
+    }
+
+
+def _attach_neighbors(
+    results: list[dict[str, Any]],
+    store: GraphStore,
+    budget: _SourceBudget,
+) -> None:
+    """Attach each top hit's direct callers and callees, with their source.
+
+    A question about how a symbol works is usually answered by the symbol
+    plus what calls it and what it calls, so returning those here is what
+    stops the caller opening the same files by hand.
+    """
+    for hit in results[:_MAX_EXPANDED_HITS]:
+        qname = hit.get("qualified_name")
+        if not qname:
+            continue
+        try:
+            incoming = store.get_edges_by_target(qname)
+            outgoing = store.get_edges_by_source(qname)
+        except Exception as exc:  # noqa: BLE001 - a bad row must not fail search
+            logger.warning("Neighbour lookup failed for %s: %s", qname, exc)
+            continue
+
+        for key, edges, attr in (
+            ("callers", incoming, "source_qualified"),
+            ("callees", outgoing, "target_qualified"),
+        ):
+            seen: set[str] = set()
+            entries: list[dict[str, Any]] = []
+            for edge in edges:
+                if edge.kind != "CALLS" or len(entries) >= _MAX_NEIGHBORS_PER_HIT:
+                    continue
+                other = getattr(edge, attr, None)
+                if not other or other in seen or other == qname:
+                    continue
+                seen.add(other)
+                node = store.get_node(other)
+                if node is None:
+                    continue
+                entry = _neighbor_entry(node)
+                if budget.attach(
+                    entry, node.file_path, node.line_start, node.line_end,
+                ):
+                    entries.append(entry)
+            if entries:
+                hit[key] = entries
+
+
 def semantic_search_nodes(
     query: str,
     kind: str | None = None,
@@ -1120,6 +1255,9 @@ def semantic_search_nodes(
     model: str | None = None,
     provider: str | None = None,
     detail_level: str = "standard",
+    include_source: bool = False,
+    expand_neighbors: bool = False,
+    max_source_lines: int = _MAX_SEARCH_SOURCE_LINES_PER_NODE,
 ) -> dict[str, Any]:
     """Search for nodes by name, keyword, or semantic similarity.
 
@@ -1135,6 +1273,16 @@ def semantic_search_nodes(
         context_files: Optional list of file paths. Nodes in these files
             receive a relevance boost.
         detail_level: "standard" (full output) or "minimal" (summary only).
+        include_source: Attach the source of each hit, so the caller can
+            answer from the response instead of opening the files itself.
+            Off by default: it costs tokens, and a caller that only wants
+            locations should not pay for them.
+        expand_neighbors: With include_source, also return the direct callers
+            and callees of the top hits, each with their own source. This is
+            what lets a caller answer "how does X work" from one response
+            instead of opening those files itself.
+        max_source_lines: Per-node snippet cap when include_source is set.
+            The response is additionally capped in total.
 
     Returns:
         Ranked list of matching nodes.
@@ -1148,6 +1296,27 @@ def semantic_search_nodes(
         )
 
         search_mode = mode_out[0] if mode_out else "keyword"
+
+        source_omitted = 0
+        if include_source and results and detail_level != "minimal":
+            per_node = min(
+                max(int(max_source_lines), 1),
+                _MAX_SEARCH_SOURCE_LINES_PER_NODE,
+            )
+            budget = _SourceBudget(
+                root,
+                _MAX_EXPANDED_SOURCE_LINES if expand_neighbors
+                else _MAX_SEARCH_SOURCE_LINES,
+                per_node,
+            )
+            for hit in results:
+                budget.attach(
+                    hit, hit.get("file_path"),
+                    hit.get("line_start"), hit.get("line_end"),
+                )
+            if expand_neighbors:
+                _attach_neighbors(results, store, budget)
+            source_omitted = budget.omitted
 
         summary = f"Found {len(results)} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""
@@ -1188,6 +1357,8 @@ def semantic_search_nodes(
             "summary": summary,
             "results": results,
         }
+        if source_omitted:
+            result["source_omitted"] = source_omitted
         if confidence:
             result["confidence"] = confidence
         result["_hints"] = generate_hints(

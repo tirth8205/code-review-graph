@@ -261,13 +261,6 @@ async def build_or_update_graph_tool(
     By default performs an incremental update (only changed files).
     Set full_rebuild=True to re-parse every file.
 
-    Runs the blocking full_build / incremental_update work on a worker
-    thread via ``_offload`` so the stdio event loop stays responsive.
-    Without that, long builds deadlocked on Windows because
-    ``ProcessPoolExecutor`` (used by parallel parsing) interacted badly
-    with the sync handler blocking the only event-loop thread. See:
-    #46, #136, #262.
-
     Args:
         full_rebuild: If True, re-parse all files. Default: False (incremental).
         repo_root: Repository root path. Auto-detected from current directory if omitted.
@@ -286,6 +279,12 @@ async def build_or_update_graph_tool(
         embedding_model: Exact model for an explicit post-build embedding
             refresh. Must be supplied with embedding_provider. Default: disabled.
     """
+    # The blocking full_build / incremental_update work runs on a worker
+    # thread via _offload so the stdio event loop stays responsive. Without
+    # it, long builds deadlocked on Windows because ProcessPoolExecutor (used
+    # by parallel parsing) interacted badly with the sync handler blocking the
+    # only event-loop thread. See #46, #136, #262. (Kept out of the docstring:
+    # it ships to the model every session and says nothing about when to call.)
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "build_or_update_graph_tool",
@@ -315,9 +314,6 @@ async def run_postprocess_tool(
 
     Use after building with postprocess="none" or "minimal", or to re-run
     expensive steps independently. Signatures are always computed.
-
-    Offloaded via ``_offload`` so community detection on large graphs
-    does not block the MCP event loop. See: #46, #136, #262.
 
     Args:
         flows: Run flow detection. Default: True.
@@ -531,6 +527,8 @@ async def semantic_search_nodes_tool(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     detail_level: str = "standard",
+    include_source: bool = False,
+    expand_neighbors: bool = False,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -552,6 +550,13 @@ async def semantic_search_nodes_tool(
                   "minimax", or "voyage". Must match the provider used during
                   embed_graph.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
+        include_source: Return the source of each hit alongside its location,
+                        so you can answer without opening the files. Costs
+                        tokens; leave off when you only need locations.
+                        Ignored when detail_level is "minimal". Default: False.
+        expand_neighbors: With include_source, also return each top hit's direct
+                          callers and callees with their source, so one call
+                          answers "how does X work". Default: False.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -559,6 +564,7 @@ async def semantic_search_nodes_tool(
         lambda: semantic_search_nodes(
             query=query, kind=kind, limit=limit, repo_root=root,
             model=model, provider=provider, detail_level=detail_level,
+            include_source=include_source, expand_neighbors=expand_neighbors,
         ),
         root,
     )
@@ -572,35 +578,26 @@ async def embed_graph_tool(
 ) -> dict:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
-    Requires: pip install code-review-graph[embeddings] (local provider only;
-    cloud providers use stdlib urllib).
-    Default provider: local. Default model: all-MiniLM-L6-v2.
-    Override provider via `provider` param, model via `model` param or
-    CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL / CRG_VOYAGE_MODEL env vars.
-    Changing the model or provider re-embeds all nodes automatically.
-
-    After running this, semantic_search_nodes_tool will use vector similarity
-    instead of keyword matching for much better results.
-
-    Runs the blocking sentence-transformers / Gemini / HTTP inference on a
-    worker thread via ``_offload`` so the stdio event loop stays
-    responsive — without that, embedding a large graph would silently hang
-    the MCP server on Windows. See: #46, #136, #262.
+    Afterwards semantic_search_nodes_tool ranks by vector similarity instead
+    of keyword matching. Changing the model or provider re-embeds every node.
+    The local provider needs: pip install code-review-graph[embeddings].
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.
-        model: Embedding model. For local: HuggingFace ID/path; for openai:
-               model ID (e.g. "text-embedding-3-small"); for google: Gemini
-               model ID; for voyage: Voyage model ID (e.g. "voyage-code-3").
-               Falls back to CRG_EMBEDDING_MODEL / CRG_OPENAI_MODEL /
-               CRG_VOYAGE_MODEL env vars as appropriate.
-        provider: "local" (default), "openai", "google", "minimax", or "voyage".
-                  "openai" requires CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY +
-                  CRG_OPENAI_MODEL env vars and accepts any OpenAI-compatible
-                  endpoint (real OpenAI, Azure, new-api, LiteLLM, vLLM, etc.).
-                  "voyage" requires VOYAGE_API_KEY and defaults to voyage-code-3
-                  unless a model arg or CRG_VOYAGE_MODEL is supplied.
+        model: Embedding model. Local: a HuggingFace ID or path (default
+               all-MiniLM-L6-v2); openai / google / voyage: that provider's
+               model ID. Falls back to CRG_EMBEDDING_MODEL, CRG_OPENAI_MODEL
+               or CRG_VOYAGE_MODEL.
+        provider: "local" (default), "openai", "google", "minimax", or
+                  "voyage". "openai" accepts any OpenAI-compatible endpoint
+                  and needs CRG_OPENAI_BASE_URL + CRG_OPENAI_API_KEY;
+                  "voyage" needs VOYAGE_API_KEY.
     """
+    # The blocking sentence-transformers / Gemini / HTTP inference runs on a
+    # worker thread via _offload so the stdio event loop stays responsive.
+    # Without it, embedding a large graph silently hangs the MCP server on
+    # Windows. See #46, #136, #262. (Kept out of the docstring: it ships to
+    # the model in every session and tells it nothing about when to call.)
     root = _resolve_repo_root(repo_root)
     return await _offload(
         "embed_graph_tool",
@@ -929,10 +926,6 @@ async def detect_changes_tool(
     flows, communities, and test coverage gaps. Returns risk scores and
     prioritized review items. Replaces get_review_context for change-aware reviews.
 
-    Offloaded via ``_offload`` — runs `git diff` subprocesses and BFS
-    traversals that can take several seconds on large repos, and honours
-    ``CRG_TOOL_TIMEOUT``. See: #46, #136, #262.
-
     Args:
         base: Git ref to diff against. Default: HEAD~1.
         changed_files: List of changed file paths (relative to repo root). Auto-detected if omitted.
@@ -1064,10 +1057,6 @@ async def generate_wiki_tool(
     Creates a wiki page for each detected community and an index page.
     Pages are written to .code-review-graph/wiki/ inside the repository.
     Only regenerates pages whose content has changed unless force=True.
-
-    Offloaded via ``_offload`` — on large graphs the page-generation loop
-    touches every community and issues many SQLite reads, which would
-    block the MCP event loop. See: #46, #136, #262.
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.

@@ -2,7 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- `semantic_search_nodes_tool` can return the code with the hits.
+  `include_source=True` attaches each hit's source lines, and
+  `expand_neighbors=True` also attaches the direct callers and callees of the
+  top hits with their source. `max_source_lines` caps each snippet, one
+  line budget caps the whole response, cut-off snippets are marked
+  `source_truncated`, and a stored path that resolves outside the repository
+  is never read. Source is not attached when `detail_level="minimal"`. Without this an agent got names and line numbers and opened
+  the same files by hand, so the search cost tokens on top of the reads
+  instead of replacing them.
+- The README and `docs/REPRODUCING.md` publish the first canonical
+  `agent_baseline` capture (2026-09-22): against a grep-and-read-top-3-files
+  baseline, the graph answer is a median 6.65x smaller across 18 questions on
+  6 repositories (range 4.2x to 72.6x). The per-repo CSVs are in
+  `evaluate/results/`; the 2026-05-25 `impact_accuracy` CSVs are removed, as
+  the 2026-08-02 captures replace them.
+
 ### Changed
+
+- Search ranks test code below production code unless the query asks about
+  tests (`kind="Test"`, or a word such as "test", "spec", "fixture" or
+  "mock"). A two-line test stub that names a symbol used to score as well as
+  the implementation and could outrank it.
+- The installed instruction block tells agents to answer from
+  `include_source=True, expand_neighbors=True` and open a file only when a
+  snippet is cut off. It still says not to change code from graph output
+  alone. Earlier blocks stay recognised for upgrade and uninstall.
 
 - The MCP server instructions now route by question type instead of introducing
   the server as a code-review tool. With deferred tool loading an agent sees
