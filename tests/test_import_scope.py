@@ -399,9 +399,13 @@ class TestTraversalQueryPlan:
             "(kind TEXT PRIMARY KEY, weight REAL NOT NULL, "
             "direction TEXT NOT NULL)"
         )
+        # The first two branches bind the AOP direction override (the
+        # ``extra`` LIKE pattern and the forced direction) ahead of the
+        # policy default; the directory branch does not.
         params = (
-            (0.5, 0.6, "incoming", "outgoing", 0.5, 0.6, "incoming",
-             "incoming", 0.5, 0.6, "incoming", "incoming", 0.05)
+            (0.5, 0.6, '%"aop_resolved"%', "outgoing", "incoming", "outgoing",
+             0.5, 0.6, '%"aop_resolved"%', "outgoing", "incoming", "incoming",
+             0.5, 0.6, "incoming", "incoming", 0.05)
             if "?" in sql else ()
         )
         return [

@@ -74,7 +74,7 @@ _JS_FAMILY = frozenset({"javascript", "typescript", "tsx"})
 # can hide a real answer. ``references_to`` is deliberately excluded: it reads
 # REFERENCES edges, which is exactly where an unresolved handoff does land.
 _CALL_PATTERNS = frozenset({
-    "callers_of", "callees_of", "tests_for", IMPACT_PATTERN,
+    "callers_of", "callees_of", "tests_for", "advises", "advised_by", IMPACT_PATTERN,
 })
 # Patterns answered from IMPORTS_FROM edges.
 _IMPORT_PATTERNS = frozenset({"imports_of", "importers_of", IMPACT_PATTERN})
@@ -121,12 +121,18 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
             "is unresolved, so callers can be missing"
         ),
     ),
+    # gap_note() returns only the first match per (language, patterns) (see
+    # its docstring), so a second java/_CALL_PATTERNS entry would never be
+    # reached. The AOP gap narrowed by #592 (within/args/target/this,
+    # cross-aspect refs, compound booleans) and the separate reflective-
+    # invocation gap are folded into one note for that reason.
     LanguageGap(
         languages=frozenset({"java"}),
         patterns=_CALL_PATTERNS,
         note=(
-            "java aop advice and reflective invocation are not statically "
-            "traced, so callers can be missing here (#592)"
+            "java aop pointcuts (within/args/target/this, cross-aspect "
+            "refs, compound booleans) and reflective calls are not "
+            "resolved (#592)"
         ),
     ),
     LanguageGap(
