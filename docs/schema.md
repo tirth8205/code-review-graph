@@ -68,8 +68,10 @@ A type alias, interface, enum or similar construct where the language parser emi
 Columns as for Class.
 
 ### Endpoint
-A synthesised routed entry point, emitted for Spring request mappings and WebFlux functional
-routes. Linked to the handling method by a `HANDLES` edge.
+A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
+routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
+and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
+closures have an Endpoint without that edge; resource routes are not expanded yet.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
@@ -106,7 +108,7 @@ was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
 | PRODUCES | Kafka producer -> `kafka:<topic>` | Spring Kafka enrichment |
 | TEMPORAL_STUB | class -> declared Temporal workflow or activity interface of a stub field | Used by `temporal_resolver.py` to resolve calls made through the stub |
 | DEPENDS_ON_CONFIG | `@ConfigurationProperties` class -> `ConfigProperty` | Spring enrichment |
-| HANDLES | `Endpoint` -> controller method; `@EventListener` method -> event | Spring enrichment |
+| HANDLES | handler -> `Endpoint`; listener -> event | Spring and Laravel enrichment |
 | TRIGGERS | `Scheduler` -> `@Scheduled` method | Spring enrichment |
 | PUBLISHES | method -> Spring application event | Spring enrichment |
 

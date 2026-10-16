@@ -525,6 +525,132 @@ def _laravel_edges(edges, kind: str | None = None):
 
 
 class TestLaravelSemantics:
+    def test_laravel_endpoints_cover_verbs_handlers_and_closures(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        controller = _write_php(
+            repo / "app/Http/Controllers/ItemController.php",
+            "<?php\nnamespace App\\Http\\Controllers;\n"
+            "class ItemController { public function index() {} public function __invoke() {} }\n",
+        )
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ItemController as Items;
+Route::get('/items', [Items::class, 'index']);
+Route::post('/items', Items::class);
+Route::put('/items', 'Items@index');
+Route::patch('/items', function () {});
+Route::delete('/items', [Items::class, 'index']);
+Route::options('/items', [Items::class, 'index']);
+Route::match(['get', 'post'], '/lookup', [Items::class, 'index']);
+Route::any('/all', [Items::class, 'index']);
+"""
+        route_file = repo / "routes/web.php"
+        nodes, edges = CodeParser(repo).parse_bytes(route_file, source)
+        endpoints = [node for node in nodes if node.kind == "Endpoint"]
+        handles = [edge for edge in edges if edge.kind == "HANDLES"]
+
+        assert [(n.extra["http_method"], n.extra["route"]) for n in endpoints] == [
+            ("GET", "/items"), ("POST", "/items"), ("PUT", "/items"),
+            ("PATCH", "/items"), ("DELETE", "/items"),
+            ("OPTIONS", "/items"), ("GET", "/lookup"),
+            ("POST", "/lookup"), ("ANY", "/all"),
+        ]
+        assert len(handles) == 8
+        assert len({node.name for node in endpoints}) == 9
+        assert endpoints[3].extra["handler"] == "closure"
+        assert handles[1].source == f"{controller.resolve().as_posix()}::ItemController.__invoke"
+        assert handles[2].source == f"{controller.resolve().as_posix()}::ItemController.index"
+        assert all(edge.target == f"{route_file.resolve().as_posix()}::{node.name}"
+                   for edge, node in zip(handles[:3], endpoints[:3]))
+        assert len(_laravel_edges(edges, "CALLS")) == 4
+
+    def test_laravel_endpoint_groups_compose_prefix_and_controller(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        controller = _write_php(repo / "app/Http/Controllers/ItemController.php")
+        source = br"""<?php
+use Illuminate\Support\Facades\Route as Router;
+use App\Http\Controllers\ItemController;
+Router::prefix('api')->group(function () {
+    Router::group(['prefix' => 'v1'], function () {
+        Router::controller(ItemController::class)->group(function () {
+            Router::get('items', 'index');
+        });
+    });
+});
+"""
+        nodes, edges = CodeParser(repo).parse_bytes(repo / "routes/api.php", source)
+        endpoints = [node for node in nodes if node.kind == "Endpoint"]
+        handles = [edge for edge in edges if edge.kind == "HANDLES"]
+
+        assert [(n.extra["http_method"], n.extra["route"]) for n in endpoints] == [
+            ("GET", "/api/v1/items"),
+        ]
+        assert [edge.source for edge in handles] == [
+            f"{controller.resolve().as_posix()}::ItemController.index",
+        ]
+
+    def test_laravel_arrow_closure_has_endpoint_without_handler_edge(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::get('/health', fn () => 'ok');
+"""
+        nodes, edges = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        endpoints = [node for node in nodes if node.kind == "Endpoint"]
+        assert [(node.extra["http_method"], node.extra["route"]) for node in endpoints] == [
+            ("GET", "/health"),
+        ]
+        assert [edge for edge in edges if edge.kind == "HANDLES"] == []
+
+    def test_laravel_endpoints_require_static_route_evidence(self, tmp_path):
+        source = br"""<?php
+use Acme\Routing\Route;
+Route::get('/foreign', function () {});
+use Illuminate\Support\Facades\Route as Router;
+Router::get($path, function () {});
+Router::get('/dynamic', $handler);
+Router::prefix($prefix)->group(function () {
+    Router::get('/inside', function () {});
+});
+"""
+        nodes, edges = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert [node for node in nodes if node.kind == "Endpoint"] == []
+        assert [edge for edge in edges if edge.kind == "HANDLES"] == []
+
+    def test_laravel_endpoint_groups_accept_double_quotes_and_arrow_bodies(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::group(["prefix" => "v1"], fn () => Route::get('items', fn () => 1));
+Route::prefix("v2")->group(fn () => Route::get("items/{id}", fn () => 1));
+Route::group(['as' => 'a.', "prefix" => 'v3'], function () {
+    Route::get('items', fn () => 1);
+});
+Route::get("items/$id", fn () => 1);
+"""
+        nodes, _ = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert [
+            (n.extra["http_method"], n.extra["route"]) for n in nodes if n.kind == "Endpoint"
+        ] == [("GET", "/v1/items"), ("GET", "/v2/items/{id}"), ("GET", "/v3/items")]
+
+    def test_laravel_endpoint_groups_skip_non_literal_options(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::group($options, fn () => Route::get('a', fn () => 1));
+Route::group(config('admin.routes'), fn () => Route::get('b', fn () => 1));
+Route::group(array_merge($d, ['prefix' => 'v2']), fn () => Route::get('c', fn () => 1));
+Route::group(['as' => 'a.', ...$extra], fn () => Route::get('d', fn () => 1));
+Route::group([$key => 'v2'], fn () => Route::get('e', fn () => 1));
+Route::group(['prefix' => $prefix], fn () => Route::get('f', fn () => 1));
+Route::group(['prefix' => "v$n"], fn () => Route::get('g', fn () => 1));
+"""
+        nodes, _ = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert [node for node in nodes if node.kind == "Endpoint"] == []
+
     def test_laravel_route_alias_resolves_grouped_controller_import(self, tmp_path):
         repo = tmp_path / "repo"
         _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
