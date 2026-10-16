@@ -2172,6 +2172,54 @@ def incremental_update(
 _DEBOUNCE_SECONDS = 1
 
 
+class _WatchDebouncer(threading.Thread):
+    """Batch events until a quiet interval passes, then hand them on.
+
+    The algorithm of watchdog 6.0.0's ``EventDebouncer``, with one change:
+    the wait for a first event checks for queued events and for a stop
+    under the condition lock before it sleeps.  watchdog's waits
+    unconditionally, so an event or a stop that arrives between ``start()``
+    and that first wait is notified to nobody and then slept on.  The
+    observer starts before startup work, so that event can be the only one.
+    """
+
+    def __init__(self, interval: float, callback: Callable[[list[Any]], None]) -> None:
+        super().__init__(name="crg-watch-debouncer", daemon=True)
+        self._interval = interval
+        self._callback = callback
+        self._events: list[Any] = []
+        self._stopping = False
+        self._cond = threading.Condition()
+
+    def handle_event(self, event: Any) -> None:
+        with self._cond:
+            self._events.append(event)
+            self._cond.notify()
+
+    def stop(self) -> None:
+        """Ask the thread to exit; events still queued are dropped, as in watchdog."""
+        with self._cond:
+            self._stopping = True
+            self._cond.notify()
+
+    def run(self) -> None:
+        with self._cond:
+            while True:
+                while not self._events and not self._stopping:
+                    self._cond.wait()
+                if self._interval:
+                    # Every further event restarts the quiet interval.
+                    while not self._stopping:
+                        if not self._cond.wait(timeout=self._interval):
+                            break
+                if self._stopping:
+                    break
+                events, self._events = self._events, []
+                # Called with the condition held, as watchdog does: events
+                # arriving meanwhile wait in handle_event for the next batch.
+                self._callback(events)
+
+
 def _raise_watch_update_errors(result: dict, context: str) -> None:
     """Fail the watch boundary when an incremental update reports errors."""
     errors = result.get("errors") or []
@@ -2468,7 +2516,7 @@ class _WatchSupervisor:
         return sorted(self._unwatched)
 
     def attach(self, observer: Any) -> None:
-        """Bind the observer, once the initial build has earned one."""
+        """Bind the observer that the watches are scheduled on."""
         self._observer = observer
 
     def schedule_initial(self, handler: Any) -> None:
@@ -2905,7 +2953,6 @@ def _create_watch_handler(
 ):
     """Create the debounced watchdog handler for one repository."""
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
-    from watchdog.utils.event_debouncer import EventDebouncer
 
     ignore_patterns = _load_ignore_patterns(repo_root)
     parser = CodeParser(repo_root)
@@ -2918,6 +2965,10 @@ def _create_watch_handler(
             self.failure: BaseException | None = None
             self.last_event_at: float | None = None
             self.events_seen: int = 0
+            # Every graph write this watcher makes holds this lock: event
+            # batches here, and startup reconciliation and post-processing in
+            # watch().  The store's one connection cannot take two writers.
+            self.lock = threading.Lock()
 
         def _relative_path(self, path: str, *, apply_ignores: bool = True) -> str | None:
             candidate = Path(os.path.abspath(path))
@@ -3084,32 +3135,34 @@ def _create_watch_handler(
             # from a watcher whose repository is simply quiet.
             self.last_event_at = time.time()
             self.events_seen += len(events)
-            try:
-                files_updated, newly_included = self._refresh_ignore_patterns(events)
-                changed_files = sorted(
-                    newly_included | {path for event in events for path in self._event_paths(event)}
-                )
-                if changed_files:
-                    result = incremental_update(
-                        repo_root,
-                        store,
-                        changed_files=changed_files,
-                        reconcile_stale=False,
+            with self.lock:
+                try:
+                    files_updated, newly_included = self._refresh_ignore_patterns(events)
+                    changed_files = sorted(
+                        newly_included
+                        | {path for event in events for path in self._event_paths(event)}
                     )
-                    _raise_watch_update_errors(result, "incremental update")
-                    files_updated += result["files_updated"]
-                if files_updated > 0 and on_files_updated is not None:
-                    postprocess_result = on_files_updated(store)
-                    _raise_watch_postprocess_warnings(postprocess_result)
-            except BaseException as exc:
-                self.failure = exc
+                    if changed_files:
+                        result = incremental_update(
+                            repo_root,
+                            store,
+                            changed_files=changed_files,
+                            reconcile_stale=False,
+                        )
+                        _raise_watch_update_errors(result, "incremental update")
+                        files_updated += result["files_updated"]
+                    if files_updated > 0 and on_files_updated is not None:
+                        postprocess_result = on_files_updated(store)
+                        _raise_watch_postprocess_warnings(postprocess_result)
+                except BaseException as exc:
+                    self.failure = exc
 
         def raise_if_failed(self) -> None:
             if self.failure is not None:
                 raise RuntimeError("watch update failed") from self.failure
 
     processor = WatchBatchProcessor()
-    debouncer = EventDebouncer(_DEBOUNCE_SECONDS, processor.process)
+    debouncer = _WatchDebouncer(_DEBOUNCE_SECONDS, processor.process)
 
     class GraphUpdateHandler(FileSystemEventHandler):
         def dispatch(self, event: FileSystemEvent) -> None:
@@ -3128,6 +3181,10 @@ def _create_watch_handler(
 
         def process(self, events: list[FileSystemEvent]) -> None:
             processor.process(events)
+
+        def serialized(self) -> threading.Lock:
+            """The lock event batches hold while they write to the graph."""
+            return processor.lock
 
         def raise_if_failed(self) -> None:
             processor.raise_if_failed()
@@ -3211,7 +3268,7 @@ def watch(
         store: Graph database to update.
         on_files_updated: Optional callback invoked after each debounced
             batch of file updates completes.  Receives the store as its
-            only argument.  Used by the CLI to run post-processing
+            only argument.  Used by the CLI and MCP auto-watch to run post-processing
             (FTS, flows, communities) after watch updates.
         stop_event: Optional event that ends the loop cleanly, for callers
             that run ``watch`` on a thread they need to shut down.
@@ -3238,17 +3295,36 @@ def watch(
     # stalled for the whole build.
     supervisor.report_health(observer_alive=True, phase="initial-build", force=True)
 
-    initial = incremental_update(repo_root, store, changed_files=[])
-    _raise_watch_update_errors(initial, "initial watch reconciliation")
-    if initial["files_updated"] > 0 and on_files_updated is not None:
-        postprocess_result = on_files_updated(store)
-        _raise_watch_postprocess_warnings(postprocess_result)
     observer = Observer()
     supervisor.attach(observer)
     handler = _create_watch_handler(repo_root, store, on_files_updated)
     supervisor.schedule_initial(handler)
     handler.start()
-    observer.start()
+    observer_started = False
+    try:
+        # The observer starts before reconciliation reads anything, so a file
+        # saved during startup — post-processing a large graph takes seconds —
+        # is either read by reconciliation or captured as an event.  The batch
+        # lock is taken first: captured events wait in the debouncer and are
+        # written to the graph only after startup, never alongside it.  Nothing
+        # here may dispatch to the handler while holding the lock: the
+        # debouncer holds its own lock while it waits for this one.
+        with handler.serialized():
+            observer.start()
+            observer_started = True
+            initial = incremental_update(repo_root, store, changed_files=[])
+            _raise_watch_update_errors(initial, "initial watch reconciliation")
+            if initial["files_updated"] > 0 and on_files_updated is not None:
+                postprocess_result = on_files_updated(store)
+                _raise_watch_postprocess_warnings(postprocess_result)
+    except BaseException:
+        # Outside the lock, so a batch already waiting can finish; stopping the
+        # debouncer joins it, and no writer outlives this call.
+        _run_time_boxed(observer.stop, "observer stop")
+        if observer_started:
+            observer.join(timeout=_WATCH_STOP_TIMEOUT)
+        handler.stop()
+        raise
     supervisor.report_health(observer_alive=True, force=True)
 
     logger.info("Watching %s for changes... (Ctrl+C to stop)", repo_root)
@@ -3338,8 +3414,13 @@ def start_watch_thread(
     repo_root: Path,
     store: GraphStore,
     daemon: bool = True,
+    *,
+    on_files_updated: Optional[Callable] = None,
 ) -> threading.Thread | None:
     """Start watch mode in a background thread.
+
+    ``on_files_updated`` is forwarded to ``watch`` for post-processing
+    after changed batches, including startup reconciliation.
 
     Returns the started thread, or None if watchdog is unavailable.
     """
@@ -3353,7 +3434,7 @@ def start_watch_thread(
         # A thread cannot take the process down, so the one thing it must not
         # do is die quietly: the server would keep serving a frozen graph.
         try:
-            watch(repo_root, store)
+            watch(repo_root, store, on_files_updated=on_files_updated)
         except RuntimeError as exc:
             logger.error("Auto-watch for %s stopped: %s", repo_root, exc)
 

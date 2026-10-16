@@ -973,7 +973,10 @@ class TestWatchLoop:
             ):
                 watch(repo, store)
             assert store.get_all_files() == ["/somewhere/else/mod.py"], "nothing was deleted"
-            observer.assert_not_called()
+            # Started before startup reconciliation (PR #1108), and torn down
+            # again when it refuses the graph.
+            observer.return_value.stop.assert_called()
+            observer.return_value.join.assert_called()
         finally:
             store.close()
 

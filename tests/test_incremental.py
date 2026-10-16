@@ -1364,7 +1364,7 @@ class TestWatchReconciliation:
         store = GraphStore(tmp_path / "graph.db")
         debouncer = MagicMock()
         with patch(
-            "watchdog.utils.event_debouncer.EventDebouncer",
+            "code_review_graph.incremental._WatchDebouncer",
             return_value=debouncer,
         ):
             handler = _create_watch_handler(tmp_path, store, None)
@@ -1419,7 +1419,7 @@ class TestWatchReconciliation:
         finally:
             store.close()
 
-    def test_watch_startup_postprocess_warning_prevents_observer_start(self, tmp_path):
+    def test_watch_startup_postprocess_warning_stops_observer(self, tmp_path):
         import sqlite3
 
         from code_review_graph.postprocessing import run_post_processing
@@ -1448,7 +1448,11 @@ class TestWatchReconciliation:
             ):
                 watch(tmp_path, store, on_files_updated=run_post_processing)
 
-            observer.assert_not_called()
+            # The observer starts before startup work (PR #1108), so failing
+            # closed means it is stopped and joined before watch() raises.
+            observer.return_value.start.assert_called_once_with()
+            observer.return_value.stop.assert_called()
+            observer.return_value.join.assert_called()
         finally:
             store.close()
 
