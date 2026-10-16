@@ -13243,11 +13243,21 @@ class CodeParser:
         return [c for c in arguments.children if c.type == "argument"] if arguments else []
 
     @staticmethod
-    def _php_route_literal(node) -> Optional[str]:
-        value = next((c for c in node.children if c.is_named), None)
-        if value is None or value.type != "string":
+    def _php_string_literal(value) -> Optional[str]:
+        """Return a quoted PHP string without interpolation or escapes, else None."""
+        if value is None:
+            return None
+        if value.type == "encapsed_string" and any(
+            c.is_named and c.type != "string_content" for c in value.children
+        ):
+            return None
+        if value.type not in ("string", "encapsed_string"):
             return None
         return value.text.decode("utf-8", errors="replace")[1:-1]
+
+    @classmethod
+    def _php_route_literal(cls, node) -> Optional[str]:
+        return cls._php_string_literal(next((c for c in node.children if c.is_named), None))
 
     def _php_route_facade_call(
         self, node, namespace: str, imports: dict[str, str],
@@ -13293,21 +13303,26 @@ class CodeParser:
                 controller = self._php_class_constant_reference(access) if access else None
                 if controller is None:
                     return None
-            elif method == "group" and args:
-                options = next(
-                    (c for c in args[0].children if c.type == "array_creation_expression"),
-                    None,
-                )
-                if options is not None:
-                    for item in options.children:
-                        if item.type != "array_element_initializer":
-                            continue
-                        values = [c for c in item.children if c.is_named]
-                        if len(values) == 2 and self._php_route_literal(item) == "prefix":
-                            if values[1].type != "string":
-                                return None
-                            part = values[1].text.decode("utf-8", errors="replace")[1:-1]
-                            prefix = self._join_spring_route(prefix, part)
+            elif method == "group" and len(args) > 1:
+                # Route::group($attributes, $routes): only a literal array with literal
+                # keys is static evidence; anything else may carry a prefix we cannot see.
+                options = next((c for c in args[0].children if c.is_named), None)
+                if options is None or options.type != "array_creation_expression":
+                    return None
+                for item in options.children:
+                    if item.type != "array_element_initializer":
+                        continue
+                    values = [c for c in item.children if c.is_named]
+                    if len(values) != 2:
+                        return None
+                    key = self._php_string_literal(values[0])
+                    if key is None:
+                        return None
+                    if key == "prefix":
+                        part = self._php_string_literal(values[1])
+                        if part is None:
+                            return None
+                        prefix = self._join_spring_route(prefix, part)
         return prefix, controller
 
     def _php_route_enclosing_groups(
@@ -13316,7 +13331,7 @@ class CodeParser:
         groups = []
         current = node.parent
         while current is not None:
-            if current.type == "anonymous_function":
+            if current.type in ("anonymous_function", "arrow_function"):
                 argument = current.parent
                 if argument is not None and argument.type == "argument":
                     arguments = argument.parent
@@ -13347,7 +13362,7 @@ class CodeParser:
         if value.type == "class_constant_access_expression":
             controller = self._php_class_constant_reference(value)
             return (controller, "__invoke") if controller else None
-        if value.type == "string":
+        if value.type in ("string", "encapsed_string"):
             literal = self._php_route_literal(argument)
             if literal is None:
                 return None

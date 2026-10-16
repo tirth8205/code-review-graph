@@ -620,6 +620,37 @@ Router::prefix($prefix)->group(function () {
         assert [node for node in nodes if node.kind == "Endpoint"] == []
         assert [edge for edge in edges if edge.kind == "HANDLES"] == []
 
+    def test_laravel_endpoint_groups_accept_double_quotes_and_arrow_bodies(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::group(["prefix" => "v1"], fn () => Route::get('items', fn () => 1));
+Route::prefix("v2")->group(fn () => Route::get("items/{id}", fn () => 1));
+Route::group(['as' => 'a.', "prefix" => 'v3'], function () {
+    Route::get('items', fn () => 1);
+});
+Route::get("items/$id", fn () => 1);
+"""
+        nodes, _ = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert [
+            (n.extra["http_method"], n.extra["route"]) for n in nodes if n.kind == "Endpoint"
+        ] == [("GET", "/v1/items"), ("GET", "/v2/items/{id}"), ("GET", "/v3/items")]
+
+    def test_laravel_endpoint_groups_skip_non_literal_options(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::group($options, fn () => Route::get('a', fn () => 1));
+Route::group(config('admin.routes'), fn () => Route::get('b', fn () => 1));
+Route::group(array_merge($d, ['prefix' => 'v2']), fn () => Route::get('c', fn () => 1));
+Route::group(['as' => 'a.', ...$extra], fn () => Route::get('d', fn () => 1));
+Route::group([$key => 'v2'], fn () => Route::get('e', fn () => 1));
+Route::group(['prefix' => $prefix], fn () => Route::get('f', fn () => 1));
+Route::group(['prefix' => "v$n"], fn () => Route::get('g', fn () => 1));
+"""
+        nodes, _ = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert [node for node in nodes if node.kind == "Endpoint"] == []
+
     def test_laravel_route_alias_resolves_grouped_controller_import(self, tmp_path):
         repo = tmp_path / "repo"
         _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
