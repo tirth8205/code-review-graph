@@ -1,7 +1,8 @@
 # DeepSeek Harness (DSH)
 
 The native [dsh-code-review-graph](https://github.com/sumingwang233/dsh-code-review-graph)
-bundle provides all 30 CRG 2.3.9 tools, five workflows and seven skills, with
+bundle provides the CRG 2.3.9 tool surface (30 model-visible tools plus the
+host-internal edit-plan tool), five workflows and seven skills, with
 Agent-local tool selection and a Web/Desktop graph sidebar. Platform request:
 [#1100](https://github.com/tirth8205/code-review-graph/issues/1100).
 
@@ -49,7 +50,9 @@ code-review-graph uninstall --platform dsh --dsh-profile web --yes
 ```
 
 Scoped uninstall delegates `remove dsh-code-review-graph` to DSH and preserves
-graph data, user settings and other plugins. The adapter never installs repository
+graph data, user settings and other plugins. A native removal that fails is
+reported as an error with a non-zero exit, so the bundle is never silently left
+behind. The adapter never installs repository
 instruction files or legacy hooks for a DSH-only installation.
 
 ## Workspace and refactors

@@ -299,8 +299,9 @@ def _handle_init(args: argparse.Namespace) -> None:
         print(f"\nConfigured {len(configured)} platform(s): {', '.join(configured)}")
 
     if target == "dsh":
+        from .dsh import BUNDLE, BUNDLE_VERSION
         print("DSH uses its native bundle for tools, skills, prompts and lifecycle.")
-        print("Prepare the isolated engine once with: npx dsh-code-review-graph@0.1.0 prepare")
+        print(f"Prepare the isolated engine once with: npx {BUNDLE}@{BUNDLE_VERSION} prepare")
         return
 
     # Preview the instruction files that would be touched (#173).

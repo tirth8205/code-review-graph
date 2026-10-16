@@ -9,6 +9,10 @@ import subprocess
 from pathlib import Path
 
 BUNDLE = "dsh-code-review-graph"
+# Pinned once: the CLI hint, the README and the ``plugin add`` argument must
+# name the same tested release, or users install an engine the code does not
+# expect (review of #1101).
+BUNDLE_VERSION = "0.1.2"
 
 
 def home() -> Path:
@@ -19,6 +23,30 @@ def config_path(_root: Path, profile: str = "web") -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
         raise ValueError("DSH profile must contain only letters, digits, underscores or hyphens")
     return home() / "profiles" / profile / "package.json"
+
+
+def installed(path: Path) -> bool:
+    """True when a DSH profile manifest references the CRG bundle.
+
+    Uninstall needs this because ``configure(install=False)`` returns False
+    both for "nothing to remove" and for "removal failed". A malformed
+    manifest counts as installed: the bundle cannot be verified or removed,
+    and uninstall must say so rather than stay silent.
+    """
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return path.exists()
+    if not isinstance(manifest, dict):
+        return True
+    try:
+        deps = manifest.get("dependencies", {})
+        bundles = manifest.get("dsh", {}).get("profile", {}).get("bundles", [])
+    except AttributeError:
+        return True
+    if not isinstance(deps, dict) or not isinstance(bundles, list):
+        return True
+    return BUNDLE in deps or BUNDLE in bundles
 
 
 def configure(path: Path, *, install: bool, dry_run: bool = False) -> bool:
@@ -61,8 +89,8 @@ def configure(path: Path, *, install: bool, dry_run: bool = False) -> bool:
         print("  DSH: CLI unavailable; install/manage the bundle in the DSH application")
         return False
     try:
-        subprocess.run([executable, "plugin", "--profile", profile, action,
-                        BUNDLE + "@0.1.2" if install else BUNDLE],
+        package = f"{BUNDLE}@{BUNDLE_VERSION}" if install else BUNDLE
+        subprocess.run([executable, "plugin", "--profile", profile, action, package],
                        check=True, shell=False)
     except (OSError, subprocess.CalledProcessError) as exc:
         print(f"  DSH: native bundle {action} failed: {exc}")

@@ -972,10 +972,23 @@ def _process_platform_configs(
             continue
         if format_name == "native-bundle":
             from . import dsh
-            if scope == "user" and dsh.configure(path, install=False, dry_run=dry_run):
-                _record_edit(
-                    report, path, "removed CRG-owned DSH bundle through native CLI", dry_run,
-                )
+            if scope != "user":
+                continue
+            # ``configure`` returns False both when the bundle is absent and
+            # when native removal failed. Uninstall must never report the
+            # second as success, so check presence first and surface a real
+            # failure as an error (review of #1101).
+            if dsh.installed(path):
+                if dsh.configure(path, install=False, dry_run=dry_run):
+                    _record_edit(
+                        report, path,
+                        "removed CRG-owned DSH bundle through native CLI", dry_run,
+                    )
+                else:
+                    report.errors.append(
+                        f"{path}: {dsh.BUNDLE} is still installed; native "
+                        "DSH removal failed (see the message above)"
+                    )
             continue
         destination = _scope_for_config(
             path,

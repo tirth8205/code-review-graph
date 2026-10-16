@@ -428,6 +428,17 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "default_max": 25_000,
         "worst_max": 40_000,
     },
+    "get_refactor_edit_plan_tool": {
+        # No verbosity knobs: the plan is deliberately never truncated, so a
+        # host committing a refactor always receives every touched file's
+        # complete after_content and byte hash. Size is bounded by the
+        # rename's blast radius, not by the tool; this fixture rename
+        # measures ~23.1k tokens.
+        "default": {"refactor_id": "REFACTOR_ID"},
+        "worst": {"refactor_id": "REFACTOR_ID"},
+        "default_max": 30_000,
+        "worst_max": 50_000,
+    },
     "generate_wiki_tool": {
         "default": {},
         "worst": {"force": True},

@@ -138,6 +138,53 @@ def test_uninstall_removes_mcp_entry_for_every_current_platform_spec(
         assert data["theme"] == "dark"
 
 
+def test_failed_native_bundle_removal_is_reported(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bundle that survives a failed native removal is never silence.
+
+    ``configure`` returns False both for "nothing to remove" and for a failed
+    ``dsh plugin remove``; uninstall must report the second instead of
+    exiting 0 with the bundle still installed (review of #1101).
+    """
+    from code_review_graph import dsh
+
+    config_path = skills.PLATFORMS["dsh"]["config_path"](fake_repo)
+    _write_json(config_path, {"dependencies": {dsh.BUNDLE: "0.1.2"}})
+    monkeypatch.setattr(
+        dsh, "configure", lambda path, *, install, dry_run=False: False
+    )
+
+    report = uninstall.run(repo=fake_repo, platforms=["dsh"], keep_data=True)
+
+    assert report.errors, "failed native removal was silently swallowed"
+    assert dsh.BUNDLE in report.errors[0]
+    assert _read_jsonc(config_path) == {"dependencies": {dsh.BUNDLE: "0.1.2"}}
+
+
+def test_absent_native_bundle_is_not_an_error(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Another plugin in the DSH profile must not turn into an uninstall error."""
+    from code_review_graph import dsh
+
+    config_path = skills.PLATFORMS["dsh"]["config_path"](fake_repo)
+    _write_json(config_path, {"dependencies": {"other": "1"}})
+
+    def never(path: Path, *, install: bool, dry_run: bool = False) -> bool:
+        raise AssertionError("configure called although the bundle is absent")
+
+    monkeypatch.setattr(dsh, "configure", never)
+
+    report = uninstall.run(repo=fake_repo, platforms=["dsh"], keep_data=True)
+
+    assert report.errors == []
+
+
 def test_platform_inventory_is_derived_not_hard_coded(
     fake_repo: Path,
     fake_home: Path,
