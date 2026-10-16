@@ -152,7 +152,7 @@ code-review-graph eval --all
 
 ## Supported Languages
 
-The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Vue/Svelte single-file components, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), and Perl XS files (`.xs`). Other YAML is not treated as source code.
+The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Vue/Svelte single-file components, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), and Perl XS files (`.xs`). Other YAML is not treated as source code.
 
 Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
