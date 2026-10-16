@@ -1099,3 +1099,72 @@ class TestFindDeadCodeModuleScope:
         dead = find_dead_code(self.store)
         dead_names = {d["name"] for d in dead}
         assert "launch" not in dead_names
+
+
+class TestFindDeadCodeJavaAnnotations:
+    """``dead-code`` must not report methods whose caller is a contract or a runner.
+
+    Both annotations are already stored on the node — the parser captures them in
+    ``extra['decorators']`` — and ``_is_entry_point`` already consults them through
+    ``_has_framework_decorator``. The patterns list simply had no entry for
+    ``Override``, nor any for JUnit/TestNG.
+
+    Neither case is rescued by the test-file exclusion added in #1023:
+    ``Widget.java`` is production code, and a shared JUnit harness deliberately
+    lives in main so that several test modules can depend on it. See: #1034
+    """
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()  # release the handle before GraphStore reopens it on Windows
+        self.store = GraphStore(self.tmp.name)
+        self._seed()
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _seed(self):
+        for path in ("/repo/Widget.java", "/repo/AbstractWidgetHarness.java"):
+            self.store.upsert_node(NodeInfo(
+                kind="File", name=path, file_path=path,
+                line_start=1, line_end=100, language="java",
+            ))
+        # Overrides of Object's contract: called by HashMap, Objects.hash, the
+        # runtime — never from this repository.
+        for name, line in (("hashCode", 16), ("equals", 19)):
+            self.store.upsert_node(NodeInfo(
+                kind="Function", name=name, file_path="/repo/Widget.java",
+                line_start=line, line_end=line + 2, language="java",
+                parent_name="Widget", extra={"decorators": ["Override"]},
+            ))
+        # Invoked by the JUnit runner, in a file the test-file exclusion does
+        # not cover.
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="prepareFixture",
+            file_path="/repo/AbstractWidgetHarness.java",
+            line_start=9, line_end=10, language="java",
+            parent_name="AbstractWidgetHarness",
+            extra={"decorators": ["BeforeEach"]},
+        ))
+        # A genuinely unreferenced method, to prove the query still reports.
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="unusedHelper", file_path="/repo/Widget.java",
+            line_start=30, line_end=32, language="java", parent_name="Widget",
+        ))
+        self.store.commit()
+
+    def _dead(self) -> set[str]:
+        return {d["name"] for d in find_dead_code(self.store, root="/repo")}
+
+    def test_override_is_not_dead_code(self):
+        dead = self._dead()
+        assert "hashCode" not in dead
+        assert "equals" not in dead
+
+    def test_junit_lifecycle_outside_a_test_file_is_not_dead_code(self):
+        assert "prepareFixture" not in self._dead()
+
+    def test_a_genuinely_unreferenced_method_is_still_reported(self):
+        """The fix must narrow the false positives, not silence the query."""
+        assert "unusedHelper" in self._dead()

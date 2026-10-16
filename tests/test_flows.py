@@ -172,6 +172,77 @@ class TestFlows:
         ep_names = {ep.name for ep in eps}
         assert "query_health" in ep_names
 
+    def test_detect_entry_points_java_override(self):
+        """@Override implements a supertype contract, so the contract is the caller.
+
+        The base is frequently outside the graph — ``Object.hashCode``/``equals``/
+        ``toString`` live in the JDK — so no hierarchy walk can rescue the method
+        either. ``hashCode`` is given a caller here so that rule 1 (no incoming
+        CALLS) cannot carry the assertion on its own: the annotation is the only
+        thing that can make it an entry point.
+        """
+        self._add_func("entry_func")
+        self._add_func(
+            "hashCode",
+            parent="Widget",
+            language="java",
+            extra={"decorators": ["Override"]},
+        )
+        self._add_call("app.py::entry_func", "app.py::Widget.hashCode")
+
+        eps = detect_entry_points(self.store)
+        assert "hashCode" in {ep.name for ep in eps}
+
+    def test_detect_entry_points_junit_lifecycle(self):
+        """JUnit lifecycle methods are invoked by the runner, never explicitly.
+
+        Each one is given a caller, for the same reason as above.
+        """
+        self._add_func("entry_func")
+        for name, annotation in (
+            ("setUp", "BeforeEach"),
+            ("tearDown", "AfterEach"),
+            ("initAll", "BeforeAll"),
+            ("cleanAll", "AfterAll"),
+        ):
+            self._add_func(
+                name,
+                parent="Harness",
+                language="java",
+                extra={"decorators": [annotation]},
+            )
+            self._add_call("app.py::entry_func", f"app.py::Harness.{name}")
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"setUp", "tearDown", "initAll", "cleanAll"} <= eps
+
+    def test_detect_entry_points_junit_test_annotation(self):
+        """@Test on a Java method, whose camelCase name carries no ``test`` prefix.
+
+        ``_matches_entry_name`` keys on a ``test``-prefixed name, which Java's
+        convention does not produce.
+        """
+        self._add_func("entry_func")
+        self._add_func(
+            "keepsItsId",
+            parent="WidgetCases",
+            language="java",
+            extra={"decorators": ["Test"]},
+        )
+        self._add_call("app.py::entry_func", "app.py::WidgetCases.keepsItsId")
+
+        eps = detect_entry_points(self.store)
+        assert "keepsItsId" in {ep.name for ep in eps}
+
+    def test_override_pattern_is_anchored(self):
+        """``^Override$`` must not match a decorator that merely contains it."""
+        self._add_func("entry_func")
+        self._add_func("helper", extra={"decorators": ["Overridable"]})
+        self._add_call("app.py::entry_func", "app.py::helper")
+
+        eps = detect_entry_points(self.store)
+        assert "helper" not in {ep.name for ep in eps}
+
     def test_detect_entry_points_alembic(self):
         """upgrade/downgrade functions are entry points."""
         self._add_func("upgrade")

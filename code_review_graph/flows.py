@@ -43,8 +43,20 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"receiver", re.IGNORECASE),
     re.compile(r"api_view", re.IGNORECASE),
     re.compile(r"\baction\b", re.IGNORECASE),
+    # An override implements a supertype contract, so its caller is that
+    # contract: a supertype-typed reference, a framework, or the runtime itself
+    # for Object.hashCode/equals/toString. It is never dead by virtue of having
+    # no explicit call site, and the base is often outside the graph (the JDK),
+    # so no hierarchy walk can rescue it either. Anchored so it cannot match
+    # unrelated names such as override_settings, handled below.
+    re.compile(r"^Override$"),
     # Testing
     re.compile(r"pytest\.(fixture|mark)"),
+    # JUnit / TestNG lifecycle and test methods are invoked by the runner.
+    re.compile(
+        r"^(Test|Before|After|BeforeEach|AfterEach|BeforeAll|AfterAll"
+        r"|BeforeClass|AfterClass|ParameterizedTest|RepeatedTest|TestFactory)$"
+    ),
     re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
     # SQLAlchemy / event systems
     re.compile(r"(event\.)?listens_for", re.IGNORECASE),
