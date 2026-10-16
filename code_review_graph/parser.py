@@ -993,6 +993,7 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".dart": "dart",
     ".r": "r",  # .lower() in detect_language handles .R → .r
     ".mjs": "javascript",
+    ".cjs": "javascript",
     ".astro": "typescript",
     ".pl": "perl",
     ".pm": "perl",

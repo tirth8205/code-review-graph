@@ -17,6 +17,11 @@
 
 ### Fixed
 
+- CommonJS `.cjs` files are parsed as JavaScript, like `.js` and `.mjs`.
+  `EXTENSION_TO_LANGUAGE` had no `.cjs` entry, so every build skipped those
+  files: no functions, no calls, and a `require('./x.cjs')` pointed at a file
+  the graph did not have. `tests/test_cjs_extension.py` checks detection,
+  parsing, and a full build with the import and the cross-file call.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
