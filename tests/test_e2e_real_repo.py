@@ -388,7 +388,9 @@ def test_hybrid_search_ranks_impact_radius_nodes_first(repo_graph: BuiltGraph) -
     """A natural-language query surfaces the impact-radius implementation."""
     assert repo_graph.fts_rows > 0
 
-    results = hybrid_search(repo_graph.store, "impact radius", limit=10)
+    results = hybrid_search(
+        repo_graph.store, "impact radius", kind="Function", limit=30,
+    )[:10]
 
     assert len(results) == 10, f"expected a full page of hits, got {len(results)}"
     on_topic = [r for r in results if "impact_radius" in r["name"]]

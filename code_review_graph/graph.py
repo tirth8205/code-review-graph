@@ -808,8 +808,10 @@ class GraphStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(qualified_name) DO UPDATE SET
                  kind=excluded.kind, name=excluded.name,
-                 file_path=excluded.file_path, line_start=excluded.line_start,
-                 line_end=excluded.line_end, language=excluded.language,
+                 file_path=excluded.file_path,
+                 line_start=excluded.line_start,
+                 line_end=excluded.line_end,
+                 language=excluded.language,
                  parent_name=excluded.parent_name, params=excluded.params,
                  return_type=excluded.return_type, modifiers=excluded.modifiers,
                  is_test=excluded.is_test, file_hash=excluded.file_hash,
@@ -1061,8 +1063,10 @@ class GraphStore:
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(qualified_name) DO UPDATE SET
                      kind=excluded.kind, name=excluded.name,
-                     file_path=excluded.file_path, line_start=excluded.line_start,
-                     line_end=excluded.line_end, language=excluded.language,
+                     file_path=excluded.file_path,
+                     line_start=excluded.line_start,
+                     line_end=excluded.line_end,
+                     language=excluded.language,
                      parent_name=excluded.parent_name, params=excluded.params,
                      return_type=excluded.return_type, modifiers=excluded.modifiers,
                      is_test=excluded.is_test, file_hash=excluded.file_hash,

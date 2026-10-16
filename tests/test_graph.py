@@ -70,6 +70,55 @@ class TestGraphStore:
         assert result.kind == "Function"
         assert result.name == "my_func"
 
+    def test_upsert_function_overwrites_line_range_for_same_qualified_name(self):
+        first = self._make_func_node()
+        second = self._make_func_node()
+        first.line_start, first.line_end = 2, 4
+        second.line_start, second.line_end = 10, 12
+
+        self.store.upsert_node(first)
+        self.store.upsert_node(second)
+        self.store.commit()
+
+        result = self.store.get_node("/test/file.py::my_func")
+        assert result is not None
+        assert (result.line_start, result.line_end) == (10, 12)
+
+    def test_store_file_nodes_edges_overwrites_duplicate_node_range(self):
+        first = self._make_func_node(name="helper")
+        second = self._make_func_node(name="helper")
+        first.parent_name = "outer1"
+        second.parent_name = "outer1"
+        first.line_start, first.line_end = 2, 3
+        second.line_start, second.line_end = 8, 9
+
+        self.store.store_file_nodes_edges(
+            "/test/file.py", [first, second], [],
+        )
+
+        result = self.store.get_node("/test/file.py::outer1.helper")
+        assert result is not None
+        assert (result.line_start, result.line_end) == (8, 9)
+
+    def test_same_name_nested_functions_keep_separate_line_ranges(self):
+        first = self._make_func_node(name="helper")
+        second = self._make_func_node(name="helper")
+        first.parent_name = "outer1"
+        second.parent_name = "outer2"
+        first.line_start, first.line_end = 2, 3
+        second.line_start, second.line_end = 8, 9
+
+        self.store.store_file_nodes_edges(
+            "/test/file.py", [first, second], [],
+        )
+
+        first_result = self.store.get_node("/test/file.py::outer1.helper")
+        second_result = self.store.get_node("/test/file.py::outer2.helper")
+        assert first_result is not None
+        assert second_result is not None
+        assert (first_result.line_start, first_result.line_end) == (2, 3)
+        assert (second_result.line_start, second_result.line_end) == (8, 9)
+
     def test_upsert_method_node(self):
         method = self._make_func_node(name="do_thing", parent="MyClass")
         self.store.upsert_node(method)
