@@ -111,7 +111,7 @@ code-review-graph build \
   --embedding-model all-MiniLM-L6-v2
 ```
 
-A refresh only updates a previously embedded graph. It refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
+A refresh only updates a previously embedded graph. On a graph with no embeddings yet it embeds nothing: `build`, `update` (also when it finds no changes) and `postprocess` return `embeddings_refresh_skipped: true` with a warning, and `watch` logs that warning after each update and keeps running. Run `code-review-graph embed` once to create the index. A refresh refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
 
 ### 7. Detect changes with risk scoring
 Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, flows, communities and test gaps.
@@ -159,6 +159,10 @@ Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Pyt
 Languages not covered can be added through a `.code-review-graph/languages.toml` file. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
 
 ## What Gets Indexed
+
+Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
+Their imports, calls, and references alone do not keep application symbols alive in
+dead-code reports. Normal application callers and ordinary test evidence still count.
 
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)

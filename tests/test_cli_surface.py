@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import os
 import re
 import shutil
@@ -1156,6 +1157,10 @@ NUMERIC_ENV_VARS: tuple[NumericVar, ...] = (
     NumericVar("CRG_MAX_IMPACT_DEPTH", ("status",), "3"),
     NumericVar("CRG_MAX_BFS_DEPTH", ("status",), "10"),
     NumericVar("CRG_MAX_SEARCH_RESULTS", ("status",), "15"),
+    # Parsed at import; the test-gap caller walk that ``detect-changes``
+    # runs is what reads them, so drive that command rather than ``status``.
+    NumericVar("CRG_CALLER_TEST_ROUTE_DEPTH", ("detect-changes", "--brief"), "3"),
+    NumericVar("CRG_CALLER_TEST_ROUTE_MAX_CALLERS", ("detect-changes", "--brief"), "128"),
     NumericVar("CRG_IMPACT_DEPTH_DECAY", ("status",), "0.5"),
     NumericVar("CRG_IMPACT_SCORE_FLOOR", ("status",), "0.1"),
     NumericVar("CRG_PARSE_WORKERS", ("status",), "2"),
@@ -1384,6 +1389,100 @@ def test_no_new_unguarded_numeric_env_parse():
         "these are guarded now — remove them from UNGUARDED_BASELINE and from "
         f"UNGUARDED_AT_RUNTIME: {sorted(fixed)}"
     )
+
+
+# The two caller-walk limits (#1047) are parsed once, at import, and then
+# baked into ``GraphStore.get_caller_test_routes``. The table rows above only
+# prove a value does not crash; these prove the value reaches the walk, so a
+# setting that silently stops being read (or reads the wrong name) fails here.
+_ROUTE_DEPTH = "CRG_CALLER_TEST_ROUTE_DEPTH"
+_ROUTE_MAX_CALLERS = "CRG_CALLER_TEST_ROUTE_MAX_CALLERS"
+
+
+@pytest.fixture(scope="module")
+def helper_changed_repo(tmp_path_factory, cli_env) -> Path:
+    """HEAD changes ``helper``: no test names it, but tested ``entry`` calls it.
+
+    ``helper`` has exactly two callers (``entry`` and ``double_all``), which
+    the max-callers boundary cases below depend on.
+    """
+    repo = init_repo(tmp_path_factory.mktemp("cli-surface-route") / "repo")
+    write_sample_project(repo)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "initial")
+    core = repo / "pkg" / "core.py"
+    core.write_text(
+        core.read_text(encoding="utf-8").replace("return value * 2", "return value * 2 + 0"),
+        encoding="utf-8",
+    )
+    _git(repo, "commit", "-qam", "change helper")
+    built = run_cli("build", "-q", cwd=repo, env=cli_env)
+    assert built.returncode == 0, built.describe()
+    return repo
+
+
+def _route_env(cli_env: dict[str, str], **overrides: str) -> dict[str, str]:
+    env = {k: v for k, v in cli_env.items() if k not in (_ROUTE_DEPTH, _ROUTE_MAX_CALLERS)}
+    env.update(overrides)
+    return env
+
+
+def _helper_gap(repo: Path, env: dict[str, str]) -> tuple[CliResult, dict]:
+    """Run ``detect-changes`` and return the ``helper`` row of ``test_gaps``."""
+    result = run_cli("detect-changes", cwd=repo, env=env)
+    assert not result.traceback, result.describe()
+    assert result.returncode == 0, result.describe()
+    # A warning line may precede the JSON in the merged stream.
+    start = re.search(r"^\{", result.output, re.MULTILINE)
+    assert start is not None, result.describe()
+    payload, _ = json.JSONDecoder().raw_decode(result.output[start.start():])
+    rows = [gap for gap in payload.get("test_gaps", []) if gap.get("name") == "helper"]
+    # Never suppressed: whatever the limits, the changed symbol stays a gap.
+    assert len(rows) == 1, result.describe()
+    return result, rows[0]
+
+
+def test_caller_route_is_reported_with_the_default_limits(helper_changed_repo, cli_env):
+    _, gap = _helper_gap(helper_changed_repo, _route_env(cli_env))
+    assert gap["coverage"] == "indirect", gap
+    assert gap["covered_via"].endswith("::entry"), gap
+    assert gap["covered_depth"] == 1, gap
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "coverage"),
+    [
+        pytest.param(_ROUTE_DEPTH, "0", "none", id="depth-0-disables"),
+        pytest.param(_ROUTE_DEPTH, "1", "indirect", id="depth-1-keeps-direct-caller"),
+        pytest.param(_ROUTE_DEPTH, " 1 ", "indirect", id="depth-padded"),
+        pytest.param(_ROUTE_DEPTH, "-1", "none", id="depth-negative"),
+        pytest.param(_ROUTE_MAX_CALLERS, "0", "none", id="max-0-disables"),
+        pytest.param(_ROUTE_MAX_CALLERS, "1", "none", id="max-below-in-degree"),
+        pytest.param(_ROUTE_MAX_CALLERS, "2", "indirect", id="max-equal-in-degree"),
+        pytest.param(_ROUTE_MAX_CALLERS, "-1", "none", id="max-negative"),
+    ],
+)
+def test_caller_route_env_var_reaches_the_walk(
+    name, value, coverage, helper_changed_repo, cli_env
+):
+    """A valid override changes the answer; a limit can only shrink the walk."""
+    result, gap = _helper_gap(helper_changed_repo, _route_env(cli_env, **{name: value}))
+    assert gap["coverage"] == coverage, result.describe()
+    assert "Ignoring invalid" not in result.output, result.describe()
+
+
+@pytest.mark.parametrize(
+    "bad", ["", "abc", "1.5.2", "2.5"], ids=["empty", "word", "version", "float"]
+)
+@pytest.mark.parametrize("name", [_ROUTE_DEPTH, _ROUTE_MAX_CALLERS])
+def test_invalid_caller_route_env_var_warns_by_name_and_keeps_the_default(
+    name, bad, helper_changed_repo, cli_env
+):
+    """Unparseable means the documented default, not zero, and says so by name."""
+    result, gap = _helper_gap(helper_changed_repo, _route_env(cli_env, **{name: bad}))
+    assert name in result.output, result.describe()
+    assert gap["coverage"] == "indirect", result.describe()
+    assert gap["covered_depth"] == 1, result.describe()
 
 
 def test_crg_data_dir_override_is_honoured(tmp_path, cli_env):
