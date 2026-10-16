@@ -1036,6 +1036,8 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".properties": "properties",
     ".yml": "yaml",
     ".yaml": "yaml",
+    ".robot": "robot",
+    ".resource": "robot",
 }
 
 # ``.h`` is shared by C and C++. Keep C as the extension default, then promote
@@ -3251,6 +3253,12 @@ class CodeParser:
         if language == "rescript":
             return self._parse_rescript(path, source)
 
+        # Robot Framework has no grammar in the bundled language pack.  Parse
+        # its table sections directly so tests, keywords, calls, and resource
+        # dependencies still contribute useful graph structure.
+        if language == "robot":
+            return self._parse_robot(path, source)
+
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
         if language == "sql":
@@ -4481,6 +4489,265 @@ class CodeParser:
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
+        return nodes, edges
+
+    def _parse_robot(
+        self, path: Path, source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Extract graph structure from Robot Framework tables."""
+        text = source.decode("utf-8", errors="replace")
+        file_path = normalize_file_path(path)
+        lines = text.splitlines()
+        nodes = [NodeInfo(
+            kind="File",
+            name=file_path,
+            file_path=file_path,
+            line_start=1,
+            line_end=max(1, len(lines)),
+            language="robot",
+            is_test=_is_test_file(file_path),
+        )]
+        edges: list[EdgeInfo] = []
+        section: Optional[str] = None
+        current: Optional[tuple[str, str, int, str]] = None
+        ignored_settings = {
+            "[arguments]", "[documentation]", "[return]", "[returns]",
+            "[setup]", "[teardown]", "[timeout]", "[tags]", "[template]",
+        }
+        control_stack: list[str] = []
+
+        def qualified(name: str) -> str:
+            return f"{file_path}::{name}"
+
+        def normalize_keyword(name: str) -> str:
+            return re.sub(r"[\s_]+", "", name).casefold()
+
+        def finish(end_line: int) -> None:
+            nonlocal current
+            if current is None:
+                return
+            _, name, start_line, _ = current
+            for node in reversed(nodes):
+                if node.name == name and node.line_start == start_line:
+                    node.line_end = max(start_line, end_line)
+                    break
+            current = None
+
+        for line_number, raw_line in enumerate(lines, 1):
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            pipe_row = stripped.startswith("|")
+            if pipe_row:
+                cells = [cell.strip() for cell in stripped.strip("|").split("|") if cell.strip()]
+            else:
+                cells = [cell.strip() for cell in re.split(r"\s{2,}|\t+", raw_line) if cell.strip()]
+            if not cells:
+                continue
+            section_match = re.fullmatch(r"\*\*\*\s*(.+?)\s*\*\*\*", cells[0])
+            if section_match:
+                finish(line_number - 1)
+                section = section_match.group(1).casefold()
+                continue
+
+            if section == "settings":
+                setting = cells[0].casefold()
+                if setting in {"library", "resource", "variables"} and len(cells) > 1:
+                    target = cells[1]
+                    if setting == "resource":
+                        target = normalize_file_path((path.parent / target).resolve())
+                    edges.append(EdgeInfo(
+                        kind="IMPORTS_FROM",
+                        source=file_path,
+                        target=target,
+                        file_path=file_path,
+                        line=line_number,
+                        extra={"robot_setting": setting},
+                    ))
+                continue
+
+            if section not in {"test cases", "tasks", "keywords"}:
+                continue
+
+            is_definition = not pipe_row and not raw_line[:1].isspace()
+            if is_definition:
+                finish(line_number - 1)
+                name = cells[0]
+                is_test = section in {"test cases", "tasks"}
+                node_kind = "Test" if is_test else "Function"
+                qname = qualified(name)
+                current = (node_kind, name, line_number, qname)
+                control_stack.clear()
+                nodes.append(NodeInfo(
+                    kind=node_kind,
+                    name=name,
+                    file_path=file_path,
+                    line_start=line_number,
+                    line_end=line_number,
+                    language="robot",
+                    is_test=is_test,
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS",
+                    source=file_path,
+                    target=qname,
+                    file_path=file_path,
+                    line=line_number,
+                ))
+                continue
+
+            if current is None:
+                continue
+            while cells:
+                assignment = re.match(r"^[$@&%]\{[^}]+\}=(?:\s+(.*))?$", cells[0])
+                if assignment is not None and assignment.group(1):
+                    cells[0] = assignment.group(1)
+                    break
+                if assignment is not None:
+                    cells.pop(0)
+                    continue
+                assignment_index = next(
+                    (
+                        index
+                        for index, cell in enumerate(cells)
+                        if re.fullmatch(r"[$@&%]\{[^}]+\}=", cell)
+                    ),
+                    None,
+                )
+                if assignment_index is not None and all(
+                    re.fullmatch(r"[$@&%]\{[^}]+\}", cell)
+                    for cell in cells[:assignment_index]
+                ):
+                    cells = cells[assignment_index + 1:]
+                break
+            if not cells:
+                continue
+            keyword = cells[0]
+            if keyword.casefold() in ignored_settings:
+                continue
+            if keyword == "...":
+                continue
+            control_keyword = " ".join(keyword.casefold().split())
+            if control_keyword in {"if", "for", "while"} and len(cells) > 1:
+                if (
+                    control_keyword == "if"
+                    and len(cells) > 2
+                    and cells[2].casefold() not in {
+                        "and", "or", "not", "==", "!=", "<", ">", "<=", ">=", "in", "is",
+                    }
+                ):
+                    else_index = next(
+                        (
+                            index for index, cell in enumerate(cells[3:], 3)
+                            if cell.casefold() == "else"
+                        ),
+                        None,
+                    )
+                    branch_keywords = [cells[2]]
+                    if else_index is not None and else_index + 1 < len(cells):
+                        branch_keywords.append(cells[else_index + 1])
+                    for branch_keyword in branch_keywords:
+                        edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=current[3],
+                            target=branch_keyword,
+                            file_path=file_path,
+                            line=line_number,
+                        ))
+                    continue
+                control_stack.append(control_keyword)
+                continue
+            if control_keyword == "try":
+                control_stack.append(control_keyword)
+                continue
+            if (
+                control_keyword == "else if"
+                and control_stack
+                and control_stack[-1] == "if"
+                and len(cells) > 1
+            ):
+                continue
+            if (
+                control_keyword == "else"
+                and control_stack
+                and control_stack[-1] in {"if", "try"}
+            ):
+                continue
+            if (
+                control_keyword in {"except", "finally"}
+                and control_stack
+                and control_stack[-1] == "try"
+            ):
+                continue
+            if control_keyword == "end" and control_stack:
+                control_stack.pop()
+                continue
+            if pipe_row and len(cells) == 1:
+                continue
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=current[3],
+                target=keyword,
+                file_path=file_path,
+                line=line_number,
+            ))
+
+        finish(len(lines))
+
+        # Add a kind-qualified identity only where a test and keyword share a name.
+        test_names = {node.name for node in nodes if node.kind == "Test"}
+        keyword_names = {node.name for node in nodes if node.kind == "Function"}
+        shared_names = test_names & keyword_names
+        if shared_names:
+            for node in nodes:
+                if node.kind not in {"Test", "Function"} or node.name not in shared_names:
+                    continue
+                previous_qname = qualified(node.name)
+                node.identity_name = f"{node.kind}::{node.name}"
+                new_qname = self._node_qualified(node)
+                for edge in edges:
+                    if (
+                        edge.kind == "CONTAINS"
+                        and edge.target == previous_qname
+                        and edge.line == node.line_start
+                    ):
+                        edge.target = new_qname
+                    elif (
+                        edge.kind == "CALLS"
+                        and edge.source == previous_qname
+                        and node.line_start <= edge.line <= node.line_end
+                    ):
+                        edge.source = new_qname
+
+        keyword_definitions: dict[str, list[NodeInfo]] = {}
+        for node in nodes:
+            if node.kind == "Function":
+                normalized = normalize_keyword(node.name)
+                keyword_definitions.setdefault(normalized, []).append(node)
+
+        for edge in edges:
+            if edge.kind != "CALLS":
+                continue
+            normalized = normalize_keyword(edge.target)
+            matches = keyword_definitions.get(normalized, [])
+            if len(matches) == 1:
+                edge.target = self._node_qualified(matches[0])
+
+        test_qnames = {
+            self._node_qualified(node)
+            for node in nodes
+            if node.is_test
+        }
+        for edge in list(edges):
+            if edge.kind == "CALLS" and edge.source in test_qnames:
+                edges.append(EdgeInfo(
+                    kind="TESTED_BY",
+                    source=edge.target,
+                    target=edge.source,
+                    file_path=edge.file_path,
+                    line=edge.line,
+                    extra=edge.extra.copy(),
+                ))
         return nodes, edges
 
     def _resolve_vbnet_edges(

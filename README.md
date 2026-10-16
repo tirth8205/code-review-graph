@@ -278,8 +278,10 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 | Feature | Details |
 |---------|---------|
+| **Graph diff** | Compare graph snapshots over time: new/removed nodes, edges, community changes |
+| **Memory loop** | Persist Q&A results as markdown for re-ingestion, so the graph grows from queries |
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
-| **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
+| **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above, including Robot Framework (`.robot`, `.resource`). |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
@@ -290,7 +292,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
 | **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
-| **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
+| **Edge confidence** | Three-tier confidence (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
