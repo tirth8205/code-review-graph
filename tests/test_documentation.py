@@ -23,6 +23,7 @@ OPTIONAL_GROUPS = (
 USER_DOC_FILES = README_FILES + (
     "docs/COMMANDS.md",
     "docs/FAQ.md",
+    "docs/USAGE.md",
     "code_review_graph/docs/LLM-OPTIMIZED-REFERENCE.md",
     "docs/TROUBLESHOOTING.md",
 )
@@ -108,3 +109,12 @@ def test_schema_version_is_current_everywhere_it_is_written_down():
             f"{name} names cache schema segment(s) {sorted(segments)}; "
             f"expected only schema{LATEST_VERSION}"
         )
+
+def test_codex_install_docs_cover_global_skill_and_runtime_scope():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    usage = (ROOT / "docs/USAGE.md").read_text(encoding="utf-8")
+    for content in (readme, usage):
+        assert "$CODEX_HOME" in content
+        assert "skills/code-review-graph" in content
+        assert "WSL" in content or "Windows" in content
+        assert "read-only CLI" in content

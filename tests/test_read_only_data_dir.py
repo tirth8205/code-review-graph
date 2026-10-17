@@ -69,6 +69,16 @@ def _build_min_graph(db_path: Path) -> None:
     store.close()
 
 
+def test_graph_tool_without_database_creates_no_data_dir(tmp_path, isolated_env, capsys):
+    repo = _make_repo(tmp_path)
+
+    exc_info = _run_cli(["architecture", "--repo", str(repo)])
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert not (repo / ".code-review-graph").exists()
+
+
 @pytest.mark.parametrize("command", READ_ONLY_COMMANDS)
 def test_registry_pointed_data_dir_is_not_created(
     command, tmp_path, isolated_env, capsys,

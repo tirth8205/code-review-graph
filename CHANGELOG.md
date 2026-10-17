@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
+
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing

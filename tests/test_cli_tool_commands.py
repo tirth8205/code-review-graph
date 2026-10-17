@@ -10,6 +10,15 @@ import pytest
 
 import code_review_graph.tools  # noqa: F401 - exposes lazy patch targets
 from code_review_graph import cli
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import NodeInfo
+
+_LEGACY_GRAPH_COMMANDS = [
+    ["query", "file_summary", "app.py"],
+    ["search", "handler"],
+    ["flows"],
+    ["architecture"],
+]
 
 
 @pytest.mark.parametrize(
@@ -144,3 +153,65 @@ def test_tool_command_missing_graph_exits_nonzero(tmp_path, monkeypatch, capsys)
 
     assert exc_info.value.code == 1
     assert "No graph found" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("arguments", _LEGACY_GRAPH_COMMANDS)
+def test_tool_commands_migrate_and_read_legacy_graph(
+    arguments, tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    legacy_db = repo / ".code-review-graph.db"
+    with GraphStore(legacy_db) as store:
+        store.upsert_node(NodeInfo(
+            kind="Function", name="handler", file_path="app.py",
+            line_start=1, line_end=2, language="python",
+        ), file_hash="fixture")
+        store.commit()
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    monkeypatch.setattr(sys, "argv", ["code-review-graph", *arguments, "--repo", str(repo)])
+
+    cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "ok", result
+    assert not legacy_db.exists()
+    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+        assert store.get_node("app.py::handler") is not None
+
+
+@pytest.mark.parametrize("arguments", _LEGACY_GRAPH_COMMANDS)
+@pytest.mark.parametrize("external_source", [None, "env", "registry"])
+def test_tool_commands_missing_graph_preserve_state(
+    arguments, external_source, tmp_path, monkeypatch, capsys,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+    data_dir = repo / ".code-review-graph"
+    legacy_db = repo / ".code-review-graph.db"
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    if external_source:
+        # An external location must not silently consume an unrelated legacy graph.
+        with GraphStore(legacy_db):
+            pass
+        legacy_bytes = legacy_db.read_bytes()
+        data_dir = tmp_path / "external-data"
+        if external_source == "env":
+            monkeypatch.setenv("CRG_DATA_DIR", str(data_dir))
+        else:
+            from code_review_graph.registry import Registry
+
+            Registry().register(str(repo), data_dir=str(data_dir))
+    monkeypatch.setattr(sys, "argv", ["code-review-graph", *arguments, "--repo", str(repo)])
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main()
+
+    assert exc_info.value.code == 1
+    assert "No graph found" in capsys.readouterr().err
+    assert not data_dir.exists()
+    assert not (repo / ".code-review-graph").exists()
+    if external_source:
+        assert legacy_db.read_bytes() == legacy_bytes

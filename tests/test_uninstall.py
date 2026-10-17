@@ -6,6 +6,7 @@ never be reachable from this suite.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -1037,6 +1038,86 @@ def test_platform_scoped_unbind_targets_user_scope_toml(
     assert "[mcp_servers.other]" in text
     # Claude was not named, so its repo binding stays put.
     assert "code-review-graph" in claude_config.read_text(encoding="utf-8")
+
+
+def test_uninstall_uses_custom_codex_home_and_preserves_user_skill(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = fake_home / "wsl-codex"
+    skill_dir = codex_home / "skills" / "code-review-graph"
+    skill_dir.mkdir(parents=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text("generated\n", encoding="utf-8")
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+    (skill_dir / ".code-review-graph-managed.json").write_text(
+        json.dumps({"version": 1, "files": {"SKILL.md": "not-the-file-hash"}}),
+        encoding="utf-8",
+    )
+    config = codex_home / "config.toml"
+    _write_codex_config(config)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    config_text = config.read_text(encoding="utf-8")
+    assert "[mcp_servers.code-review-graph]" not in config_text
+    assert "[mcp_servers.other]" in config_text
+    assert skill_file.exists()
+    assert notes.exists()
+
+
+def test_uninstall_removes_only_managed_codex_skill_files(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from code_review_graph.codex_skill import install_codex_skill
+
+    codex_home = fake_home / "wsl-codex"
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    skill_dir = install_codex_skill()
+    notes = skill_dir / "notes.txt"
+    notes.write_text("user\n", encoding="utf-8")
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert notes.read_text(encoding="utf-8") == "user\n"
+    assert not (skill_dir / "SKILL.md").exists()
+    assert not (skill_dir / "agents" / "openai.yaml").exists()
+    assert not (skill_dir / "scripts" / "crg_readonly.py").exists()
+    assert not (skill_dir / ".code-review-graph-managed.json").exists()
+
+
+def test_uninstall_ignores_symlinked_codex_manifest(
+    fake_repo: Path,
+    fake_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    codex_home = fake_home / "codex"
+    skill_dir = codex_home / "skills" / "code-review-graph"
+    skill_dir.mkdir(parents=True)
+    skill = skill_dir / "SKILL.md"
+    skill.write_text("user-owned\n", encoding="utf-8")
+    outside = fake_home / "outside.json"
+    outside.write_text(
+        json.dumps({"version": 1, "files": {
+            "SKILL.md": hashlib.sha256(skill.read_bytes()).hexdigest()
+        }}),
+        encoding="utf-8",
+    )
+    (skill_dir / ".code-review-graph-managed.json").symlink_to(outside)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert skill.read_text(encoding="utf-8") == "user-owned\n"
+    assert outside.is_file()
 
 
 def test_cli_uninstall_platform_scopes_to_one_binding(
