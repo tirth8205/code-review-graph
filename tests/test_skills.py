@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -608,6 +609,33 @@ class TestInstallCodexHooks:
         assert (destination / "scripts" / "crg_readonly.py").is_file()
         assert (destination / "agents" / "openai.yaml").is_file()
         assert (destination / ".code-review-graph-managed.json").is_file()
+
+    def test_global_skill_install_excludes_python_caches(self, tmp_path, monkeypatch):
+        from code_review_graph import codex_skill
+
+        resources = tmp_path / "resources"
+        shutil.copytree(codex_skill.bundled_skill_dir(), resources)
+        cache = resources / "scripts" / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        (cache / "crg_readonly.cpython-313.pyc").write_bytes(b"compiled")
+        (cache / "other.txt").write_text("cache metadata", encoding="utf-8")
+        (resources / "scripts" / "crg_readonly.pyc").write_bytes(b"legacy compiled")
+        (resources / "scripts" / "crg_readonly.pyo").write_bytes(b"optimized")
+        monkeypatch.setattr(codex_skill, "_RESOURCE_ROOT", resources)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+        destination = install_codex_skill()
+
+        assert destination is not None
+        expected = {"SKILL.md", "agents/openai.yaml", "scripts/crg_readonly.py"}
+        manifest = json.loads(
+            (destination / ".code-review-graph-managed.json").read_text(encoding="utf-8")
+        )
+        assert set(manifest["files"]) == expected
+        assert {
+            p.relative_to(destination).as_posix()
+            for p in destination.rglob("*") if p.is_file()
+        } == expected | {".code-review-graph-managed.json"}
 
     def test_global_skill_install_is_idempotent_and_preserves_unrelated_files(
         self, tmp_path, monkeypatch

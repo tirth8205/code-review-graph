@@ -1735,6 +1735,14 @@ def _dispatch() -> None:
         else:
             repo_root = find_project_root()
         db_path = get_db_path(repo_root, read_only=True)
+        if (
+            not db_path.exists()
+            and db_path.resolve() == (repo_root / ".code-review-graph" / "graph.db").resolve()
+            and (repo_root / ".code-review-graph.db").exists()
+        ):
+            # Preserve legacy migration without creating graph state for a
+            # repository that has never been indexed or an external data dir.
+            db_path = get_db_path(repo_root)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",

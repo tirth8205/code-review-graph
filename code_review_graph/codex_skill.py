@@ -53,8 +53,13 @@ def _iter_resource_files(root: Path) -> dict[str, Path]:
         raise FileNotFoundError(f"bundled Codex skill is missing: {root}")
     files: dict[str, Path] = {}
     for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        # pip compiles Python package data on install. Those caches are not
+        # skill resources and must never be copied or recorded as owned files.
+        if "__pycache__" in relative.parts or path.suffix in {".pyc", ".pyo"}:
+            continue
         if path.is_file():
-            files[path.relative_to(root).as_posix()] = path
+            files[relative.as_posix()] = path
     if "SKILL.md" not in files:
         raise FileNotFoundError(f"bundled Codex skill has no SKILL.md: {root}")
     return files
