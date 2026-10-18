@@ -64,7 +64,9 @@ def _run_embedding_refresh(
         from code_review_graph.embeddings import refresh_embeddings
 
         refreshed = refresh_embeddings(store, provider=provider, model=model)
-        if refreshed is not None:
+        if refreshed is None:
+            _report_refresh_skipped(result, warnings)
+        else:
             result["embeddings_refreshed"] = refreshed["embedded"]
             result["embeddings_purged"] = refreshed["purged"]
     except Exception as exc:
@@ -72,6 +74,15 @@ def _run_embedding_refresh(
         warnings.append(
             f"Embedding refresh failed: {type(exc).__name__}: {exc}",
         )
+
+
+def _report_refresh_skipped(result: dict[str, Any], warnings: list[str]) -> None:
+    """Tell a caller who asked for a refresh that the graph has no index to refresh."""
+    from code_review_graph.embeddings import REFRESH_SKIPPED_WARNING
+
+    logger.warning(REFRESH_SKIPPED_WARNING)
+    warnings.append(REFRESH_SKIPPED_WARNING)
+    result["embeddings_refresh_skipped"] = True
 
 
 # SQLITE_BUSY and SQLITE_LOCKED are the only two primary result codes that
@@ -709,7 +720,7 @@ def build_or_update_graph(
                 # leaving the marker set would make every later update a full
                 # rebuild.
                 store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-                return {
+                noop_result = {
                     **result,
                     "status": "ok",
                     "build_type": "incremental",
@@ -717,6 +728,17 @@ def build_or_update_graph(
                     "summary": summary,
                     "postprocess_level": postprocess,
                 }
+                # No node changed, so there is nothing to refresh. A caller who
+                # passes the pair on every update would still never learn that
+                # the graph has no index at all, so that case is reported here.
+                if embedding_provider and embedding_model:
+                    from code_review_graph.embeddings import has_embeddings
+
+                    if not has_embeddings(store):
+                        noop_warnings: list[str] = []
+                        _report_refresh_skipped(noop_result, noop_warnings)
+                        noop_result["warnings"] = noop_warnings
+                return noop_result
             summary = (
                 f"Incremental update: {result['files_updated']} files re-parsed, "
                 f"{result['total_nodes']} nodes and "
