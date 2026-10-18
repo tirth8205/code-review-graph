@@ -17,6 +17,24 @@
 
 ### Fixed
 
+- `_strip_plsql_noise` tracked string-literal state per line and stripped
+  `/* */` comments over the raw text in a separate first pass, so a
+  string literal spanning multiple lines (or containing an unterminated
+  `/*`) could desynchronize the rest of the file: an `END name;`-shaped
+  substring inside a multi-line string terminated a block early, an
+  Oracle `q'[...]'`/`Q'<...>'` quoted string (which allows unescaped `'`
+  inside it) confused the plain `'...'` state machine the same way, and
+  an unterminated `/*` inside one string literal could pair up with an
+  unrelated `*/` inside a later string and blank out everything between
+  them — including a whole `CREATE PROCEDURE` statement that happened to
+  fall in that span, which also regressed plain (non-Oracle) SQL files.
+  It now tracks string and comment state in one pass over the whole file.
+  `_plsql_block_end`'s terminator search also ran unbounded to
+  end-of-file, so a package body member using a bare `END;` could match
+  an unrelated, later package body's same-named member's `END name;`
+  instead of its own, and the unbounded search was quadratic on a file
+  with many members (~4s for 4,000). It now takes a `limit`, bounding a
+  member's search to its own enclosing package body (PR #785 review).
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
@@ -216,6 +234,14 @@
 
 ### Fixed
 
+- PL/SQL identifiers with non-ASCII letters (e.g. `café`) were silently
+  truncated at the first accented character (`_PLSQL_IDENT` was
+  `[A-Za-z_][A-Za-z0-9_$#]*`, unlike the `\w`-based identifier matching used
+  for non-Oracle SQL elsewhere in this file, which is Unicode-aware by
+  default). The leading character class is now `[^\W\d]` instead of
+  `[A-Za-z_]`, so PL/SQL identifiers are Unicode-aware like the rest of the
+  file while still correctly handling Oracle's `$`/`#` mid-identifier
+  characters.
 - Go and Ruby imports resolve into the repository instead of staying bare
   strings. Go reads the module path from the nearest `go.mod` (nested
   modules win over their ancestors, and local `replace` targets are
@@ -452,6 +478,30 @@
   platform's MCP registration while preserving the graph data and every other
   configured integration. Without `--platform` the command still performs the
   full uninstall (#678).
+- Added Oracle PL/SQL structural parsing: packages, package bodies, triggers,
+  and PL/SQL-style functions/procedures (`.sql`, `.pls`, `.plb`, `.pks`,
+  `.pkb`, `.pck`, `.prc`, `.fnc`, `.trg`), with package bodies qualified
+  distinctly from their spec (`pkg_name$body`) and nested members qualified
+  by name plus parameter signature (`pkg_name$body.member_name(params)`, so
+  overloaded package members don't collide), plus regex-based CALLS edges
+  between procedures/functions/triggers/package members. The PL/SQL-specific
+  passes (body-span computation, CALLS extraction, packages, triggers) only
+  run for files an Oracle-dialect check confirms are PL/SQL (an Oracle
+  extension, or a content signal like `VARCHAR2`/`%TYPE`/`:NEW.`, checked
+  against comment/string-stripped text) — plain ANSI/T-SQL/MySQL `.sql`
+  files are unaffected. Comments and string-literal contents are blanked
+  before every PL/SQL regex pass runs, so a `;` or `END name;` inside a
+  trailing comment or a dynamic-SQL string literal can't be mistaken for a
+  real terminator, and Oracle's `$`/`#` identifier characters are handled
+  consistently across every pass. Every `CREATE`/`END`-anchored regex
+  requires a leading word boundary (e.g. `RECREATE PROCEDURE` no longer
+  matches as `CREATE PROCEDURE`, `ENDfoo;` no longer matches as `END foo;`),
+  and the forward-declaration/signature scanners are independently
+  comment/string-aware rather than only correct because callers happen to
+  pass pre-cleaned text. The `INSERT INTO` filter used when extracting
+  PL/SQL call edges now checks a bounded lookback window instead of
+  re-scanning the whole preceding body on every call site, keeping call
+  extraction roughly linear instead of quadratic on files with many calls.
 
 ### Fixed
 
