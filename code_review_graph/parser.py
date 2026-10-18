@@ -5095,7 +5095,10 @@ class CodeParser:
             return True
         return bool(cls._ORACLE_SIGNAL_RE.search(text))
 
-    _PLSQL_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+    # Closing delimiter for each Oracle q-quote bracket-style opener
+    # (`q'[...]'`, `q'{...}'`, `q'(...)'`, `q'<...>'`); any other character
+    # closes with itself (`q'!...!'`).
+    _PLSQL_Q_DELIM_CLOSE = {"[": "]", "{": "}", "(": ")", "<": ">"}
 
     @staticmethod
     def _strip_plsql_noise(text: str) -> str:
@@ -5112,37 +5115,85 @@ class CodeParser:
         `IS` keyword was misdetected as a bodyless forward declaration and
         dropped entirely; a body with a comment mentioning `END name;` had
         its span truncated at the comment instead of the real end.
+
+        This runs as one pass over the whole text rather than per line or
+        as a separate global comment-stripping regex applied first (PR #785
+        review): both of those earlier approaches broke on real PL/SQL —
+        a plain `'...'` string's open/close state was reset at the start
+        of every line, so a string spanning multiple lines (or an Oracle
+        `q'[...]'`/`Q'<...>'` quoted string, which allows unescaped `'`
+        inside it) let a `;` or `END name;` inside the string terminate the
+        block early; and a bare `/\\*.*?\\*/` substitution over raw text
+        doesn't know it's inside a string either, so a string containing an
+        unterminated `/*` (e.g. a comment-like fragment in a literal) could
+        pair up with an unrelated later `*/` and blank out everything in
+        between, including real statements — silently dropping a
+        `CREATE PROCEDURE ...` that happened to fall inside that span.
         """
-        def _blank_block_comment(m: "re.Match[str]") -> str:
-            return "".join("\n" if c == "\n" else " " for c in m.group(0))
-
-        text = CodeParser._PLSQL_BLOCK_COMMENT_RE.sub(_blank_block_comment, text)
-
-        out_lines: list[str] = []
-        for raw_line in text.splitlines(keepends=True):
-            line = raw_line.rstrip("\r\n")
-            ending = raw_line[len(line):]
-            out: list[str] = []
-            in_string = False
-            i = 0
-            while i < len(line):
-                ch = line[i]
-                if ch == "'":
-                    out.append(ch)
-                    if in_string and i + 1 < len(line) and line[i + 1] == "'":
-                        out.append(" ")
+        out: list[str] = []
+        i, n = 0, len(text)
+        in_single = False
+        q_close: str | None = None  # set while inside a q'...' string
+        while i < n:
+            c = text[i]
+            if q_close is not None:
+                if text[i:i + len(q_close)] == q_close:
+                    out.append(" " * len(q_close))
+                    i += len(q_close)
+                    q_close = None
+                else:
+                    out.append("\n" if c == "\n" else " ")
+                    i += 1
+                continue
+            if in_single:
+                if c == "'":
+                    if i + 1 < n and text[i + 1] == "'":
+                        out.append("  ")
                         i += 2
                         continue
-                    in_string = not in_string
+                    out.append("'")
+                    in_single = False
                     i += 1
                     continue
-                if not in_string and ch == "-" and i + 1 < len(line) and line[i + 1] == "-":
-                    out.append(" " * (len(line) - i))
-                    break
-                out.append(" " if in_string else ch)
+                out.append("\n" if c == "\n" else " ")
                 i += 1
-            out_lines.append("".join(out) + ending)
-        return "".join(out_lines)
+                continue
+            # Not inside any string literal here.
+            if c == "-" and i + 1 < n and text[i + 1] == "-":
+                nl = text.find("\n", i)
+                end = n if nl == -1 else nl
+                out.append(" " * (end - i))
+                i = end
+                continue
+            if c == "/" and i + 1 < n and text[i + 1] == "*":
+                close = text.find("*/", i + 2)
+                seg_end = n if close == -1 else close + 2
+                out.append(
+                    "".join("\n" if ch == "\n" else " " for ch in text[i:seg_end]),
+                )
+                i = seg_end
+                continue
+            if (
+                c in "qQ" and i + 2 < n and text[i + 1] == "'"
+                and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+            ):
+                open_delim = text[i + 2]
+                out.append(c)
+                out.append("'")
+                out.append(" ")
+                i += 3
+                q_close = CodeParser._PLSQL_Q_DELIM_CLOSE.get(
+                    open_delim, open_delim,
+                ) + "'"
+                continue
+            if c == "'":
+                out.append("'")
+                in_single = True
+                i += 1
+                continue
+            out.append(c)
+            i += 1
+        return "".join(out)
 
     # Any top-level CREATE statement this parser recognizes — used to bound
     # a block-end search that finds no END at all, so a malformed/unusual
@@ -5545,7 +5596,7 @@ class CodeParser:
                 member_identity = f"{member_name}({member_sig})"
                 member_line = clean_text[: body_start + mm.start()].count("\n") + 1
                 member_body_end = self._plsql_block_end(
-                    clean_text, member_start, member_name,
+                    clean_text, member_start, member_name, limit=body_end,
                 )
                 member_qualified = f"{body_qualified}.{member_identity}"
                 nodes.append(NodeInfo(
@@ -5719,7 +5770,9 @@ class CodeParser:
                 ))
 
     @staticmethod
-    def _plsql_block_end(text: str, start: int, name: str) -> int:
+    def _plsql_block_end(
+        text: str, start: int, name: str, limit: int | None = None,
+    ) -> int:
         """Return the index just past the terminating ``;`` of a named
         PL/SQL block beginning at ``start``.
 
@@ -5729,23 +5782,36 @@ class CodeParser:
         bare, unnamed ``END;``. Falls back to the first bare ``END;`` if no
         named terminator exists (this can under-shoot for unnamed bodies
         with nested blocks — an inherent limitation of regex-based PL/SQL
-        parsing, since no PL/SQL grammar is available). If no ``END`` at all
-        is found (a malformed/incomplete block), the search is bounded by
-        the next top-level ``CREATE`` statement rather than end-of-file, so
-        one broken block can't swallow the rest of the file.
+        parsing, since no PL/SQL grammar is available).
+
+        ``limit`` bounds how far either search can look (defaults to the
+        next top-level ``CREATE`` statement after ``start``, or end of
+        file, if no ``END`` at all is found). Without this bound, the named
+        search ran unbounded to end-of-file: two package bodies with a
+        same-named member (two overloads sharing a name is explicitly a
+        supported case, but so is one package body's member called `foo`
+        and another, unrelated package body's member also called `foo`)
+        could bleed into each other when the first used a bare `END;` and
+        the regex, un-bounded, found some *later* package body's own named
+        `END foo;` instead — see PR #785 review. An unbounded scan from
+        every member's start to end-of-file is also quadratic over a file
+        with many members (~4s for 4,000 members, per that review); passing
+        the enclosing block's own end as `limit` keeps each member's search
+        proportional to that block's size instead of to the whole file.
         """
+        if limit is None:
+            next_stmt = CodeParser._SQL_NEXT_STMT_RE.search(text, start)
+            limit = next_stmt.start() if next_stmt else len(text)
+        window = text[start:limit]
         named = re.search(
-            rf"\bEND\b\s*{re.escape(name)}\b\s*;", text[start:], re.IGNORECASE,
+            rf"\bEND\b\s*{re.escape(name)}\b\s*;", window, re.IGNORECASE,
         )
         if named:
             return start + named.end()
-        bare = re.search(r"\bEND\b\s*;", text[start:], re.IGNORECASE)
+        bare = re.search(r"\bEND\b\s*;", window, re.IGNORECASE)
         if bare:
             return start + bare.end()
-        next_stmt = CodeParser._SQL_NEXT_STMT_RE.search(text, start)
-        if next_stmt:
-            return next_stmt.start()
-        return len(text)
+        return limit
 
     def _extract_plsql_calls(
         self,

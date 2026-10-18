@@ -4471,6 +4471,148 @@ class TestPLSQLHelpers:
         lookback_start = max(0, m.start() - CodeParser._INTO_LOOKBACK)
         assert re.search(r"\bINTO\s*$", text[lookback_start:m.start()], re.IGNORECASE)
 
+    def test_strip_noise_tracks_string_state_across_lines(self):
+        # _strip_plsql_noise used to reset its in-string flag at the start
+        # of every line, so a string literal spanning multiple lines let a
+        # "END name;"-shaped substring inside it terminate the block early
+        # (PR #785 review).
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_multiline_string.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE multi_line_proc AS\n"
+            "  v_msg VARCHAR2(200) := 'line one\n"
+            "END multi_line_proc;\n"
+            "line two';\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END multi_line_proc;\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = [n for n in nodes if n.name == "multi_line_proc"]
+        assert len(procs) == 1
+        assert procs[0].line_end == 7
+
+    def test_strip_noise_handles_q_quoted_strings(self):
+        # Oracle's q'[...]'/Q'<...>' quote operator allows unescaped `'`
+        # inside the string, which the plain '...' state machine does not
+        # know about, so it closed the string early on the embedded `'`
+        # and then misread the rest of the q-string as real code.
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_qstring.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE q_proc AS\n"
+            "  v_msg VARCHAR2(200) := q'[it's a test; END q_proc;]';\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END q_proc;\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        procs = [n for n in nodes if n.name == "q_proc"]
+        assert len(procs) == 1
+        assert procs[0].line_end == 5
+
+    def test_strip_noise_comment_cannot_start_inside_string(self):
+        # The old implementation blanked /\*.*?\*/ over the raw text before
+        # any string tracking existed, so an unterminated "/*" inside one
+        # string literal could pair up with an unrelated "*/" inside a
+        # later string, blanking everything between them — including a
+        # whole CREATE PROCEDURE statement that happened to fall in that
+        # span (PR #785 review: "staging finds both procedures and tables
+        # but this branch finds only one procedure").
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_comment_in_string.sql"
+        fixture.write_text(
+            "CREATE PROCEDURE get_widget AS\n"
+            "BEGIN\n"
+            "  v_note VARCHAR2(100) := 'a /* b';\n"
+            "END;\n"
+            "\n"
+            "CREATE PROCEDURE should_not_be_dropped AS\n"
+            "BEGIN\n"
+            "  NULL;\n"
+            "END;\n"
+            "\n"
+            "CREATE TABLE widgets (id INT, tag VARCHAR2(20) DEFAULT 'c */ d');\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        names = {n.name for n in nodes}
+        assert "get_widget" in names
+        assert "should_not_be_dropped" in names
+        assert "widgets" in names
+
+    def test_block_end_bounded_to_enclosing_package_body(self):
+        # _plsql_block_end's named-END search ran unbounded to end-of-file,
+        # so a member using a bare "END;" could have its search skip past
+        # its own package body entirely and land on an unrelated, later
+        # package body's same-named member's "END <name>;" (PR #785
+        # review). Passing the enclosing body's own end as `limit` keeps
+        # the search inside that body.
+        parser = CodeParser()
+        fixture = FIXTURES / "sample_plsql_bleed.pkb"
+        fixture.write_text(
+            "CREATE OR REPLACE PACKAGE BODY pkg_a IS\n"
+            "  PROCEDURE foo IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END;\n"
+            "END pkg_a;\n"
+            "/\n"
+            "\n"
+            "CREATE OR REPLACE PACKAGE BODY pkg_b IS\n"
+            "  PROCEDURE foo IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END foo;\n"
+            "END pkg_b;\n"
+            "/\n",
+        )
+        try:
+            nodes, _ = parser.parse_file(fixture)
+        finally:
+            fixture.unlink()
+        foos = [n for n in nodes if n.name == "foo"]
+        assert len(foos) == 2
+        by_line = sorted(foos, key=lambda n: n.line_start)
+        assert by_line[0].line_end == 5  # pkg_a.foo's own bare END, not pkg_b's
+        assert by_line[1].line_end == 13
+
+    def test_block_end_search_is_not_quadratic_on_many_members(self):
+        # Each member's unbounded search used to cost O(remaining file
+        # size); bounding it to the enclosing package body's own end keeps
+        # per-member cost proportional to that body instead of the file.
+        import time
+
+        parser = CodeParser()
+        lines = ["CREATE OR REPLACE PACKAGE BODY big_pkg IS"]
+        n = 2000
+        for i in range(n):
+            lines.append(f"  PROCEDURE member_{i} IS")
+            lines.append("  BEGIN")
+            lines.append("    NULL;")
+            lines.append("  END;")
+        lines.append("END big_pkg;")
+        lines.append("/")
+        fixture = FIXTURES / "sample_plsql_many_members.pkb"
+        fixture.write_text("\n".join(lines))
+        try:
+            start = time.perf_counter()
+            nodes, _ = parser.parse_file(fixture)
+            elapsed = time.perf_counter() - start
+        finally:
+            fixture.unlink()
+        members = [n for n in nodes if n.name.startswith("member_")]
+        assert len(members) == n
+        assert elapsed < 5, f"block-end search took {elapsed:.2f}s for {n} members — looks quadratic"
+
 
 class TestZigParsing:
     def setup_method(self):
