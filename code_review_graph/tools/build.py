@@ -295,13 +295,16 @@ def _run_postprocess(
 
     # -- Expensive: flows + communities (only for "full") --
     use_incremental = not full_rebuild and bool(changed_files)
+    # Stored nodes.file_path values are absolute; change discovery reports
+    # repo-relative paths. Resolve them once for the graph-keyed passes below.
+    graph_changed_files = _fts_file_hint(repo_root, changed_files) or []
 
     stage_started = time.perf_counter()
     try:
         if use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
-            count = incremental_trace_flows(store, changed_files)
+            count = incremental_trace_flows(store, graph_changed_files)
         else:
             from code_review_graph.flows import store_flows as _store_flows
             from code_review_graph.flows import trace_flows as _trace_flows
@@ -325,7 +328,7 @@ def _run_postprocess(
                 incremental_detect_communities,
             )
 
-            count = incremental_detect_communities(store, changed_files)
+            count = incremental_detect_communities(store, graph_changed_files)
         else:
             from code_review_graph.communities import (
                 detect_communities as _detect_communities,

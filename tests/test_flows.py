@@ -634,3 +634,45 @@ class TestFlows:
             "WHERE f.id IS NULL"
         ).fetchall()
         assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
+
+
+def test_postprocess_incremental_flows_accept_repo_relative_changed_files(tmp_path):
+    """Repo-relative changed_files must reach the flow pass as absolute paths.
+
+    Stored ``nodes.file_path`` values are absolute, while change discovery
+    reports repo-relative paths. ``_run_postprocess`` has to resolve them
+    against ``repo_root``; otherwise the incremental flow pass matches nothing.
+    """
+    from code_review_graph.parser import normalize_file_path
+    from code_review_graph.tools.build import _run_postprocess
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    routes = normalize_file_path(root / "routes.py")
+    services = normalize_file_path(root / "services.py")
+
+    store = GraphStore(str(tmp_path / "graph.db"))
+    try:
+        store.upsert_node(NodeInfo(
+            kind="Function", name="handler", file_path=routes,
+            line_start=1, line_end=5, language="python",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function", name="service", file_path=services,
+            line_start=1, line_end=5, language="python",
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS", source=f"{routes}::handler",
+            target=f"{services}::service", file_path=routes, line=3,
+        ))
+        store.commit()
+
+        result: dict = {}
+        _run_postprocess(
+            store, result, "full",
+            changed_files=["routes.py"], repo_root=str(root),
+        )
+
+        assert result["flows_detected"] >= 1
+    finally:
+        store.close()
