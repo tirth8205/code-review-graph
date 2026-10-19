@@ -245,7 +245,7 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
@@ -302,7 +302,7 @@ async def build_or_update_graph_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 async def run_postprocess_tool(
     flows: bool = True,
     communities: bool = True,
@@ -346,7 +346,7 @@ async def run_postprocess_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_minimal_context_tool(
     task: str = "",
     changed_files: Optional[list[str]] = None,
@@ -378,7 +378,7 @@ async def get_minimal_context_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_impact_radius_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
@@ -423,7 +423,7 @@ async def get_impact_radius_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def query_graph_tool(
     pattern: str,
     target: str,
@@ -478,7 +478,7 @@ async def query_graph_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_review_context_tool(
     changed_files: Optional[list[str]] = None,
     max_depth: int = 2,
@@ -522,7 +522,7 @@ async def get_review_context_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def semantic_search_nodes_tool(
     query: str,
     kind: Optional[str] = None,
@@ -564,7 +564,7 @@ async def semantic_search_nodes_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 async def embed_graph_tool(
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
@@ -612,7 +612,7 @@ async def embed_graph_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list_graph_stats_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
@@ -632,7 +632,7 @@ async def list_graph_stats_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def get_docs_section_tool(
     section_name: str,
     repo_root: Optional[str] = None,
@@ -660,7 +660,7 @@ def get_docs_section_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def find_large_functions_tool(
     min_lines: int = 50,
     kind: Optional[str] = None,
@@ -691,7 +691,7 @@ async def find_large_functions_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list_flows_tool(
     sort_by: str = "criticality",
     limit: int = 50,
@@ -724,7 +724,7 @@ async def list_flows_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_flow_tool(
     flow_id: Optional[int] = None,
     flow_name: Optional[str] = None,
@@ -762,7 +762,7 @@ async def get_flow_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_affected_flows_tool(
     changed_files: Optional[list[str]] = None,
     base: str = "HEAD~1",
@@ -798,7 +798,7 @@ async def get_affected_flows_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def list_communities_tool(
     sort_by: str = "size",
     min_size: int = 0,
@@ -838,7 +838,7 @@ async def list_communities_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_community_tool(
     community_name: Optional[str] = None,
     community_id: Optional[int] = None,
@@ -875,7 +875,7 @@ async def get_community_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_architecture_overview_tool(
     repo_root: Optional[str] = None,
     detail_level: str = "minimal",
@@ -912,7 +912,7 @@ async def get_architecture_overview_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def detect_changes_tool(
     base: str = "HEAD~1",
     changed_files: Optional[list[str]] = None,
@@ -962,7 +962,7 @@ async def detect_changes_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def refactor_tool(
     mode: str = "rename",
     old_name: Optional[str] = None,
@@ -1012,7 +1012,7 @@ async def refactor_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True})
 async def apply_refactor_tool(
     refactor_id: str,
     repo_root: Optional[str] = None,
@@ -1054,7 +1054,7 @@ async def apply_refactor_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
 async def generate_wiki_tool(
     repo_root: Optional[str] = None,
     force: bool = False,
@@ -1084,7 +1084,7 @@ async def generate_wiki_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_wiki_page_tool(
     community_name: str,
     repo_root: Optional[str] = None,
@@ -1112,7 +1112,7 @@ async def get_wiki_page_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_hub_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
@@ -1139,7 +1139,7 @@ async def get_hub_nodes_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_bridge_nodes_tool(
     top_n: int = 10,
     repo_root: Optional[str] = None,
@@ -1167,7 +1167,7 @@ async def get_bridge_nodes_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_knowledge_gaps_tool(
     repo_root: Optional[str] = None,
     max_per_category: int = 15,
@@ -1197,7 +1197,7 @@ async def get_knowledge_gaps_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_surprising_connections_tool(
     top_n: int = 15,
     repo_root: Optional[str] = None,
@@ -1225,7 +1225,7 @@ async def get_surprising_connections_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def get_suggested_questions_tool(
     repo_root: Optional[str] = None,
 ) -> dict:
@@ -1248,7 +1248,7 @@ async def get_suggested_questions_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def traverse_graph_tool(
     query: str,
     mode: str = "bfs",
@@ -1283,7 +1283,7 @@ async def traverse_graph_tool(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 def list_repos_tool() -> dict:
     """List all registered repositories in the multi-repo registry.
 
@@ -1295,7 +1295,7 @@ def list_repos_tool() -> dict:
     return list_repos_func()
 
 
-@mcp.tool()
+@mcp.tool(annotations={"readOnlyHint": True})
 async def cross_repo_search_tool(
     query: str,
     kind: Optional[str] = None,
