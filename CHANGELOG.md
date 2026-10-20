@@ -69,6 +69,16 @@
   qualified name to pick another. A name that matches no symbol is
   `not_found` instead of falling back to a symbol whose name merely
   contains it.
+- tsconfig and jsconfig path aliases inherited through a relative `extends`
+  resolve against the config that declares `baseUrl` (or `paths`, when no
+  config in the chain sets `baseUrl`), as tsc does, instead of the nearest
+  config's directory. In an Nx or Turborepo layout every app extending a root
+  `tsconfig.base.json` lost its alias imports, so `importers_of` and the
+  impact radius of a shared library missed those apps (#1110). Also as in
+  tsc, a base config reached through a symlink (to the file or to a
+  directory above it) anchors where the link sits, and a `..` in its
+  `baseUrl` or `paths` climbs from there; `"baseUrl": null` in an extending
+  config unsets the inherited `baseUrl`.
 
 ## [2.3.9] - 2026-09-18
 
