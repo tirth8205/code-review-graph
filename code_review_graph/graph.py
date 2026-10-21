@@ -1277,6 +1277,8 @@ class GraphStore:
         1. Direct: TESTED_BY edges originating at this node (+ bare-name fallback).
         2. Indirect: follow outgoing CALLS edges up to *max_depth* hops,
            then collect TESTED_BY edges on each callee.
+        3. Follow incoming CALLS through test helpers to actual Test nodes,
+           allowing *max_depth* helpers between the symbol and a test.
 
         Returns a list of dicts with node fields plus ``indirect: bool``.
 
@@ -1463,7 +1465,77 @@ class GraphStore:
                             results.append(d)
             frontier = next_frontier
 
+        if max_depth > 0:
+            for route in self._get_test_helper_routes(
+                input_qns, max_depth + 1, max_frontier, self.get_repo_root(),
+            ).values():
+                for test in route["tests"]:
+                    if test not in seen:
+                        seen.add(test)
+                        d = _node_dict(test, indirect=True)
+                        if d:
+                            results.append(d)
+
         return results
+
+    def _get_test_helper_routes(
+        self, seeds: list[str], max_depth: int, max_callers: int, repo_root: str | None,
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve CALLS paths through test helpers, never helper TESTED_BY edges.
+
+        Helpers are marked as test code after parsing, so they need not have
+        TESTED_BY edges. Only reaching a real Test declaration supplies evidence;
+        a fixture's is_test flag alone cannot vouch for production code.
+        """
+        routes: dict[str, dict[str, Any]] = {}
+        frontier = {qn: {qn} for qn in seeds if "::" in qn}
+        expanded = {qn: set(origins) for qn, origins in frontier.items()}
+        for depth in range(1, max_depth + 1):
+            keys = sorted(frontier)
+            if not keys:
+                break
+            hubs: set[str] = set()
+            for start in range(0, len(keys), 450):
+                batch = keys[start:start + 450]
+                placeholders = ",".join("?" for _ in batch)
+                for row in self._conn.execute(  # nosec B608
+                    "SELECT target_qualified, COUNT(*) AS n FROM edges "
+                    f"WHERE kind = 'CALLS' AND target_qualified IN ({placeholders}) "
+                    "GROUP BY target_qualified", batch,
+                ).fetchall():
+                    if row["n"] > max_callers:
+                        hubs.add(row["target_qualified"])
+            keys = [key for key in keys if key not in hubs]
+            next_frontier: dict[str, set[str]] = {}
+            for start in range(0, len(keys), 450):
+                batch = keys[start:start + 450]
+                placeholders = ",".join("?" for _ in batch)
+                rows = self._conn.execute(  # nosec B608
+                    "SELECT e.source_qualified, e.target_qualified, e.extra, "
+                    "n.kind, n.file_path, n.is_test FROM edges e "
+                    "JOIN nodes n ON n.qualified_name = e.source_qualified "
+                    f"WHERE e.kind = 'CALLS' AND e.target_qualified IN ({placeholders}) "
+                    "ORDER BY e.source_qualified, e.target_qualified", batch,
+                ).fetchall()
+                for row in rows:
+                    caller = row["source_qualified"]
+                    if "::" not in caller or _edge_extra_is_unresolved(row["extra"]):
+                        continue
+                    origins = frontier[row["target_qualified"]]
+                    fresh = origins - expanded.get(caller, set()) - {caller}
+                    if row["kind"] == "Test":
+                        for origin in sorted(fresh):
+                            route = routes.setdefault(origin, {
+                                "via": caller, "depth": depth, "tests": [],
+                            })
+                            if caller not in route["tests"]:
+                                route["tests"].append(caller)
+                    elif row["is_test"] or is_test_file(row["file_path"], repo_root):
+                        next_frontier.setdefault(caller, set()).update(fresh)
+            for caller, origins in next_frontier.items():
+                expanded.setdefault(caller, set()).update(origins)
+            frontier = next_frontier
+        return routes
 
     def get_directly_tested(self, qualified_names: Iterable[str]) -> set[str]:
         """Which of *qualified_names* carry a TESTED_BY edge of their own.
@@ -1493,9 +1565,8 @@ class GraphStore:
     ) -> dict[str, dict[str, Any]]:
         """Find, for each input symbol, a tested *caller* that reaches it.
 
-        This is the opposite direction from :meth:`get_transitive_tests`, which
-        walks *outgoing* CALLS to ask "do the things this symbol calls have
-        tests?". Here the walk is *upwards* over incoming CALLS edges: a
+        This walks *upwards* over incoming CALLS edges, unlike the outgoing
+        callee traversal in :meth:`get_transitive_tests`: a
         private helper that no test names directly is still run by the tests of
         the public function that calls it, and reporting it as flatly
         "untested" is a false alarm the author cannot act on (#1047).
@@ -1533,7 +1604,8 @@ class GraphStore:
                 test files. Such a caller's TESTED_BY edges point at other
                 symbols in its own test file, so crediting a production symbol
                 through one would let a test fixture vouch for the code it
-                sets up. Defaults to the graph's recorded root.
+                sets up. Resolved CALLS paths through helpers to actual Test
+                nodes are accepted. Defaults to the graph's recorded root.
 
         Returns:
             ``{qualified_name: {"via", "depth", "tests"}}`` holding only the
@@ -1547,15 +1619,17 @@ class GraphStore:
         if repo_root is None:
             repo_root = self.get_repo_root()
         seeds = [qn for qn in dict.fromkeys(qualified_names) if qn]
-        routes: dict[str, dict[str, Any]] = {}
         if not seeds or max_depth < 1:
-            return routes
+            return {}
+        routes = self._get_test_helper_routes(seeds, max_depth, max_callers_per_node, repo_root)
+        for route in routes.values():
+            route["tests"] = route["tests"][:3]
 
         # node -> the seeds whose route currently passes through it. The walk
         # is level-synchronous and batched over every seed at once: one CALLS
         # query and one TESTED_BY query per hop, rather than a BFS per symbol.
         # On a 248-symbol delta that is 4 queries instead of several hundred.
-        frontier: dict[str, set[str]] = {qn: {qn} for qn in seeds}
+        frontier: dict[str, set[str]] = {qn: {qn} for qn in seeds if qn not in routes}
         # node -> seeds already expanded through it, so a call cycle
         # terminates instead of re-walking the same edges each hop.
         expanded: dict[str, set[str]] = {qn: set(origins) for qn, origins in frontier.items()}
