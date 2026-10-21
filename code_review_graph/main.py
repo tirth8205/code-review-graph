@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
@@ -1488,11 +1489,15 @@ def main(
     previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
     _incremental._MCP_STDIO_ACTIVE = transport == "stdio"
     watch_store: GraphStore | None = None
+    watch_thread: threading.Thread | None = None
+    watch_stop = threading.Event()
     try:
         if auto_watch:
             watch_store = GraphStore(get_db_path(root))
-            thread = start_watch_thread(root, watch_store, daemon=True)
-            if thread is None:
+            watch_thread = start_watch_thread(
+                root, watch_store, daemon=True, stop_event=watch_stop,
+            )
+            if watch_thread is None:
                 logger.warning("Auto-watch was requested but could not be started")
 
         if sys.platform == "win32":
@@ -1531,9 +1536,17 @@ def main(
         else:
             raise ValueError(f"unsupported transport: {transport!r}")
     finally:
-        if watch_store is not None:
-            watch_store.close()
-        _incremental._MCP_STDIO_ACTIVE = previous_stdio_state
+        try:
+            if watch_thread is not None:
+                watch_stop.set()
+                # watch() joins its debouncer before returning. A timed join
+                # could leave it using the store after close(), so wait until
+                # all watcher work has actually finished (#1121).
+                watch_thread.join()
+            if watch_store is not None:
+                watch_store.close()
+        finally:
+            _incremental._MCP_STDIO_ACTIVE = previous_stdio_state
 
 
 if __name__ == "__main__":
