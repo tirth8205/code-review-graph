@@ -3338,10 +3338,13 @@ def start_watch_thread(
     repo_root: Path,
     store: GraphStore,
     daemon: bool = True,
+    *,
+    stop_event: threading.Event | None = None,
 ) -> threading.Thread | None:
     """Start watch mode in a background thread.
 
-    Returns the started thread, or None if watchdog is unavailable.
+    Returns the started thread, or None if watchdog is unavailable. Set
+    *stop_event* and join the returned thread before closing its store.
     """
     try:
         import watchdog  # noqa: F401
@@ -3353,7 +3356,10 @@ def start_watch_thread(
         # A thread cannot take the process down, so the one thing it must not
         # do is die quietly: the server would keep serving a frozen graph.
         try:
-            watch(repo_root, store)
+            if stop_event is None:
+                watch(repo_root, store)
+            else:
+                watch(repo_root, store, stop_event=stop_event)
         except RuntimeError as exc:
             logger.error("Auto-watch for %s stopped: %s", repo_root, exc)
 
