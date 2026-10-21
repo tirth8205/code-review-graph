@@ -195,6 +195,31 @@ def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _run_jedi_enrichment(
+    store: GraphStore, repo_root: Path, files: Optional[list[str]] = None,
+) -> Optional[dict]:
+    """Run post-build Jedi call-resolution enrichment (optional extra).
+
+    Resolves ``receiver.method()`` calls on lowercase receivers that
+    tree-sitter drops, using Jedi. Best-effort like the other resolvers:
+    skipped when the ``[enrichment]`` extra (jedi) is not installed and never
+    fails a build. Can be disabled explicitly with
+    ``CRG_DISABLE_ENRICHMENT=1`` (e.g. to keep watch mode cheap on large
+    repos even when jedi is installed).
+
+    *files* limits the scan to those files (see ``enrich_jedi_calls``);
+    ``None`` scans every Python file.
+    """
+    if os.environ.get("CRG_DISABLE_ENRICHMENT", "") == "1":
+        return {"skipped": True, "reason": "disabled via CRG_DISABLE_ENRICHMENT"}
+    try:
+        from .jedi_resolver import enrich_jedi_calls
+        return enrich_jedi_calls(store, repo_root, files=files)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Jedi enrichment failed: %s", exc)
+        return None
+
+
 def _refresh_target_resolution(store: GraphStore) -> None:
     """Reclassify CALLS/REFERENCES targets after the cross-file resolvers.
 
@@ -1850,6 +1875,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     scoped_stats = _run_scoped_resolver(store)
+    jedi_stats = _run_jedi_enrichment(store, repo_root)
     _refresh_target_resolution(store)
 
     return {
@@ -1865,6 +1891,7 @@ def full_build(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 
@@ -2038,6 +2065,9 @@ def incremental_update(
     # explicit transaction — avoids nested transaction errors.
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
+    # Stored paths of the files re-parsed here. Re-parsing replaces a file's
+    # edges, so these are the only files the Jedi step needs to scan again.
+    reparsed_paths: list[str] = []
 
     if use_serial or len(to_parse) < 8:
         for rel_path in to_parse:
@@ -2058,6 +2088,7 @@ def incremental_update(
             # before the freshness anchor is advanced, so the next run still
             # sees this file as changed.
             store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
+            reparsed_paths.append(str(abs_path))
             remaining_identity.discard(rel_path)
             parsed_files += 1
             total_nodes += len(nodes)
@@ -2081,6 +2112,7 @@ def incremental_update(
                     edges,
                     fhash,
                 )
+                reparsed_paths.append(str(repo_root / rel_path))
                 remaining_identity.discard(rel_path)
                 parsed_files += 1
                 total_nodes += len(nodes)
@@ -2122,6 +2154,11 @@ def incremental_update(
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
     scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+    reparsed_py = [p for p in reparsed_paths if p.endswith(".py")]
+    jedi_stats = (
+        _run_jedi_enrichment(store, repo_root, files=reparsed_py)
+        if reparsed_py else None
+    )
     if files_updated or stale_files:
         _refresh_target_resolution(store)
 
@@ -2161,6 +2198,7 @@ def incremental_update(
         "temporal_resolution": temporal_stats,
         "hcl_resolution": hcl_stats,
         "scoped_resolution": scoped_stats,
+        "jedi_enrichment": jedi_stats,
     }
 
 

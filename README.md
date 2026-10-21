@@ -243,7 +243,9 @@ Blast-radius analysis recovers every file in the ground truth on all 13 evaluati
 | gin | 3 | 0.609 | 0.439 | 1.0 |
 | **Average** | **13** | **0.693** | **0.546** | **1.000** |
 
-The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-08-02 capture co-change mode returned `predicted_files = 0` on every graded commit, so it is not yet a usable measurement and no co-change number is quoted.
+This table is from the 2026-08-02 capture, taken before the path fix described below. That bug also kept real neighbour files out of the graph-derived ground truth, so these numbers will change when the benchmark is re-run.
+
+The benchmark also runs a **co-change mode**: the predictor is seeded with one changed file and graded against the other files the author touched in the same commit, which is evidence from git history rather than from the graph. Both modes appear in the result CSVs (`ground_truth_mode` column). In the 2026-08-02 capture co-change mode returned `predicted_files = 0` on every graded commit, code seeds included (for example `code_review_graph/cli.py` and gin's `context.go`). The cause was a path bug in the benchmark: `git diff` gives repo-relative paths, the graph stores absolute ones, so the seed never matched a node. That bug is now fixed, but the benchmark has not been re-run yet, so no co-change number is quoted.
 
 </details>
 
@@ -266,7 +268,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 ### Limitations
 
-- **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. The co-change mode is not yet a usable measurement.
+- **Impact "recall 1.0" is circular.** The historical ground truth comes from the same graph edges the predictor walks, so it is an upper bound by construction. Co-change numbers are not quoted until the benchmark is re-run with the path fix.
 - **Small single-file changes.** Graph context can exceed a plain file read for trivial edits. The overhead is the structural metadata that makes multi-file analysis possible.
 - **Search ranking.** Keyword search usually finds the right result near the top, but ranking needs work. Express queries can return no hits because of module-pattern naming.
 - **Flow detection.** Entry-point detection is strongest for Python and PHP/Laravel. JavaScript and Go flow detection needs work.

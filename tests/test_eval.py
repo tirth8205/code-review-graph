@@ -724,6 +724,13 @@ def test_impact_accuracy_emits_both_ground_truth_modes():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = _make_repo(tmpdir, two_file_commit=True)
+        # The runner resolves the clone path before full_build (see
+        # runner.run_eval). The parser resolves cross-file import/call
+        # targets, so building from a non-canonical root (macOS /var vs
+        # /private/var) stores node names and edge targets under different
+        # prefixes and no edge ever matches a node. Build and run against
+        # the resolved root, exactly as production eval does.
+        repo_path = repo_path.resolve()
         store = _build_store(repo_path)
         try:
             results = impact_accuracy.run(repo_path, store, _mock_config())
@@ -753,8 +760,17 @@ def test_impact_accuracy_emits_both_ground_truth_modes():
     assert len(co_rows) == 1
     co = co_rows[0]
     assert co["status"] == "ok"
+    # The seed is reported relative to the repo root, never as the local
+    # clone path (the predictor itself still gets the stored absolute form).
     assert co["seed_file"] == "helper.py"
     assert co["actual_files"] == 1
+    # Regression guard: the predictor must emit real candidates. main.py
+    # imports helper.py, so the CALLS/IMPORTS_FROM edge has to be found even
+    # though only the seed file was analysed. (Was broken: the relative git
+    # path never matched the absolute path the graph stores → predicted=0
+    # on every commit.)
+    assert co["predicted_files"] > 0
+    assert co["true_positives"] >= 1
     assert 0.0 <= co["precision"] <= 1.0
     assert 0.0 <= co["recall"] <= 1.0
 
@@ -777,6 +793,9 @@ def test_impact_accuracy_co_change_skipped_for_single_file_commit():
     assert len(co_rows) == 1
     assert co_rows[0]["status"] == "skipped"
     assert "co-changed" in co_rows[0]["error"]
+    # Skipped rows also report the seed relative to the repo root.
+    assert not Path(co_rows[0]["seed_file"]).is_absolute()
+    assert str(Path(tmpdir)) not in co_rows[0]["seed_file"]
 
     agg = impact_accuracy.aggregate(results)
     assert agg["skipped_rows"] == 1

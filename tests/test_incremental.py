@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
@@ -781,6 +782,56 @@ class TestFullBuild:
         finally:
             store.close()
 
+    def test_full_build_wires_jedi_enrichment(self, tmp_path):
+        # Regression guard: the [enrichment] extra (jedi) used to be dead
+        # code — enrich_jedi_calls was never invoked by any build path.
+        # full_build must call it with the store + repo root and surface
+        # its stats in the result dict.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ), patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 3, "files": 1},
+            ) as mock_enrich:
+                result = full_build(tmp_path, store)
+            assert result["jedi_enrichment"] == {"resolved": 3, "files": 1}
+            assert mock_enrich.call_count == 1
+            assert mock_enrich.call_args[0][0] is store
+            assert mock_enrich.call_args[0][1] == tmp_path
+        finally:
+            store.close()
+
+    def test_full_build_jedi_enrichment_skips_when_disabled(self, tmp_path, monkeypatch):
+        # The opt-out must skip enrichment without failing the build and
+        # report the skip in the stats.
+        py_file = tmp_path / "sample.py"
+        py_file.write_text("def hello():\n    pass\n")
+        (tmp_path / ".git").mkdir()
+
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            monkeypatch.setenv("CRG_DISABLE_ENRICHMENT", "1")
+            with patch(
+                "code_review_graph.incremental.get_all_tracked_files",
+                return_value=["sample.py"],
+            ):
+                result = full_build(tmp_path, store)
+            assert result["jedi_enrichment"] == {
+                "skipped": True,
+                "reason": "disabled via CRG_DISABLE_ENRICHMENT",
+            }
+        finally:
+            store.close()
+
     def test_full_build_removes_nodes_left_without_a_file_node(self, tmp_path):
         from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -833,6 +884,98 @@ class TestIncrementalUpdate:
         try:
             result = incremental_update(tmp_path, store, changed_files=[])
             assert result["files_updated"] == 0
+        finally:
+            store.close()
+
+    def test_incremental_update_wires_jedi_enrichment(self, tmp_path):
+        # Jedi enrichment must re-run when Python files changed, and be
+        # skipped entirely when nothing Python-related was updated.
+        py_file = tmp_path / "app.py"
+        py_file.write_text("def app():\n    pass\n")
+        db_path = tmp_path / "test.db"
+        store = GraphStore(db_path)
+        try:
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 1, "files": 1},
+            ) as mock_enrich:
+                result = incremental_update(
+                    tmp_path, store, changed_files=["app.py"]
+                )
+                assert result["jedi_enrichment"] == {"resolved": 1, "files": 1}
+                assert mock_enrich.call_count == 1
+
+                mock_enrich.reset_mock()
+                result = incremental_update(tmp_path, store, changed_files=[])
+                # Nothing was re-parsed, so the Jedi step does not run.
+                assert result["jedi_enrichment"] is None
+                mock_enrich.assert_not_called()
+        finally:
+            store.close()
+
+    def test_incremental_update_scopes_jedi_to_reparsed_files(self, tmp_path):
+        # Review of PR #823: an incremental update must not make Jedi read
+        # every Python file again. Only the files re-parsed in this update
+        # lost their Jedi edges, so only those are passed to the scan.
+        for i in range(5):
+            (tmp_path / f"mod{i}.py").write_text(f"def f{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            incremental_update(
+                tmp_path, store, changed_files=[f"mod{i}.py" for i in range(5)]
+            )
+            (tmp_path / "mod2.py").write_text("def f2():\n    return 2\n")
+            with patch(
+                "code_review_graph.jedi_resolver.enrich_jedi_calls",
+                return_value={"resolved": 0, "files": 0},
+            ) as mock_enrich:
+                incremental_update(tmp_path, store, changed_files=["mod2.py"])
+            assert mock_enrich.call_count == 1
+            scoped = mock_enrich.call_args.kwargs["files"]
+            assert [Path(f).name for f in scoped] == ["mod2.py"]
+        finally:
+            store.close()
+
+    def test_jedi_scan_reads_only_the_given_files(self, tmp_path):
+        # enrich_jedi_calls(files=...) must read only those files from disk.
+        pytest.importorskip("jedi")
+        from code_review_graph.jedi_resolver import enrich_jedi_calls
+
+        (tmp_path / "svc.py").write_text(
+            "class Service:\n    def authenticate(self):\n        return True\n\n"
+            "def make():\n    return Service()\n"
+        )
+        (tmp_path / "app.py").write_text(
+            "from svc import make\n\ndef run():\n    s = make()\n"
+            "    return s.authenticate()\n"
+        )
+        for i in range(3):
+            (tmp_path / f"other{i}.py").write_text(f"def g{i}():\n    pass\n")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            with patch.dict(os.environ, {"CRG_DISABLE_ENRICHMENT": "1"}):
+                incremental_update(
+                    tmp_path, store,
+                    changed_files=["svc.py", "app.py"] + [f"other{i}.py" for i in range(3)],
+                )
+            read: list[str] = []
+            real_read_bytes = Path.read_bytes
+
+            def spy(self):
+                read.append(self.name)
+                return real_read_bytes(self)
+
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path, files=[str(tmp_path / "app.py")])
+            assert read == ["app.py"]
+
+            # Without a scope (full build) every Python file is read.
+            read.clear()
+            with patch.object(Path, "read_bytes", spy):
+                enrich_jedi_calls(store, tmp_path)
+            assert sorted(read) == sorted(
+                ["app.py", "svc.py"] + [f"other{i}.py" for i in range(3)]
+            )
         finally:
             store.close()
 

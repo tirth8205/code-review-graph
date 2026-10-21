@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from .parser import CodeParser, EdgeInfo, normalize_file_path
 from .parser import _is_test_file as _parser_is_test_file
@@ -24,12 +24,21 @@ logger = logging.getLogger(__name__)
 _SELF_NAMES = frozenset({"self", "cls", "super"})
 
 
-def enrich_jedi_calls(store, repo_root: Path) -> dict:
+def enrich_jedi_calls(
+    store, repo_root: Path, files: Optional[Iterable[str]] = None,
+) -> dict:
     """Resolve untracked Python method calls via Jedi.
 
     Walks Python files, finds ``receiver.method()`` calls that tree-sitter
     dropped (lowercase receiver, not self/cls), resolves them with Jedi,
     and inserts new CALLS edges.
+
+    *files* limits which files are read and scanned for calls. ``None``
+    (a full build) scans every Python file in the graph. An incremental
+    update passes only the files it re-parsed: re-parsing replaces a file's
+    edges, so those are the only files that lost their Jedi edges, and
+    reading every other Python file again on each update is wasted work.
+    Jedi still resolves call targets across the whole project.
 
     Returns stats dict with ``resolved`` count.
     """
@@ -39,7 +48,8 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
         logger.info("Jedi not installed, skipping Python enrichment")
         return {"skipped": True, "reason": "jedi not installed"}
 
-    repo_root = Path(repo_root).resolve()
+    repo_root_given = Path(repo_root)
+    repo_root = repo_root_given.resolve()
 
     # Get Python files from the graph — skip early if none
     all_files = store.get_all_files()
@@ -47,6 +57,16 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     if not py_files:
         return {"resolved": 0, "files": 0}
+
+    # Files to read and scan. The Jedi project below is still built from
+    # every Python file so that targets in unchanged files resolve.
+    if files is None:
+        scan_files = py_files
+    else:
+        wanted = {normalize_file_path(f) for f in files}
+        scan_files = [f for f in py_files if normalize_file_path(f) in wanted]
+        if not scan_files:
+            return {"resolved": 0, "files": 0}
 
     # Scope the Jedi project to Python-only directories to avoid scanning
     # non-Python files (e.g. node_modules, TS sources).  This matters for
@@ -81,7 +101,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     files_with_pending: list[tuple[str, bytes, list]] = []
     total_skipped = 0
-    for file_path in py_files:
+    for file_path in scan_files:
         try:
             source = Path(file_path).read_bytes()
         except (OSError, PermissionError):
@@ -101,7 +121,7 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
     logger.debug(
         "Jedi: %d/%d Python files have pending calls (%d calls skipped — no project target)",
-        len(files_with_pending), len(py_files), total_skipped,
+        len(files_with_pending), len(scan_files), total_skipped,
     )
 
     resolved_count = 0
@@ -158,12 +178,18 @@ def enrich_jedi_calls(store, repo_root: Path) -> dict:
 
             # Only emit edges for project-internal definitions
             try:
-                module_path.relative_to(repo_root)
+                rel_path = module_path.relative_to(repo_root)
             except ValueError:
                 continue
 
-            # Build qualified target: file_path::Class.method or file_path::func
-            target_file = normalize_file_path(module_path)
+            # Build the target in the same path form the graph stores nodes
+            # under. Nodes are stored relative to the repo root as handed to
+            # full_build, which may be non-canonical (e.g. macOS /var vs
+            # /private/var symlinks); rebase the resolved module path back
+            # onto that root instead of emitting a canonicalized absolute
+            # path — otherwise the edge target never matches a node
+            # qualified name and neighbor/impact lookups miss it.
+            target_file = normalize_file_path(repo_root_given / rel_path)
             parent = name.parent()
             if parent and parent.type == "class":
                 target = f"{target_file}::{parent.name}.{name.name}"
