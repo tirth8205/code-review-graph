@@ -562,6 +562,9 @@ Notes:
 - `install` appends a Git `pre-commit` hook that prints a risk summary before
   each commit. The hook skips linked worktrees unless `CRG_HOOK_WORKTREES=1`
   is set, so a worktree does not build a second graph for another branch.
+- `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
+  hooks that run `update` after a branch switch, a merge and a rebase, with
+  the same worktree rule.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
 

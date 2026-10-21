@@ -347,6 +347,7 @@ def _handle_init(args: argparse.Namespace) -> None:
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_git_sync_hooks,
         install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
@@ -422,6 +423,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
@@ -430,6 +433,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():

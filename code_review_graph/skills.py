@@ -1572,7 +1572,11 @@ def _known_git_hook_blocks() -> tuple[str, ...]:
     return tuple(sorted(set(_LEGACY_GIT_HOOK_BLOCKS), key=len, reverse=True))
 
 
-def _git_hook_markers_balanced(text: str) -> bool:
+def _git_hook_markers_balanced(
+    text: str,
+    begin_marker: str = _GIT_HOOK_BEGIN_MARKER,
+    end_marker: str = _GIT_HOOK_END_MARKER,
+) -> bool:
     """Return whether every begin marker in ``text`` has its own end marker.
 
     A begin marker with no end marker after it, or a second begin marker
@@ -1580,37 +1584,42 @@ def _git_hook_markers_balanced(text: str) -> bool:
     is then no trustworthy boundary, so callers must refuse rather than guess
     where the block stops.
     """
-    begins = text.count(_GIT_HOOK_BEGIN_MARKER)
-    if begins != text.count(_GIT_HOOK_END_MARKER):
+    begins = text.count(begin_marker)
+    if begins != text.count(end_marker):
         return False
     cursor = 0
     for _ in range(begins):
-        begin = text.find(_GIT_HOOK_BEGIN_MARKER, cursor)
-        closing = text.find(_GIT_HOOK_END_MARKER, begin)
+        begin = text.find(begin_marker, cursor)
+        closing = text.find(end_marker, begin)
         if closing < 0:
             return False
-        nested = text.find(_GIT_HOOK_BEGIN_MARKER, begin + len(_GIT_HOOK_BEGIN_MARKER))
+        nested = text.find(begin_marker, begin + len(begin_marker))
         if 0 <= nested < closing:
             return False
-        cursor = closing + len(_GIT_HOOK_END_MARKER)
+        cursor = closing + len(end_marker)
     return True
 
 
-def _git_hook_block_span(text: str, start: int = 0) -> tuple[int, int] | None:
+def _git_hook_block_span(
+    text: str,
+    start: int = 0,
+    begin_marker: str = _GIT_HOOK_BEGIN_MARKER,
+    end_marker: str = _GIT_HOOK_END_MARKER,
+) -> tuple[int, int] | None:
     """Return ``(begin, end)`` offsets of one marked block, or None.
 
     ``end`` is just past the block's trailing newline, so slicing the span out
     leaves no blank line behind.
     """
-    begin = text.find(_GIT_HOOK_BEGIN_MARKER, start)
+    begin = text.find(begin_marker, start)
     if begin < 0:
         return None
-    closing = text.find(_GIT_HOOK_END_MARKER, begin)
+    closing = text.find(end_marker, begin)
     if closing < 0:
         # Someone deleted the closing marker; guessing where the block stops is
         # how user content gets eaten, so refuse.
         return None
-    end = closing + len(_GIT_HOOK_END_MARKER)
+    end = closing + len(end_marker)
     if end < len(text) and text[end] == "\n":
         end += 1
     return begin, end
@@ -1637,6 +1646,39 @@ def _upgrade_git_hook_block(existing: str) -> str | None:
     return None
 
 
+def _git_hooks_dir(repo_root: Path) -> Path | None:
+    """Return the directory git runs hooks from, or None when there is none.
+
+    Resolved via ``git rev-parse --git-path hooks`` so linked worktrees,
+    submodules and ``core.hooksPath`` are honoured, with the legacy
+    ``.git/hooks`` lookup as the fallback when git itself is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "hooks"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(repo_root),
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Output is relative to repo_root (".git/hooks", a core.hooksPath
+            # value such as ".husky") or absolute (linked worktrees).
+            return repo_root / result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
+
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        logger.warning(
+            "No git hooks directory found at %s — skipping git hook install.", repo_root
+        )
+        return None
+    return git_dir / "hooks"
+
+
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
@@ -1659,32 +1701,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
-    hooks_dir: Path | None = None
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "hooks"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            cwd=str(repo_root),
-            timeout=10,
-            stdin=subprocess.DEVNULL,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            # Output is relative to repo_root (".git/hooks", a core.hooksPath
-            # value such as ".husky") or absolute (linked worktrees).
-            hooks_dir = repo_root / result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
-
+    hooks_dir = _git_hooks_dir(repo_root)
     if hooks_dir is None:
-        git_dir = repo_root / ".git"
-        if not git_dir.is_dir():
-            logger.warning(
-                "No git hooks directory found at %s — skipping git hook install.", repo_root
-            )
-            return None
-        hooks_dir = git_dir / "hooks"
+        return None
 
     hook_path = hooks_dir / "pre-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1722,6 +1741,120 @@ def install_git_hook(repo_root: Path) -> Path | None:
     hook_path.chmod(0o755)
     logger.info("Wrote git pre-commit hook: %s", hook_path)
     return hook_path
+
+
+# --- Git sync hooks ---------------------------------------------------------
+#
+# ``pre-commit`` only refreshes the graph right before a commit. The working
+# tree also changes on a branch checkout and on a merge or rebase (including
+# ``git pull`` in either mode), none of which runs ``pre-commit``. These hooks
+# run ``update`` once after each of those, when the working tree has reached
+# its final state:
+#
+# - post-checkout, on branch checkouts only, and not while a rebase is in
+#   progress: a rebase checks out the new base before replaying local commits,
+#   so updating there would drop the user's own changes from the graph.
+# - post-merge, after a merge or a merge-mode ``git pull``.
+# - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
+#   fires it, but ``pre-commit`` already updated the graph for that commit.
+#
+# They share the pre-commit block's rules: explicit begin/end markers, appended
+# to an existing hook rather than overwriting it, and skipped in linked
+# worktrees unless ``CRG_HOOK_WORKTREES=1``.
+
+_GIT_SYNC_HOOK_BEGIN_MARKER = "# >>> code-review-graph sync hook >>>"
+_GIT_SYNC_HOOK_END_MARKER = "# <<< code-review-graph sync hook <<<"
+_GIT_SYNC_HOOK_NOTE = (
+    "# Installed by code-review-graph. Keeps the graph in sync after checkout, merge and rebase."
+)
+_GIT_SYNC_HOOK_NAMES = ("post-checkout", "post-merge", "post-rewrite")
+
+# Extra shell conditions per hook, checked before anything else runs.
+_GIT_SYNC_HOOK_CONDITIONS = {
+    # $3 is 1 for a branch checkout and 0 for a file checkout.
+    "post-checkout": '[ "$3" = "1" ] && ',
+    "post-merge": "",
+    # $1 names the command that rewrote commits: "rebase" or "amend".
+    "post-rewrite": '[ "$1" = "rebase" ] && ',
+}
+
+
+def _git_sync_hook_block(hook_name: str) -> str:
+    """Return the marked block that ``hook_name`` runs to update the graph."""
+    condition = _GIT_SYNC_HOOK_CONDITIONS[hook_name]
+    rebase_guard = ""
+    if hook_name == "post-checkout":
+        # post-rewrite updates the graph once the rebase has finished.
+        rebase_guard = """\
+    elif [ -d "$crg_hook_git_dir/rebase-merge" ] || [ -d "$crg_hook_git_dir/rebase-apply" ]; then
+        :
+"""
+    body = f"""\
+if {condition}command -v code-review-graph >/dev/null 2>&1; then
+    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
+    crg_hook_root=$(git rev-parse --show-toplevel 2>/dev/null) || crg_hook_root=""
+    if [ -z "$crg_hook_git_dir" ] || [ -z "$crg_hook_root" ]; then
+        echo "code-review-graph: skipping graph sync; cannot determine the Git worktree." >&2
+    elif [ -f "$crg_hook_git_dir/commondir" ] && [ "$CRG_HOOK_WORKTREES" != "1" ]; then
+        echo "code-review-graph: skipping graph sync in a linked worktree;" \\
+            "set CRG_HOOK_WORKTREES=1 to keep a graph for this worktree too." >&2
+{rebase_guard}    else
+        code-review-graph update --quiet --repo "$crg_hook_root" || true
+    fi
+fi
+"""
+    return (
+        f"{_GIT_SYNC_HOOK_BEGIN_MARKER}\n{_GIT_SYNC_HOOK_NOTE}\n"
+        f"{body}{_GIT_SYNC_HOOK_END_MARKER}\n"
+    )
+
+
+def install_git_sync_hooks(repo_root: Path) -> list[Path]:
+    """Install post-checkout, post-merge and post-rewrite hooks that run ``update``.
+
+    Called automatically by ``code-review-graph install`` next to
+    :func:`install_git_hook`, and resolves the hooks directory the same way.
+    Each block is appended to an existing hook, never overwriting it, and a
+    block written by an earlier release is replaced in place. A hook whose
+    markers are unbalanced was edited by hand and is left alone. A failed
+    update never fails the git command that triggered it.
+    """
+    hooks_dir = _git_hooks_dir(repo_root)
+    if hooks_dir is None:
+        return []
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for name in _GIT_SYNC_HOOK_NAMES:
+        hook_path = hooks_dir / name
+        block = _git_sync_hook_block(name)
+        if hook_path.exists():
+            existing = hook_path.read_text(encoding="utf-8")
+            if _GIT_SYNC_HOOK_BEGIN_MARKER in existing:
+                span = _git_hook_block_span(
+                    existing, 0, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
+                )
+                if span is None or not _git_hook_markers_balanced(
+                    existing, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
+                ):
+                    logger.warning(
+                        "%s has a code-review-graph begin marker with no matching end "
+                        "marker; leaving it alone.",
+                        hook_path,
+                    )
+                    continue
+                begin, end = span
+                updated = existing[:begin] + block + existing[end:]
+                if updated != existing:
+                    hook_path.write_text(updated, encoding="utf-8")
+            else:
+                hook_path.write_text(existing.rstrip("\n") + "\n" + block, encoding="utf-8")
+        else:
+            hook_path.write_text(_GIT_HOOK_SHEBANG + block, encoding="utf-8")
+        hook_path.chmod(0o755)
+        logger.info("Wrote git %s hook: %s", name, hook_path)
+        written.append(hook_path)
+    return written
 
 
 # --- Hook ownership --------------------------------------------------------

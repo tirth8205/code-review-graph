@@ -699,7 +699,7 @@ def _remove_instruction(
         )
 
 
-def _resolve_git_hook(repo_root: Path) -> Path:
+def _resolve_git_hook(repo_root: Path, name: str = "pre-commit") -> Path:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", "hooks"],
@@ -713,8 +713,8 @@ def _resolve_git_hook(repo_root: Path) -> Path:
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():
-        return repo_root / result.stdout.strip() / "pre-commit"
-    return repo_root / ".git" / "hooks" / "pre-commit"
+        return repo_root / result.stdout.strip() / name
+    return repo_root / ".git" / "hooks" / name
 
 
 def _strip_git_hook_blocks(raw: str) -> tuple[str, bool]:
@@ -796,6 +796,19 @@ def _remove_git_hook(
             "every known installed block and was kept"
         )
 
+    _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
+
+
+def _rewrite_or_remove_hook(
+    path: Path,
+    new_text: str,
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    detail: str,
+    dry_run: bool,
+) -> None:
+    """Write back what is left of a hook, or delete it when only a shebang remains."""
     meaningful = [
         line
         for line in new_text.splitlines()
@@ -816,6 +829,42 @@ def _remove_git_hook(
             report,
             dry_run=dry_run,
             detail="remove hook containing only code-review-graph",
+        )
+
+
+def _remove_git_sync_hooks(
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the marked sync block out of post-checkout, post-merge and post-rewrite."""
+    begin_marker = skills._GIT_SYNC_HOOK_BEGIN_MARKER
+    end_marker = skills._GIT_SYNC_HOOK_END_MARKER
+    for name in skills._GIT_SYNC_HOOK_NAMES:
+        path = _resolve_git_hook(repo_root, name)
+        if not path.exists() or not _safe_path(path, repo_root, report):
+            continue
+        raw = _read_text(path, report)
+        if raw is None or begin_marker not in raw:
+            continue
+        if not skills._git_hook_markers_balanced(raw, begin_marker, end_marker):
+            report.skipped_paths.append(
+                f"{path} (a code-review-graph begin marker has no matching end marker; "
+                "left unchanged)"
+            )
+            continue
+        text = raw
+        while (span := skills._git_hook_block_span(text, 0, begin_marker, end_marker)):
+            begin, end = span
+            text = text[:begin] + text[end:]
+        _rewrite_or_remove_hook(
+            path,
+            text,
+            repo_root,
+            report,
+            detail="removed code-review-graph hook block",
+            dry_run=dry_run,
         )
 
 
@@ -1120,6 +1169,7 @@ def _process_repo(
         )
 
     _remove_git_hook(repo_root, report, dry_run=dry_run)
+    _remove_git_sync_hooks(repo_root, report, dry_run=dry_run)
     _remove_gitignore(repo_root, report, dry_run=dry_run)
 
 

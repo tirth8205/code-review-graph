@@ -42,6 +42,12 @@ code-review-graph update
 code-review-graph detect-changes --brief
 ```
 
+`install` also appends `post-checkout`, `post-merge` and `post-rewrite` hooks
+that run `code-review-graph update --quiet` after a branch checkout, a merge
+and a rebase. With a hook manager, add that command to the same three hooks;
+run it from `post-checkout` only when its third argument is `1`, and from
+`post-rewrite` only when its first argument is `rebase`.
+
 The hook skips linked worktrees, so a commit there cannot silently build a
 second graph for another branch. It finds the git dir with
 `git rev-parse --absolute-git-dir` (Git 2.13 or newer); a `commondir` file in
@@ -329,8 +335,9 @@ on first use. Nothing else is needed.
 ## Graph seems stale
 
 - With hooks installed, `update --skip-flows` runs after each Edit/Write and
-  the pre-commit hook runs `update` before each commit (not in linked
-  worktrees; see above).
+  the pre-commit hook runs `update` before each commit, and the post-checkout,
+  post-merge and post-rewrite hooks run it after a branch switch, a merge and
+  a rebase (not in linked worktrees; see above).
 - Run `code-review-graph update`, or `/code-review-graph:build-graph` in Claude
   Code, to catch up.
 - Check `.claude/settings.json` still has the hooks; `code-review-graph install`

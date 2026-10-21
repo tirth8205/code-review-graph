@@ -58,6 +58,14 @@ so `core.hooksPath` setups work). The hook runs `update` and
 implicit update does not build a second graph for another branch; set
 `CRG_HOOK_WORKTREES=1` to run it there too. `--no-hooks` skips the hook.
 
+The same `install` also appends `post-checkout`, `post-merge` and
+`post-rewrite` hooks that run `update` after a branch switch, a merge or a
+rebase, including `git pull` in either mode, so the graph follows the checked
+out code between commits. A file checkout and `commit --amend` do not trigger
+an update, and the checkout a rebase makes before replaying local commits is
+skipped in favour of a single update when the rebase finishes. They share the
+pre-commit hook's worktree rule and `--no-hooks` switch.
+
 ## Core Workflow
 
 ### 1. Build the graph (first time only)

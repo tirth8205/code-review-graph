@@ -119,7 +119,7 @@ When a file changes, the graph traces every caller, dependent and test that coul
 
 ### Incremental updates
 
-Hooks, the pre-commit hook and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
+Hooks, the git hooks (pre-commit, post-checkout, post-merge, post-rewrite) and watch mode trigger incremental updates. The update diffs changed files, finds their dependents through the graph's import and call edges, and re-parses only the files whose SHA-256 hash changed. On a ~3,000-file project (django) a two-file edit re-indexes in about 2.5 seconds on the path the hooks use, of which ~1.4 s is process start-up; a no-op update costs only that start-up. See [Incremental update latency](docs/REPRODUCING.md#incremental-update-latency).
 
 <p align="center">
   <img src="diagrams/diagram4_incremental_update.png" alt="Incremental update flow: a hook or watch update triggers a git diff, dependents are found through graph edges, and only files whose SHA-256 hash changed are re-parsed" width="90%" />
@@ -283,7 +283,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
-| **Auto-update hooks** | Editor hooks, a git pre-commit hook and watch mode update the graph as you work |
+| **Auto-update hooks** | Editor hooks, git hooks (before each commit, after checkout, merge and rebase) and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
@@ -521,7 +521,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
 | `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
 | `CRG_DATA_DIR` | Directory for graph databases and generated artefacts | - |
-| `CRG_HOOK_WORKTREES` | Set to `1` to let the pre-commit hook run in linked git worktrees | - |
+| `CRG_HOOK_WORKTREES` | Set to `1` to let the generated git hooks run in linked git worktrees | - |
 | `CRG_EMBEDDING_MODEL` | Default model for local vector embeddings | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | Set to `1` to suppress the cloud embedding egress warning | - |
 | `CRG_ALLOW_REMOTE_CODE` | Allow HuggingFace models that require `trust_remote_code=True` | `0` |
