@@ -8,6 +8,8 @@ from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from code_review_graph import cli
 
 
@@ -195,6 +197,7 @@ class TestBuildUpdateCommands:
             full_rebuild=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="none",
+            wait_for_lock=False,
         )
         mock_postprocess.assert_not_called()
 
@@ -234,6 +237,7 @@ class TestBuildUpdateCommands:
             repo_root=str(Path("repo-root").resolve()),
             base=None,
             postprocess="minimal",
+            wait_for_lock=False,
         )
         mock_postprocess.assert_not_called()
 
@@ -269,6 +273,101 @@ class TestBuildUpdateCommands:
                             cli.main()
 
         assert mock_build.call_args.kwargs["base"] == "HEAD~3"
+
+    def test_build_forwards_wait_to_the_shared_seam(self):
+        """--wait must reach build_or_update_graph, not be swallowed here."""
+        argv = ["code-review-graph", "build", "--wait", "--repo", "repo-root"]
+        result = {"files_parsed": 1, "total_nodes": 2, "total_edges": 1}
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ):
+                            cli.main()
+
+        assert mock_build.call_args.kwargs["wait_for_lock"] is True
+
+    def test_update_that_stood_down_exits_zero_and_says_who_owns_the_build(
+        self, capsys,
+    ):
+        """A skipped run is not a failure.
+
+        Commit hooks and agent hooks run this command on every edit; reporting
+        an overlap as a non-zero exit turns a normal race into an error the
+        user has to interpret. The message names the holder so a stale lock is
+        distinguishable from a live one.
+        """
+        argv = ["code-review-graph", "update", "--repo", "repo-root"]
+        result = {
+            "status": "contended",
+            "skipped": True,
+            "build_type": "none",
+            "holder_pid": 4242,
+            "files_updated": 0,
+            "total_nodes": 0,
+            "total_edges": 0,
+            "summary": (
+                "Another code-review-graph build is already running for this "
+                "repository (PID 4242); skipped instead of parsing the same "
+                "working tree twice."
+            ),
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with patch(
+                            "code_review_graph.postprocessing.run_post_processing",
+                        ) as mock_postprocess:
+                            with pytest.raises(SystemExit) as excinfo:
+                                cli.main()
+
+        assert excinfo.value.code == cli.EXIT_TEMPFAIL
+        captured = capsys.readouterr()
+        assert "PID 4242" in captured.err
+        assert "Incremental:" not in captured.out
+        mock_postprocess.assert_not_called()
+
+    def test_build_that_stood_down_does_not_print_a_build_summary(self, capsys):
+        argv = ["code-review-graph", "build", "--repo", "repo-root"]
+        result = {
+            "status": "contended",
+            "skipped": True,
+            "holder_pid": 7,
+            "files_parsed": 0,
+            "total_nodes": 0,
+            "total_edges": 0,
+            "summary": "Another code-review-graph build is already running",
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with pytest.raises(SystemExit) as excinfo:
+                            cli.main()
+
+        assert excinfo.value.code == cli.EXIT_TEMPFAIL
+        assert "Full build:" not in capsys.readouterr().out
 
     def test_update_reports_full_rebuild_fallback(self, capsys):
         argv = ["code-review-graph", "update", "--repo", "repo-root"]
