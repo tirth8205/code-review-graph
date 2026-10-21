@@ -17,6 +17,23 @@
 
 ### Fixed
 
+- Overlapping graph writes no longer stack their work (#1073). `build`,
+  `update` and `postprocess` take a per-repository `flock` on
+  `<data dir>/write.lock` before parsing or rewriting derived data, so a second
+  invocation reports `status: contended` (CLI: `Skipped: another
+  code-review-graph ... is already running for this repository (PID n)`) and
+  exits `75` (`EX_TEMPFAIL`) instead of repeating the work. Commit hooks,
+  editor-save hooks and agent tool hooks fire in bursts, and until now the only
+  cross-process protection was SQLite's busy timeout, which is not reached
+  until the first write — every duplicate run paid for a complete parse first,
+  and a `postprocess` could rewrite flows/communities/FTS for a graph another
+  process was still storing. Ten concurrent `update` runs of one repository
+  used to mean ten process pools on the same files. `--wait`
+  (`wait_for_lock`) blocks until the in-flight write finishes, for callers that
+  want the work done rather than skipped; two repositories never block each
+  other; and the fixed lock path lets external tooling take the same lock. The
+  kernel releases it when the holder dies, so a killed or timed-out run never
+  wedges the repository.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

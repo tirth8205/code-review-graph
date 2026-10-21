@@ -22,6 +22,7 @@ from ..incremental import (
     incremental_update,
     resolve_incremental_base,
 )
+from ..locking import WriteLock, write_lock_path
 from ..parser import normalize_file_path
 from ._common import _get_store
 
@@ -613,8 +614,17 @@ def build_or_update_graph(
     recurse_submodules: bool | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    wait_for_lock: bool = False,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
+
+    Only one build runs per repository at a time. A second call that arrives
+    while the first is still parsing reports ``status: contended`` and returns
+    without touching the graph rather than repeating the same work: ``build``
+    and ``update`` are fired from commit hooks, save hooks and the watcher,
+    which can overlap by seconds, and each duplicate used to pay for a full
+    parse plus its own process pool before failing on the SQLite write lock.
+    Pass ``wait_for_lock=True`` (CLI: ``--wait``) to block instead of skipping.
 
     Args:
         full_rebuild: If True, re-parse every file. If False (default),
@@ -639,11 +649,28 @@ def build_or_update_graph(
             source-derived text or load an embedding model unexpectedly.
         embedding_model: Exact model for an explicitly requested post-build
             embedding refresh. Must be supplied with ``embedding_provider``.
+        wait_for_lock: Block until an in-flight build for this repository
+            finishes, instead of skipping. Default: False, because the
+            skipping caller is usually a hook whose work the in-flight build
+            already covers; a human running ``build``/``update`` by hand
+            usually wants the wait.
 
     Returns:
-        Summary with files_parsed/updated, node/edge counts, and errors.
+        Summary with files_parsed/updated, node/edge counts, and errors. A run
+        that stood down because another build held the lock returns
+        ``status: contended``, ``skipped: True`` and ``holder_pid``.
     """
     store, root = _get_store(repo_root)
+    # The lock is taken before the first parse and before any post-processing:
+    # a duplicate run used to pay for a whole parse plus its own process pool
+    # before it discovered another writer was already ahead of it.
+    # :mod:`code_review_graph.locking` explains why the store, not the path, is
+    # what names the lock: the file must be the one for the database this call
+    # is actually about to write.
+    lock, contended = _lock_or_skip(store.db_path, wait_for_lock)
+    if contended is not None:
+        store.close()
+        return contended
     try:
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
@@ -796,6 +823,51 @@ def build_or_update_graph(
         return build_result
     finally:
         store.close()
+        lock.release()
+
+
+def _lock_or_skip(
+    db_path: Path, wait_for_lock: bool
+) -> tuple[WriteLock | None, dict[str, Any] | None]:
+    """Take the graph's write lock, or build the response for standing down.
+
+    Returns the held lock and ``None``, or ``None`` and the response to return.
+    Both graph-writing entry points (``build_or_update_graph`` and
+    ``run_postprocess``) share this so neither can drift from the other.
+    """
+    lock = WriteLock(db_path)
+    if lock.acquire(blocking=wait_for_lock):
+        return lock, None
+    return None, _write_skipped_response(db_path, lock.holder_pid())
+
+
+def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, Any]:
+    """Describe a run that stood down because another writer owns the graph.
+
+    ``contended`` rather than ``error``: nothing failed, and a caller switching
+    on the existing statuses would otherwise have no way to tell a lost race
+    from a broken database. The counts are present and zero so callers that
+    unpack them keep working.
+    """
+    holder = f"PID {holder_pid}" if holder_pid is not None else "another process"
+    return {
+        "status": "contended",
+        "skipped": True,
+        "build_type": "none",
+        "holder_pid": holder_pid,
+        "lock_path": str(write_lock_path(db_path)),
+        "files_parsed": 0,
+        "files_updated": 0,
+        "total_nodes": 0,
+        "total_edges": 0,
+        "errors": [],
+        "summary": (
+            f"Another code-review-graph build, update or postprocess is "
+            f"already running for this repository ({holder}); skipped instead "
+            f"of repeating the work. Pass wait_for_lock=True (CLI: --wait) to "
+            f"block until it finishes."
+        ),
+    }
 
 
 def run_postprocess(
@@ -805,12 +877,17 @@ def run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    wait_for_lock: bool = False,
 ) -> dict[str, Any]:
     """Run post-processing steps on an existing graph.
 
     Useful for running expensive steps (flows, communities) separately
     from the build, or for re-running after the graph has been updated
     with ``postprocess="none"``.
+
+    Takes the same per-repository write lock as ``build`` and ``update``: this
+    rewrites derived data (flows, communities, FTS) for a graph another process
+    may be half way through writing, which is the failure #1073 reports.
 
     Args:
         flows: Run flow detection. Default: True.
@@ -821,11 +898,18 @@ def run_postprocess(
             supplied with ``embedding_model``. Default: disabled.
         embedding_model: Exact model for an explicit refresh. Must be supplied
             with ``embedding_provider``. Default: disabled.
+        wait_for_lock: Block until an in-flight write for this repository
+            finishes, instead of skipping. Default: False.
 
     Returns:
-        Summary of what was computed.
+        Summary of what was computed, or ``status: contended`` when another
+        writer held the lock.
     """
     store, _root = _get_store(repo_root)
+    lock, contended = _lock_or_skip(store.db_path, wait_for_lock)
+    if contended is not None:
+        store.close()
+        return contended
     result: dict[str, Any] = {"status": "ok"}
     warnings: list[str] = []
 
@@ -976,3 +1060,4 @@ def run_postprocess(
         return result
     finally:
         store.close()
+        lock.release()

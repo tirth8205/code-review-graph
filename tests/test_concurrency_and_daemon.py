@@ -59,8 +59,11 @@ import pytest
 
 from code_review_graph import daemon as daemon_mod
 from code_review_graph import migrations as migrations_mod
+from code_review_graph.cli import EXIT_TEMPFAIL
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import _WatchSupervisor
+from code_review_graph.locking import WriteLock, write_lock_path
+from code_review_graph.tools.build import build_or_update_graph
 
 pytestmark = pytest.mark.concurrency
 
@@ -416,16 +419,21 @@ class _LockHeld:
 class TestConcurrentAccess:
     """Two processes on one graph.db."""
 
-    def test_the_only_cross_process_protection_is_sqlites_busy_timeout(
+    def test_the_store_itself_adds_no_cross_process_protection(
         self, tmp_path: Path
     ) -> None:
         """Pin the protection surface the rest of this module reasons about.
 
         Everything else here is a consequence of these four facts, so they are
         asserted rather than assumed: WAL journalling, a five-second busy
-        timeout, autocommit, and — on disk — nothing but the database itself.
-        No lock file, no PID file, no "build in progress" marker that a second
-        process could notice before it starts writing.
+        timeout, autocommit, and — around the database file — nothing the store
+        itself creates. No lock file, no PID file, no "build in progress"
+        marker: ``GraphStore`` is a client, not a coordinator.
+
+        Coordination lives one layer up, in :mod:`code_review_graph.locking`,
+        which is why a second *build* is refused before it parses while a
+        second *writer* still reaches SQLite's busy timeout. See
+        [TestSingleFlightWriteLock] for the layer above this one.
         """
         data_dir = tmp_path / ".code-review-graph"
         store = GraphStore(data_dir / "graph.db")
@@ -619,12 +627,16 @@ class TestConcurrentAccess:
             results.append((proc.returncode, out, err))
 
         # No deadlock: every process terminated inside the timeout above.
-        # A loser may legitimately die on the busy timeout; what it may not do
-        # is leave the database broken or short of files.
+        # A loser now stands down on the write lock (EXIT_TEMPFAIL) instead of
+        # dying on the busy timeout after its own full parse; what it may not
+        # do is leave the database broken or short of files. The busy-timeout
+        # path itself is still covered by the ``_LockHeld`` tests above, which
+        # hold the SQLite lock without holding ours.
         assert any(rc == 0 for rc, _, _ in results), results
         for rc, _out, err in results:
             if rc != 0:
-                assert "database is locked" in err, err
+                assert rc == EXIT_TEMPFAIL, err
+                assert "already running" in err, err
 
         assert _integrity(_db_path(repo)) == "ok"
         assert _fts_integrity(_db_path(repo)) == "ok"
@@ -2218,3 +2230,309 @@ class TestUnwatchedRecord:
         assert len(supervisor.unwatched_paths) == _MAX_UNWATCHED_TRACKED
         assert str(repo / "src" / f"gone{total - 1:05d}") in supervisor.unwatched_paths
         assert str(repo / "src" / "gone00000") not in supervisor.unwatched_paths
+
+
+# ---------------------------------------------------------------------------
+# 5. Single-flight build lock: duplicate runs stand down instead of stacking
+# ---------------------------------------------------------------------------
+
+
+_WRITE_LOCK_HOLDER = """
+import sys, time
+from pathlib import Path
+from code_review_graph.locking import WriteLock
+
+lock = WriteLock(Path(sys.argv[1]))
+assert lock.acquire(), "child could not take the write lock"
+print("LOCKED", flush=True)
+time.sleep(float(sys.argv[2]))
+"""
+
+
+class TestSingleFlightWriteLock:
+    """One build per repository, however many callers arrive at once.
+
+    ``build`` and ``update`` are fired from commit hooks, editor-save hooks,
+    agent tool hooks and the watcher. Before the lock, several of those
+    starting within a second of each other each spawned their own process pool
+    and parsed the same working tree, and the pile-up was only visible at the
+    SQLite write — after every redundant parse had been paid for. Measured on
+    one machine: ten concurrent ``update`` runs of one repository, all with
+    their own pool, load average 44 on 18 cores.
+    """
+
+    def test_the_lock_lives_in_the_data_directory(self, tmp_path: Path) -> None:
+        """Scoped per repository, and moved with the database when it moves.
+
+        A lock in the repository would miss graphs kept outside the working
+        tree (``CRG_DATA_DIR``, ``--data-dir``) and would be committed by
+        accident; a single global lock would serialise unrelated repositories.
+        The name is fixed so external tooling can exclude itself from a build
+        with ``flock -n .code-review-graph/write.lock ...``.
+        """
+        assert write_lock_path(Path("/data/graph.db")) == Path("/data/write.lock")
+        assert write_lock_path(Path("/r/.code-review-graph/graph.db")) == Path(
+            "/r/.code-review-graph/write.lock"
+        )
+
+    def test_second_update_skips_while_the_first_holds_the_lock(
+        self, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        lock = WriteLock(db)
+        assert lock.acquire()
+        try:
+            skipped = _crg("update", "--repo", str(repo), env=env)
+        finally:
+            lock.release()
+
+        # Canary: it really did stand down. A run that ignored the lock would
+        # have built the graph and written an anchor.
+        combined = skipped.stdout + skipped.stderr
+        assert skipped.returncode == EXIT_TEMPFAIL, combined
+        assert "already running" in combined, combined
+        assert _metadata(db, "git_head_sha") is None
+        assert _counts(db)["nodes"] == 0
+
+    def test_the_skipped_run_names_the_process_that_owns_the_work(
+        self, tmp_path: Path
+    ) -> None:
+        """ "Somebody else is on it" is only actionable with a PID.
+
+        Without it the user sees a build that did nothing and no way to tell a
+        live holder from a stale lock file.
+        """
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        lock = WriteLock(db)
+        assert lock.acquire()
+        try:
+            skipped = _crg("update", "--repo", str(repo), env=env)
+        finally:
+            lock.release()
+
+        assert f"PID {os.getpid()}" in (skipped.stdout + skipped.stderr), skipped.stderr
+
+    def test_a_finished_build_leaves_the_lock_free(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+
+        built = _crg("build", "--repo", str(repo), "--skip-flows", env=env)
+        assert built.returncode == 0, built.stderr
+
+        db = _db_path(repo)
+        assert write_lock_path(db).exists(), "the lock file should outlive the run"
+        assert _metadata(db, "git_head_sha") is not None
+        lock = WriteLock(db)
+        assert lock.acquire(), "a completed build left the lock held"
+        lock.release()
+
+    def test_a_killed_holder_does_not_wedge_the_repository(self, tmp_path: Path) -> None:
+        """The kernel drops the lock, so SIGKILL is survivable.
+
+        A stale lock file must never need a human to delete it: a hook that is
+        killed mid-build — which is exactly what a hook timeout does — would
+        otherwise block every later run forever.
+        """
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        holder = subprocess.Popen(
+            [sys.executable, "-c", _WRITE_LOCK_HOLDER, str(db), "60"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        try:
+            assert holder.stdout is not None
+            assert holder.stdout.readline().strip() == "LOCKED"
+            # Canary: the child's lock is really visible to other processes.
+            probe = WriteLock(db)
+            assert not probe.acquire()
+            holder.kill()
+            holder.wait(timeout=30)
+        finally:
+            if holder.poll() is None:  # pragma: no cover - cleanup only
+                holder.kill()
+                holder.wait(timeout=30)
+
+        assert _wait_for(lambda: WriteLock(db).acquire(), timeout=10.0), (
+            "the lock outlived the process that held it"
+        )
+
+        recovered = _crg("update", "--repo", str(repo), env=env)
+        assert recovered.returncode == 0, recovered.stderr
+        assert _counts(db)["files"] == 12
+
+    def test_wait_blocks_until_the_holder_finishes(self, tmp_path: Path) -> None:
+        """A caller who asks to wait gets the work done, not a silent skip."""
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        lock = WriteLock(db)
+        assert lock.acquire()
+        threading.Timer(2.0, lock.release).start()
+        started = time.monotonic()
+        waited = _crg("update", "--wait", "--repo", str(repo), env=env)
+        waited_for = time.monotonic() - started
+        lock.release()
+
+        assert waited.returncode == 0, waited.stderr
+        # Canary: it waited rather than racing the holder, and it then did the
+        # work instead of reporting contention.
+        assert waited_for >= 1.5, f"did not wait for the holder: {waited_for:.1f}s"
+        assert "already running" not in (waited.stdout + waited.stderr)
+        assert _counts(db)["files"] == 12
+        assert _integrity(db) == "ok"
+
+    def test_builds_of_different_repositories_do_not_block_each_other(
+        self, tmp_path: Path
+    ) -> None:
+        """The lock is per database, not global: two repos build in parallel."""
+        home = tmp_path / "home"
+        busy = _make_repo(tmp_path / "busy", 12)
+        other = _make_repo(tmp_path / "other", 12)
+        env = _isolated_env(home)
+
+        lock = WriteLock(_db_path(busy))
+        assert lock.acquire()
+        try:
+            built = _crg("build", "--repo", str(other), "--skip-flows", env=env)
+        finally:
+            lock.release()
+
+        assert built.returncode == 0, built.stderr
+        assert "already running" not in (built.stdout + built.stderr)
+        assert _counts(_db_path(other))["files"] == 12
+
+    def test_the_tool_entry_point_reports_contention_instead_of_parsing(
+        self, tmp_path: Path
+    ) -> None:
+        """MCP callers get a status they can act on, not a blocking build.
+
+        An agent calling ``build_or_update_graph`` while the user's hook is
+        building must not queue a second full parse behind it, and must be able
+        to tell this apart from a failure.
+        """
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        lock = WriteLock(db)
+        assert lock.acquire()
+        try:
+            result = build_or_update_graph(repo_root=str(repo), postprocess="none")
+        finally:
+            lock.release()
+
+        assert result["status"] == "contended"
+        assert result["skipped"] is True
+        assert result["holder_pid"] == os.getpid()
+        assert result["lock_path"] == str(write_lock_path(db))
+        # The counts are present and zero so callers that unpack them keep
+        # working, and nothing was written.
+        assert result["files_parsed"] == 0
+        assert result["errors"] == []
+        assert _counts(db)["nodes"] == 0
+        assert _metadata(db, "git_head_sha") is None
+
+    def test_postprocess_stands_down_for_a_running_build(self, tmp_path: Path) -> None:
+        """The other half of #1073: derived data must not be rewritten mid-build.
+
+        ``postprocess`` recomputes flows, communities and FTS from whatever
+        nodes are stored. Running it while a build is still storing files
+        leaves the derived tables describing a graph that no longer exists, and
+        SQLite's busy timeout does not help because the stages commit
+        separately.
+        """
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+
+        built = _crg("build", "--repo", str(repo), "--skip-flows", env=env)
+        assert built.returncode == 0, built.stderr
+        db = _db_path(repo)
+        before = _counts(db)
+
+        lock = WriteLock(db)
+        assert lock.acquire()
+        try:
+            skipped = _crg("postprocess", "--repo", str(repo), env=env)
+        finally:
+            lock.release()
+
+        combined = skipped.stdout + skipped.stderr
+        assert skipped.returncode == EXIT_TEMPFAIL, combined
+        assert "already running" in combined
+        assert "Post-processing:" not in skipped.stdout
+        assert _counts(db) == before
+
+        # The lock is free again, so the same command now does the work.
+        rebuilt = _crg("postprocess", "--repo", str(repo), env=env)
+        assert rebuilt.returncode == 0, rebuilt.stderr
+        assert "Post-processing:" in rebuilt.stdout
+
+    def test_a_burst_of_concurrent_updates_builds_the_graph_once(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression this lock exists for: a burst must not stack parses.
+
+        Eight hooks firing at once used to mean eight process pools and eight
+        parses of the same tree. All eight now exit 0, at most one of them
+        parses, and the graph ends up correct.
+        """
+        home = tmp_path / "home"
+        repo = _make_repo(tmp_path / "repo", 12)
+        env = _isolated_env(home)
+        db = _seed_empty_db(repo)
+
+        burst = [
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "code_review_graph",
+                    "update",
+                    "--repo",
+                    str(repo),
+                    "--skip-flows",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            for _ in range(8)
+        ]
+        results = []
+        for proc in burst:
+            out, err = proc.communicate(timeout=_PROC_TIMEOUT)
+            results.append((proc.returncode, out, err))
+
+        # Winner exits 0; every other run reports EX_TEMPFAIL rather than
+        # failing, so a hook cannot confuse an overlap with a broken graph.
+        assert all(code in (0, EXIT_TEMPFAIL) for code, _, _ in results), [
+            (code, err) for code, _, err in results if code not in (0, EXIT_TEMPFAIL)
+        ]
+        assert any(code == 0 for code, _, _ in results)
+        skipped = [out + err for _, out, err in results if "already running" in out + err]
+        # Canary: the burst really overlapped. If it did not, this test would
+        # pass on the old code too and pin nothing.
+        assert skipped, "no run contended: the burst did not overlap"
+        assert len(skipped) < len(results)
+        assert _counts(db)["files"] == 12
+        assert _integrity(db) == "ok"

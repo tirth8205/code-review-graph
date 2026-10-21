@@ -190,6 +190,33 @@ The graph is SQLite in WAL mode. If you see `database is locked`:
   `.code-review-graph/graph.db`, `graph.db-wal` and `graph.db-shm`, and run
   `code-review-graph build`.
 
+## `Skipped: another code-review-graph ... is already running for this repository`
+
+`build`, `update` and `postprocess` take a per-repository lock before touching
+the graph, so a second invocation does not repeat work the first is already
+doing. That is expected when a commit hook, an editor save hook and an agent
+tool hook all fire at once: one run writes, the others report the overlap and
+exit `75` (`EX_TEMPFAIL`).
+
+- The message names the PID that owns the write, so a live holder is
+  distinguishable from a leftover lock file. The lock is
+  `<data dir>/write.lock` (by default `.code-review-graph/write.lock`), and the
+  kernel releases it when the holder dies, including on `SIGKILL` — a killed
+  build never blocks the next one.
+- Exit `75` rather than `0` on purpose: an overlap is not success, but it is
+  not the failure a `1` would report either, so a hook can tell the two apart
+  without matching strings.
+- Pass `--wait` to block until the in-flight write finishes and then run
+  anyway. Use it for a command you are starting by hand; hooks should keep the
+  default, where skipping is free because the running write covers the same
+  work.
+- Two different repositories never block each other, and a graph stored
+  outside the working tree (`CRG_DATA_DIR`, `--data-dir`) keeps its lock with
+  it.
+- Because the name and location are fixed, a wrapper script can exclude itself
+  from a build with `flock -n .code-review-graph/write.lock <command>`, and
+  both sides exclude each other.
+
 ## Large repositories
 
 - The first `build` parses every file. Later `update` runs parse only changed
