@@ -1484,6 +1484,31 @@ class Plain:
         # Total: exactly 5 live edges
         assert len(calls) == 5
 
+    def test_rust_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if false`` blocks in Rust are never emitted.
+
+        Rust's if is an ``if_expression`` and its false literal is a
+        ``boolean_literal``, neither of which the Go/TS walk matches, so
+        without a Rust case every such call is kept. The else branch and
+        ``if true`` stay live.
+        """
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        assert len(hits("live_helper")) == 1
+        assert hits("dead_false_call") == []
+        assert hits("dead_in_consequence") == []
+        assert len(hits("live_in_else")) == 1
+        assert len(hits("live_final_else")) == 1
+        assert len(hits("some_condition")) == 1
+        assert len(hits("live_in_if_true")) == 1
+        assert len(calls) == 5
+
     def test_dead_guard_covers_declarations_nested_in_dead_branch(self):
         """A function or class declared inside a dead branch is never
         evaluated, so calls in its body are dead. This matches what the
@@ -1772,6 +1797,58 @@ class TestDeadGuardHelpers:
         call = self._find_call(root, b"g")
         assert _is_in_static_dead_guard(call) is False
 
+    # --- _is_in_rust_dead_guard ---
+
+    def test_rust_if_false_dead(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if false { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_else_branch_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false { a(); } else { b(); } }"
+        )
+        call_b = self._find_call(root, b"b")
+        assert _is_in_rust_dead_guard(call_b) is False
+
+    def test_rust_if_true_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if true { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_no_guard_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { g(); }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_compound_condition_live(self):
+        """Only a literal ``false`` is dead: ``false && false`` is left alone."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false && false { g(); } }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_value_position_if_false_dead(self):
+        """A ``let`` binding's ``if`` is the same node shape as a statement."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { let x = if false { g() } else { 1 }; }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
     # --- _extract_calls integration ---
 
     def test_extract_calls_skips_dead_go(self):
@@ -1807,6 +1884,19 @@ class TestDeadGuardHelpers:
         dead = [
             e for e in edges
             if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_in_if0"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_rust(self):
+        """_extract_calls returns True (skip) for a dead Rust call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.target.split("::")[-1] == "dead_false_call"
         ]
         assert dead == []
 

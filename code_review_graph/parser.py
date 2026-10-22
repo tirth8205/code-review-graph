@@ -386,6 +386,8 @@ def _python_unreachable_call_positions(
 # walking the tree-sitter ancestor chain of a call node:
 #
 #   * Go / TypeScript / JavaScript:  ``if false { ... }`` / ``if (0) { ... }``
+#   * Rust:                          ``if false { ... }`` (an if_expression,
+#                                    whose false is a boolean_literal)
 #   * C / C++:                       ``#if 0`` / ``#elif 0`` preprocessor blocks
 #
 # Only the consequence (true branch) is dead; ``else`` / ``#else`` / ``#elif``
@@ -483,6 +485,31 @@ def _is_in_static_dead_guard(node) -> bool:
             return True
         child = parent
         parent = parent.parent
+    return False
+
+
+def _is_in_rust_dead_guard(node) -> bool:
+    """Return True if *node* sits in the consequence of a Rust ``if false``.
+
+    Rust's if is an ``if_expression`` and its false is a ``boolean_literal``.
+    Both are shared with Kotlin and Scala, where ``if (false)`` is kept, so
+    this walk is only called for Rust. The else branch and ``if true`` stay
+    live, and only a literal ``false`` counts: ``false && false`` does not.
+    """
+    cursor = node.parent
+    while cursor is not None:
+        if cursor.type == "if_expression":
+            condition = cursor.child_by_field_name("condition")
+            consequence = cursor.child_by_field_name("consequence")
+            if (
+                condition is not None
+                and consequence is not None
+                and condition.type == "boolean_literal"
+                and condition.text == b"false"
+                and _node_is_in_child(node, consequence)
+            ):
+                return True
+        cursor = cursor.parent
     return False
 
 
@@ -12218,6 +12245,11 @@ class CodeParser:
 
         # Non-Python languages: tree-sitter dead-guard walk (Go/TS/JS
         # ``if false``, C/C++ ``#if 0``).  ``ast`` above cannot reach them.
+        # Rust is separate: its if is an if_expression and its false is a
+        # boolean_literal, and both shapes are shared with Kotlin and Scala,
+        # whose if (false) stays live.
+        if language == "rust" and _is_in_rust_dead_guard(child):
+            return True
         if language != "python" and _is_in_static_dead_guard(child):
             return True
 
