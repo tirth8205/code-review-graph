@@ -3,6 +3,8 @@
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import CodeParser
@@ -2654,3 +2656,63 @@ class TestTypeScriptTypeDeclarations:
                 and e.target == f"{types.resolve().as_posix()}::Finding"
                 for e in edges
             )
+
+
+class TestJsGeneratorFunctions:
+    """Generator functions in JS/TS are Function nodes like any other function.
+
+    ``function* gen() {}`` parses as ``generator_function_declaration`` and
+    ``const gen = function* () {}`` as ``generator_function``. Neither node type
+    was listed, so a generator produced no node and its calls were attributed
+    to the enclosing file instead.
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    @pytest.mark.parametrize("filename", ["gen.js", "gen.ts", "gen.tsx"])
+    def test_generator_declaration_is_a_function(self, filename):
+        path = Path("/test") / filename
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"export function* ids(start) {\n"
+            b"  yield nextId(start);\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert [f.name for f in fns] == ["ids"]
+        assert (fns[0].line_start, fns[0].line_end) == (1, 3)
+        qn = f"{path.as_posix()}::ids"
+        assert any(
+            e.kind == "CONTAINS" and e.source == path.as_posix() and e.target == qn
+            for e in edges
+        )
+        calls = [e for e in edges if e.kind == "CALLS" and e.target == "nextId"]
+        assert [e.source for e in calls] == [qn]
+
+    def test_async_generator_declaration_is_a_function(self):
+        nodes, _ = self.parser.parse_bytes(
+            Path("/test/stream.js"),
+            b"async function* pages() {\n"
+            b"  yield await fetchPage();\n"
+            b"}\n",
+        )
+        assert {n.name for n in nodes if n.kind == "Function"} == {"pages"}
+
+    @pytest.mark.parametrize("filename", ["gen.js", "gen.ts"])
+    def test_generator_expressions_assigned_to_names_are_functions(self, filename):
+        path = Path("/test") / filename
+        nodes, edges = self.parser.parse_bytes(
+            path,
+            b"const walk = function* (tree) {\n"
+            b"  yield visit(tree);\n"
+            b"};\n"
+            b"app.items = function* () {\n"
+            b"  yield load();\n"
+            b"};\n",
+        )
+        fns = {n.name for n in nodes if n.kind == "Function"}
+        assert fns == {"walk", "app.items"}
+        sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
+        assert sources["visit"] == f"{path.as_posix()}::walk"
+        assert sources["load"] == f"{path.as_posix()}::app.items"

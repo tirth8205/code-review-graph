@@ -1251,9 +1251,24 @@ _TS_TYPE_DECLARATIONS = frozenset({
 
 _FUNCTION_TYPES: dict[str, list[str]] = {
     "python": ["function_definition"],
-    "javascript": ["function_declaration", "method_definition", "arrow_function"],
-    "typescript": ["function_declaration", "method_definition", "arrow_function"],
-    "tsx": ["function_declaration", "method_definition", "arrow_function"],
+    "javascript": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
+    "typescript": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
+    "tsx": [
+        "function_declaration",
+        "generator_function_declaration",
+        "method_definition",
+        "arrow_function",
+    ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
     "java": ["method_declaration", "constructor_declaration"],
@@ -10102,7 +10117,7 @@ class CodeParser:
     # ------------------------------------------------------------------
 
     _JS_FUNC_VALUE_TYPES = frozenset(
-        {"arrow_function", "function_expression", "function"},
+        {"arrow_function", "function_expression", "function", "generator_function"},
     )
 
     def _extract_js_var_functions(
