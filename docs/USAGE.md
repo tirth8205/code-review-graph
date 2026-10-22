@@ -42,6 +42,9 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
 
+Using Zed over SSH? See
+[Zed troubleshooting](TROUBLESHOOTING.md#6-zed-native-agent-cannot-see-mcp-in-an-ssh-project).
+
 The CodeBuddy layout follows its documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),
 [skills](https://www.codebuddy.ai/docs/cli/skills), and

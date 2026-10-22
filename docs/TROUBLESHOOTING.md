@@ -178,6 +178,41 @@ If `status` finds the graph but `/mcp` does not list `code-review-graph`,
 `.mcp.json` is not in the session's working directory. Run
 `code-review-graph install` from the project root.
 
+### 6. Zed native agent cannot see MCP in an SSH project
+
+**Symptom.** You ran `install --platform zed` and `build` on a remote host,
+then restarted Zed locally, but its native agent does not list code-review-graph.
+
+**Cause.** `install --platform zed` writes `context_servers` into the
+user-level settings on the machine running the command:
+`~/Library/Application Support/Zed/settings.json` on macOS or
+`~/.config/zed/settings.json` on Linux. Settings written on the remote host
+are not read by your local Zed instance. In the affected Zed SSH setup, MCP
+servers are launched locally by Zed, not on the SSH host. The generated entry
+also records the checkout path as `cwd`; a remote path is not a local checkout.
+An external agent running remotely can read its own remote configuration,
+which explains why it may work while Zed's native agent does not.
+
+**Fix.** Install code-review-graph on the machine running Zed and clone the
+project there. In that local checkout, run:
+
+```bash
+cd /path/to/local/checkout
+code-review-graph install --platform zed
+code-review-graph build
+```
+
+Restart Zed and open that local project. The server's command and `cwd` must
+both be usable locally. This graph describes the local checkout, not remote-only
+edits; keep the checkout in sync yourself and run `code-review-graph update`
+there after changes.
+
+See [#828](https://github.com/tirth8205/code-review-graph/issues/828) for the
+reported setup and workaround. Remote MCP behavior depends on your Zed version;
+track upstream support in
+[zed#39213](https://github.com/zed-industries/zed/issues/39213) and
+[zed#47671](https://github.com/zed-industries/zed/issues/47671).
+
 ---
 
 ## Database lock errors
