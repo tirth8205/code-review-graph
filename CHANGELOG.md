@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Python modules that replace themselves in `sys.modules` are followed to the
+  module they install. A compatibility shim such as
+  `sys.modules[__name__] = importlib.import_module("app.services.billing")`
+  hands importers `app/services/billing.py`, but the graph stopped at the shim:
+  `import billing` targeted the shim file, `billing.charge(...)` and the
+  `TESTED_BY` edge from a test calling it stayed unresolved because `charge`
+  is not defined in the shim, and `from billing import charge` named a node
+  that does not exist. The import edge, module-receiver calls and
+  `from shim import name` now resolve to the real module, through chains of
+  shims and through re-exports to the defining file. Only the literal,
+  module-level form is followed; a computed or relative module name, a swap
+  inside a block, or a target outside the repository leaves the file as the
+  module. Because importers now depend on the real module, editing only the
+  shim does not re-parse them on `update`; run `build` after re-pointing a
+  shim.
+
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing
@@ -17,6 +35,14 @@
 
 ### Fixed
 
+- `from module import name as alias` followed by `alias(...)` is recorded as
+  a call to `module.py::name`. It used to qualify the alias,
+  `module.py::alias`, a target that matches no node.
+- A call through a Python module receiver whose module only re-exports the
+  name (`pkg.helper()` where `pkg/__init__.py` does
+  `from .impl import helper`) resolves to the defining file. The resolver
+  required the name at the top level of the receiver's own module, so the
+  call stayed unresolved.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

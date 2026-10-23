@@ -2297,10 +2297,20 @@ class GraphStore:
 
             context_file = edge["file_path"]
             imported_files = import_targets.get(context_file, set())
+            # A module receiver names its file outright; when that module
+            # only re-exports the name, the parser stamps the defining file,
+            # which the call site never imports itself.
+            receiver_file = (
+                edge_extra.get("receiver_module")
+                if edge_extra.get("receiver_binding") == "module"
+                else None
+            )
             supported = [
                 qualified
                 for qualified, candidate_file in candidates
-                if candidate_file == context_file or candidate_file in imported_files
+                if candidate_file == context_file
+                or candidate_file in imported_files
+                or candidate_file == receiver_file
             ]
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [

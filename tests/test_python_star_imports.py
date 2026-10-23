@@ -162,7 +162,9 @@ def test_parse_worker_reuses_star_export_cache(
     _parse_single_file(("caller_a.py", str(tmp_path)))
     _parse_single_file(("caller_b.py", str(tmp_path)))
 
-    assert helper_reads == 1
+    # Once to check whether the module is a sys.modules shim, once for its
+    # star exports; both answers are cached process-wide.
+    assert helper_reads == 2
 
 
 def test_concurrent_parsers_compute_star_exports_once(
@@ -209,7 +211,9 @@ def test_concurrent_parsers_compute_star_exports_once(
             executor.map(lambda caller: _call_targets(tmp_path, caller), callers)
         )
 
-    assert helper_reads == 1
+    # Once to check whether the module is a sys.modules shim, once for its
+    # star exports; both answers are cached process-wide.
+    assert helper_reads == 2
     assert all(f"{helper.as_posix()}::concurrent_helper" in result for result in targets)
 
 
