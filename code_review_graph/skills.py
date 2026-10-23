@@ -2876,23 +2876,124 @@ def install_hermes_skills(repo_root: Path) -> Path:
 # --- OpenCode plugin ---
 
 
-def _opencode_plugin_content() -> str:
-    """Return TypeScript source for the OpenCode user-level plugin.
+def _detect_opencode_major_version() -> int | None:
+    """Return the installed OpenCode major version, when it can be detected."""
+    executable = shutil.which("opencode")
+    if executable is None:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    match = re.search(r"(?:^|\s)v?(\d+)\.\d+(?:\.\d+)?(?:\s|$)", output)
+    return int(match.group(1)) if match else None
 
-    The plugin hooks into three OpenCode events to mirror the Claude Code
-    hook behaviors:
 
-    1. ``file.edited`` — runs ``code-review-graph update --skip-flows``
-    2. ``session.created`` — runs ``code-review-graph status``
-    3. ``tool.execute.before`` — when the tool is a shell command starting
-       with ``git commit``, runs ``code-review-graph detect-changes --brief``
-
-    All handlers use try/catch so errors never break the editor session.
-    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
-    context) for subprocess execution.
-    """
+def _opencode_v1_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode 1.x user-level plugin."""
     return """\
 import type { Plugin } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
+/**
+ * code-review-graph plugin for OpenCode 1.x.
+ *
+ * Keeps the knowledge graph up-to-date and surfaces status
+ * information automatically during coding sessions.
+ *
+ * Installed by: code-review-graph install --platform opencode
+ */
+
+const execFileAsync = promisify(execFile)
+
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
+  } catch {
+    return ""
+  }
+}
+
+const CodeReviewGraphPlugin: Plugin = async ({ directory, worktree }) => {
+  // Prefer the worktree root. Falling back to `directory` still lets the CRG
+  // CLI discover the repository root when OpenCode starts in a subdirectory.
+  const baseDir = worktree || directory
+
+  return {
+    event: async ({ event }) => {
+      if (event.type === "file.edited") {
+        await runQuiet(["update", "--skip-flows"], baseDir, 60_000)
+      }
+
+      if (event.type === "session.created") {
+        const output = await runQuiet(["status"], baseDir, 15_000)
+        if (output) {
+          console.log("[code-review-graph]", output)
+        }
+      }
+    },
+
+    "tool.execute.before": async (input, output) => {
+      const command = output?.args?.command
+      if (
+        input.tool === "bash" &&
+        typeof command === "string" &&
+        /^git\\s+commit/i.test(command)
+      ) {
+        const text = await runQuiet(["detect-changes", "--brief"], baseDir, 30_000)
+        if (text) {
+          console.log("[code-review-graph] Pre-commit analysis:\\n" + text)
+        }
+      }
+    },
+  }
+}
+
+export default CodeReviewGraphPlugin
+"""
+
+
+def _opencode_v2_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode user-level plugin.
+
+    The plugin exports an OpenCode 2.x (V2) definition object with an ``id``
+    and a ``setup`` function because the V2 loader rejects any other
+    default-export shape with ``SchemaError(Expected object at ["default"])``.
+    The plugin package is imported only for types so older 2.x hosts do not
+    need to resolve it at runtime. ``setup`` mirrors the Claude Code hook behaviors:
+
+    1. successful ``edit``/``write``/``patch`` tool calls (there is no V2
+       ``file.edited`` hook) — runs ``code-review-graph update --skip-flows``
+    2. ``session.created`` events via ``ctx.event.subscribe`` — runs
+       ``code-review-graph status``
+    3. ``ctx.tool.hook("execute.before")`` — when the tool is a shell
+       command starting with ``git commit``, runs ``code-review-graph
+       detect-changes --brief``
+
+    All handlers use try/catch (or a swallowing helper) so errors never
+    break the editor session. Subprocesses run via ``node:child_process``
+    ``execFile`` with argv arrays — never by interpolating a command string
+    into Bun's ``$`` template, which would escape it into one executable
+    name.
+    """
+    return """\
+import type { Plugin } from "@opencode/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 
 /**
  * code-review-graph plugin for OpenCode.
@@ -2903,62 +3004,87 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Installed by: code-review-graph install --platform opencode
  */
 
-// Helper: run a shell command quietly, swallowing errors.
-async function run($: any, cmd: string): Promise<string> {
+const execFileAsync = promisify(execFile)
+
+// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
-    const result = await $`${cmd}`.quiet()
-    return result.stdout?.toString().trim() ?? ""
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
   } catch {
     return ""
   }
 }
 
-export default (app: any) => {
-  // 1. Auto-update graph after file edits
-  app.on("file.edited", async ({ $ }: { $: any }) => {
-    try {
-      await $`code-review-graph update --skip-flows`.quiet()
-    } catch {
-      // Swallow — graph may not be built yet for this project.
-    }
-  })
+export default {
+  id: "code-review-graph",
+  async setup(ctx) {
+    const baseDir = ctx.location.directory
+    const controller = new AbortController()
 
-  // 2. Show graph status when a new session starts
-  app.on("session.created", async ({ $ }: { $: any }) => {
-    try {
-      const result = await $`code-review-graph status`.quiet()
-      const output = result.stdout?.toString().trim()
-      if (output) {
-        console.log("[code-review-graph]", output)
+    // Show graph status when a new session starts.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type !== "session.created") continue
+          // Only handle sessions for this plugin instance's location.
+          const sessionDir = event.location?.directory
+          if (sessionDir !== undefined && sessionDir !== baseDir) continue
+          const output = await runQuiet(["status"], sessionDir ?? baseDir, 15_000)
+          if (output) {
+            console.log("[code-review-graph]", output)
+          }
+        }
+      } catch {
+        // Aborted on unload — ignore.
       }
-    } catch {
-      // Swallow — not every project has a graph.
-    }
-  })
+    })()
 
-  // 3. Detect changes before git commit commands
-  app.on("tool.execute.before", async (ctx: any) => {
-    try {
-      const input = ctx?.input ?? ctx?.params ?? {}
-      const cmd =
-        input.command ?? input.cmd ?? input.content ?? ""
-      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
-        const result =
-          await ctx.$`code-review-graph detect-changes --brief`.quiet()
-        const output = result.stdout?.toString().trim()
+    // Auto-update graph after file edits. V2 has no `file.edited` hook,
+    // so trigger off successful edit/write/patch tool calls instead.
+    await ctx.tool.hook("execute.after", async (event) => {
+      if (event.status !== "completed") return
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "edit" && tool !== "write" && tool !== "patch") return
+      void runQuiet(["update", "--skip-flows"], baseDir, 60_000)
+    })
+
+    // Detect changes before git commit commands.
+    await ctx.tool.hook("execute.before", async (event) => {
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "bash" && tool !== "shell" && tool !== "execute") return
+      const input = (event.input ?? {}) as Record<string, unknown>
+      const cmd = input.command ?? input.cmd ?? input.content ?? ""
+      if (typeof cmd !== "string" || !/^git\\s+commit/i.test(cmd)) return
+      try {
+        const output = await runQuiet(["detect-changes", "--brief"], baseDir, 30_000)
         if (output) {
           console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
         }
+      } catch {
+        // Swallow — never block a commit.
       }
-    } catch {
-      // Swallow — never block a commit.
-    }
-  })
-}
+    })
+
+    return () => controller.abort()
+  },
+} satisfies Parameters<typeof Plugin.define>[0]
 """
 
 
-def install_opencode_plugin() -> Path:
+def _opencode_plugin_content(major_version: int = 2) -> str:
+    """Return the plugin template for an OpenCode major version."""
+    if major_version == 1:
+        return _opencode_v1_plugin_content()
+    if major_version >= 2:
+        return _opencode_v2_plugin_content()
+    raise ValueError(f"Unsupported OpenCode major version: {major_version}")
+
+
+def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     """Install the OpenCode user-level plugin for code-review-graph.
 
     Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
@@ -2968,11 +3094,23 @@ def install_opencode_plugin() -> Path:
     Returns:
         Path to the plugin file that was written.
     """
+    if opencode_major is None:
+        opencode_major = _detect_opencode_major_version()
+    if opencode_major is None:
+        # OpenCode may be installed outside PATH while the user is preparing
+        # configuration for a later install. Prefer the current major rather
+        # than silently emitting the legacy 1.x shape in that case.
+        opencode_major = 2
+        logger.warning(
+            "Could not detect the installed OpenCode version; "
+            "defaulting to the OpenCode 2.x plugin template"
+        )
+
     plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
     plugin_path = plugins_dir / "crg-plugin.ts"
 
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    plugin_path.write_text(_opencode_plugin_content(), encoding="utf-8")
-    logger.info("Wrote OpenCode plugin: %s", plugin_path)
+    plugin_path.write_text(_opencode_plugin_content(opencode_major), encoding="utf-8")
+    logger.info("Wrote OpenCode %s.x plugin: %s", opencode_major, plugin_path)
 
     return plugin_path

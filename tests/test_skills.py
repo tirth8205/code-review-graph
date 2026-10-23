@@ -21,6 +21,7 @@ from code_review_graph.skills import (
     PLATFORMS,
     _copilot_vscode_detected,
     _cursor_hook_scripts,
+    _detect_opencode_major_version,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
@@ -2356,27 +2357,36 @@ class TestOpenCodePluginContent:
 
     def test_has_plugin_type_import(self):
         content = _opencode_plugin_content()
-        assert "import type" in content
-        assert "@opencode-ai/plugin" in content
+        assert 'import type { Plugin } from "@opencode/plugin"' in content
+        assert "satisfies Parameters<typeof Plugin.define>[0]" in content
+        assert "Plugin.define(" not in content
 
     def test_has_default_export(self):
         content = _opencode_plugin_content()
         assert "export default" in content
 
-    def test_hooks_file_edited_event(self):
+    def test_uses_v2_definition_shape(self):
+        """V2 loader requires an object with id + setup, not a function."""
         content = _opencode_plugin_content()
-        assert '"file.edited"' in content
-        assert "code-review-graph update --skip-flows" in content
+        assert 'id: "code-review-graph"' in content
+        assert "async setup(ctx" in content
+        assert "app.on(" not in content
+
+    def test_hooks_file_edits_via_tool_hook(self):
+        content = _opencode_plugin_content()
+        assert 'ctx.tool.hook("execute.after"' in content
+        assert '"update", "--skip-flows"' in content
 
     def test_hooks_session_created_event(self):
         content = _opencode_plugin_content()
         assert '"session.created"' in content
-        assert "code-review-graph status" in content
+        assert "ctx.event.subscribe" in content
+        assert '["status"]' in content
 
     def test_hooks_tool_execute_before_event(self):
         content = _opencode_plugin_content()
-        assert '"tool.execute.before"' in content
-        assert "code-review-graph detect-changes --brief" in content
+        assert 'ctx.tool.hook("execute.before"' in content
+        assert '"detect-changes", "--brief"' in content
 
     def test_has_git_commit_detection(self):
         """Pre-commit hook should match git commit commands."""
@@ -2389,6 +2399,59 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         # Count the three event registrations and ensure catch blocks
         assert content.count("} catch") >= 3
+
+    def test_v1_uses_returned_hooks_api(self):
+        content = _opencode_plugin_content(1)
+        assert 'import type { Plugin } from "@opencode-ai/plugin"' in content
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert "return {" in content
+        assert "event: async" in content
+        assert '"tool.execute.before": async' in content
+        assert "app.on(" not in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_v1_runs_commands_from_worktree_without_repo_override(self):
+        content = _opencode_plugin_content(1)
+        assert "const baseDir = worktree || directory" in content
+        assert '--repo' not in content
+        assert 'execFileAsync("code-review-graph", args' in content
+        assert '["update", "--skip-flows"]' in content
+        assert '["status"]' in content
+        assert '["detect-changes", "--brief"]' in content
+
+    def test_rejects_unknown_legacy_major(self):
+        with pytest.raises(ValueError, match="Unsupported OpenCode major version"):
+            _opencode_plugin_content(0)
+
+
+class TestOpenCodeVersionDetection:
+    def test_detects_v1(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v1.19.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 1
+
+    def test_detects_v2(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v2.1.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 2
+
+    def test_returns_none_when_binary_is_missing(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: None)
+        assert _detect_opencode_major_version() is None
+
+    def test_returns_none_for_unparseable_version(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="unknown\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() is None
 
 
 class TestInstallOpenCodePlugin:
@@ -2403,10 +2466,36 @@ class TestInstallOpenCodePlugin:
 
     def test_plugin_file_has_correct_content(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
-            result = install_opencode_plugin()
+            result = install_opencode_plugin(opencode_major=2)
         content = result.read_text(encoding="utf-8")
         assert "export default" in content
-        assert "file.edited" in content
+        assert "execute.after" in content
+
+    def test_installs_v1_template_for_opencode_1(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin(opencode_major=1)
+        content = result.read_text(encoding="utf-8")
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert '"tool.execute.before": async' in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_auto_detects_installed_major(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: 1
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        assert "const CodeReviewGraphPlugin: Plugin = async" in result.read_text(encoding="utf-8")
+
+    def test_unknown_version_defaults_to_v2(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: None
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        content = result.read_text(encoding="utf-8")
+        assert 'id: "code-review-graph"' in content
+        assert "defaulting to the OpenCode 2.x plugin template" in caplog.text
 
     def test_creates_parent_directories(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
