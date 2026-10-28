@@ -1296,6 +1296,22 @@ class EmbeddingStore:
 
         return embedded
 
+    @staticmethod
+    def _iter_scores(
+        cursor: sqlite3.Cursor,
+        query_vec: list[float],
+        chunk_size: int = 500,
+    ):
+        """Stream (qualified_name, similarity) pairs from a cursor in chunks."""
+        while True:
+            rows = cursor.fetchmany(chunk_size)
+            if not rows:
+                break
+            for row in rows:
+                vec = _decode_vector(row["vector"])
+                sim = _cosine_similarity(query_vec, vec)
+                yield (row["qualified_name"], sim)
+
     def search(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
         """Search for nodes by semantic similarity.
 
@@ -1521,19 +1537,11 @@ class EmbeddingStore:
             "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
             (provider_name,),
         )
-        chunk_size = 500
-
-        def _iter_scores():
-            while True:
-                rows = cursor.fetchmany(chunk_size)
-                if not rows:
-                    break
-                for row in rows:
-                    vec = _decode_vector(row["vector"])
-                    sim = _cosine_similarity(query_vec, vec)
-                    yield (row["qualified_name"], sim)
-
-        return heapq.nlargest(limit, _iter_scores(), key=lambda x: x[1])
+        return heapq.nlargest(
+            limit,
+            self._iter_scores(cursor, query_vec),
+            key=lambda x: x[1],
+        )
 
     def remove_node(self, qualified_name: str) -> None:
         self._conn.execute(

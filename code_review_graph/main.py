@@ -264,16 +264,18 @@ async def _offload(
     if provenance and "with_provenance" not in globals():
         _resolve_attr("with_provenance")
 
-    def _run() -> dict:
-        result = work()
-        return _resolve_attr("with_provenance")(result, root) if provenance else result
+    run_fn = (
+        (lambda: _resolve_attr("with_provenance")(work(), root))
+        if provenance
+        else work
+    )
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:
-        return await _run_off_loop(_run)
+        return await _run_off_loop(run_fn)
 
     try:
-        return await asyncio.wait_for(_run_off_loop(_run), timeout=tool_timeout)
+        return await asyncio.wait_for(_run_off_loop(run_fn), timeout=tool_timeout)
     except asyncio.TimeoutError:
         message = f"{tool_name} timed out after {tool_timeout}s. {timeout_hint}"
         error_response = {

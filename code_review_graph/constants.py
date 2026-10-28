@@ -390,5 +390,5 @@ def release_os_memory() -> None:
         if callable(_MALLOC_TRIM_FN):
             try:
                 _MALLOC_TRIM_FN(0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("malloc_trim(0) failed: %s", exc)
