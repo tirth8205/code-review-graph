@@ -297,12 +297,18 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
     # disambiguate between several same-named definitions.
     # ------------------------------------------------------------------
     imports_by_file: dict[str, set[str]] = {}
-    for row in conn.execute(
-        "SELECT file_path, target_qualified FROM edges WHERE kind = 'IMPORTS_FROM'"
-    ).fetchall():
-        imports_by_file.setdefault(row["file_path"], set()).add(
-            row["target_qualified"]
-        )
+    scoped_file_list = sorted(file_language.keys())
+    for start in range(0, len(scoped_file_list), 450):
+        batch = scoped_file_list[start : start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        for row in conn.execute(
+            "SELECT file_path, target_qualified FROM edges "
+            f"WHERE kind = 'IMPORTS_FROM' AND file_path IN ({placeholders})",
+            batch,
+        ).fetchall():
+            imports_by_file.setdefault(row["file_path"], set()).add(
+                row["target_qualified"]
+            )
 
     # ------------------------------------------------------------------
     # csharp_namespaces_by_file: .cs file → namespaces it declares. C#
@@ -408,10 +414,17 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
             return next(iter(matched_by_suffix))
         return None
 
-    calls_rows = conn.execute(
-        "SELECT id, source_qualified, target_qualified, extra, file_path, line "
-        "FROM edges WHERE kind = 'CALLS'"
-    ).fetchall()
+    calls_rows = []
+    for start in range(0, len(scoped_file_list), 450):
+        batch = scoped_file_list[start : start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        calls_rows.extend(
+            conn.execute(
+                "SELECT id, source_qualified, target_qualified, extra, file_path, line "
+                f"FROM edges WHERE kind = 'CALLS' AND file_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
 
     resolved = 0
     for row in calls_rows:

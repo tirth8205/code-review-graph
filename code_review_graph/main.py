@@ -11,62 +11,131 @@ endpoint cannot be driven cross-origin (e.g. via DNS rebinding); see
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
 import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import anyio.to_thread
 from fastmcp import FastMCP
 
 from . import __version__
-from . import incremental as _incremental
 from .constants import env_int
-from .graph import GraphStore
-from .incremental import find_project_root, get_db_path, start_watch_thread
-from .prompts import (
-    architecture_map_prompt,
-    debug_issue_prompt,
-    onboard_developer_prompt,
-    pre_merge_check_prompt,
-    review_changes_prompt,
-)
-from .tools import (
-    apply_refactor_func,
-    build_or_update_graph,
-    cross_repo_search_func,
-    detect_changes_func,
-    embed_graph,
-    find_large_functions,
-    generate_wiki_func,
-    get_affected_flows_func,
-    get_architecture_overview_func,
-    get_bridge_nodes_func,
-    get_community_func,
-    get_docs_section,
-    get_flow,
-    get_hub_nodes_func,
-    get_impact_radius,
-    get_knowledge_gaps_func,
-    get_minimal_context,
-    get_review_context,
-    get_suggested_questions_func,
-    get_surprising_connections_func,
-    get_wiki_page_func,
-    list_communities_func,
-    list_flows,
-    list_graph_stats,
-    list_repos_func,
-    query_graph,
-    refactor_func,
-    run_postprocess,
-    semantic_search_nodes,
-    traverse_graph_func,
-    with_provenance,
-)
+
+if TYPE_CHECKING:
+    from .graph import GraphStore
+    from .tools import (
+        apply_refactor_func,
+        build_or_update_graph,
+        cross_repo_search_func,
+        detect_changes_func,
+        embed_graph,
+        find_large_functions,
+        generate_wiki_func,
+        get_affected_flows_func,
+        get_architecture_overview_func,
+        get_bridge_nodes_func,
+        get_community_func,
+        get_flow,
+        get_hub_nodes_func,
+        get_impact_radius,
+        get_knowledge_gaps_func,
+        get_minimal_context,
+        get_review_context,
+        get_suggested_questions_func,
+        get_surprising_connections_func,
+        get_wiki_page_func,
+        list_communities_func,
+        list_flows,
+        list_graph_stats,
+        query_graph,
+        refactor_func,
+        run_postprocess,
+        semantic_search_nodes,
+        traverse_graph_func,
+    )
+
+_LAZY_TOOL_NAMES = frozenset({
+    "apply_refactor_func",
+    "build_or_update_graph",
+    "cross_repo_search_func",
+    "detect_changes_func",
+    "embed_graph",
+    "find_large_functions",
+    "generate_wiki_func",
+    "get_affected_flows_func",
+    "get_architecture_overview_func",
+    "get_bridge_nodes_func",
+    "get_community_func",
+    "get_docs_section",
+    "get_flow",
+    "get_hub_nodes_func",
+    "get_impact_radius",
+    "get_knowledge_gaps_func",
+    "get_minimal_context",
+    "get_review_context",
+    "get_suggested_questions_func",
+    "get_surprising_connections_func",
+    "get_wiki_page_func",
+    "list_communities_func",
+    "list_flows",
+    "list_graph_stats",
+    "list_repos_func",
+    "query_graph",
+    "refactor_func",
+    "run_postprocess",
+    "semantic_search_nodes",
+    "traverse_graph_func",
+    "with_provenance",
+})
+
+_LAZY_PROMPT_NAMES = frozenset({
+    "architecture_map_prompt",
+    "debug_issue_prompt",
+    "onboard_developer_prompt",
+    "pre_merge_check_prompt",
+    "review_changes_prompt",
+})
+
+_LAZY_OTHER_ATTRS: dict[str, tuple[str, str | None]] = {
+    "_incremental": (".incremental", None),
+    "find_project_root": (".incremental", "find_project_root"),
+    "get_db_path": (".incremental", "get_db_path"),
+    "start_watch_thread": (".incremental", "start_watch_thread"),
+    "GraphStore": (".graph", "GraphStore"),
+}
+
+
+def _resolve_attr(name: str):
+    g = globals()
+    if name in g:
+        return g[name]
+    return __getattr__(name)
+
+
+def __getattr__(name: str):
+    if name in _LAZY_TOOL_NAMES:
+        from . import tools as _tools_mod
+        val = getattr(_tools_mod, name)
+        globals()[name] = val
+        return val
+    if name in _LAZY_PROMPT_NAMES:
+        from . import prompts as _prompts_mod
+        val = getattr(_prompts_mod, name)
+        globals()[name] = val
+        return val
+    target = _LAZY_OTHER_ATTRS.get(name)
+    if target is not None:
+        mod_path, attr = target
+        mod = importlib.import_module(mod_path, __package__ or "code_review_graph")
+        val = mod if attr is None else getattr(mod, attr)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 logger = logging.getLogger(__name__)
 
@@ -187,9 +256,17 @@ async def _offload(
             their builds would make the documented remedy a new bug.
         timeout_hint: Advice appended to the timeout message.
     """
+    impl_candidate = tool_name[:-5] if tool_name.endswith("_tool") else tool_name
+    for _cand in (impl_candidate, f"{impl_candidate}_func", tool_name):
+        if _cand in _LAZY_TOOL_NAMES and _cand not in globals():
+            _resolve_attr(_cand)
+            break
+    if provenance and "with_provenance" not in globals():
+        _resolve_attr("with_provenance")
+
     def _run() -> dict:
         result = work()
-        return with_provenance(result, root) if provenance else result
+        return _resolve_attr("with_provenance")(result, root) if provenance else result
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:
@@ -207,7 +284,7 @@ async def _offload(
         if not provenance:
             return error_response
         return await _run_off_loop(
-            lambda: with_provenance(error_response, root)
+            lambda: _resolve_attr("with_provenance")(error_response, root)
         )
 
 
@@ -671,7 +748,7 @@ def get_docs_section_tool(
         section_name: The section to retrieve (e.g. "review-delta", "usage").
         repo_root: Repository root path. Auto-detected if omitted.
     """
-    return get_docs_section(
+    return _resolve_attr("get_docs_section")(
         section_name=section_name,
         repo_root=_resolve_repo_root(repo_root),
     )
@@ -1302,7 +1379,7 @@ def list_repos_tool() -> dict:
 
     Stays synchronous: one small JSON read, no graph database and no Git.
     """
-    return list_repos_func()
+    return _resolve_attr("list_repos_func")()
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
@@ -1353,7 +1430,7 @@ def review_changes(base: str = "HEAD~1") -> list[dict]:
     Args:
         base: Git ref to diff against. Default: HEAD~1.
     """
-    return review_changes_prompt(base=base)
+    return _resolve_attr("review_changes_prompt")(base=base)
 
 
 @mcp.prompt()
@@ -1362,7 +1439,7 @@ def architecture_map() -> list[dict]:
 
     Generates a comprehensive architecture map with module summaries and coupling warnings.
     """
-    return architecture_map_prompt()
+    return _resolve_attr("architecture_map_prompt")()
 
 
 @mcp.prompt()
@@ -1374,7 +1451,7 @@ def debug_issue(description: str = "") -> list[dict]:
     Args:
         description: Description of the issue to debug.
     """
-    return debug_issue_prompt(description=description)
+    return _resolve_attr("debug_issue_prompt")(description=description)
 
 
 @mcp.prompt()
@@ -1383,7 +1460,7 @@ def onboard_developer() -> list[dict]:
 
     Creates an onboarding guide covering codebase structure, key modules, and patterns.
     """
-    return onboard_developer_prompt()
+    return _resolve_attr("onboard_developer_prompt")()
 
 
 @mcp.prompt()
@@ -1395,7 +1472,7 @@ def pre_merge_check(base: str = "HEAD~1") -> list[dict]:
     Args:
         base: Git ref to diff against. Default: HEAD~1.
     """
-    return pre_merge_check_prompt(base=base)
+    return _resolve_attr("pre_merge_check_prompt")(base=base)
 
 
 def _apply_tool_filter(tools: str | None = None) -> None:
@@ -1491,12 +1568,13 @@ def main(
         port: Port when using HTTP (required for HTTP; set by CLI).
     """
     global _default_repo_root
-    root = Path(repo_root) if repo_root else find_project_root()
+    root = Path(repo_root) if repo_root else _resolve_attr("find_project_root")()
     _default_repo_root = str(root)
     _apply_tool_filter(tools)
 
-    previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
-    _incremental._MCP_STDIO_ACTIVE = transport == "stdio"
+    inc_mod = _resolve_attr("_incremental")
+    previous_stdio_state = inc_mod._MCP_STDIO_ACTIVE
+    inc_mod._MCP_STDIO_ACTIVE = transport == "stdio"
     watch_store: GraphStore | None = None
     watch_thread: threading.Thread | None = None
     watch_stop = threading.Event()

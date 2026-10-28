@@ -12,6 +12,7 @@ Supports multiple providers:
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__ as _crg_version
+from .constants import release_os_memory
 from .graph import GraphNode, GraphStore, node_to_dict
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,13 @@ LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 # torch DLL / OpenMP init runs inside an executor thread).
 _MODEL_CACHE: dict[str, Any] = {}
 _MODEL_INIT_LOCK = threading.RLock()
+
+
+def clear_model_cache() -> None:
+    """Release cached sentence-transformer models and return memory to OS."""
+    with _MODEL_INIT_LOCK:
+        _MODEL_CACHE.clear()
+    release_os_memory()
 
 
 def prewarm_local_embeddings(model_name: str | None = None) -> None:
@@ -1204,6 +1213,8 @@ class EmbeddingStore:
             isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA cache_size=-2000")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
         # The file this connection holds open. If graph.db is later replaced,
         # the connection keeps reading the old file; see _cached_vectors().
@@ -1227,7 +1238,12 @@ class EmbeddingStore:
         self.close()
 
     def close(self) -> None:
+        try:
+            self._conn.execute("PRAGMA shrink_memory")
+        except sqlite3.Error:
+            pass
         self._conn.close()
+        release_os_memory()
 
     def embed_nodes(self, nodes: list[GraphNode], batch_size: int = 64) -> int:
         """Compute and store embeddings for a list of nodes."""
@@ -1506,17 +1522,18 @@ class EmbeddingStore:
             (provider_name,),
         )
         chunk_size = 500
-        while True:
-            rows = cursor.fetchmany(chunk_size)
-            if not rows:
-                break
-            for row in rows:
-                vec = _decode_vector(row["vector"])
-                sim = _cosine_similarity(query_vec, vec)
-                scored.append((row["qualified_name"], sim))
 
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
+        def _iter_scores():
+            while True:
+                rows = cursor.fetchmany(chunk_size)
+                if not rows:
+                    break
+                for row in rows:
+                    vec = _decode_vector(row["vector"])
+                    sim = _cosine_similarity(query_vec, vec)
+                    yield (row["qualified_name"], sim)
+
+        return heapq.nlargest(limit, _iter_scores(), key=lambda x: x[1])
 
     def remove_node(self, qualified_name: str) -> None:
         self._conn.execute(

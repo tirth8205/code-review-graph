@@ -117,10 +117,18 @@ def resolve_temporal_calls(store: GraphStore) -> dict:
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
     # -----------------------------------------------------------------------
-    calls_rows = conn.execute(
-        "SELECT id, source_qualified, target_qualified, extra, file_path "
-        "FROM edges WHERE kind = 'CALLS'"
-    ).fetchall()
+    java_file_list = sorted(java_files)
+    calls_rows = []
+    for start in range(0, len(java_file_list), 450):
+        batch = java_file_list[start : start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        calls_rows.extend(
+            conn.execute(
+                "SELECT id, source_qualified, target_qualified, extra, file_path "
+                f"FROM edges WHERE kind = 'CALLS' AND file_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
 
     resolved = 0
 

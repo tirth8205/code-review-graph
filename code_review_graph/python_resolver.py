@@ -57,15 +57,8 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
         "ON f.kind = 'File' AND f.file_path = e.file_path "
         "WHERE e.kind = 'IMPORTS_FROM' AND f.language = 'python'"
     ).fetchall():
-        try:
-            extra = json.loads(edge["extra"] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            extra = {}
-        if not isinstance(extra, dict):
-            extra = {}
-
-        raw_module = extra.get("python_module")
-        if not isinstance(raw_module, str):
+        raw_extra = edge["extra"]
+        if not raw_extra or raw_extra == "{}":
             raw_module = edge["target_qualified"]
             if (
                 raw_module in python_file_set
@@ -74,6 +67,24 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
                 or "\\" in raw_module
             ):
                 continue
+            extra = {}
+        else:
+            try:
+                extra = json.loads(raw_extra)
+            except (TypeError, json.JSONDecodeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            raw_module = extra.get("python_module")
+            if not isinstance(raw_module, str):
+                raw_module = edge["target_qualified"]
+                if (
+                    raw_module in python_file_set
+                    or raw_module.startswith(".")
+                    or "/" in raw_module
+                    or "\\" in raw_module
+                ):
+                    continue
 
         candidates = sorted(modules.get(raw_module, ()))
         desired_extra = dict(extra)
@@ -105,11 +116,12 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
         elif candidates:
             ambiguous += 1
 
-    conn.executemany(
-        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-        updates,
-    )
     if updates:
+        store._begin_immediate()
+        conn.executemany(
+            "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
+            updates,
+        )
         conn.commit()
         store._invalidate_cache()
 

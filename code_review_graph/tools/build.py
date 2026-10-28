@@ -18,6 +18,7 @@ from ..build_state import (
     graph_contents_are_complete,
     read_build_state,
 )
+from ..constants import normalize_file_path
 from ..incremental import (
     VERIFIED_FILE_COUNT_KEY,
     _prepare_db_path,
@@ -279,18 +280,30 @@ def _run_postprocess(
             )
         return warnings
 
+    noop_incremental = (
+        not full_rebuild
+        and changed_files is not None
+        and build_result.get("files_updated") == 0
+        and not build_result.get("stale_files_removed")
+    )
+
     # Resolve bare and C++ scoped call targets before derived graph steps.
     if not skip_resolvers:
         try:
-            resolved = store.resolve_bare_call_targets()
-            resolved += store.resolve_bare_tested_by_sources()
-            build_result["bare_edges_resolved"] = resolved
-            build_result["cpp_scoped_edges_resolved"] = (
-                store.resolve_cpp_scoped_call_targets()
-            )
-            # Resolvers rewrite bare targets into qualified ones, so the stored
-            # certainty column is only correct once they have all run.
-            store.refresh_target_resolution()
+            if noop_incremental and not store.get_nodes_without_signature():
+                build_result["bare_edges_resolved"] = 0
+                build_result["cpp_scoped_edges_resolved"] = 0
+            else:
+                noop_incremental = False
+                resolved = store.resolve_bare_call_targets()
+                resolved += store.resolve_bare_tested_by_sources()
+                build_result["bare_edges_resolved"] = resolved
+                build_result["cpp_scoped_edges_resolved"] = (
+                    store.resolve_cpp_scoped_call_targets()
+                )
+                # Resolvers rewrite bare targets into qualified ones, so the stored
+                # certainty column is only correct once they have all run.
+                store.refresh_target_resolution()
         except sqlite3.OperationalError as e:
             logger.warning("Call-target resolution failed: %s", e)
             _note_contention(build_result, e)
@@ -381,7 +394,9 @@ def _run_postprocess(
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = 0
+        elif use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
             count = incremental_trace_flows(
@@ -408,7 +423,9 @@ def _run_postprocess(
 
     stage_started = time.perf_counter()
     try:
-        if use_incremental:
+        if noop_incremental:
+            count = store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0]
+        elif use_incremental:
             from code_review_graph.communities import (
                 incremental_detect_communities,
             )
@@ -442,7 +459,8 @@ def _run_postprocess(
     # -- Compute pre-computed summary tables --
     stage_started = time.perf_counter()
     try:
-        _compute_summaries(store)
+        if not noop_incremental:
+            _compute_summaries(store)
         build_result["summaries_computed"] = True
     except (sqlite3.OperationalError, Exception) as e:
         logger.warning("Summary computation failed: %s", e)
@@ -466,6 +484,8 @@ def _run_postprocess(
         time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
     store.set_metadata("postprocess_level", postprocess)
+    if hasattr(store, "shrink_memory"):
+        store.shrink_memory()
 
     return warnings
 
@@ -533,6 +553,7 @@ def _compute_summaries(store: Any) -> None:
         community_rows = conn.execute(
             "SELECT id, name, size, dominant_language FROM communities"
         ).fetchall()
+        comm_summary_rows = []
         for r in community_rows:
             cid, cname, csize, clang = r[0], r[1], r[2], r[3]
 
@@ -553,11 +574,15 @@ def _compute_summaries(store: Any) -> None:
                 if "/" in prefix:
                     purpose = prefix.rsplit("/", 1)[0].split("/")[-1] if "/" in prefix else ""
 
-            conn.execute(
+            comm_summary_rows.append(
+                (cid, cname, purpose, key_syms, csize, clang or "")
+            )
+        if comm_summary_rows:
+            conn.executemany(
                 "INSERT OR REPLACE INTO community_summaries "
                 "(community_id, name, purpose, key_symbols, size, dominant_language) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (cid, cname, purpose, key_syms, csize, clang or ""),
+                comm_summary_rows,
             )
         conn.commit()
     except sqlite3.OperationalError:
@@ -603,6 +628,7 @@ def _compute_summaries(store: Any) -> None:
                 for nr in node_rows:
                     id_to_name[nr[0]] = nr[1]
 
+        flow_snapshot_rows = []
         for r, path_ids in zip(flow_rows, parsed_paths):
             fid, fname, ep_id = r[0], r[1], r[2]
             crit, ncount, fcount = r[3], r[4], r[5]
@@ -619,11 +645,15 @@ def _compute_summaries(store: Any) -> None:
                     last = id_to_name.get(path_ids[-1])
                     if last and last not in critical_path:
                         critical_path.append(last)
-            conn.execute(
+            flow_snapshot_rows.append(
+                (fid, fname, ep_name, _json.dumps(critical_path), crit, ncount, fcount)
+            )
+        if flow_snapshot_rows:
+            conn.executemany(
                 "INSERT OR REPLACE INTO flow_snapshots "
                 "(flow_id, name, entry_point, critical_path, criticality, "
                 "node_count, file_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (fid, fname, ep_name, _json.dumps(critical_path), crit, ncount, fcount),
+                flow_snapshot_rows,
             )
         conn.commit()
     except sqlite3.OperationalError:
@@ -656,26 +686,18 @@ def _compute_summaries(store: Any) -> None:
         risk_nodes = conn.execute(
             "SELECT id, qualified_name, name FROM nodes WHERE kind IN ('Function', 'Class', 'Test')"
         ).fetchall()
-        security_kw = {
-            "auth",
-            "login",
-            "password",
-            "token",
-            "session",
-            "crypt",
-            "secret",
-            "credential",
-            "permission",
-            "sql",
-            "execute",
-        }
+        import re as _re
+        security_kw_re = _re.compile(
+            "auth|login|password|token|session|crypt|secret|credential|permission|sql|execute",
+            _re.IGNORECASE,
+        )
+        risk_rows = []
         for n in risk_nodes:
             nid, qn, name = n[0], n[1], n[2]
             caller_count = caller_counts.get(qn, 0)
             tested = tested_counts.get(qn, 0)
             coverage = "tested" if tested > 0 else "untested"
-            name_lower = name.lower()
-            sec_relevant = 1 if any(kw in name_lower for kw in security_kw) else 0
+            sec_relevant = 1 if security_kw_re.search(name) else 0
             risk = 0.0
             if caller_count > 10:
                 risk += 0.3
@@ -686,12 +708,14 @@ def _compute_summaries(store: Any) -> None:
             if sec_relevant:
                 risk += 0.4
             risk = min(risk, 1.0)
-            conn.execute(
+            risk_rows.append((nid, qn, risk, caller_count, coverage, sec_relevant))
+        if risk_rows:
+            conn.executemany(
                 "INSERT OR REPLACE INTO risk_index "
                 "(node_id, qualified_name, risk_score, caller_count, "
                 "test_coverage, security_relevant, last_computed) "
                 "VALUES (?, ?, ?, ?, ?, ?, datetime('now'))",
-                (nid, qn, risk, caller_count, coverage, sec_relevant),
+                risk_rows,
             )
         conn.commit()
     except sqlite3.OperationalError:

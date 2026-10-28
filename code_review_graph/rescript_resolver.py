@@ -43,6 +43,18 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
     """
     conn = store._conn  # intentional: post-build maintenance pass
 
+    has_rescript = conn.execute(
+        "SELECT 1 FROM ("
+        "SELECT 1 FROM nodes WHERE file_path LIKE '%.res' OR file_path LIKE '%.resi' "
+        "OR file_path LIKE '%.RES' OR file_path LIKE '%.RESI' LIMIT 1"
+        ") UNION ALL SELECT 1 FROM ("
+        "SELECT 1 FROM edges WHERE file_path LIKE '%.res' OR file_path LIKE '%.resi' "
+        "OR file_path LIKE '%.RES' OR file_path LIKE '%.RESI' LIMIT 1"
+        ") LIMIT 1"
+    ).fetchone()
+    if has_rescript is None:
+        return {"files_indexed": 0, "calls_resolved": 0, "imports_resolved": 0}
+
     # Basename (module name) → absolute file path, preferring .res over .resi.
     basename_to_path: dict[str, str] = {}
     rescript_files: set[str] = set()
@@ -120,19 +132,15 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
         if file_target and file_target != target:
             import_updates.append((file_target, row["id"]))
 
-    cur = conn.cursor()
-    for new_target, edge_id in call_updates:
-        cur.execute(
+    all_updates = call_updates + import_updates
+    if all_updates:
+        store._begin_immediate()
+        conn.executemany(
             "UPDATE edges SET target_qualified = ? WHERE id = ?",
-            (new_target, edge_id),
+            all_updates,
         )
-    for new_target, edge_id in import_updates:
-        cur.execute(
-            "UPDATE edges SET target_qualified = ? WHERE id = ?",
-            (new_target, edge_id),
-        )
-    conn.commit()
-    store._invalidate_cache()
+        conn.commit()
+        store._invalidate_cache()
 
     result = {
         "files_indexed": len(basename_to_path),
