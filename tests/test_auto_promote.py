@@ -811,9 +811,13 @@ def test_the_workflow_parses_and_has_no_dangling_needs(workflow: dict):
 def test_every_step_that_refers_to_another_step_refers_to_one_that_exists(workflow: dict):
     steps = workflow["jobs"]["promote"]["steps"]
     known = {step["id"] for step in steps if step.get("id")}
-    for step in steps:
-        for referenced in re.findall(r"steps\.([A-Za-z0-9_-]+)\.", json.dumps(step)):
-            assert referenced in known, f"{step.get('name')} refers to steps.{referenced}"
+    
+    referenced = set(
+        re.findall(r"steps\.([A-Za-z0-9_-]+)\.", json.dumps(steps))
+    )
+
+    assert referenced
+    assert referenced <= known
 
 
 def test_it_runs_daily_and_by_hand_and_on_nothing_else(workflow: dict):

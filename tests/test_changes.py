@@ -456,7 +456,7 @@ class TestChanges:
             repo_root=repo_root,
         )
         assert len(result["affected_flows"]) >= 1
-
+ 
     def test_analyze_changes_review_priorities_ordered(self):
         """Review priorities are ordered by descending risk score."""
         # Create several functions with varying risk levels.
@@ -469,9 +469,11 @@ class TestChanges:
             changed_ranges={"app.py": [(1, 20)]},
         )
         priorities = result["review_priorities"]
-        if len(priorities) >= 2:
-            for i in range(len(priorities) - 1):
-                assert priorities[i]["risk_score"] >= priorities[i + 1]["risk_score"]
+
+        assert len(priorities) >= 2
+
+        risk_scores = [priority["risk_score"] for priority in priorities]
+        assert risk_scores == sorted(risk_scores, reverse=True)
 
     def test_analyze_changes_fallback_no_ranges(self):
         """Falls back to all nodes in files when no ranges provided."""

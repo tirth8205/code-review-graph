@@ -339,17 +339,11 @@ class TestUnindexedTargets:
         _init_repo(repo)
         store = _build(repo)
         try:
-            known = {n.qualified_name for n in store.get_all_nodes(exclude_files=False)}
-            known |= {
-                str(repo / "pkg" / "core"),
-            }
-            for edge in _import_edges(store):
-                target = edge.target_qualified
-                if not target.startswith(str(repo)):
-                    continue  # a bare module string, visibly external
-                assert target in known, target
-            assert "example.com/dep" in {
-                e.target_qualified for e in _import_edges(store)
+            targets = {edge.target_qualified for edge in _import_edges(store)}
+
+            assert targets == {
+                (repo / "pkg" / "core").as_posix(),
+                "example.com/dep",
             }
         finally:
             store.close()

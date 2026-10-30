@@ -720,11 +720,15 @@ class TestGraphBackedToolProvenanceCoverage:
             assert attaches, (
                 f"{category}: {tool_name} does not attach graph provenance"
             )
-
-    @pytest.mark.parametrize("tool_name", [
-        "get_docs_section_tool", "list_repos_tool", "cross_repo_search_tool",
+    
+    @pytest.mark.parametrize(("tool_name", "offloads"), [
+        ("get_docs_section_tool", False),
+        ("list_repos_tool", False),
+        ("cross_repo_search_tool", True),
     ])
-    def test_non_single_repository_tools_do_not_claim_one_graph(self, tool_name):
+    def test_non_single_repository_tools_do_not_claim_one_graph(
+        self, tool_name, offloads,
+    ):
         tool = getattr(crg_main, tool_name)
         underlying = getattr(tool, "fn", None) or tool
         source = inspect.getsource(underlying)
@@ -732,8 +736,8 @@ class TestGraphBackedToolProvenanceCoverage:
         # Offloading must not smuggle provenance in through the back door:
         # a tool that spans several repositories, or none, has no single
         # graph whose freshness it could report.
-        if "_offload(" in source:
-            assert "provenance=False" in source
+        assert ("_offload(" in source) is offloads
+        assert ("provenance=False" in source) is offloads
 
 class TestApplyToolFilter:
     """Tests for _apply_tool_filter (``serve --tools`` / ``CRG_TOOLS``).

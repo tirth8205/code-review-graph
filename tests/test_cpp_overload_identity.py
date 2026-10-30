@@ -1060,15 +1060,35 @@ def test_missing_scoped_candidate_rechecks_when_definition_appears(tmp_path: Pat
     finally:
         store.close()
 
+def _reindex_cpp_source(store, parser, path: Path, source: str) -> None:
+    path.write_text(source, encoding="utf-8")
+    nodes, edges = parser.parse_file(path)
+    store.store_file_nodes_edges(str(path), nodes, edges)
+
+
+def _get_scoped_call_edges(store, caller: str):
+    call = next(
+        edge
+        for edge in store.get_edges_by_source(caller)
+        if edge.kind == "CALLS"
+    )
+    tested_by = next(
+        edge
+        for edge in store.get_edges_by_target(caller)
+        if edge.kind == "TESTED_BY"
+    )
+    return call, tested_by
 
 def test_cross_file_scoped_resolution_rechecks_candidate_changes(tmp_path: Path):
     callee_path = tmp_path / "callee.cpp"
     caller_path = tmp_path / "caller.cpp"
+
     callee_path.write_text("void A::run(int value) {}\n", encoding="utf-8")
     caller_path.write_text(
         "void test_caller() { A::run(1); }\n",
         encoding="utf-8",
     )
+
     store = GraphStore(tmp_path / "graph.db")
     parser = CodeParser()
     caller = f"{caller_path.as_posix()}::test_caller()"
@@ -1078,68 +1098,50 @@ def test_cross_file_scoped_resolution_rechecks_candidate_changes(tmp_path: Path)
             nodes, edges = parser.parse_file(path)
             store.store_file_nodes_edges(str(path), nodes, edges)
 
+        # Primeiro cenário: resolução para A::run(int)
         assert store.resolve_cpp_scoped_call_targets() == 1
-        call = next(
-            edge
-            for edge in store.get_edges_by_source(caller)
-            if edge.kind == "CALLS"
-        )
+
+        call, tested_by = _get_scoped_call_edges(store, caller)
+
         assert call.target_qualified == f"{callee_path.as_posix()}::A.run(int)"
         assert call.extra["cpp_scoped_target"] == "A::run"
-        tested_by = next(
-            edge
-            for edge in store.get_edges_by_target(caller)
-            if edge.kind == "TESTED_BY"
-        )
         assert tested_by.source_qualified == f"{callee_path.as_posix()}::A.run(int)"
         assert tested_by.extra == call.extra
 
-        callee_path.write_text(
+        # Segundo cenário: duas sobrecargas geram ambiguidade
+        _reindex_cpp_source(
+            store,
+            parser,
+            callee_path,
             "void A::run(int value) {}\nvoid A::run(double value) {}\n",
-            encoding="utf-8",
         )
-        nodes, edges = parser.parse_file(callee_path)
-        store.store_file_nodes_edges(str(callee_path), nodes, edges)
 
         assert store.resolve_cpp_scoped_call_targets() == 0
-        call = next(
-            edge
-            for edge in store.get_edges_by_source(caller)
-            if edge.kind == "CALLS"
-        )
+
+        call, tested_by = _get_scoped_call_edges(store, caller)
+
         assert call.target_qualified == "A::run"
         assert call.extra["ambiguous_target_count"] == 2
-        tested_by = next(
-            edge
-            for edge in store.get_edges_by_target(caller)
-            if edge.kind == "TESTED_BY"
-        )
         assert tested_by.source_qualified == "A::run"
         assert tested_by.extra == call.extra
 
-        callee_path.write_text(
+        # Terceiro cenário: resolução para A::run(double)
+        _reindex_cpp_source(
+            store,
+            parser,
+            callee_path,
             "void A::run(double value) {}\n",
-            encoding="utf-8",
         )
-        nodes, edges = parser.parse_file(callee_path)
-        store.store_file_nodes_edges(str(callee_path), nodes, edges)
 
         assert store.resolve_cpp_scoped_call_targets() == 1
-        call = next(
-            edge
-            for edge in store.get_edges_by_source(caller)
-            if edge.kind == "CALLS"
-        )
+
+        call, tested_by = _get_scoped_call_edges(store, caller)
+
         assert call.target_qualified == f"{callee_path.as_posix()}::A.run(double)"
         assert call.extra["cpp_scoped_target"] == "A::run"
         assert "ambiguous_targets" not in call.extra
         assert "ambiguous_target_count" not in call.extra
         assert "ambiguous_targets_truncated" not in call.extra
-        tested_by = next(
-            edge
-            for edge in store.get_edges_by_target(caller)
-            if edge.kind == "TESTED_BY"
-        )
         assert tested_by.source_qualified == f"{callee_path.as_posix()}::A.run(double)"
         assert tested_by.extra == call.extra
     finally:

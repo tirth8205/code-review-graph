@@ -1430,17 +1430,16 @@ class TestFlowTools:
         result = list_flows(repo_root=str(self.root), limit=1)
         assert result["status"] == "ok"
         assert len(result["flows"]) <= 1
-
+    
     def test_list_flows_kind_filter(self):
         result = list_flows(repo_root=str(self.root), kind="Function")
+
         assert result["status"] == "ok"
-        # All returned flows should have Function entry points
-        for f in result["flows"]:
-            ep_id = f["entry_point_id"]
-            row = self.store._conn.execute(
-                "SELECT kind FROM nodes WHERE id = ?", (ep_id,)
-            ).fetchone()
-            assert row["kind"] == "Function"
+        assert len(result["flows"]) == 1
+
+        flow = result["flows"][0]
+        assert flow["name"] == "handle_request"
+        assert self.store.get_node_kind_by_id(flow["entry_point_id"]) == "Function"
 
     def test_list_flows_kind_filter_no_match(self):
         result = list_flows(repo_root=str(self.root), kind="Class")
@@ -1544,25 +1543,42 @@ class TestFlowTools:
             detail_level="minimal",
         )
         assert result["status"] == "ok"
-        assert result["total"] >= 1
-        for flow in result["affected_flows"]:
-            assert "steps" not in flow
-            assert "path" not in flow
-            assert "name" in flow
-            assert "criticality" in flow
+        assert len(result["affected_flows"]) == result["total"] == 1
+
+        flow = result["affected_flows"][0]
+        assert "steps" not in flow
+        assert "path" not in flow
+        assert "name" in flow
+        assert "criticality" in flow
 
     def test_get_affected_flows_max_flows_truncates(self):
         """max_flows bounds the list while total keeps the full count (#849)."""
+        app_py = (self.root / "app.py").as_posix()
+        auth_py = (self.root / "auth.py").as_posix()
+
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="admin_handler",
+            file_path=app_py, line_start=26, line_end=35, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source=f"{app_py}::admin_handler",
+            target=f"{auth_py}::check_auth",
+            file_path=app_py, line=30,
+        ))
+        self.store.commit()
+        self._build_flows()
+
         result = get_affected_flows_func(
             changed_files=["auth.py"],
             repo_root=str(self.root),
             max_flows=1,
         )
         assert result["status"] == "ok"
-        assert len(result["affected_flows"]) <= 1
-        if result["total"] > 1:
-            assert result["truncated"] is True
-            assert "showing 1" in result["summary"]
+        assert result["total"] >= 2
+        assert len(result["affected_flows"]) == 1
+        assert result["truncated"] is True
+        assert "showing 1" in result["summary"]
 
     def test_get_affected_flows_max_flows_zero_disables_limit(self):
         result = get_affected_flows_func(
@@ -1777,12 +1793,16 @@ class TestCommunityTools:
         assert "Architecture:" in result["summary"]
         assert "communities" in result["summary"]
         assert "cross-community edges" in result["summary"]
-
+    
     def test_get_architecture_overview_defaults_to_compact_output(self):
         result = get_architecture_overview_func(repo_root=str(self.root))
+
         assert "community pairs" in result["summary"]
-        for c in result["communities"]:
-            assert "members" not in c
+
+        communities = result["communities"]
+        assert communities
+        assert all(map(lambda community: "members" not in community, communities))
+
         assert result["context_savings"]["estimated"] is True
         assert set(result["context_savings"]) == {
             "estimated",
@@ -1804,7 +1824,7 @@ class TestCommunityTools:
         for c in result["communities"]:
             assert "members" not in c
             assert "name" in c and "size" in c and "cohesion" in c
-
+    
     def test_get_architecture_overview_minimal_aggregates_edges(self):
         std = get_architecture_overview_func(
             repo_root=str(self.root), detail_level="standard"
@@ -1812,17 +1832,19 @@ class TestCommunityTools:
         minimal = get_architecture_overview_func(
             repo_root=str(self.root), detail_level="minimal"
         )
-        # Minimal edges are pair-aggregated, so count is <= standard's
-        # per-edge count.
-        assert len(minimal["cross_community_edges"]) <= len(
-            std["cross_community_edges"]
-        )
-        for pair in minimal["cross_community_edges"]:
-            assert "source_community" in pair
-            assert "target_community" in pair
-            assert "edge_count" in pair
-            assert pair["edge_count"] >= 1
-            assert isinstance(pair["top_kinds"], list)
+
+        std_edges = std["cross_community_edges"]
+        pairs = minimal["cross_community_edges"]
+
+        assert std_edges
+        assert len(pairs) == 1
+
+        pair = pairs[0]
+        assert pair["source_community"]
+        assert pair["target_community"]
+        assert pair["edge_count"] == len(std_edges)
+        assert isinstance(pair["top_kinds"], list)
+        assert "CALLS" in pair["top_kinds"]
 
     def test_get_architecture_overview_minimal_summary_label(self):
         result = get_architecture_overview_func(

@@ -165,6 +165,7 @@ class TestEmbeddingStore:
             store = EmbeddingStore(db)
             # Should not raise even if node doesn't exist
             store.remove_node("nonexistent::func")
+            assert store.count() == 0
             store.close()
 
     def test_embed_nodes_commits_each_batch(self, tmp_path):
@@ -835,12 +836,10 @@ class TestEmbeddingStoreContextManager:
 
     def test_context_manager_closes_on_exception(self, tmp_path):
         db = tmp_path / "embed_err.db"
-        try:
+        with pytest.raises(RuntimeError, match="simulated crash"):
             with EmbeddingStore(db) as store:
                 assert store.db_path == db
                 raise RuntimeError("simulated crash")
-        except RuntimeError:
-            pass
         # The connection was closed by __exit__ even though an exception
         # was raised.  This is the whole point of #260 — without the
         # context manager, the connection would leak.

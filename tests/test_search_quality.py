@@ -362,13 +362,24 @@ class TestSearchBehaviour:
             Path(tmp.name).unlink(missing_ok=True)
 
     def test_operator_words_do_not_raise_or_act_as_operators(self, store):
-        for query in ("AND", "OR", "NOT", "NEAR", "token NEAR store"):
+        for query in ("OR", "NOT", "NEAR", "token NEAR store"):
             hybrid_search(store, query, limit=10)
 
+        mode = []
+        results = hybrid_search(store, "AND", limit=10, _out_mode=mode)
+
+        assert mode == ["fts"]
+        assert "Store" in _names(results)
+
     def test_degenerate_queries_do_not_raise(self, store):
-        for query in ("", " ", "a", "...", '"impact radius"', "well-known",
-                      "graph.py", 'say"hi', "*", "^", "(", "col:value"):
-            hybrid_search(store, query, limit=10)
+        for query in (
+            "", " ", "a", "...", '"impact radius"', "well-known",
+            "graph.py", 'say"hi', "*", "^", "(", "col:value"
+        ):
+            results = hybrid_search(store, query, limit=10)
+
+            assert isinstance(results, list)
+            assert len(results) <= 10
 
 
 # ---------------------------------------------------------------------------

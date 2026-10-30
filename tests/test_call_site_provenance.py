@@ -20,7 +20,6 @@ split by it.
 from __future__ import annotations
 
 import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -249,12 +248,11 @@ class TestCallSitesOnRows:
 
 
 class TestTargetResolutionColumn:
-    def test_column_is_created_indexed_and_backfilled_by_migration(self):
-        tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        tmp.close()
+    def _prepare_database_for_migration(self, db_path):
+        store = GraphStore(db_path)
         try:
-            store = GraphStore(tmp.name)
             conn = store._conn
+
             conn.execute("DROP INDEX IF EXISTS idx_edges_kind_target_resolution")
             conn.execute("ALTER TABLE edges DROP COLUMN target_resolution")
             conn.execute(
@@ -277,30 +275,33 @@ class TestTargetResolutionColumn:
                 "UPDATE metadata SET value = '10' WHERE key = 'schema_version'"
             )
             store.commit()
+        finally:
             store.close()
 
-            store = GraphStore(tmp.name)
-            try:
-                assert get_schema_version(store._conn) == LATEST_VERSION
-                rows = dict(store._conn.execute(
-                    "SELECT target_qualified, target_resolution FROM edges"
-                ).fetchall())
-                assert rows["src/app.py::run"] == "direct"
-                assert rows["run"] == "unresolved"
-                # The column means nothing for an import edge; it stays NULL
-                # rather than claiming a file path is an unresolved call.
-                assert rows["src/lib.py"] is None
-                indexes = {
-                    row[0] for row in store._conn.execute(
-                        "SELECT name FROM sqlite_master WHERE type = 'index' "
-                        "AND tbl_name = 'edges'"
-                    )
-                }
-                assert "idx_edges_kind_target_resolution" in indexes
-            finally:
-                store.close()
-        finally:
-            Path(tmp.name).unlink(missing_ok=True)
+    def test_column_is_created_indexed_and_backfilled_by_migration(self, tmp_path):
+        db_path = tmp_path / "migration.db"
+
+        self._prepare_database_for_migration(db_path)
+
+        with GraphStore(db_path) as store:
+            assert get_schema_version(store._conn) == LATEST_VERSION
+
+            rows = dict(store._conn.execute(
+                "SELECT target_qualified, target_resolution FROM edges"
+            ).fetchall())
+
+            assert rows["src/app.py::run"] == "direct"
+            assert rows["run"] == "unresolved"
+            assert rows["src/lib.py"] is None
+
+            indexes = {
+                row[0] for row in store._conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index' "
+                    "AND tbl_name = 'edges'"
+                )
+            }
+
+            assert "idx_edges_kind_target_resolution" in indexes
 
     def test_refresh_reclassifies_a_target_a_resolver_bound(self, repo):
         """A resolver pass rewrites a bare target; the column must follow it."""

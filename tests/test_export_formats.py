@@ -1136,22 +1136,20 @@ def _frontmatter(text: str) -> str | None:
 
 
 def test_obsidian_frontmatter_is_valid_yaml(corpus: Corpus):
-    bad: list[tuple[str, str]] = []
     checked = 0
+
     for page in _vault(corpus).glob("*.md"):
         if page.name.startswith("_"):
             continue
+
         block = _frontmatter(page.read_text(encoding="utf-8"))
         assert block is not None, f"{page.name} has no frontmatter"
         checked += 1
-        try:
-            parsed = yaml.safe_load(block)
-        except yaml.YAMLError as exc:
-            bad.append((page.name, type(exc).__name__))
-            continue
+
+        parsed = yaml.safe_load(block)
         assert isinstance(parsed, dict), page.name
+
     assert checked > 0
-    assert not bad, bad
 
 
 def test_obsidian_colon_path_round_trips_through_yaml(corpus: Corpus):

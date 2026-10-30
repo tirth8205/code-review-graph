@@ -303,45 +303,50 @@ class TestSymbolDisambiguation:
         assert result["status"] == "ok"
         assert result["target"] == target
         assert result["results"] == []
+    
+    def _seed_java_fqn_graph(self, store, root):
+        java_target = str(root / "OrderHandler.java") + "::OrderHandler.process"
+        java_caller = str(root / "OrderRouter.java") + "::route"
+
+        store.upsert_node(NodeInfo(
+            kind="Function",
+            name="process",
+            parent_name="OrderHandler",
+            file_path=str(root / "OrderHandler.java"),
+            line_start=10,
+            line_end=20,
+            language="java",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function",
+            name="route",
+            file_path=str(root / "OrderRouter.java"),
+            line_start=1,
+            line_end=5,
+            language="java",
+        ))
+        store.upsert_node(NodeInfo(
+            kind="Function",
+            name="process",
+            file_path=str(root / "worker.py"),
+            line_start=1,
+            line_end=5,
+            language="python",
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source=java_caller,
+            target=java_target,
+            file_path=str(root / "OrderRouter.java"),
+            line=3,
+        ))
+        store.commit()
+        return java_target
 
     def test_java_fqn_requires_matching_language_and_class(self, tmp_path):
         root, store = _make_repo(tmp_path)
         try:
-            java_target = str(root / "OrderHandler.java") + "::OrderHandler.process"
-            java_caller = str(root / "OrderRouter.java") + "::route"
-            store.upsert_node(NodeInfo(
-                kind="Function",
-                name="process",
-                parent_name="OrderHandler",
-                file_path=str(root / "OrderHandler.java"),
-                line_start=10,
-                line_end=20,
-                language="java",
-            ))
-            store.upsert_node(NodeInfo(
-                kind="Function",
-                name="route",
-                file_path=str(root / "OrderRouter.java"),
-                line_start=1,
-                line_end=5,
-                language="java",
-            ))
-            store.upsert_node(NodeInfo(
-                kind="Function",
-                name="process",
-                file_path=str(root / "worker.py"),
-                line_start=1,
-                line_end=5,
-                language="python",
-            ))
-            store.upsert_edge(EdgeInfo(
-                kind="CALLS",
-                source=java_caller,
-                target=java_target,
-                file_path=str(root / "OrderRouter.java"),
-                line=3,
-            ))
-            store.commit()
+            java_target = self._seed_java_fqn_graph(store, root)
         finally:
             store.close()
 

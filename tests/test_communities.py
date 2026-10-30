@@ -570,52 +570,50 @@ class TestCommunities:
     def test_igraph_available_is_bool(self):
         """IGRAPH_AVAILABLE is a boolean."""
         assert isinstance(IGRAPH_AVAILABLE, bool)
-
-    def test_leiden_fallback_to_file_based(self):
-        """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
-        # Seed nodes with only CONTAINS edges (no CALLS/IMPORTS -- sparse graph)
+    
+    def _seed_sparse_graph_for_fallback(self):
+        """Prepare a sparse graph containing only CONTAINS edges."""
         self.store.upsert_node(
             NodeInfo(
                 kind="File", name="a.py", file_path="a.py",
                 line_start=1, line_end=100, language="python",
             ), file_hash="a1"
         )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f1", file_path="a.py",
-                line_start=1, line_end=10, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f2", file_path="a.py",
-                line_start=11, line_end=20, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f3", file_path="a.py",
-                line_start=21, line_end=30, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f1",
-                     file_path="a.py", line=1)
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f2",
-                     file_path="a.py", line=11)
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f3",
-                     file_path="a.py", line=21)
-        )
-        # With high min_size, Leiden may produce tiny clusters that get dropped.
-        # The fallback to file-based should still produce results.
+
+        for name, start, end in (
+            ("f1", 1, 10),
+            ("f2", 11, 20),
+            ("f3", 21, 30),
+        ):
+            self.store.upsert_node(
+                NodeInfo(
+                    kind="Function",
+                    name=name,
+                    file_path="a.py",
+                    line_start=start,
+                    line_end=end,
+                    language="python",
+                    parent_name=None,
+                ), file_hash="a1"
+            )
+
+        for name, line in (("f1", 1), ("f2", 11), ("f3", 21)):
+            self.store.upsert_edge(
+                EdgeInfo(
+                    kind="CONTAINS",
+                    source="a.py",
+                    target=f"a.py::{name}",
+                    file_path="a.py",
+                    line=line,
+                )
+            )
+
+    def test_leiden_fallback_to_file_based(self):
+        """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
+        self._seed_sparse_graph_for_fallback()
+
         result = detect_communities(self.store, min_size=2)
+
         assert isinstance(result, list)
         assert len(result) >= 1
 
@@ -873,8 +871,8 @@ class TestCommunityPrReconciliation:
 
         assert communities[1]["name"] == "services-invoice"
 
-    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
-    def test_oversized_split_uses_member_names_and_real_cohesion(self):
+    @staticmethod
+    def _make_oversized_split_scenario():
         nodes = [
             *[
                 _community_node(i, f"services/auth.py::auth_{name}")
@@ -885,8 +883,10 @@ class TestCommunityPrReconciliation:
                 for i, name in enumerate(("load", "save", "delete"), start=4)
             ],
         ]
+
         left = [node.qualified_name for node in nodes[:3]]
         right = [node.qualified_name for node in nodes[3:]]
+
         edges = [
             _community_edge(1, left[0], left[1]),
             _community_edge(2, left[0], left[2]),
@@ -896,6 +896,7 @@ class TestCommunityPrReconciliation:
             _community_edge(6, right[1], right[2]),
             _community_edge(7, left[0], right[0]),
         ]
+
         parent = {
             "id": 7,
             "name": "services-parent",
@@ -904,6 +905,12 @@ class TestCommunityPrReconciliation:
             "members": [node.qualified_name for node in nodes],
             "dominant_language": "python",
         }
+
+        return nodes, edges, parent, left, right
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_oversized_split_uses_member_names_and_real_cohesion(self):
+        nodes, edges, parent, left, right = self._make_oversized_split_scenario()
 
         split = communities_module._split_oversized(
             [parent], nodes, edges, threshold_pct=0.1, min_split_size=2
@@ -921,6 +928,7 @@ class TestCommunityPrReconciliation:
                 for edge_id in range(8, 48)
             ],
         ]
+
         duplicate_split = communities_module._split_oversized(
             [parent],
             nodes,
@@ -928,6 +936,7 @@ class TestCommunityPrReconciliation:
             threshold_pct=0.1,
             min_split_size=2,
         )
+
         expected_partition = {
             frozenset(community["members"])
             for community in split
@@ -939,15 +948,13 @@ class TestCommunityPrReconciliation:
 
         assert duplicate_partition == expected_partition
 
-    @pytest.mark.parametrize("bare_subjects", [False, True])
-    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
-    def test_oversized_split_keeps_tests_with_their_subjects(
-        self, bare_subjects: bool
-    ):
+    @staticmethod
+    def _make_split_scenario_with_tests(bare_subjects):
         production = [
             _community_node(i, f"src/feature.py::feature_{i}")
             for i in range(1, 5)
         ]
+
         tests = [
             _community_node(
                 i + 4,
@@ -957,9 +964,11 @@ class TestCommunityPrReconciliation:
             )
             for i in range(1, 5)
         ]
+
         nodes = [*production, *tests]
         edges: list[GraphEdge] = []
         edge_id = 1
+
         for group in (production, tests):
             for left_idx, left_node in enumerate(group):
                 for right_node in group[left_idx + 1:]:
@@ -971,6 +980,7 @@ class TestCommunityPrReconciliation:
                         )
                     )
                     edge_id += 1
+
         for production_node, test_node in zip(production, tests):
             edges.append(
                 _community_edge(
@@ -985,6 +995,7 @@ class TestCommunityPrReconciliation:
                 )
             )
             edge_id += 1
+
         parent = {
             "id": 8,
             "name": "feature-parent",
@@ -994,9 +1005,21 @@ class TestCommunityPrReconciliation:
             "dominant_language": "python",
         }
 
+        return production, tests, nodes, edges, parent
+
+    @pytest.mark.parametrize("bare_subjects", [False, True])
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_oversized_split_keeps_tests_with_their_subjects(
+        self, bare_subjects: bool
+    ):
+        production, tests, nodes, edges, parent = (
+            self._make_split_scenario_with_tests(bare_subjects)
+        )
+
         split = communities_module._split_oversized(
             [parent], nodes, edges, threshold_pct=0.1, min_split_size=2
         )
+
         member_to_community = {
             member: index
             for index, community in enumerate(split)
