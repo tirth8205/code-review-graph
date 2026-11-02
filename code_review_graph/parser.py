@@ -2991,6 +2991,12 @@ class CodeParser:
         # files never existed on disk. See ``forget.forget_files``.
         self._excluded_files: set[str] = set()
         self._export_symbol_cache: dict[str, Optional[str]] = {}
+        # Zig receiver evidence: file -> {import alias: module path/name}
+        # and file -> {container type name}.  The call walker consults these
+        # maps to turn ``self.foo()`` / ``Type.foo()`` / ``alias.foo()`` into
+        # receiver-backed CALLS instead of bare names.
+        self._zig_import_aliases: dict[str, dict[str, str]] = {}
+        self._zig_defined_types: dict[str, set[str]] = {}
         self._tsconfig_resolver = TsconfigResolver()
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
@@ -9729,6 +9735,16 @@ class CodeParser:
     # ------------------------------------------------------------------
 
     _ZIG_CONTAINER_KINDS = frozenset({"struct", "union", "enum", "opaque"})
+    #: Zig's builtin/std helpers that are not project symbols.  Marking them
+    #: external keeps the unresolved bucket focused on calls that could
+    #: actually be resolved inside this repository.
+    _ZIG_EXTERNAL_CALLEES = frozenset({
+        "expect", "expectEqual", "expectEqualStrings", "expectError",
+        "expectFmt", "expectString", "expectWithinEpsilon",
+    })
+    #: Suffix-chain segment used when an earlier part of the receiver is a
+    #: call expression (``foo().bar()``) rather than a name we can bind.
+    _ZIG_UNKNOWN_RECEIVER = "?"
 
     def _extract_zig_constructs(
         self,
@@ -9904,6 +9920,11 @@ class CodeParser:
                 resolved = self._resolve_module_to_file(
                     target, file_path, language,
                 )
+                # Keep the alias so ``util.helper()`` can later be bound to
+                # the imported file instead of staying a bare call name.
+                self._zig_import_aliases.setdefault(file_path, {})[var_name] = (
+                    resolved if resolved else target
+                )
                 edges.append(EdgeInfo(
                     kind="IMPORTS_FROM",
                     source=file_path,
@@ -9921,6 +9942,7 @@ class CodeParser:
                 break
 
         if container_decl is not None:
+            self._zig_defined_types.setdefault(file_path, set()).add(var_name)
             kind_label = "struct"
             for cd in container_decl.children:
                 if cd.type == "ContainerDeclType":
@@ -10059,10 +10081,11 @@ class CodeParser:
         """Walk a subtree and emit a CALLS edge for each call site.
 
         A call site is a ``SuffixExpr`` or ``FieldOrFnCall`` node whose
-        direct children include a ``FnCallArguments``; the callee is the
-        IDENTIFIER (or BUILTINIDENTIFIER) immediately preceding it. The
-        builtin ``@import`` is skipped here because it's already modelled
-        as IMPORTS_FROM by _handle_zig_var_decl.
+        direct children include a ``FnCallArguments``.  For member calls the
+        full suffix chain is kept as receiver evidence, so ``self.foo()``,
+        ``Type.foo()`` and ``alias.foo()`` are no longer flattened to an
+        unattributable bare name.  Zig builtins (``@as``, ``@intCast``, ...)
+        are language operators, not project calls, and are skipped.
         """
         src_qn = (
             self._qualify(enclosing_func, file_path, enclosing_class)
@@ -10078,24 +10101,117 @@ class CodeParser:
                     if ch.type != "FnCallArguments" or i == 0:
                         continue
                     prev = children[i - 1]
-                    callee: Optional[str] = None
-                    if prev.type == "IDENTIFIER":
-                        callee = prev.text.decode("utf-8", errors="replace")
-                    elif prev.type == "BUILTINIDENTIFIER":
-                        txt = prev.text.decode("utf-8", errors="replace")
-                        if txt != "@import":
-                            callee = txt
-                    if callee:
-                        edges.append(EdgeInfo(
-                            kind="CALLS",
-                            source=src_qn,
-                            target=callee,
-                            file_path=file_path,
-                            line=node.start_point[0] + 1,
-                        ))
+                    if prev.type == "BUILTINIDENTIFIER":
+                        # @as/@intCast/@ptrCast/... are builtins, not calls.
+                        break
+                    if prev.type != "IDENTIFIER":
+                        break
+                    callee = prev.text.decode("utf-8", errors="replace")
+                    receiver = self._zig_call_receiver(node)
+                    extra = self._zig_receiver_extra(
+                        receiver, callee, file_path, enclosing_class,
+                    )
+                    edges.append(EdgeInfo(
+                        kind="CALLS",
+                        source=src_qn,
+                        target=callee,
+                        file_path=file_path,
+                        line=node.start_point[0] + 1,
+                        extra=extra,
+                    ))
                     break
             for ch in node.children:
                 stack.append(ch)
+
+    def _zig_call_receiver(self, call_node) -> list[str]:
+        """Return the receiver segments preceding a Zig call node.
+
+        ``self.map.getOrPut(k)`` yields ``["self", "map"]``; a plain
+        ``foo()`` yields an empty list.  An earlier suffix that is itself a
+        call (``foo().bar()``) contributes the sentinel ``?`` because its
+        result type cannot be inferred here.
+        """
+        parent = call_node.parent
+        if parent is None or parent.type != "SuffixExpr":
+            return []
+        parts: list[str] = []
+        for ch in parent.children:
+            if (
+                ch.start_byte == call_node.start_byte
+                and ch.end_byte == call_node.end_byte
+                and ch.type == call_node.type
+            ):
+                break
+            if ch.type in ("IDENTIFIER", "BUILTINIDENTIFIER"):
+                parts.append(ch.text.decode("utf-8", errors="replace"))
+            elif ch.type == "FieldOrFnCall":
+                # ``foo().bar`` has an unknowable receiver type; do not
+                # stitch the callee name into a fake module path.
+                if any(c.type == "FnCallArguments" for c in ch.children):
+                    return [self._ZIG_UNKNOWN_RECEIVER]
+                identifiers = [
+                    c for c in ch.children if c.type == "IDENTIFIER"
+                ]
+                if len(identifiers) == 1:
+                    parts.append(
+                        identifiers[0].text.decode("utf-8", errors="replace")
+                    )
+                else:
+                    return [self._ZIG_UNKNOWN_RECEIVER]
+            elif ch.type == "SuffixExpr":
+                return [self._ZIG_UNKNOWN_RECEIVER]
+        return parts
+
+    def _zig_receiver_extra(
+        self,
+        receiver: list[str],
+        callee: str,
+        file_path: str,
+        enclosing_class: Optional[str],
+    ) -> dict:
+        """Build edge metadata that lets the resolver bind the callee."""
+        extra: dict = {}
+        if callee in self._ZIG_EXTERNAL_CALLEES:
+            extra["external"] = True
+        if not receiver:
+            return extra
+        extra["receiver"] = ".".join(receiver)
+
+        root = receiver[0]
+        if root == self._ZIG_UNKNOWN_RECEIVER:
+            return extra
+        if root == "self" and len(receiver) == 1 and enclosing_class:
+            extra["receiver_binding"] = "class"
+            extra["receiver_class"] = enclosing_class
+            return extra
+
+        alias = self._zig_import_aliases.get(file_path, {}).get(root)
+        if alias is not None:
+            if alias.endswith(".zig"):
+                if len(receiver) >= 2:
+                    # ``os_compat.time.milliTimestamp()``: the last segment
+                    # names a container inside the imported file.
+                    extra["receiver_binding"] = "module_class"
+                    extra["receiver_module"] = alias
+                    extra["receiver_class"] = receiver[-1]
+                else:
+                    extra["receiver_binding"] = "module"
+                    extra["receiver_module"] = alias
+            else:
+                # ``std``, ``builtin`` and package-style imports are outside
+                # this repository graph.
+                extra["external"] = True
+                extra["external_module"] = alias
+            return extra
+
+        if root in self._zig_defined_types.get(file_path, ()):
+            extra["receiver_binding"] = "class"
+            extra["receiver_class"] = root
+            return extra
+        if root in ("std", "builtin", "root"):
+            extra["external"] = True
+            extra["external_module"] = root
+        return extra
 
     # ------------------------------------------------------------------
     # JS/TS: variable-assigned functions  (const foo = () => {})

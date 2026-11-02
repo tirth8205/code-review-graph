@@ -3940,11 +3940,12 @@ class TestZigParsing:
         assert "expect" in bare_targets
         assert "helper" in bare_targets
 
-    def test_builtin_calls_emitted(self):
-        # @intCast inside Point.distance should produce a CALLS edge
-        # whose target is the builtin name (with the leading @).
+    def test_builtin_calls_not_emitted(self):
+        # Zig builtins such as @intCast are language operators, not calls
+        # into a project symbol. Emitting them only pollutes the
+        # unresolved bucket.
         targets = {e.target for e in self.edges if e.kind == "CALLS"}
-        assert "@intCast" in targets
+        assert not any(target.startswith("@") for target in targets)
 
     def test_at_import_is_not_a_call(self):
         # @import is modelled as IMPORTS_FROM only — never as CALLS, so

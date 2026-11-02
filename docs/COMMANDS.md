@@ -417,6 +417,9 @@ code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph
 code-review-graph build                        # Full build
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
+code-review-graph build --zls                  # Full build, then resolve Zig CALLS with ZLS
+code-review-graph enrich-zls                   # Resolve unresolved Zig CALLS with ZLS (needs zls on PATH)
+code-review-graph enrich-zls --limit 500 --timeout 12  # Bounded trial run
 code-review-graph update                       # Incremental update from the last-built commit
 code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel

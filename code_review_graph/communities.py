@@ -1010,10 +1010,59 @@ _TEST_COMMUNITY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A qualified name embeds its file path before ``::``; test directories are
+# a stronger signal than a generated community name.  ``src/tests`` in zlstack
+# is named "support-tcp" from its file stems, which the name regex cannot see.
+_TEST_PATH_RE = re.compile(
+    r"(^|/)(?:tests?|__tests__|specs?)(/|$)", re.IGNORECASE,
+)
+# Test-only files do not always live under a tests/ directory (zlink keeps
+# engine_test.zig beside the engine).  Inline ``test`` blocks in a production
+# file must NOT count, or a module with thorough unit tests looks test-only.
+_TEST_FILE_RE = re.compile(
+    r"(^|/)(?:test_[^/]+|[^/]*_test(?:[^/]*)?)\."
+    r"(?:zig|py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|cc|cpp|h|hpp|rb|php|cs)$",
+    re.IGNORECASE,
+)
+
 
 def _is_test_community(name: str) -> bool:
     """Return True if a community name indicates it is test-dominated."""
     return bool(_TEST_COMMUNITY_RE.search(name))
+
+
+def _qn_is_test(qualified_name: str) -> bool:
+    """True when a node's file is a test file (not merely an inline test)."""
+    path = qualified_name.split("::", 1)[0]
+    return bool(_TEST_PATH_RE.search(path) or _TEST_FILE_RE.search(path))
+
+
+def _test_dominated_community_ids(
+    communities: list[dict[str, Any]],
+) -> set[int]:
+    """Community IDs whose membership is mostly test code.
+
+    Name-only detection misses communities such as ``support-tcp`` that are
+    actually ``src/tests``.  Membership evidence is authoritative: at least
+    half the members must live in a test path, or the generated name must
+    match the legacy test naming pattern.
+    """
+    ids: set[int] = set()
+    for community in communities:
+        members = community.get("members", [])
+        name = community.get("name", "")
+        if _is_test_community(name):
+            ids.add(community.get("id", 0))
+            continue
+        test_members = sum(1 for qn in members if _qn_is_test(qn))
+        ratio = test_members / len(members)
+        # Tiny mixed communities are too noisy to label from a 50% split;
+        # a tiny community that is entirely test files is still clear.
+        if len(members) < 5 and ratio < 1.0:
+            continue
+        if ratio >= 0.5:
+            ids.add(community.get("id", 0))
+    return ids
 
 
 def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
@@ -1029,6 +1078,7 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
         Dict with keys: communities, cross_community_edges, warnings.
     """
     communities = get_communities(store)
+    test_communities = _test_dominated_community_ids(communities)
 
     # Build node -> community_id mapping
     node_to_community: dict[str, int] = {}
@@ -1053,6 +1103,11 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
             src_comm is not None
             and tgt_comm is not None
             and src_comm != tgt_comm
+            # Tests calling production code is healthy, not architecture debt.
+            # Skip both directions for test-dominated communities so their
+            # CALLS cannot masquerade as production coupling.
+            and src_comm not in test_communities
+            and tgt_comm not in test_communities
         ):
             pair = (min(src_comm, tgt_comm), max(src_comm, tgt_comm))
             cross_counts[pair] += 1
