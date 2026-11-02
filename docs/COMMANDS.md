@@ -74,7 +74,9 @@ changed_files: list[str] | None  # Auto-detected from VCS
 max_depth: int = 2               # Hops in graph
 repo_root: str | None
 base: str = "HEAD~1"
-detail_level: str = "standard"   # "standard" or "minimal"
+detail_level: str = "standard"   # "standard", "minimal", or "compact"
+max_results: int = 500          # Traversal budget (nodes)
+max_files: int = 25             # Compact-mode display limit (hard ceiling 200)
 resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
 ```
 An impacted node that calls or references the changed code in one hop carries
@@ -83,6 +85,25 @@ own `file_path`) and `call_site_count` when there is more than one.
 `unresolved_call_sites` counts call sites that name a changed symbol but were
 never bound to it, so an empty radius is not read as proof of absence.
 Responses may include estimated `context_savings` metadata.
+
+Use `detail_level="compact"` when the next step is opening affected files rather
+than inspecting individual call sites. It returns ranked repository-relative
+`changed_files` and `impacted_files`, with `impacted_file_count`,
+`impacted_files_omitted`, `total_impacted`, `truncated`, and
+`unresolved_call_sites`. Paths outside the repository keep their absolute identity.
+Files follow the graph's best-first node ranking. Counts describe the traversed
+radius; `truncated` remains true when traversal or the file display was bounded.
+The mode omits node/edge records and repeated qualified names. `max_files` limits
+only the displayed files, independently of the `max_results` traversal budget.
+Standard output and its existing limits are unchanged; minimal output remains a
+summary without file paths.
+
+The CLI exposes the same controls:
+
+```bash
+code-review-graph impact --files src/auth.py --detail-level compact --max-files 20
+code-review-graph impact --files src/auth.py --detail-level minimal
+```
 
 #### `query_graph_tool`
 ```

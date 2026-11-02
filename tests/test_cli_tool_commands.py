@@ -28,6 +28,8 @@ from code_review_graph import cli
                 "max_depth": 3,
                 "max_results": 20,
                 "base": "HEAD~1",
+                "detail_level": "standard",
+                "max_files": 25,
             },
         ),
         (
