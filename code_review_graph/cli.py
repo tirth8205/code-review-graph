@@ -563,6 +563,7 @@ _PATH_REPO_COMMANDS = frozenset({
     "dead-code",
     "serve",
     "mcp",
+    "enrich-zls",
     *_GRAPH_TOOL_COMMANDS,
 })
 
@@ -1032,6 +1033,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip flow/community detection (signatures + FTS only)",
     )
     build_cmd.add_argument(
+        "--zls", action="store_true",
+        help="After the build, resolve unresolved Zig CALLS through ZLS "
+             "(requires zls on PATH; much slower than parsing)",
+    )
+    build_cmd.add_argument(
         "--skip-postprocess",
         action="store_true",
         help="Skip all post-processing (raw parse only)",
@@ -1389,6 +1395,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
+
+    # enrich-zls (optional semantic pass for Zig call resolution)
+    zls_cmd = sub.add_parser(
+        "enrich-zls",
+        help="Resolve unresolved Zig CALLS through a running ZLS server",
+    )
+    zls_cmd.add_argument("--repo", default=None, help="Repository root (auto-detected)")
+    zls_cmd.add_argument("--data-dir", default=None, help="External graph data directory")
+    zls_cmd.add_argument(
+        "--limit", type=_non_negative_int, default=0,
+        help="Maximum distinct call sites to probe (0 = all)",
+    )
+    zls_cmd.add_argument(
+        "--timeout", type=float, default=8.0,
+        help="Seconds per ZLS definition request (default: 8)",
+    )
+    zls_cmd.add_argument(
+        "--max-seconds", type=float, default=1800.0, dest="max_seconds",
+        help="Overall wall-clock budget for the enrichment pass (default: 1800)",
+    )
+    zls_cmd.add_argument(
+        "--json", action="store_true", dest="json_output",
+        help="Output one machine-readable JSON object",
+    )
+    zls_cmd.add_argument("-q", "--quiet", action="store_true", help="Suppress progress output")
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -2010,6 +2041,7 @@ def _dispatch() -> None:
         "visualize",
         "wiki",
         "dead-code",
+        "enrich-zls",
     )
     # Read-only consumers must not create graph.db / data dirs / registry
     # entries when the graph is missing (follow-up to #777 / #782; see #803).
@@ -2046,7 +2078,7 @@ def _dispatch() -> None:
     else:
         db_path = get_db_path(repo_root)
     if (
-        args.command in ("dead-code", "forget", *_read_only_db_cmds)
+        args.command in ("dead-code", "forget", "enrich-zls", *_read_only_db_cmds)
         and not db_path.exists()
     ):
         print(
@@ -2089,6 +2121,32 @@ def _dispatch() -> None:
                     line = item.get("line", "?")
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
 
+        elif args.command == "enrich-zls":
+            from .zls_resolver import enrich_zls_calls
+
+            result = enrich_zls_calls(
+                store,
+                repo_root,
+                limit=args.limit,
+                request_timeout=args.timeout,
+                max_seconds=args.max_seconds,
+            )
+            if args.json_output:
+                print(json.dumps(result, indent=2, default=str))
+            elif not args.quiet:
+                if result.get("skipped"):
+                    print(f"ZLS enrichment skipped: {result.get('reason')}")
+                else:
+                    print(
+                        "ZLS enrichment: "
+                        f"resolved={result.get('resolved', 0)} "
+                        f"external={result.get('external', 0)} "
+                        f"unmatched={result.get('unmatched', 0)} "
+                        f"errors={result.get('errors', 0)} "
+                        f"sites={result.get('call_sites', 0)} "
+                        f"elapsed={result.get('elapsed_seconds', 0)}s"
+                    )
+
         elif args.command == "build":
             pp = (
                 "none"
@@ -2119,6 +2177,18 @@ def _dispatch() -> None:
                 )
                 if result.get("errors"):
                     print(f"Errors: {len(result['errors'])}")
+            if getattr(args, "zls", False):
+                from .zls_resolver import enrich_zls_calls
+
+                zls_result = enrich_zls_calls(store, repo_root)
+                if not args.quiet:
+                    print(
+                        "ZLS enrichment: "
+                        f"resolved={zls_result.get('resolved', 0)} "
+                        f"external={zls_result.get('external', 0)} "
+                        f"unmatched={zls_result.get('unmatched', 0)} "
+                        f"errors={zls_result.get('errors', 0)}"
+                    )
 
         elif args.command == "update":
             pp = (

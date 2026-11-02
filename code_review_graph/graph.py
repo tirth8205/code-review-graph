@@ -1758,6 +1758,19 @@ class GraphStore:
                 candidate for candidate in candidates
                 if parent_lookup.get(candidate[0]) == class_name
             ]
+        if binding == "module_class":
+            module_file = edge_extra.get("receiver_module")
+            class_name = edge_extra.get("receiver_class")
+            if (
+                not isinstance(module_file, str) or not module_file
+                or not isinstance(class_name, str) or not class_name
+            ):
+                return []
+            return [
+                candidate for candidate in candidates
+                if candidate[1] == module_file
+                and parent_lookup.get(candidate[0]) == class_name
+            ]
         return []
 
     @classmethod
@@ -2280,6 +2293,10 @@ class GraphStore:
                 edge_extra = {}
             if not isinstance(edge_extra, dict):
                 edge_extra = {}
+            if edge_extra.get("external"):
+                # std/builtin/test helpers are outside this repository graph;
+                # resolving them by bare name would invent a project edge.
+                continue
             if raw_key not in edge_extra and (
                 "ambiguous_targets" in edge_extra
                 or "unresolved_targets" in edge_extra
@@ -2302,6 +2319,18 @@ class GraphStore:
                 for qualified, candidate_file in candidates
                 if candidate_file == context_file or candidate_file in imported_files
             ]
+            # Same-file evidence outranks an imported file when two classes
+            # share a name (e.g. two BufferLease containers).  Without this,
+            # ``BufferLease.init()`` inside buffer_lease.zig stays ambiguous
+            # against lease_state.zig's same-named class.
+            if len(supported) > 1:
+                same_file = [
+                    qualified
+                    for qualified, candidate_file in candidates
+                    if candidate_file == context_file
+                ]
+                if len(same_file) == 1:
+                    supported = same_file
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [
                 qualified
