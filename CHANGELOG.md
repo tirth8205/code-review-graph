@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
+  paths and value types, never values. `detect_changes` reports them as
+  `changed_yaml_paths`, bounded by `max_results`. `pnpm-lock.yaml` is ignored at
+  any depth.
 - The MCP server instructions now route by question type instead of introducing
   the server as a code-review tool. With deferred tool loading an agent sees
   only the tool names and these instructions, so "for code reviews" kept it on
