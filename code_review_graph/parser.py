@@ -19,7 +19,7 @@ import re
 import subprocess
 import sys
 import threading
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -5205,6 +5205,9 @@ class CodeParser:
         re.IGNORECASE,
     )
 
+    _PLSQL_NAMED_END_RE = re.compile(rf"\bEND\b\s*({_PLSQL_IDENT})\s*;", re.IGNORECASE)
+    _PLSQL_BARE_END_RE = re.compile(r"\bEND\b\s*;", re.IGNORECASE)
+
     @staticmethod
     def _plsql_is_forward_decl(text: str, start: int) -> bool:
         """True if a PROCEDURE/FUNCTION member at `start` (just after the
@@ -5588,7 +5591,20 @@ class CodeParser:
             ))
 
             body_text = clean_text[body_start:body_end]
-            for mm in self._SQL_PACKAGE_MEMBER_RE.finditer(body_text):
+            named_ends: dict[str, list[int]] = {}
+            for em in self._PLSQL_NAMED_END_RE.finditer(clean_text, body_start, body_end):
+                named_ends.setdefault(em.group(1).lower(), []).append(em.end())
+            members = list(self._SQL_PACKAGE_MEMBER_RE.finditer(body_text))
+            # An overload with a bare `END;` must not run on to the `END name;`
+            # of the next overload, so each member stops at the next one of its
+            # name. Other names cannot bound it: it may nest local procedures.
+            member_limits = [body_end] * len(members)
+            next_of_name: dict[str, int] = {}
+            for index in range(len(members) - 1, -1, -1):
+                key = members[index].group(2).lower()
+                member_limits[index] = next_of_name.get(key, body_end)
+                next_of_name[key] = body_start + members[index].start()
+            for mm, member_limit in zip(members, member_limits):
                 member_start = body_start + mm.end()
                 if self._plsql_is_forward_decl(clean_text, member_start):
                     # `PROCEDURE x(...);` with no body — the real
@@ -5600,7 +5616,8 @@ class CodeParser:
                 member_identity = f"{member_name}({member_sig})"
                 member_line = clean_text[: body_start + mm.start()].count("\n") + 1
                 member_body_end = self._plsql_block_end(
-                    clean_text, member_start, member_name, limit=body_end,
+                    clean_text, member_start, member_name,
+                    limit=member_limit, named_ends=named_ends,
                 )
                 member_qualified = f"{body_qualified}.{member_identity}"
                 nodes.append(NodeInfo(
@@ -5775,7 +5792,11 @@ class CodeParser:
 
     @staticmethod
     def _plsql_block_end(
-        text: str, start: int, name: str, limit: int | None = None,
+        text: str,
+        start: int,
+        name: str,
+        limit: int | None = None,
+        named_ends: dict[str, list[int]] | None = None,
     ) -> int:
         """Return the index just past the terminating ``;`` of a named
         PL/SQL block beginning at ``start``.
@@ -5802,20 +5823,28 @@ class CodeParser:
         with many members (~4s for 4,000 members, per that review); passing
         the enclosing block's own end as `limit` keeps each member's search
         proportional to that block's size instead of to the whole file.
+
+        ``named_ends`` maps a lower-cased name to the sorted end offsets of its
+        ``END name;`` terminators. A caller walking many members of one body
+        passes it so that a member with a bare ``END;`` does not rescan the rest
+        of the body for a name that never appears.
         """
         if limit is None:
             next_stmt = CodeParser._SQL_NEXT_STMT_RE.search(text, start)
             limit = next_stmt.start() if next_stmt else len(text)
-        window = text[start:limit]
-        named = re.search(
-            rf"\bEND\b\s*{re.escape(name)}\b\s*;", window, re.IGNORECASE,
-        )
-        if named:
-            return start + named.end()
-        bare = re.search(r"\bEND\b\s*;", window, re.IGNORECASE)
-        if bare:
-            return start + bare.end()
-        return limit
+        if named_ends is not None:
+            ends = named_ends.get(name.lower(), [])
+            at = bisect_left(ends, start)
+            if at < len(ends) and ends[at] <= limit:
+                return ends[at]
+        else:
+            named = re.compile(
+                rf"\bEND\b\s*{re.escape(name)}\b\s*;", re.IGNORECASE,
+            ).search(text, start, limit)
+            if named:
+                return named.end()
+        bare = CodeParser._PLSQL_BARE_END_RE.search(text, start, limit)
+        return bare.end() if bare else limit
 
     def _extract_plsql_calls(
         self,

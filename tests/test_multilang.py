@@ -4616,6 +4616,46 @@ class TestPLSQLHelpers:
 
         assert [n.name for n in nodes if n.kind == "Function"] == ["2fa_check"]
 
+    def test_overload_with_bare_end_stops_before_the_next_overload(self):
+        source = (
+            b"CREATE OR REPLACE PACKAGE BODY a IS\n"
+            b"  PROCEDURE run(x NUMBER) IS\n"
+            b"  BEGIN\n"
+            b"    one();\n"
+            b"  END;\n"
+            b"  PROCEDURE run(y DATE) IS\n"
+            b"  BEGIN\n"
+            b"    two();\n"
+            b"  END run;\n"
+            b"END a;\n"
+        )
+
+        nodes, edges = CodeParser().parse_bytes(Path("o.pkb"), source)
+
+        spans = {n.identity_name: (n.line_start, n.line_end) for n in nodes if n.name == "run"}
+        assert spans == {"run(x NUMBER)": (2, 5), "run(y DATE)": (6, 9)}
+        calls = {
+            (e.source.rsplit(".", 1)[-1], e.target) for e in edges if e.kind == "CALLS"
+        }
+        assert calls == {("run(x NUMBER)", "one"), ("run(y DATE)", "two")}
+
+    def test_block_end_uses_the_named_end_index(self):
+        text = "BEGIN a; END; BEGIN b; END foo; END bar;"
+        named_ends = {"foo": [text.index(" END bar")], "bar": [len(text)]}
+
+        # A later `END foo;` wins over the nearer bare `END;`.
+        assert CodeParser._plsql_block_end(text, 0, "foo", named_ends=named_ends) == (
+            text.index(" END bar")
+        )
+        # A name with no entry falls back to the first bare `END;`.
+        assert CodeParser._plsql_block_end(text, 0, "baz", named_ends=named_ends) == (
+            text.index(" BEGIN b")
+        )
+        # An entry past the limit is out of reach, so the bare `END;` wins.
+        assert CodeParser._plsql_block_end(
+            text, 0, "bar", limit=text.index(" BEGIN b"), named_ends=named_ends,
+        ) == text.index(" BEGIN b")
+
     def test_block_end_search_is_not_quadratic_on_many_members(self):
         # Each member's unbounded search used to cost O(remaining file
         # size); bounding it to the enclosing package body's own end keeps
