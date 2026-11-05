@@ -35,13 +35,15 @@ def test_other_dependency_defaults_are_unchanged(tmp_path):
     assert _should_ignore("src/lib/__pycache__/app.pyc", patterns)
 
 
-@pytest.mark.parametrize("manifest", ["go.mod", "go.work", "Gemfile", "Rakefile", "app.gemspec"])
-def test_go_and_ruby_vendor_dependencies_remain_excluded(tmp_path, manifest):
+@pytest.mark.parametrize(
+    "manifest", ["go.mod", "go.work", "Gemfile", "Rakefile", "app.gemspec", "Cargo.toml"],
+)
+def test_go_ruby_and_cargo_vendor_dependencies_remain_excluded(tmp_path, manifest):
     (tmp_path / manifest).write_text("", encoding="utf-8")
     assert _should_ignore("vendor/package/lib/source.rb", _load_ignore_patterns(tmp_path))
 
 
-@pytest.mark.parametrize("manifest", ["composer.json", "go.mod", "Gemfile"])
+@pytest.mark.parametrize("manifest", ["composer.json", "go.mod", "Gemfile", "Cargo.toml"])
 def test_nested_dependency_vendor_is_excluded_in_watch(tmp_path, manifest):
     clear_nested_ignore_cache()
     module = tmp_path / "api"
@@ -93,3 +95,17 @@ def test_removing_root_manifest_invalidates_nested_scan(tmp_path):
         assert not store.get_nodes_by_file(str(output))
         assert store.get_nodes_by_file(str(user))
         assert _should_ignore("vendor/mod/target/generated.py", _load_ignore_patterns(tmp_path))
+
+
+def test_reload_after_removing_root_manifest_rescans_without_a_watch_event(tmp_path):
+    """A long-lived process rebuilds without any event clearing the cache."""
+    clear_nested_ignore_cache()
+    manifest = tmp_path / "Gemfile"
+    manifest.write_text("", encoding="utf8")
+    module = tmp_path / "vendor/mod"
+    (module / "target").mkdir(parents=True)
+    (module / "pom.xml").write_text("<project/>", encoding="utf8")
+    assert _should_ignore("vendor/mod/target/generated.py", _load_ignore_patterns(tmp_path))
+    manifest.unlink()
+    assert _should_ignore("vendor/mod/target/generated.py", _load_ignore_patterns(tmp_path))
+    assert not _should_ignore("vendor/mod/src/user.py", _load_ignore_patterns(tmp_path))
