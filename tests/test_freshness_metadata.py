@@ -342,3 +342,77 @@ def test_cli_update_warns_about_failed_files(repo, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Incremental: 1 files updated" in captured.out
     assert "bad.py" in captured.err
+
+
+def test_healthy_noop_update_leaves_resolved_edges_alone(repo, monkeypatch):
+    """A no-op update on a complete graph only checks FTS (review of #1105).
+
+    Hooks run ``update`` after every edit, and the resolvers end in an UPDATE of
+    every CALLS and REFERENCES edge under the write lock.
+    """
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("a healthy no-op update must not run the resolvers")
+
+    for name in ("resolve_bare_call_targets", "refresh_target_resolution"):
+        monkeypatch.setattr(GraphStore, name, must_not_run)
+
+    result = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), postprocess="minimal",
+    )
+
+    assert result["status"] == "ok"
+    assert result["files_updated"] == 0
+    assert result["fts_rebuilt"] is False
+
+
+def test_pending_noop_update_still_refreshes_embeddings(repo, monkeypatch):
+    """The run that left the marker may have changed nodes (review of #1105)."""
+    from code_review_graph import embeddings
+    from code_review_graph.embeddings import REFRESH_SKIPPED_WARNING
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    calls = []
+
+    def fake_refresh(store, provider, model):
+        calls.append((provider, model))
+        return None
+
+    monkeypatch.setattr(embeddings, "refresh_embeddings", fake_refresh)
+
+    result = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        postprocess="minimal",
+        embedding_provider="local",
+        embedding_model="test-model",
+    )
+
+    assert result["files_updated"] == 0
+    assert result["repaired_interrupted_build"] is True
+    assert calls == [("local", "test-model")]
+    assert result["warnings"].count(REFRESH_SKIPPED_WARNING) == 1
+
+
+def test_build_stopped_in_language_resolvers_is_rebuilt(repo, monkeypatch):
+    """Post-processing cannot redo these resolvers (review of #1105)."""
+    from code_review_graph import incremental
+    from code_review_graph.build_state import BUILD_IN_PROGRESS, BUILD_STATE_KEY
+
+    def stopped(_store):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(incremental, "_run_python_resolver", stopped)
+        with pytest.raises(KeyboardInterrupt):
+            build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_IN_PROGRESS
+
+    repaired = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), postprocess="minimal",
+    )
+    assert repaired["build_type"] == "full"
+    assert repaired["repaired_interrupted_build"] is True

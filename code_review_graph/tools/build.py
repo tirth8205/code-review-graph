@@ -161,11 +161,15 @@ def _run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    skip_resolvers: bool = False,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
 
     When *full_rebuild* is False and *changed_files* are available,
     uses incremental flow/community detection for faster updates.
+
+    *skip_resolvers* leaves call-target resolution out, for a no-op update on a
+    graph whose edges are already resolved.
 
     Records structured stage durations in ``build_result["postprocess_timing"]``.
     Minimal processing reports ``signatures_s`` and ``fts_s``; full processing
@@ -198,22 +202,23 @@ def _run_postprocess(
         return warnings
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
-    try:
-        resolved = store.resolve_bare_call_targets()
-        resolved += store.resolve_bare_tested_by_sources()
-        build_result["bare_edges_resolved"] = resolved
-        build_result["cpp_scoped_edges_resolved"] = (
-            store.resolve_cpp_scoped_call_targets()
-        )
-        # Resolvers rewrite bare targets into qualified ones, so the stored
-        # certainty column is only correct once they have all run.
-        store.refresh_target_resolution()
-    except sqlite3.OperationalError as e:
-        logger.warning("Call-target resolution failed: %s", e)
-        _note_contention(build_result, e)
-        warnings.append(
-            f"Call-target resolution failed: {type(e).__name__}: {e}"
-        )
+    if not skip_resolvers:
+        try:
+            resolved = store.resolve_bare_call_targets()
+            resolved += store.resolve_bare_tested_by_sources()
+            build_result["bare_edges_resolved"] = resolved
+            build_result["cpp_scoped_edges_resolved"] = (
+                store.resolve_cpp_scoped_call_targets()
+            )
+            # Resolvers rewrite bare targets into qualified ones, so the stored
+            # certainty column is only correct once they have all run.
+            store.refresh_target_resolution()
+        except sqlite3.OperationalError as e:
+            logger.warning("Call-target resolution failed: %s", e)
+            _note_contention(build_result, e)
+            warnings.append(
+                f"Call-target resolution failed: {type(e).__name__}: {e}"
+            )
 
     # -- Signatures + FTS (fast, always run unless "none") --
     timing: dict[str, float] = {}
@@ -741,11 +746,8 @@ def build_or_update_graph(
                 # community passes. A pending marker may also mean flows or
                 # communities were interrupted; honor the requested level in
                 # that case so a default update can finish the full repair.
-                postprocess_level = (
-                    postprocess
-                    if previous_state == POSTPROCESS_PENDING
-                    else "minimal"
-                )
+                pending = previous_state == POSTPROCESS_PENDING
+                postprocess_level = postprocess if pending else "minimal"
                 build_result = {
                     **result,
                     "status": "ok",
@@ -761,6 +763,12 @@ def build_or_update_graph(
                     full_rebuild=False,
                     changed_files=None,
                     repo_root=str(root),
+                    # The run that left the marker may have changed nodes. A
+                    # complete graph has no resolver or embedding work to do,
+                    # and hooks run this path after every edit.
+                    embedding_provider=embedding_provider if pending else None,
+                    embedding_model=embedding_model if pending else None,
+                    skip_resolvers=not pending,
                 )
                 if warnings:
                     build_result["warnings"] = warnings
@@ -768,7 +776,8 @@ def build_or_update_graph(
                     build_result["status"] = "partial"
                 if not build_result.get("postprocess_contended"):
                     store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
-                if embedding_provider and embedding_model:
+                build_result["repaired_interrupted_build"] = interrupted
+                if not pending and embedding_provider and embedding_model:
                     from code_review_graph.embeddings import has_embeddings
 
                     if not has_embeddings(store):
