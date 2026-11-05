@@ -13244,7 +13244,11 @@ class CodeParser:
 
     @staticmethod
     def _php_string_literal(value) -> Optional[str]:
-        """Return a quoted PHP string without interpolation or escapes, else None."""
+        """Return a quoted PHP string's value without interpolation or escapes, else None.
+
+        Single-quoted strings are decoded (``\\'`` and ``\\\\``); double-quoted strings
+        with escape sequences or interpolation are rejected.
+        """
         if value is None:
             return None
         if value.type == "encapsed_string" and any(
@@ -13253,7 +13257,10 @@ class CodeParser:
             return None
         if value.type not in ("string", "encapsed_string"):
             return None
-        return value.text.decode("utf-8", errors="replace")[1:-1]
+        text = value.text.decode("utf-8", errors="replace")
+        if value.type == "string" and text.startswith("'"):
+            return re.sub(r"\\([\\'])", r"\1", text[1:-1])
+        return text[1:-1]
 
     @classmethod
     def _php_route_literal(cls, node) -> Optional[str]:
@@ -13323,6 +13330,14 @@ class CodeParser:
                         if part is None:
                             return None
                         prefix = self._join_spring_route(prefix, part)
+                    elif key == "controller":
+                        controller = (
+                            self._php_class_constant_reference(values[1])
+                            if values[1].type == "class_constant_access_expression"
+                            else None
+                        )
+                        if controller is None:
+                            return None
         return prefix, controller
 
     def _php_route_enclosing_groups(
@@ -13367,7 +13382,10 @@ class CodeParser:
             if literal is None:
                 return None
             if "@" in literal:
-                controller, method = literal.rsplit("@", 1)
+                # Laravel reads 'Class@method' as a class name, not through PHP `use`
+                # aliases or the file namespace; the leading backslash keeps it literal.
+                class_name, method = literal.rsplit("@", 1)
+                controller = "\\" + class_name.lstrip("\\") if class_name.strip("\\") else None
             else:
                 controller, method = group_controller, literal
             if controller and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
@@ -13434,6 +13452,21 @@ class CodeParser:
                         return
                     methods.append(method.upper())
         route = self._join_spring_route(prefix, path)
+        # Route::get(...)->prefix('v1') prepends to the full URI, once per call.
+        current = node
+        while (
+            current.parent is not None
+            and current.parent.type == "member_call_expression"
+            and current.parent.child_by_field_name("object") == current
+        ):
+            current = current.parent
+            name = current.child_by_field_name("name")
+            if name is not None and name.text == b"prefix":
+                chain_args = self._php_route_arguments(current)
+                part = self._php_route_literal(chain_args[0]) if chain_args else None
+                if part is None:
+                    return
+                route = self._join_spring_route(part, route)
         handler_name = handler[1] if handler else "closure"
         for index, method in enumerate(dict.fromkeys(methods)):
             name = f"{handler_name}@Route[{node.start_byte}:{index}] {method} {route}"
