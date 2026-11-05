@@ -308,9 +308,11 @@ def _run_postprocess(
     # -- Expensive: flows + communities (only for "full") --
     use_incremental = (
         not full_rebuild
-        and changed_files is not None
-        and (bool(changed_files) or not build_result.get("stale_files_removed"))
+        and not build_result.get("identity_rebuild")
+        and bool(changed_files)
     )
+    # The incremental helpers join on nodes.file_path, which is absolute.
+    incremental_paths = _fts_file_hint(repo_root, changed_files)
 
     stage_started = time.perf_counter()
     try:
@@ -319,7 +321,7 @@ def _run_postprocess(
         elif use_incremental:
             from code_review_graph.flows import incremental_trace_flows
 
-            count = incremental_trace_flows(store, changed_files)
+            count = incremental_trace_flows(store, incremental_paths or changed_files)
         else:
             from code_review_graph.flows import store_flows as _store_flows
             from code_review_graph.flows import trace_flows as _trace_flows
@@ -345,7 +347,9 @@ def _run_postprocess(
                 incremental_detect_communities,
             )
 
-            count = incremental_detect_communities(store, changed_files)
+            count = incremental_detect_communities(
+                store, incremental_paths or changed_files
+            )
         else:
             from code_review_graph.communities import (
                 detect_communities as _detect_communities,

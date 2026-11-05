@@ -97,7 +97,7 @@ def resolve_hcl_module_references(store: GraphStore) -> dict[str, int]:
         "UPDATE edges SET target_qualified = ? WHERE id = ?",
         reference_updates + import_updates,
     )
-    conn.commit()
+    store.commit()
     if reference_updates or import_updates:
         store._invalidate_cache()
 

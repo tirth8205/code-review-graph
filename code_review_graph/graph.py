@@ -710,7 +710,9 @@ class GraphStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA cache_size=-2000")
-            conn.execute("PRAGMA temp_store=MEMORY")
+            # FILE keeps the impact-radius working tables reclaimable; the
+            # compile-time default is memory on some SQLite builds.
+            conn.execute("PRAGMA temp_store=FILE")
             _assert_usable_database(conn, self.db_path)
             self._conn = conn
             self._init_schema()
@@ -782,6 +784,7 @@ class GraphStore:
             dict[str, set[str]],
         ] | None = None
         self._cache_lock = threading.Lock()
+        self._cache_epoch = 0
         # Identifies the read transaction currently open on this connection,
         # so a reader cannot roll back a transaction a writer took from it.
         self._active_read_txn: object | None = None
@@ -799,6 +802,7 @@ class GraphStore:
     def _invalidate_cache(self) -> None:
         """Invalidate the cached NetworkX graph after write operations."""
         with self._cache_lock:
+            self._cache_epoch += 1
             self._nxg_cache = None
             self._bare_endpoint_context_cache = None
 
@@ -860,6 +864,7 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
+        self._invalidate_cache()
         return row["id"]
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
@@ -884,6 +889,7 @@ class GraphStore:
                 " updated_at=? WHERE id=?",
                 (edge.line, extra, confidence, confidence_tier, now, existing["id"]),
             )
+            self._invalidate_cache()
             return existing["id"]
 
         self._conn.execute(
@@ -894,7 +900,9 @@ class GraphStore:
             (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
              confidence, confidence_tier, now),
         )
-        return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        edge_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self._invalidate_cache()
+        return edge_id
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
@@ -1171,10 +1179,12 @@ class GraphStore:
 
     def commit(self) -> None:
         self._conn.commit()
+        self._invalidate_cache()
 
     def rollback(self) -> None:
         """Rollback the current transaction."""
         self._conn.rollback()
+        self._invalidate_cache()
 
     # --- Read operations ---
 
@@ -2157,6 +2167,7 @@ class GraphStore:
         cached = getattr(self, "_bare_endpoint_context_cache", None)
         if cached is not None:
             return cached
+        epoch = self._cache_epoch
 
         # bare_name -> [(qualified_name, defining_file)]
         node_lookup: dict[str, list[tuple[str, str]]] = {}
@@ -2257,7 +2268,10 @@ class GraphStore:
             import_targets,
             ambiguous_import_targets,
         )
-        self._bare_endpoint_context_cache = result
+        with self._cache_lock:
+            # Publish only if no write invalidated the context meanwhile.
+            if self._cache_epoch == epoch:
+                self._bare_endpoint_context_cache = result
         return result
 
     def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:
@@ -3727,64 +3741,68 @@ class GraphStore:
         """Build a directed graph with impact weights for both policies."""
         import networkx as nx
 
-        with self._cache_lock:
-            if self._nxg_cache is not None:
-                return self._nxg_cache
-            g: nx.DiGraph = nx.DiGraph()
-            rows = self._conn.execute("SELECT * FROM edges").fetchall()
-            known_qns = {
-                row[0] for row in self._conn.execute(
-                    "SELECT qualified_name FROM nodes"
+        cached = self._nxg_cache
+        if cached is not None:
+            return cached
+        # Build outside the lock: reading every edge takes long enough
+        # that holding it would stall the writers that invalidate.
+        g: nx.DiGraph = nx.DiGraph()
+        rows = self._conn.execute("SELECT * FROM edges").fetchall()
+        known_qns = {
+            row[0] for row in self._conn.execute(
+                "SELECT qualified_name FROM nodes"
+            )
+        }
+        for r in rows:
+            source = r["source_qualified"]
+            target = r["target_qualified"]
+            kind = r["kind"]
+            candidate_weight = IMPACT_EDGE_WEIGHTS.get(
+                kind, IMPACT_DEFAULT_EDGE_WEIGHT,
+            )
+            if not g.has_edge(source, target):
+                g.add_edge(source, target, kind=kind)
+            data = g[source][target]
+            # Mirror the stored column, falling back to the same
+            # node-existence test for a graph built before migration v11.
+            # Parallel edges collapse into one networkx edge, so the flag
+            # means "every edge here is an unresolved call": one proven
+            # relationship of any kind clears it, and a direct-only
+            # traversal never drops a hop it could prove.
+            unresolved = False
+            if kind in TARGET_RESOLUTION_KINDS:
+                stored = (
+                    r["target_resolution"]
+                    if "target_resolution" in r.keys()
+                    else None
                 )
-            }
-            for r in rows:
-                source = r["source_qualified"]
-                target = r["target_qualified"]
-                kind = r["kind"]
-                candidate_weight = IMPACT_EDGE_WEIGHTS.get(
-                    kind, IMPACT_DEFAULT_EDGE_WEIGHT,
+                unresolved = (
+                    stored == "unresolved"
+                    if stored is not None
+                    else target not in known_qns
                 )
-                if not g.has_edge(source, target):
-                    g.add_edge(source, target, kind=kind)
-                data = g[source][target]
-                # Mirror the stored column, falling back to the same
-                # node-existence test for a graph built before migration v11.
-                # Parallel edges collapse into one networkx edge, so the flag
-                # means "every edge here is an unresolved call": one proven
-                # relationship of any kind clears it, and a direct-only
-                # traversal never drops a hop it could prove.
-                unresolved = False
-                if kind in TARGET_RESOLUTION_KINDS:
-                    stored = (
-                        r["target_resolution"]
-                        if "target_resolution" in r.keys()
-                        else None
-                    )
-                    unresolved = (
-                        stored == "unresolved"
-                        if stored is not None
-                        else target not in known_qns
-                    )
-                if unresolved:
-                    data.setdefault("unresolved_target", True)
-                else:
-                    data["unresolved_target"] = False
-                existing_weight = IMPACT_EDGE_WEIGHTS.get(
-                    data.get("kind", ""), IMPACT_DEFAULT_EDGE_WEIGHT,
-                )
-                if candidate_weight > existing_weight:
-                    data["kind"] = kind
+            if unresolved:
+                data.setdefault("unresolved_target", True)
+            else:
+                data["unresolved_target"] = False
+            existing_weight = IMPACT_EDGE_WEIGHTS.get(
+                data.get("kind", ""), IMPACT_DEFAULT_EDGE_WEIGHT,
+            )
+            if candidate_weight > existing_weight:
+                data["kind"] = kind
 
-                direction = IMPACT_EDGE_DIRECTIONS.get(
-                    kind, IMPACT_DEFAULT_EDGE_DIRECTION,
+            direction = IMPACT_EDGE_DIRECTIONS.get(
+                kind, IMPACT_DEFAULT_EDGE_DIRECTION,
+            )
+            if direction != IMPACT_DIRECTION_NONE:
+                weight_key = f"impact_{direction}_weight"
+                data[weight_key] = max(
+                    data.get(weight_key, 0.0), candidate_weight,
                 )
-                if direction != IMPACT_DIRECTION_NONE:
-                    weight_key = f"impact_{direction}_weight"
-                    data[weight_key] = max(
-                        data.get(weight_key, 0.0), candidate_weight,
-                    )
-            self._nxg_cache = g
-            return g
+        with self._cache_lock:
+            if self._nxg_cache is None:
+                self._nxg_cache = g
+            return self._nxg_cache
 
     def _make_qualified(self, node: NodeInfo) -> str:
         if node.kind == "File":

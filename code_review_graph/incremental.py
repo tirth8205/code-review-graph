@@ -1706,6 +1706,11 @@ def _can_batch_store(store: GraphStore, parser: Any) -> bool:
     )
 
 
+# These languages are parsed by bounded fallbacks or config readers, so no
+# grammar package is loaded for them and probing one only costs a subprocess.
+_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+
+
 def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
     """Pre-warm grammar load probes concurrently before spawning worker pool."""
     try:
@@ -1732,8 +1737,14 @@ def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
             grammars.update(("php", "html"))
         elif lang == "c" and suffix == ".h":
             grammars.update(("c", "cpp"))
+        elif lang in _NO_GRAMMAR_LANGUAGES:
+            continue
         else:
             grammars.add(lang)
+    custom = getattr(parser, "_custom_languages", None) or {}
+    grammars = {
+        getattr(custom.get(g), "grammar", None) or g for g in grammars
+    }
     unprobed = [
         g for g in grammars if g not in parser_mod._PARSER_PROBE_RESULTS
     ]

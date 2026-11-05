@@ -139,7 +139,7 @@ def resolve_rescript_cross_module(store: GraphStore) -> dict:
             "UPDATE edges SET target_qualified = ? WHERE id = ?",
             all_updates,
         )
-        conn.commit()
+        store.commit()
         store._invalidate_cache()
 
     result = {
