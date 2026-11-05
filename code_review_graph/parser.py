@@ -2699,8 +2699,8 @@ def _hcl_ref_target(
     """Map a ``variable_expr.get_attr*`` chain to its canonical graph name."""
     # Provider meta-arguments use the provider namespace even when a local
     # provider name collides with an expression root such as "local".
-    # Iterator expressions inside an indexed provider remain ordinary refs.
-    if provider and root not in {"each", "count", "self", "path", "terraform"}:
+    # Only the block-local iterators cannot be a provider's local name.
+    if provider and root not in {"each", "count", "self"}:
         return ".".join(["provider", root] + attrs[:1])
     if root == "var" and attrs:
         return f"var.{attrs[0]}"

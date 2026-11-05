@@ -100,3 +100,19 @@ resource "aws_instance" "x" { provider = aws.by_region[each.key] }
     assert {e.target for e in edges if e.kind == "REFERENCES"} == {
         "main.tf::provider.aws.by_region"
     }
+
+
+@pytest.mark.parametrize("name", ["path", "terraform"])
+def test_provider_named_like_a_builtin_namespace_keeps_its_references(name):
+    _, edges = CodeParser().parse_bytes(Path("main.tf"), f'''
+provider "{name}" {{ alias = "west" }}
+resource "example" "x" {{ provider = {name}.west }}
+module "child" {{
+  source = "./child"
+  providers = {{ {name} = {name}.west }}
+}}
+output "o" {{ value = {name}.west }}
+'''.encode())
+    target = f"main.tf::provider.{name}.west"
+    refs = {(e.source, e.target) for e in edges if e.kind == "REFERENCES"}
+    assert refs == {("main.tf::resource.example.x", target), ("main.tf::module.child", target)}
