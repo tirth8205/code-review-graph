@@ -19,6 +19,11 @@ uv run pytest tests/test_parser.py -v                                           
 
 CI runs the suite on Python 3.10, 3.11, 3.12 and 3.13 and fails below 65% coverage.
 
+`tests/test_parser_grammar_contract.py` checks every built-in class, function, import,
+and call dispatch name against its bundled Tree-sitter grammar. When updating a grammar
+or adding dispatch entries, use the grammar's actual named node types. This contract
+checks configured dispatch names; language fixtures still verify extraction behavior.
+
 ## Linting and Type Checking
 
 ```bash
@@ -54,8 +59,8 @@ feature branch --PR--> staging --PR--> testing --PR--> main --tag--> PyPI
 | Branch    | Purpose                                                        | Who merges into it                      |
 | --------- | -------------------------------------------------------------- | --------------------------------------- |
 | `staging` | Default branch. Every feature and fix PR lands here first.     | Maintainers, once CI is green.          |
-| `testing` | Candidate for the next release. Gets a longer soak and manual QA. | Maintainer, via a promotion PR from `staging`. |
-| `main`    | Released code. Nothing reaches `main` without passing QA on `testing`. | Maintainer, via a promotion PR from `testing`. |
+| `testing` | Candidate for the next release. Gets a longer soak and manual QA. | The `Auto promote` workflow, once a day, when `staging` is green. |
+| `main`    | Released code. Nothing reaches `main` without passing QA on `testing`. | Maintainer only, by hand, via a promotion PR from `testing`. |
 
 Rules that apply to all three branches (enforced by repository rulesets):
 
@@ -74,17 +79,142 @@ merge commit when a PR has several authors so nobody loses attribution. Rebase-m
 also allowed on `staging`.
 
 **Promotion PRs** move everything on `staging` to `testing`, and later everything on
-`testing` to `main`. Open one from the Actions tab (`Promote` workflow, pick the step) or
-by hand with `gh pr create --base testing --head staging`. They are always merged with a
-**merge commit**, never squashed, so every contributor stays the author of their commits;
-the `testing` and `main` rulesets allow no other merge method. A promotion is the
-maintainer's sign-off: CI green is necessary but not sufficient. A promotion PR opened by
-the workflow shows an "Approve workflows to run" banner; the required checks are already
-satisfied by the CI run on the source branch's tip, so the banner can be approved or
-ignored.
+`testing` to `main`. They are always merged with a **merge commit**, never squashed, so
+every contributor stays the author of their commits; the `testing` and `main` rulesets
+allow no other merge method. Opening a promotion PR re-queues every required check on a
+commit that already had them green from the push run, so the PR sits blocked for a
+quarter of an hour or so before it can be merged. That is normal.
+
+`staging` → `testing` happens by itself. `testing` → `main` never does.
+
+### Automatic promotion to `testing`
+
+`.github/workflows/auto-promote.yml` runs once a day. If `staging` has commits `testing`
+does not, every required status check is green on the `staging` tip, and the promotion
+gate has not failed on the current `testing` tip, it opens the promotion PR and merges it
+with a merge commit. It writes a summary on every run, including the runs that decide to
+do nothing, so "nothing to promote" is never indistinguishable from "did not run".
+
+**One repository setting is required.** Settings → Actions → General → Workflow
+permissions → tick **Allow GitHub Actions to create and approve pull requests** → Save.
+Without it `gh pr create` is refused and no promotion PR can be opened — by this workflow
+or by the manual `Promote` one. Leave *Workflow permissions* itself on **Read repository
+contents and packages permissions**: both workflows ask for the writes they need in their
+own `permissions:` block. If the tick is missing, the run goes red and the job summary
+gives that click path.
+
+It merges only a PR it opened itself: same repository, `staging` → `testing`, carrying the
+`auto-promotion` label, and at the commit whose checks were read. `gh pr list --head
+staging` matches a branch of that name in any of this repository's forks, and a PR's base
+branch can be changed by its author at any time without re-running a single check, so all
+of that is verified again immediately before the merge, and the merge itself is pinned
+with `--match-head-commit`. **A promotion PR you opened by hand is never touched** — it
+has no `auto-promotion` label, so the daily run refuses it by number and says so.
+
+It stops, without failing, when there is nothing to promote, when CI is still running,
+when a required check failed or was skipped, when the promotion gate is still running on
+`testing`, when the gate failed there, or when `staging` moved mid-run. Those states are
+reported elsewhere already and tomorrow's run looks again. Three things turn the run red,
+because nothing else reports them:
+
+- **GitHub refused the merge.** The PR is left open and the refusal is quoted in the job
+  summary, with the causes listed in the order they actually occur; merge it by hand with
+  a merge commit.
+- **The workflow is stuck on its own PR** — it conflicts, it is a draft, or GitHub holds
+  it for a rule with every required check green. A stalled promotion that reported itself
+  as a green warning every morning would stay stalled for ever.
+- **A PR it was about to merge is not the one it decided on**, or the release gate could
+  not be started after the merge.
+
+Every rule lives in `scripts/auto_promote.py` and is covered by
+`tests/test_auto_promote.py`; the workflow fetches facts and obeys. The required contexts
+are read from the `testing` ruleset at run time, so a renamed CI job cannot silently drop
+out of the gate. The workflow has no input, variable or code path that can target `main`,
+the PR it merges is re-checked at the door, and the tests assert both.
+
+To see what it would decide without it doing anything, run the `Auto promote` workflow
+from the Actions tab: a hand-started run defaults to a dry run.
+
+**Promotion to `main` is never automatic.** Open it from the Actions tab (`Promote`
+workflow, pick `testing -> main`) or by hand with
+`gh pr create --base main --head testing`, read the promotion gate's verdict first, and
+merge it yourself. That is the maintainer's sign-off: CI green is necessary but not
+sufficient.
 
 **Hotfixes** for a released version follow the same path. If a fix is urgent, open the PR
 against `staging` and promote twice in a row; do not open PRs against `main`.
+
+### The promotion gate
+
+Every time something lands on `testing`, `.github/workflows/promotion-gate.yml` runs the
+slow checks that are too expensive for a pull request. It also runs on demand from the
+Actions tab. It never runs on a pull request, so no contributor waits for it.
+
+It runs seven checks:
+
+| Check | What it does | If it fails |
+| ----- | ------------- | ----------- |
+| `upgrade-path` | Installs the last three PyPI releases, builds a real graph with each, then opens and updates that graph with the current code. | Blocks |
+| `packaging`    | Builds the wheel and the sdist, installs each into a clean environment with the checkout out of reach, and drives the installed program. | Blocks |
+| `determinism`  | Rebuilds one corpus nine times, serial and parallel, thread and process, under two hash seeds, and compares every table. | Blocks |
+| `suite`        | The ordinary test suite with the 65% coverage floor, on Python 3.10, 3.11, 3.12 and 3.13. | Blocks |
+| `e2e`          | Drives the real MCP server over stdio on Linux, macOS and Windows. | Blocks on Linux and macOS, reports on Windows |
+| `corpus`       | Clones eight pinned third-party repositories, builds a graph over each, and compares twelve measured properties against recorded baselines. | Reports |
+| `browser`      | Renders the generated visualization page in headless Chromium. | Reports |
+
+**Blocks** means: do not promote `testing` to `main` until it is green or the maintainer
+has decided in writing why it does not matter. **Reports** means the failure is recorded
+and shown but does not hold a release.
+
+The split is not about how important a check is, it is about whether a failure is
+evidence about our code:
+
+- `upgrade-path` blocks because it is the only check that proves a database a user
+  already has survives the upgrade. A migration that corrupts it cannot be undone by a
+  later patch release.
+- `packaging` blocks because a wheel missing a data file is broken for every user at once
+  and needs another release to fix. It installs from PyPI, which every other job here
+  already does, so it adds no new way to fail.
+- `determinism` blocks because it needs no network and no third-party checkout: a
+  failure is a real difference, never an outage.
+- `suite` blocks because it is the same suite the pull-request CI already requires,
+  re-run against the merged state of `testing`, which no single pull request tested.
+- `e2e` blocks on Linux and macOS because the stdio MCP interface is what every editor
+  integration speaks. The Windows leg reports, because process spawning and file-handle
+  timing on the Windows runner is the flakiest surface in this repository and a runner
+  hiccup must not hold a release.
+- `corpus` reports because it clones eight repositories that belong to other people. A
+  rate limit, an outage or an upstream force-push fails it for a reason that has nothing
+  to do with this code, and a failed clone must not stop a release. A property that moved
+  is still a real regression: read the numbers and decide.
+- `browser` reports because it downloads a Chromium build at run time, and a page that
+  fails to render damages nobody's data.
+
+Reporting is not the same as ignoring. Every check is wrapped by
+`scripts/promotion_gate.py`, which fails it when its test module is not in the checkout,
+when the run collected almost nothing, or when the tests were skipped instead of
+run, including a `browser` run that skipped because Playwright was missing. A check that
+quietly tested nothing is recorded as a failure, not as a pass.
+
+The result is posted twice: to the run's job summary, and as one comment on the open
+issue labelled `promotion-gate` (the workflow opens that issue the first time it needs
+it). The report names every check, whether it passed, and for a failure the exact
+assertion that moved: for example the property, its baseline and the measured delta.
+
+The gate opens no pull request and merges nothing. Promotion to `main` stays the
+maintainer's decision, made with the `Promote` workflow as before. `Auto promote` cannot
+reach `main` either: it promotes `staging` to `testing` and nothing else.
+
+To run any of these by hand:
+
+```bash
+CRG_UPGRADE_TEST=1 uv run pytest -m upgrade -q -rxX   # upgrade-path
+uv run pytest tests/test_packaging.py -m packaging -q # packaging
+uv run pytest -m determinism -q -rxX                  # determinism
+uv run pytest -m corpus -q                            # corpus (clones 8 repos)
+uv run pytest -m browser -q                           # browser (needs the browser-test extra)
+uv run pytest -m e2e -q                               # e2e
+```
 
 **Releases** are cut from `main` only: bump the version, tag `vX.Y.Z`, publish a GitHub
 release, and the `publish` workflow uploads to PyPI. Nothing is ever released from

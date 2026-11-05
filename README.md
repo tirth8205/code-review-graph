@@ -27,7 +27,7 @@
   <a href="https://pepy.tech/project/code-review-graph"><img src="https://img.shields.io/pepy/dt/code-review-graph?style=flat-square" alt="Downloads"></a>
   <a href="https://github.com/tirth8205/code-review-graph/stargazers"><img src="https://img.shields.io/github/stars/tirth8205/code-review-graph?style=flat-square" alt="Stars"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence"></a>
-  <a href="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml"><img src="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml"><img src="https://github.com/tirth8205/code-review-graph/actions/workflows/ci.yml/badge.svg?branch=staging" alt="CI"></a>
   <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10%2B-blue.svg?style=flat-square" alt="Python 3.10+"></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-compatible-green.svg?style=flat-square" alt="MCP"></a>
   <a href="https://code-review-graph.com"><img src="https://img.shields.io/badge/website-code--review--graph.com-blue?style=flat-square" alt="Website"></a>
@@ -49,7 +49,7 @@
 AI coding tools often re-read large parts of a codebase to review a change. `code-review-graph` builds a structural map of the code with [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), keeps it updated incrementally, and serves compact context over [MCP](https://modelcontextprotocol.io/), so the assistant reads only the files a change touches.
 
 <p align="center">
-  <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: reading flask's whole corpus costs 143,594 tokens, a graph answer costs 2,196 (71.0x fewer)" width="85%" />
+  <img src="diagrams/diagram1_before_vs_after.png" alt="The Token Problem: reading flask's whole corpus costs 143,594 tokens, a graph answer costs 2,196 (65x fewer)" width="85%" />
 </p>
 
 ---
@@ -65,7 +65,7 @@ code-review-graph build                # parse the codebase
 `install` detects which AI coding tools you have, writes an MCP server entry for each, installs hooks and skills where the platform supports them, and adds graph instructions to the platform's rules file. The MCP entry uses `poetry run` or `uv run` inside a Poetry or uv project environment, `uvx code-review-graph serve` when `uvx` is on PATH, and otherwise the current Python interpreter. Restart the editor or tool afterwards.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, and GitHub Copilot CLI" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, and Hermes Agent" width="85%" />
 </p>
 
 To configure one platform, pass `--platform` with one of `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, or `hermes`:
@@ -127,10 +127,10 @@ Hooks, the pre-commit hook and watch mode trigger incremental updates. The updat
 
 ### Whole codebase or targeted answer?
 
-Instead of feeding a whole corpus to the model, the graph returns a slice shaped to the question. On this repository, 208,821 source tokens become ~3,190 tokens per question.
+Instead of feeding a whole corpus to the model, the graph returns a slice shaped to the question. In the 2026-08-02 capture of this repository at `84bde354`, 208,821 source tokens became ~3,190 tokens per question. The repository has grown a lot since that snapshot, so both numbers are larger today.
 
 <p align="center">
-  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph repo: 208,821 source tokens funnel down to ~3,190 token graph responses, 68x fewer tokens per question" width="80%" />
+  <img src="diagrams/diagram6_monorepo_funnel.png" alt="code-review-graph at the 84bde354 snapshot: 208,821 source tokens funnel down to ~3,190 token graph responses, about 65x fewer tokens per question" width="80%" />
 </p>
 
 ### Language coverage and notebooks
@@ -139,9 +139,11 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other YAML is not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other YAML and other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references, and Laravel Route and Eloquent edges when the source shows explicit framework imports, model inheritance and receiver evidence.
+
+Java projects get Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, and Temporal workflow and activity edges. Each resolver runs after the parse and needs the injected field, published event or workflow stub to be visible in the repository.
 
 ### Add your own language
 
@@ -177,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -189,35 +191,39 @@ See [docs/GITHUB_ACTION.md](docs/GITHUB_ACTION.md) for inputs, risk levels and c
 ## Benchmarks
 
 <p align="center">
-  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 repositories: ~65x median per-question token reduction (376x max), 0.69 average impact F1 against graph-derived ground truth" width="85%" />
+  <img src="diagrams/diagram5_benchmark_board.png" alt="Benchmarks across 6 repositories: ~63x median per-question token reduction (358x max), 0.69 average impact F1 against graph-derived ground truth" width="85%" />
 </p>
 
-The median per-question token reduction across the 6 repositories is about **65x** (whole-corpus baseline vs graph query). The **376x** maximum is one repository (fastapi, the largest corpus), not the typical result.
+The median per-question token reduction across the 6 repositories is about **63x** (whole-corpus baseline vs graph query). The **358x** maximum is one repository (fastapi, the largest corpus), not the typical result.
 
 All numbers come from the evaluation runner against 6 open-source repositories (13 commits). Every config pins an upstream SHA, Leiden runs with a fixed seed, and embeddings are deterministic on CPU, so two runs on different machines produce the same numbers. The reproduction recipe is in [`docs/REPRODUCING.md`](docs/REPRODUCING.md). A weekly report-only run on the two smallest configs lives in [`.github/workflows/eval.yml`](.github/workflows/eval.yml).
 
 <details>
-<summary><strong>Token efficiency: ~65x median per-question reduction (range 36x to 376x; whole-corpus vs graph query)</strong></summary>
+<summary><strong>Token efficiency: ~63x median per-question reduction (range 35x to 358x; whole-corpus vs graph query)</strong></summary>
 <br>
 
-For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, and so on), the graph returns ~2,000 to 3,500 tokens of search hits plus neighbour edges instead of every source file. The table averages the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
+For a typical agent question (`"how does authentication work"`, `"what is the main entry point"`, and so on), the graph returns ~2,200 to 3,900 tokens of search hits plus neighbour edges instead of every source file. The table averages the 5 sample questions defined in `code_review_graph/token_benchmark.py`.
 
 | Repo | Snapshot SHA | naive_corpus_tokens | avg graph_tokens | Reduction |
 |------|---|-----------------:|----------------:|----------:|
-| fastapi | `22381558` | 948,793 | 2,653 | **375.6x** |
-| flask | `a29f88ce` | 143,594 | 2,196 | **71.0x** |
-| code-review-graph | `84bde354` | 208,821 | 3,190 | **68.1x** |
-| gin | `5c00df8a` | 166,868 | 2,766 | **61.9x** |
-| httpx | `b55d4635` | 142,356 | 2,661 | **60.6x** |
-| express | `b4ab7d65` | 136,052 | 3,936 | **36.0x** |
+| fastapi | `22381558` | 948,793 | 2,653 | **357.6x** |
+| flask | `a29f88ce` | 143,594 | 2,196 | **65.4x** |
+| code-review-graph | `84bde354` | 208,821 | 3,190 | **65.5x** |
+| gin | `5c00df8a` | 166,868 | 2,766 | **60.3x** |
+| httpx | `b55d4635` | 142,356 | 2,661 | **53.5x** |
+| express | `b4ab7d65` | 136,052 | 3,936 | **34.6x** |
 
 > Captured 2026-08-02 from clean clones at the pinned SHAs (crg 2.3.7, local `all-MiniLM-L6-v2` embeddings). These numbers are lower than the 2026-05-25 capture they replace: node embedding text became richer, so `avg graph_tokens` rose in every repo. fastapi is measured at its current pin `22381558` rather than the retired `0227991a`.
+>
+> The Reduction column is `naive_corpus_tokens / avg graph_tokens`, so it divides out from the two columns beside it. The benchmark's own `average_reduction_ratio` averages the five per-question ratios instead, which always reads higher; those per-question figures are in [`docs/REPRODUCING.md`](docs/REPRODUCING.md#standalone-token-benchmark-code_review_graphtoken_benchmarkpy).
+>
+> The `code-review-graph` row is a snapshot, not a current measurement. The repository has grown since `84bde354`, so its corpus and graph are both much larger today.
 
 The whole-corpus baseline is an upper bound no real agent pays; an agent greps for identifiers and reads the best-matching files. The `agent_baseline` eval benchmark measures that case (a pure-Python grep over the corpus, top-3 files by match count, token-counted against the graph query cost). It writes `evaluate/results/<repo>_agent_baseline_<date>.csv`; no canonical capture has been published yet.
 
 The formal `token_efficiency` benchmark measures a different scenario, the full `get_review_context()` JSON against only the changed-file content of a commit, and reports ratios below 1 for small commits because the response carries impact-radius edges and source snippets. The two benchmarks answer different questions; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what).
 
-Review and impact tools attach a compact `context_savings` estimate to their responses. The CLI shows the same figures in the `Token Savings` panel (see Usage below) and `--verify` compares them with OpenAI's `cl100k_base` tokenizer. Calibration across 222 sample files puts the estimate within about 1% of real tokens in aggregate ([data](docs/REPRODUCING.md#calibration-result-committed)).
+Review and impact tools attach a compact `context_savings` estimate to their responses. The CLI shows the same figures in the `Token Savings` panel (see Usage below) and `--verify` compares them with OpenAI's `cl100k_base` tokenizer. Calibration across 222 sample files puts the estimate within about 1% of real tokens in aggregate ([data](docs/REPRODUCING.md#calibration-table)).
 
 </details>
 
@@ -245,7 +251,7 @@ The benchmark also runs a **co-change mode**: the predictor is seeded with one c
 <summary><strong>Build stats</strong></summary>
 <br>
 
-From the same 2026-08-02 clean-room build. Embedding counts are lower than node counts because File nodes are not embedded.
+From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding counts are lower than node counts because File nodes are not embedded. The `code-review-graph` row is that snapshot, not the repository as it stands now.
 
 | Repo | Nodes | Edges | Embeddings |
 |------|------:|------:|-----------:|
@@ -275,6 +281,7 @@ From the same 2026-08-02 clean-room build. Embedding counts are lower than node 
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
 | **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
+| **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
 | **Auto-update hooks** | Editor hooks, a git pre-commit hook and watch mode update the graph as you work |
 | **Semantic search** | Optional vector embeddings via sentence-transformers, Google Gemini, MiniMax, Voyage AI, or any OpenAI-compatible endpoint (OpenAI, Azure, new-api, LiteLLM, vLLM, LocalAI) |
@@ -283,9 +290,9 @@ From the same 2026-08-02 clean-room build. Embedding counts are lower than node 
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
 | **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
-| **Edge confidence** | Three-tier confidence (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
+| **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
-| **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, SVG, JSON |
+| **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
 | **Estimated context savings** | `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`) on review, impact, detect-changes and architecture responses |
 | **Community auto-split** | Communities above 25% of the graph are split recursively with Leiden |
@@ -308,14 +315,19 @@ From the same 2026-08-02 clean-room build. Embedding counts are lower than node 
 ## Usage
 
 <details>
-<summary><strong>Slash commands</strong></summary>
+<summary><strong>Skills</strong></summary>
 <br>
 
-| Command | Description |
-|---------|-------------|
-| `/code-review-graph:build-graph` | Build or rebuild the code graph |
-| `/code-review-graph:review-delta` | Review changes since last commit |
-| `/code-review-graph:review-pr` | Full PR review with blast-radius analysis |
+`install` writes these four skills for the platforms that support them (Claude Code, Gemini CLI, CodeBuddy Code, Hermes Agent and Qoder). Ask for one by name.
+
+| Skill | Description |
+|-------|-------------|
+| `explore-codebase` | Navigate and understand codebase structure using the knowledge graph |
+| `review-changes` | Perform a structured code review using change detection and impact |
+| `debug-issue` | Systematically debug issues using graph-powered code navigation |
+| `refactor-safely` | Plan and execute safe refactoring using dependency analysis |
+
+Qoder also gets `build-graph`, `review-delta` and `review-pr` from the repository's `skills/` directory.
 
 </details>
 
@@ -331,10 +343,12 @@ code-review-graph build            # Parse the whole codebase
 code-review-graph update           # Incremental update (changed files only)
 code-review-graph status           # Graph statistics
 code-review-graph watch            # Update on file changes
+code-review-graph forget <path>    # Drop already-parsed files from the graph
+code-review-graph dead-code        # Functions and classes with no callers or tests
 code-review-graph visualize        # Interactive HTML graph
 code-review-graph visualize --format json      # Export graph data as JSON
 code-review-graph visualize --format graphml   # Export as GraphML
-code-review-graph visualize --format svg       # Export as SVG
+code-review-graph visualize --format svg       # Export as SVG (needs matplotlib)
 code-review-graph visualize --format obsidian  # Export as Obsidian vault
 code-review-graph visualize --format cypher    # Export as Neo4j Cypher
 code-review-graph wiki             # Markdown wiki from communities
@@ -343,7 +357,7 @@ code-review-graph detect-changes --brief --base main  # Against the merge base o
 code-review-graph update --brief                 # Refresh graph + same panel
 code-review-graph detect-changes --brief --verify  # Cross-check against tiktoken
 code-review-graph register <path>  # Register repo in the multi-repo registry
-code-review-graph unregister <id>  # Remove repo from the registry
+code-review-graph unregister <path|alias>  # Remove repo from the registry
 code-review-graph repos            # List registered repositories
 code-review-graph daemon start     # Start the multi-repo watch daemon
 code-review-graph daemon stop      # Stop the daemon
@@ -353,7 +367,11 @@ code-review-graph serve            # Start the MCP server (stdio)
 code-review-graph serve --http     # MCP over Streamable HTTP on localhost:5555
 ```
 
+This is a selection. `code-review-graph --help` lists every command, and [docs/COMMANDS.md](docs/COMMANDS.md) documents their flags.
+
 When `detect-changes --base` names a branch, the diff runs against the merge base of that branch and HEAD. Commit hashes and other revisions are used as given.
+
+`visualize --format svg` needs matplotlib, which ships in the `eval` extra (`pip install "code-review-graph[eval]"`). The other export formats need no extra install.
 
 JSON exports are written inside the local graph data directory, which Git ignores by default. They can contain absolute paths and code-structure metadata, so inspect an export before publishing it.
 
@@ -379,7 +397,7 @@ Both commands print the same panel showing how many tokens the graph saved compa
 | `detect-changes --brief` | Read-only. Queries the existing graph for the current changes and prints the panel. | Most of the time; hooks or `crg-daemon` keep the graph fresh. |
 | `update --brief` | Re-parses the changed files into the graph first, then prints the same panel. | After a rebase, a large change set, or whenever the graph may be stale. |
 
-Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-result-committed).
+Add `--verify` to either command to compare the figures with OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The estimate is within about 1% of real tokens in aggregate; see [`docs/REPRODUCING.md`](docs/REPRODUCING.md#calibration-table).
 
 The same `context_savings` metadata is attached to the JSON responses of the `get_impact_radius`, `get_review_context`, `detect_changes` and `get_architecture_overview` MCP tools.
 
@@ -491,7 +509,7 @@ pip install "code-review-graph[embeddings]"          # Local vector embeddings (
 pip install "code-review-graph[google-embeddings]"   # Google Gemini embeddings
 pip install "code-review-graph[communities]"         # Community detection (igraph)
 pip install "code-review-graph[enrichment]"          # Python call-resolution enrichment (Jedi)
-pip install "code-review-graph[eval]"                # Evaluation benchmarks (matplotlib)
+pip install "code-review-graph[eval]"                # Evaluation benchmarks and SVG export (matplotlib)
 pip install "code-review-graph[wiki]"                # ollama client (not used by the current wiki generator)
 pip install "code-review-graph[all]"                 # All optional dependencies
 ```
@@ -500,7 +518,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations | `30` |
+| `CRG_GIT_TIMEOUT` | Timeout in seconds for Git operations (build, update, watch) | `30` |
+| `CRG_DISCOVERY_TIMEOUT` | Timeout in seconds for each Git command that discovers what changed, when a review tool or command was not given an explicit file list. Running out reports an error, never "no changes" | `5`, or `CRG_GIT_TIMEOUT` when you set that explicitly |
 | `CRG_DATA_DIR` | Directory for graph databases and generated artefacts | - |
 | `CRG_HOOK_WORKTREES` | Set to `1` to let the pre-commit hook run in linked git worktrees | - |
 | `CRG_EMBEDDING_MODEL` | Default model for local vector embeddings | `all-MiniLM-L6-v2` |
@@ -511,7 +530,9 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | Maximum depth for graph traversal | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | Maximum changed functions analysed in one change report | `500` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | Maximum frontier size for transitive caller/callee expansion | `50` |
-| `CRG_TOOL_TIMEOUT` | Timeout in seconds for bounded MCP tools (`0` disables) | `0` |
+| `CRG_CALLER_TEST_ROUTE_DEPTH` | Hops to walk up incoming `CALLS` when looking for a tested caller of an untested changed symbol. Reported as a note, never as coverage | `2` |
+| `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | Maximum callers examined while looking for that tested caller | `500` |
+| `CRG_TOOL_TIMEOUT` | Timeout in seconds for read-only MCP tools (`0` disables). Does not bound the tools that write: build, postprocess, embed, wiki and apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | Window for `detect-changes --churn` commit counts | `90` |
 | `CRG_LEIDEN_SEED` | Seed for Leiden community detection | `42` |
 | `CRG_RECURSE_SUBMODULES` | Include git submodules when set to `1`, `true` or `yes` | - |
@@ -643,7 +664,9 @@ pytest
 ```
 
 Pull requests target `staging` (the default branch). Changes are promoted
-`staging` → `testing` → `main`, and releases are tagged from `main`. See
+`staging` → `testing` → `main`, and releases are tagged from `main`. The first
+step runs once a day by itself when `staging` is green; promotion to `main` is
+never automatic. See
 [CONTRIBUTING.md](CONTRIBUTING.md#branching-and-promotion) for the full flow.
 
 To add a built-in language, edit `code_review_graph/parser.py`: add the extension to `EXTENSION_TO_LANGUAGE` and node type mappings to `_CLASS_TYPES`, `_FUNCTION_TYPES`, `_IMPORT_TYPES` and `_CALL_TYPES`. Include a test fixture and open a PR. For a language you only need in one repository, use [`languages.toml`](docs/CUSTOM_LANGUAGES.md) instead.

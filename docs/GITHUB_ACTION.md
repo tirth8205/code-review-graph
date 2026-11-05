@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -57,7 +57,7 @@ which run on Node 24. Self-hosted runners must be version `2.327.1` or newer.
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high
@@ -67,7 +67,7 @@ To turn the review into a merge gate:
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `github-token` | yes | none | Token used to post the sticky PR comment via the GitHub API. The workflow's default `GITHUB_TOKEN` works when the job has `pull-requests: write`. |
+| `github-token` | yes | none | Token used to post the sticky PR comment via the GitHub API. The workflow's default `GITHUB_TOKEN` works when the job has `pull-requests: write`. A personal access token or a GitHub App installation token also works; see [Which comment gets updated](#which-comment-gets-updated). |
 | `comment` | no | `true` | Post (and keep updated) the sticky PR comment. Set to `false` to run analysis and gating without commenting. |
 | `fail-on-risk` | no | `none` | Fail the job when the overall risk score reaches a level: `none` (never fail), `high` (risk >= 0.70), `critical` (risk >= 0.85). |
 | `python-version` | no | `3.12` | Python version used to run code-review-graph (3.10 or newer). |
@@ -110,24 +110,31 @@ action maps the score to levels:
 - A `Powered by code-review-graph` footer.
 
 If `detect-changes` capped the analysed functions (`CRG_MAX_CHANGED_FUNCS`,
-default 500), the comment says so. Bodies over 60,000 characters are cut and
-marked `Report truncated`.
+default 500), the comment says so. A body over 60,000 UTF-8 bytes is cut on a
+line boundary and marked `Report truncated`; that limit is the finished body,
+notice and footer included, so a truncated report still fits the cap the
+trusted commenting workflow enforces (`MAX_REPORT_BYTES`).
 
 The comment starts with a hidden HTML marker
-(`<!-- code-review-graph-report -->`). On each run the action looks the marker
-up with `gh api` and PATCHes the existing comment instead of creating a new
-one.
+(`<!-- code-review-graph-report -->`). On each run the action looks up a
+comment that both starts with the marker and was written by the token's own
+account, and PATCHes that one instead of creating a new comment. Both
+conditions matter: the marker is documented here, so a pull request
+participant can post a comment carrying it, and an author filter is what
+stops the action adopting it. When the token's identity cannot be
+established the action posts a comment of its own rather than editing
+someone else's.
 
 ## Cache behavior
 
 The action caches the `.code-review-graph/` directory (the SQLite graph
 database) with `actions/cache`:
 
-- **Key**: `code-review-graph-schema10-<runner.os>-<hashFiles(lockfiles)>`.
+- **Key**: `code-review-graph-schema13-<runner.os>-<hashFiles(lockfiles)>`.
   The lockfile hash covers `uv.lock`, `poetry.lock`, `requirements*.txt`,
   `Pipfile.lock`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
   `go.sum`, `Cargo.lock`, `Gemfile.lock` and `composer.lock`.
-- **Schema segment**: `schema10` tracks the database schema version
+- **Schema segment**: `schema13` tracks the database schema version
   (`LATEST_VERSION` in `code_review_graph/migrations.py`). It is bumped when
   the schema changes so a stale cache is not restored across incompatible
   versions.
@@ -136,7 +143,9 @@ database) with `actions/cache`:
 - **On cache hit**: the action runs `code-review-graph update --base
   origin/<base-branch>`, which re-parses only the files that differ from the
   PR's base. If the restored database is unusable, it falls back to a full
-  `build`.
+  `build`; `build` discards a `graph.db` SQLite cannot read and rebuilds from
+  scratch, so a corrupt cache costs one slow run rather than turning every
+  run red until someone clears the cache by hand.
 - **On cache miss**: a full `code-review-graph build` runs. Later runs are
   incremental.
 
@@ -172,6 +181,28 @@ database) with `actions/cache`:
   of PR code because it can execute untrusted code with a privileged token
   ([details](https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/)).
 
+## Which comment gets updated
+
+The Action keeps one comment per pull request and rewrites it on every push.
+It finds that comment by the hidden marker `<!-- code-review-graph-report -->`
+plus the comment's author, because the marker is published here and anyone can
+paste it into a comment of their own.
+
+How the author is established depends on the token:
+
+- A personal access token answers `GET /user`, so the Action matches its own
+  login exactly.
+- An installation token (the workflow's default `GITHUB_TOKEN`, or a GitHub
+  App's) cannot call `GET /user`, and its comments are authored by a bot
+  account whose login the Action cannot learn: `github-actions[bot]` for the
+  default token, `<app-slug>[bot]` for an App. There the Action matches a
+  marker comment written by a bot. Pull request participants are never bots,
+  so a pasted marker is still not adopted.
+
+If several bots post marker comments on the same pull request under
+installation tokens, give the Action a personal access token so its identity
+is exact.
+
 ## Dogfooding
 
 This repository runs the action on its own PRs via
@@ -200,4 +231,13 @@ Options: `--input` (JSON file or `-` for stdin, default `-`), `--output`
 (file or `-` for stdout, default `-`), `--fail-on-risk none|high|critical`,
 `--max-functions` (default 10), `--max-flows` (default 5), `--quiet` (skip
 writing the body). Exit codes: 0 rendered and gate passed or disabled, 2 the
-input file could not be read, 3 risk gate breached.
+input file could not be read, 3 risk gate breached, 4 `detect-changes`
+produced no analysis at all.
+
+Exit 4 is deliberately distinct from 0. `detect-changes` prints exactly
+`No changes detected.` for a tree it read and found unchanged; anything else
+that is not JSON means the analysis never ran. The rendered comment then says
+so, and the action fails the job, because a reassuring comment on a pull
+request nobody analyzed is worse than no comment at all. This is not
+something `fail-on-risk: none` can switch off: an unknown risk is not a low
+one.

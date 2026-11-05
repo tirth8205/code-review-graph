@@ -3,7 +3,9 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 10.
+The current schema version is 13, the highest key in `MIGRATIONS`. A database
+below that is migrated on open, in order, by every migration above its own
+version.
 
 ## Node Types
 
@@ -86,12 +88,13 @@ A synthesised node for a Spring application event, created after the build by
 ## Edge Types
 
 Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship
-was seen), `line`, `extra` (JSON), `confidence` and `confidence_tier`.
+was seen), `line`, `extra` (JSON), `confidence`, `confidence_tier` and, for
+`CALLS` and `REFERENCES`, `target_resolution`.
 
 | Kind | Source -> target | Notes |
 |---|---|---|
-| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it |
-| IMPORTS_FROM | importing file -> imported module or file | `file_path` equals the source |
+| CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |
+| IMPORTS_FROM | importing file -> imported module, file or package directory | `file_path` equals the source. `extra.import_scope` marks a DIRECTORY target: `package` (a Go import names a directory of files) or `tree` (a Ruby `require_all` names everything below one). The read path expands a directory to its members; see `import_scope_ancestors` in `graph.py` |
 | INHERITS | child class -> parent class | |
 | IMPLEMENTS | implementing class -> interface | |
 | CONTAINS | file -> class or function; class -> method | Structural containment |
@@ -144,6 +147,8 @@ CREATE TABLE nodes (
     file_hash TEXT,
     extra TEXT DEFAULT '{}',
     symbol TEXT,                 -- v10
+    docstring TEXT,              -- v13
+    name_tokens TEXT,            -- v13
     updated_at REAL NOT NULL,
     signature TEXT,              -- v2
     community_id INTEGER         -- v4
@@ -159,6 +164,7 @@ CREATE TABLE edges (
     extra TEXT DEFAULT '{}',
     confidence REAL DEFAULT 1.0,              -- v9
     confidence_tier TEXT DEFAULT 'EXTRACTED', -- v9
+    target_resolution TEXT,                   -- v11; 'direct' | 'unresolved' | NULL
     updated_at REAL NOT NULL
 );
 
@@ -205,9 +211,10 @@ CREATE TABLE communities (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- v5 (rebuilt by search.rebuild_fts_index with the same definition)
+-- v5, widened by v13 (rebuilt by search.rebuild_fts_index from the same
+-- migrations.NODES_FTS_DDL, so the two cannot drift)
 CREATE VIRTUAL TABLE nodes_fts USING fts5(
-    name, qualified_name, file_path, signature,
+    name, qualified_name, file_path, signature, docstring, name_tokens,
     content='nodes', content_rowid='rowid',
     tokenize='porter unicode61'
 );
@@ -245,7 +252,29 @@ CREATE TABLE risk_index (
     last_computed TEXT DEFAULT '',
     FOREIGN KEY (node_id) REFERENCES nodes(id)
 );
+
+-- v12, widened by v13 to mirror every nodes_fts column
+CREATE TABLE nodes_fts_state (
+    node_id INTEGER PRIMARY KEY,
+    name TEXT,
+    qualified_name TEXT,
+    file_path TEXT,
+    signature TEXT,
+    docstring TEXT,      -- v13
+    name_tokens TEXT     -- v13
+);
+CREATE INDEX idx_nodes_fts_state_file ON nodes_fts_state(file_path);
 ```
+
+`nodes_fts` is an external content table: it holds the inverted index but reads column
+values from `nodes`. Removing one of its entries therefore needs the values that were
+indexed, and those are gone once the node row is deleted. `nodes_fts_state` mirrors what
+the index currently holds so `search.update_fts_index` can rewrite just the rows an
+update touched instead of dropping and repopulating the whole index. It starts empty
+after the migration; the first index sync fills it with one full rebuild. Its columns
+have to be exactly `migrations.NODES_FTS_COLUMNS`, because an external-content delete
+replays every indexed value; the `fts_state_synced` metadata key records the mirror
+shape, and a mirror written under an older value forces one rebuild.
 
 ### Embeddings
 
@@ -266,7 +295,8 @@ CREATE TABLE embeddings (
 
 | Key | Set by |
 |---|---|
-| `schema_version` | `migrations.py`; `10` on a current database |
+| `schema_version` | `migrations.py`; `13` on a current database |
+| `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
 | `last_updated` | Full and incremental builds |
 | `last_build_type` | Full and incremental builds |
 | `git_head_sha`, `git_branch` | Builds in a git checkout |
@@ -295,6 +325,7 @@ CREATE TABLE embeddings (
 | `idx_risk_index_score` | `risk_index(risk_score DESC)` | v6 |
 | `idx_edges_composite` | `edges(kind, source_qualified, target_qualified, file_path, line)` | v8 |
 | `idx_nodes_symbol` | `nodes(symbol)` | v10 |
+| `idx_edges_kind_target_resolution` | `edges(kind, target_resolution)` | v11 |
 
 ### Migrations
 
@@ -311,3 +342,6 @@ Each migration runs in its own transaction and updates `schema_version` on succe
 | 8 | `idx_edges_composite` |
 | 9 | `edges.confidence`, `edges.confidence_tier` |
 | 10 | `nodes.symbol`, back-filled from `qualified_name`, and `idx_nodes_symbol` |
+| 11 | `edges.target_resolution`, back-filled for `CALLS`/`REFERENCES`, and `idx_edges_kind_target_resolution` |
+| 12 | `nodes_fts_state`, the mirror of the FTS index, and `idx_nodes_fts_state_file` |
+| 13 | `nodes.docstring`, `nodes.name_tokens`, both back-filled; `nodes_fts` and `nodes_fts_state` widened to carry them |

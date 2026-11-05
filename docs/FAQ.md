@@ -38,8 +38,8 @@ language server.
 
 **Trade-off.** CRG's call resolution is AST-level and heuristic, not
 compiler-backed. Dynamic dispatch, metaprogramming and duck typing produce
-inferred or ambiguous edges, so every edge carries a confidence tier
-(`EXTRACTED`, `INFERRED`, `AMBIGUOUS`). LSP is more precise per symbol; CRG is
+inferred edges, so every edge carries a confidence tier
+(`EXTRACTED` or `INFERRED`). LSP is more precise per symbol; CRG is
 broader, persistent and cheaper to query across the repository.
 
 ## Isn't this just RAG?

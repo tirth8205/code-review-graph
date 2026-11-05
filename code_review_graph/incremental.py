@@ -22,10 +22,14 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NamedTuple, Optional
 
+from .build_state import advance_to_postprocess_pending
+from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
+from .constants import discovery_timeout, env_float, env_int
+from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
 
-_MAX_PARSE_WORKERS = int(os.environ.get("CRG_PARSE_WORKERS", str(min(os.cpu_count() or 4, 8))))
+_MAX_PARSE_WORKERS = env_int("CRG_PARSE_WORKERS", min(os.cpu_count() or 4, 8))
 
 # Set only while the in-process FastMCP server is using stdio transport.
 # This is deliberately separate from ``sys.stdin.isatty()``: CI, cron, and
@@ -191,6 +195,20 @@ def _run_scoped_resolver(store: GraphStore) -> Optional[dict]:
         return None
 
 
+def _refresh_target_resolution(store: GraphStore) -> None:
+    """Reclassify CALLS/REFERENCES targets after the cross-file resolvers.
+
+    The resolvers above rewrite bare targets into qualified ones, so this has
+    to run last. A failure here costs the query layer its stored certainty
+    column, which every read falls back from safely, so it must never fail a
+    build.
+    """
+    try:
+        store.refresh_target_resolution()
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("Target-resolution refresh failed: %s", exc)
+
+
 # Default ignore patterns (in addition to .gitignore).
 #
 # ``**/<dir>/**`` patterns are safe-anywhere directory exclusions.  A leading
@@ -272,10 +290,10 @@ NESTED_OUTPUT_DIR_MARKERS: dict[str, frozenset[str]] = {
 # (no file stats), stops at ``CRG_MODULE_SCAN_DEPTH`` levels, never descends
 # into an already-ignored tree, and its result is cached per repository so
 # incremental updates never pay for it twice inside the TTL.
-_MODULE_SCAN_DEPTH = int(os.environ.get("CRG_MODULE_SCAN_DEPTH", "3"))
-_MODULE_SCAN_MAX_DIRS = int(os.environ.get("CRG_MODULE_SCAN_MAX_DIRS", "2000"))
+_MODULE_SCAN_DEPTH = env_int("CRG_MODULE_SCAN_DEPTH", 3)
+_MODULE_SCAN_MAX_DIRS = env_int("CRG_MODULE_SCAN_MAX_DIRS", 2000)
 _MAX_NESTED_OUTPUT_PATTERNS = 200
-_NESTED_IGNORE_TTL_SECONDS = float(os.environ.get("CRG_NESTED_IGNORE_TTL", "300"))
+_NESTED_IGNORE_TTL_SECONDS = env_float("CRG_NESTED_IGNORE_TTL", 300.0)
 
 _nested_ignore_cache: dict[tuple[str, tuple[str, ...]], tuple[float, list[str]]] = {}
 _nested_ignore_lock = threading.Lock()
@@ -397,6 +415,26 @@ def _write_data_dir_gitignore(data_dir: Path) -> None:
             pass
 
 
+def _create_data_dir(data_dir: Path) -> None:
+    """Create the data directory, or say why it could not be created.
+
+    ``GraphStore`` already reports a directory it cannot *write* to as one
+    ``Error: ...`` line naming ``CRG_DATA_DIR``. A directory that cannot be
+    *created* is the same failure one step earlier, and reached the user as a
+    ``PermissionError`` traceback out of ``pathlib.mkdir`` because it happens
+    while the path is still being resolved, before any store exists.
+    """
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise GraphStoreError(
+            f"cannot create the graph data directory at {data_dir} ({exc}). "
+            f"Check the permissions on {data_dir.parent}, or set CRG_DATA_DIR "
+            "to a writable directory."
+        ) from exc
+    _write_data_dir_gitignore(data_dir)
+
+
 def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
     """Return the directory where this project's graph data lives.
 
@@ -426,8 +464,7 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
             if registry_data_dir:
                 data_dir = Path(registry_data_dir).resolve()
                 if create:
-                    data_dir.mkdir(parents=True, exist_ok=True)
-                    _write_data_dir_gitignore(data_dir)
+                    _create_data_dir(data_dir)
                 return data_dir
     except Exception as exc:
         # If registry lookup fails, log and fall through to other methods
@@ -441,8 +478,7 @@ def get_data_dir(repo_root: Path, *, create: bool = True) -> Path:
         data_dir = repo_root / ".code-review-graph"
 
     if create:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        _write_data_dir_gitignore(data_dir)
+        _create_data_dir(data_dir)
 
     return data_dir
 
@@ -713,8 +749,6 @@ def _is_binary(path: Path) -> bool:
         return True
 
 
-_GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
-
 # When True, `git ls-files --recurse-submodules` is used so that files
 # inside git submodules are included in the graph.  Opt-in via env var;
 # can also be overridden per-call through function parameters.
@@ -815,6 +849,11 @@ def _decode_name_status_paths(output: bytes) -> list[str]:
 
 def _store_vcs_metadata(repo_root: Path, store: "GraphStore") -> bool:
     """Persist VCS branch/revision info and report whether its anchor was stored."""
+    # The root the stored absolute ``file_path`` values were built from.
+    # Consumers that read a path convention out of a file path (``tests/``,
+    # ``src/test/``) need it to know where the repository starts; without it
+    # they would read the directories above the checkout. See #1023.
+    store.set_metadata("repo_root", str(repo_root))
     vcs = detect_vcs(repo_root)
     if vcs == "git":
         branch, sha = _git_branch_info(repo_root)
@@ -882,7 +921,13 @@ def resolve_incremental_base(repo_root: Path, store: "GraphStore") -> str | None
     return None
 
 
-def resolve_review_base(repo_root: Path, base: str) -> str:
+def resolve_review_base(
+    repo_root: Path,
+    base: str,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> str:
     """Resolve a branch-like Git review base to its common ancestor with HEAD.
 
     ``git diff <branch>`` compares the two tips and therefore includes commits
@@ -894,7 +939,27 @@ def resolve_review_base(repo_root: Path, base: str) -> str:
     If ref detection or merge-base resolution fails (for example in a shallow
     clone), return *base* unchanged so callers retain the existing diff
     behaviour rather than silently reporting no changes.
+
+    Args:
+        repo_root: Repository root directory.
+        base: Git ref to resolve.
+        timeout: Seconds allowed for each Git subprocess. ``None`` (default)
+            uses the general ``CRG_GIT_TIMEOUT`` budget; the change-discovery
+            chain passes the shorter :func:`discovery_timeout` instead.
+        require_vcs: Raise
+            :class:`~code_review_graph.errors.ChangeDiscoveryError` when git
+            cannot be run or overruns *timeout*, instead of returning *base*
+            unresolved.
+
+            Falling back to the unresolved ref is right for a shallow clone,
+            where there genuinely is no merge base, and wrong for a timeout:
+            the caller then diffs two tips instead of the common ancestor and
+            silently scopes the review to the base branch's commits too. The
+            shorter the budget, the likelier that is, so the discovery chain
+            asks to be told.
     """
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
     if (
         detect_vcs(repo_root) != "git"
         or not base
@@ -911,7 +976,7 @@ def resolve_review_base(repo_root: Path, base: str) -> str:
             encoding="utf-8",
             errors="replace",
             cwd=str(repo_root),
-            timeout=_GIT_TIMEOUT,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
         symbolic_ref = symbolic.stdout.strip()
@@ -927,17 +992,49 @@ def resolve_review_base(repo_root: Path, base: str) -> str:
             encoding="utf-8",
             errors="replace",
             cwd=str(repo_root),
-            timeout=_GIT_TIMEOUT,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
         resolved = result.stdout.strip()
         if result.returncode == 0 and re.fullmatch(r"[0-9a-fA-F]{40,64}", resolved):
             return resolved
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
 
     logger.debug("Could not resolve review merge base for %s; using it directly", base)
     return base
+
+
+def _vcs_unavailable(
+    tool: str, exc: BaseException, *, timeout: float | None = None,
+) -> ChangeDiscoveryError:
+    """Describe a VCS command that could not be run at all.
+
+    Missing binary and timeout are the two failures that say nothing about
+    the working tree, so a caller must never read them as "nothing changed".
+
+    *timeout* is the budget that actually expired. It matters which one is
+    named: change discovery runs on :func:`~.constants.discovery_timeout`,
+    and telling that caller to raise ``CRG_GIT_TIMEOUT`` would send them to a
+    knob that does not govern the call they just made.
+    """
+    if isinstance(exc, subprocess.TimeoutExpired):
+        budget = _GIT_TIMEOUT if timeout is None else timeout
+        knob = (
+            "CRG_GIT_TIMEOUT"
+            if timeout is None or budget >= _GIT_TIMEOUT
+            else "CRG_DISCOVERY_TIMEOUT"
+        )
+        return ChangeDiscoveryError(
+            f"could not determine the changes: {tool} timed out after "
+            f"{budget:g}s. Raise {knob}, or re-run when the "
+            "repository is not busy."
+        )
+    return ChangeDiscoveryError(
+        f"could not determine the changes: {tool} could not be run ({exc}). "
+        f"Install {tool} and make sure it is on PATH."
+    )
 
 
 def get_changed_files(
@@ -945,6 +1042,8 @@ def get_changed_files(
     base: str = "HEAD~1",
     *,
     strict: bool = False,
+    timeout: float | None = None,
+    require_vcs: bool = False,
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
@@ -953,14 +1052,42 @@ def get_changed_files(
     range (e.g. ``"r100:HEAD"``) as *base* to compare against a specific
     revision instead.  When *strict* is true, Git discovery failures raise
     instead of being reported as an empty change list.
+
+    Args:
+        repo_root: Repository root directory.
+        base: Git ref (or SVN revision range) to diff against.
+        strict: Raise instead of returning ``[]`` when Git discovery fails.
+        timeout: Seconds allowed for each subprocess. ``None`` (default) uses
+            the general ``CRG_GIT_TIMEOUT`` budget, which is what build,
+            incremental update and watch want; the read-only change-discovery
+            chain passes the shorter :func:`discovery_timeout` instead.
+        require_vcs: The narrower half of *strict*, for callers whose whole
+            answer is "these files changed": it raises
+            :class:`~code_review_graph.errors.ChangeDiscoveryError` when the
+            VCS binary is missing or times out, but keeps the documented
+            fallback for a base ref that simply does not resolve (a repository
+            with no commits still has to work). Returning ``[]`` for a VCS that
+            could not be run is what let ``detect-changes`` report a clean tree
+            it never looked at.
+
+            It is also what makes the short *timeout* above safe to use: a
+            budget that is exhausted has to be reported, not rounded down to
+            "no changes".
     """
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
     if detect_vcs(repo_root) == "svn":
-        return _get_svn_changed_files(repo_root, base if _SAFE_SVN_REV.match(base) else None)
+        return _get_svn_changed_files(
+            repo_root,
+            base if _SAFE_SVN_REV.match(base) else None,
+            timeout=timeout,
+            require_vcs=require_vcs or strict,
+        )
     # Git path
     if base.startswith("-") or not _SAFE_GIT_REF.fullmatch(base):
         logger.warning("Invalid git ref rejected: %s", base)
         if strict:
-            raise RuntimeError(f"invalid git diff base: {base}")
+            raise ChangeDiscoveryError(f"invalid git diff base: {base}")
         return []
     try:
         # --name-status (not --name-only): renames/copies must report BOTH
@@ -969,12 +1096,12 @@ def get_changed_files(
             ["git", "diff", "--name-status", "-z", base, "--"],
             capture_output=True,
             cwd=str(repo_root),
-            timeout=_GIT_TIMEOUT,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             if strict:
-                raise RuntimeError(
+                raise ChangeDiscoveryError(
                     f"git diff failed while discovering changed files (rc={result.returncode})"
                 )
             # Fallback: try diff against empty tree (initial commit)
@@ -982,16 +1109,18 @@ def get_changed_files(
                 ["git", "diff", "--name-status", "-z", "--cached"],
                 capture_output=True,
                 cwd=str(repo_root),
-                timeout=_GIT_TIMEOUT,
+                timeout=timeout,
                 stdin=subprocess.DEVNULL,
             )
         if result.returncode != 0:
             logger.warning("git diff failed while discovering changed files")
             return []
         return _decode_name_status_paths(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         if strict:
-            raise RuntimeError("git change discovery failed") from exc
+            raise ChangeDiscoveryError("git change discovery failed") from exc
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
         return []
 
 
@@ -1038,19 +1167,33 @@ def _find_content_mismatches(
     return mismatched_files, current_hashes, text_files
 
 
-def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> list[str]:
+def _get_svn_changed_files(
+    repo_root: Path,
+    rev_range: str | None = None,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> list[str]:
     """Return changed files in an SVN working copy.
 
     When *rev_range* is given (e.g. ``"r100:HEAD"``), ``svn diff --summarize``
     is used to list files changed between those revisions.  Otherwise
     ``svn status`` reports working-copy modifications.
+
+    *timeout* is the per-subprocess budget; ``None`` uses ``CRG_GIT_TIMEOUT``.
+
+    *require_vcs* has the same meaning as in :func:`get_changed_files`: an
+    ``svn`` that cannot be run is raised rather than reported as "nothing
+    changed".
     """
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
     try:
         if rev_range:
             result = subprocess.run(
                 ["svn", "diff", "--summarize", "--non-interactive", "-r", rev_range],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+                cwd=str(repo_root), timeout=timeout,
                 stdin=subprocess.DEVNULL,
             )
             if result.returncode != 0:
@@ -1067,7 +1210,7 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
             result = subprocess.run(
                 ["svn", "status", "--non-interactive"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                cwd=str(repo_root), timeout=_GIT_TIMEOUT,
+                cwd=str(repo_root), timeout=timeout,
                 stdin=subprocess.DEVNULL,
             )
             files = []
@@ -1081,13 +1224,46 @@ def _get_svn_changed_files(repo_root: Path, rev_range: str | None = None) -> lis
                     path = line[8:].strip() if len(line) > 8 else line[1:].strip()
                     files.append(path)
             return files
-    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("svn", exc, timeout=timeout) from exc
+        return []
+    except UnicodeDecodeError:
         return []
 
-def get_staged_and_unstaged(repo_root: Path) -> list[str]:
-    """Get all modified files (staged + unstaged + untracked)."""
+
+def get_staged_and_unstaged(
+    repo_root: Path,
+    *,
+    timeout: float | None = None,
+    require_vcs: bool = False,
+) -> list[str]:
+    """Get all modified files (staged + unstaged + untracked).
+
+    ``--untracked-files=all`` is deliberate and load-bearing, not a default
+    nobody chose. It is what makes a brand-new, never-committed directory
+    report the files inside it. Git's cheaper ``normal`` mode collapses such a
+    directory to a single ``dir/`` record, which is not a path any caller can
+    open, so scoping the walk down would delete the first commit of every new
+    feature package from every review. See the note in
+    :func:`discover_review_changes`.
+
+    Args:
+        repo_root: Repository root directory.
+        timeout: Seconds allowed for the subprocess. ``None`` (default) uses
+            the general ``CRG_GIT_TIMEOUT`` budget; the change-discovery chain
+            passes the shorter :func:`discovery_timeout` instead.
+        require_vcs: Raise
+            :class:`~code_review_graph.errors.ChangeDiscoveryError` when git
+            cannot be run or overruns *timeout*, instead of returning ``[]``.
+            A caller whose answer is an all-clear must pass this.
+    """
+    if timeout is None:
+        timeout = _GIT_TIMEOUT
     if detect_vcs(repo_root) == "svn":
-        return _get_svn_changed_files(repo_root)
+        return _get_svn_changed_files(
+            repo_root, timeout=timeout, require_vcs=require_vcs,
+        )
     try:
         result = subprocess.run(
             [
@@ -1099,7 +1275,7 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
             ],
             capture_output=True,
             cwd=str(repo_root),
-            timeout=_GIT_TIMEOUT,
+            timeout=timeout,
             stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
@@ -1119,8 +1295,72 @@ def get_staged_and_unstaged(repo_root: Path) -> list[str]:
                     index += 1
             index += 1
         return files
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if require_vcs:
+            raise _vcs_unavailable("git", exc, timeout=timeout) from exc
         return []
+
+
+def discover_review_changes(
+    repo_root: Path,
+    base: str = "HEAD~1",
+) -> tuple[list[str], str]:
+    """Discover the files under review, on the short discovery budget.
+
+    This is the chain every review-shaped tool and command runs when the
+    caller did not name ``changed_files`` itself: resolve the base, diff
+    against it, and fall back to the working tree when that diff is empty.
+
+    Two things make it different from calling the three functions directly,
+    and both exist because this chain runs inside an MCP tool call that a
+    client will abandon at its own request ceiling (#262):
+
+    * every subprocess gets :func:`discovery_timeout` rather than the
+      30-second ``CRG_GIT_TIMEOUT`` that build, update and watch need, so the
+      worst case for the whole chain is seconds rather than two minutes;
+    * every subprocess runs with ``require_vcs=True``, so exhausting that
+      budget raises :class:`~code_review_graph.errors.ChangeDiscoveryError`.
+
+    The second is what licenses the first. Shortening a budget whose timeout
+    path returns ``[]`` would not have made this chain safer -- it would have
+    made #913's false all-clear several times easier to hit, and extended it
+    to the base resolution, where a timed-out merge base silently degrades a
+    three-dot diff into a two-dot one and scopes the review to the wrong
+    commits. Timing out is a failure, and it is now reported as one: callers
+    turn the error into ``status: error`` naming
+    ``CRG_DISCOVERY_TIMEOUT``, which a user can act on, instead of an
+    all-clear they cannot tell from a clean tree.
+
+    Note what this chain deliberately does *not* do: scope down the untracked
+    walk. ``git status --untracked-files=normal`` is much cheaper on a large
+    tree, and it was tried, but it collapses a wholly-untracked directory to
+    one ``dir/`` record -- so the first commit of a new package disappears
+    from every review tool with ``status: ok`` and no warning. Being slow is a
+    bug; confidently reviewing nothing is a worse one. The budget above bounds
+    the walk instead, and reports it when it does.
+
+    Returns:
+        ``(changed_files, resolved_base)``. The resolved base is returned
+        because callers need the same ref afterwards, for diff hunks and risk
+        scoring, and resolving it twice would spend the budget twice.
+
+    Raises:
+        ChangeDiscoveryError: git could not be run, or overran the discovery
+            budget. Never raised for a repository that simply has no changes.
+    """
+    budget = discovery_timeout()
+    resolved_base = resolve_review_base(
+        repo_root, base, timeout=budget, require_vcs=True,
+    )
+    changed = get_changed_files(
+        repo_root, resolved_base, timeout=budget, require_vcs=True,
+    )
+    if not changed:
+        changed = get_staged_and_unstaged(
+            repo_root, timeout=budget, require_vcs=True,
+        )
+    return changed, resolved_base
+
 
 def get_all_tracked_files(
     repo_root: Path,
@@ -1142,7 +1382,14 @@ def get_all_tracked_files(
     if recurse_submodules is None:
         recurse_submodules = _RECURSE_SUBMODULES
 
-    cmd = ["git", "ls-files"]
+    # -z is required, not a nicety: without it core.quotePath (on by
+    # default) makes git C-quote any path holding a non-ASCII or control
+    # byte, so `git ls-files` answers `"src/caf\303\251.py"` — quotes,
+    # backslashes and all — and every such file is silently dropped from the
+    # inventory because that spelling does not exist on disk. With -z the
+    # paths arrive raw and NUL-separated, and a newline in a path is no
+    # longer a record separator either.
+    cmd = ["git", "ls-files", "-z"]
     if recurse_submodules:
         cmd.append("--recurse-submodules")
 
@@ -1155,7 +1402,7 @@ def get_all_tracked_files(
             timeout=_GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
-        return [f.strip() for f in result.stdout.splitlines() if f.strip()]
+        return [f for f in result.stdout.split("\0") if f]
     except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeDecodeError):
         return []
 
@@ -1309,7 +1556,73 @@ def _assert_graph_matches_root(repo_root: Path, store: GraphStore) -> None:
     )
 
 
-_MAX_DEPENDENT_HOPS = int(os.environ.get("CRG_DEPENDENT_HOPS", "2"))
+#: How many markers the two filesystem probes below look at. They only have
+#: to establish which root the graph is anchored to, and every marker in one
+#: graph shares that root, so a handful is as conclusive as all of them.
+_ROOT_PROBE_LIMIT = 25
+
+
+def assert_graph_serves_root(repo_root: Path, store: GraphStore) -> None:
+    """Refuse to *answer* from a graph built for a different repository.
+
+    ``_assert_graph_matches_root`` guards the write side only: it runs during
+    incremental reconciliation, where a wrong root would purge files. Every
+    read-only consumer opened the same database without asking, so dropping
+    one repository's ``graph.db`` into another repository (a copied file, a
+    restored CI cache) served that repository's symbols and absolute paths
+    under this repository's name, and exited 0 while doing it.
+
+    Refusing to answer is not destructive the way purging is, so this check
+    is deliberately narrower than the write-side one: it fires only on an
+    unambiguously foreign graph. Four things are not that, and pass:
+
+    * a graph with no authoritative File markers at all;
+    * a graph of repo-relative paths, which carry no root identity;
+    * a different spelling of the same root (macOS ``/var`` against
+      ``/private/var``, a symlinked checkout) — resolved before comparing;
+    * a graph whose files are not on this machine at all, which is stale or
+      synthetic rather than another live checkout being served.
+    """
+    # Materialised, not consumed lazily: this runs on every command, so a
+    # store that answers with something other than a list of paths must skip
+    # the check rather than take the process down with it.
+    markers = [str(path) for path in store.get_file_marker_paths()]
+    absolute = [path for path in markers if Path(path).is_absolute()]
+    if not absolute:
+        return
+
+    prefix = normalize_file_path(_canonical_repo_root(repo_root))
+    prefix = prefix if prefix.endswith("/") else prefix + "/"
+    if any(normalize_file_path(path).startswith(prefix) for path in absolute):
+        return
+
+    probe = absolute[:_ROOT_PROBE_LIMIT]
+    if any(
+        normalize_file_path(os.path.realpath(path)).startswith(prefix)
+        for path in probe
+    ):
+        return
+
+    elsewhere = next((path for path in probe if Path(path).exists()), None)
+    if elsewhere is None:
+        logger.debug(
+            "Graph at %s holds no file under %s and none on this machine; "
+            "treating it as stale rather than as another repository's graph.",
+            store.db_path,
+            repo_root,
+        )
+        return
+
+    raise GraphRootMismatchError(
+        f"the graph at {store.db_path} was built for a different repository "
+        f"root: none of its {len(absolute)} file(s), such as "
+        f"{normalize_file_path(elsewhere)}, are under {repo_root}. Run "
+        "`code-review-graph build` here, or point --repo at the root it was "
+        "built for."
+    )
+
+
+_MAX_DEPENDENT_HOPS = env_int("CRG_DEPENDENT_HOPS", 2)
 _MAX_DEPENDENT_FILES = 500
 
 
@@ -1458,13 +1771,12 @@ def full_build(
         # Serial fallback (for debugging or tiny repos)
         for i, rel_path in enumerate(files, 1):
             full_path = repo_root / rel_path
+            parsed: tuple[list, list, str] | None = None
             try:
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(full_path, source)
-                store.store_file_nodes_edges(str(full_path), nodes, edges, fhash)
-                total_nodes += len(nodes)
-                total_edges += len(edges)
+                parsed = (nodes, edges, fhash)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
                 if parser.detect_language(full_path) == "cpp":
@@ -1474,6 +1786,18 @@ def full_build(
                 errors.append({"file": rel_path, "error": str(e)})
                 if parser.detect_language(full_path) == "cpp":
                     cpp_errors.add(str(rel_path))
+            if parsed is not None:
+                # Deliberately outside the handlers above. A file this loop
+                # could not *parse* is reported and keeps no rows; a file it
+                # could not *write* is a different thing entirely — the usual
+                # cause is another process holding the SQLite write lock — and
+                # filing that as a parse error let the build carry on, write
+                # the VCS anchor and exit 0 while those files were missing
+                # from the graph for good. The build stops instead, so no
+                # anchor is written and the next run rebuilds.
+                store.store_file_nodes_edges(str(full_path), *parsed)
+                total_nodes += len(parsed[0])
+                total_edges += len(parsed[1])
             if i % 50 == 0 or i == file_count:
                 logger.info("Progress: %d/%d files parsed", i, file_count)
     else:
@@ -1509,6 +1833,11 @@ def full_build(
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
     _store_cpp_identity_pending(store, cpp_errors)
+    # Storing is over: every file that could be parsed has its rows. Recorded
+    # before the anchor and before post-processing, so a process killed from
+    # here on leaves a graph that ``postprocess`` can genuinely finish, told
+    # apart from one killed mid-parse that only a build can repair.
+    advance_to_postprocess_pending(store)
     # Failed files are reported in ``errors`` and simply hold no rows; the
     # anchor still describes the commit the stored files were parsed at.
     _store_vcs_metadata(repo_root, store)
@@ -1521,6 +1850,7 @@ def full_build(
     temporal_stats = _run_temporal_resolver(store)
     hcl_stats = _run_hcl_resolver(store)
     scoped_stats = _run_scoped_resolver(store)
+    _refresh_target_resolution(store)
 
     return {
         "files_parsed": len(files),
@@ -1716,16 +2046,22 @@ def incremental_update(
                 source = abs_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(abs_path, source)
-                store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
-                remaining_identity.discard(rel_path)
-                parsed_files += 1
-                total_nodes += len(nodes)
-                total_edges += len(edges)
             except (OSError, PermissionError) as e:
                 errors.append({"file": rel_path, "error": str(e)})
+                continue
             except Exception as e:
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
+                continue
+            # Same reasoning as the serial loop in full_build: a failed write
+            # is not a failed parse. Letting it propagate stops the update
+            # before the freshness anchor is advanced, so the next run still
+            # sees this file as changed.
+            store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
+            remaining_identity.discard(rel_path)
+            parsed_files += 1
+            total_nodes += len(nodes)
+            total_edges += len(edges)
     else:
         # See full-build comment above for executor kind rationale.
         args_list = [(rel_path, str(repo_root)) for rel_path in to_parse]
@@ -1786,6 +2122,8 @@ def incremental_update(
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
     scoped_changed = any(rp.endswith((".php", ".rs", ".cs")) for rp in all_files)
     scoped_stats = _run_scoped_resolver(store) if scoped_changed else None
+    if files_updated or stale_files:
+        _refresh_target_resolution(store)
 
     # Freshness follows what was stored. A file that failed to parse is
     # reported in ``errors`` and keeps its previous rows; it must not stop the
@@ -1801,6 +2139,9 @@ def incremental_update(
         store.set_metadata("last_build_type", "incremental")
         if not remaining_identity:
             store.set_metadata(_CPP_IDENTITY_METADATA_KEY, CPP_IDENTITY_VERSION)
+        # Same point as in ``full_build``: the changed files are stored, so a
+        # kill from here leaves only derived data to rebuild.
+        advance_to_postprocess_pending(store)
         freshness_advanced = _store_vcs_metadata(repo_root, store)
         store.commit()
 
@@ -1844,10 +2185,22 @@ def _raise_watch_update_errors(result: dict, context: str) -> None:
 
 
 def _raise_watch_postprocess_warnings(result: object) -> None:
-    """Treat structured post-processing warnings as a failed watch update."""
+    """Treat structured post-processing warnings as a failed watch update.
+
+    One warning is exempt: an explicit embedding refresh that found no index
+    to refresh. The graph update itself succeeded and the post-processing step
+    has already logged the notice, so the watch keeps running. A refresh that
+    fails against an existing index still fails the update.
+    """
     if not isinstance(result, dict):
         return
-    warnings = result.get("warnings") or []
+    from .embeddings import REFRESH_SKIPPED_WARNING
+
+    warnings = [
+        warning
+        for warning in result.get("warnings") or []
+        if warning != REFRESH_SKIPPED_WARNING
+    ]
     if warnings:
         details = "; ".join(str(warning) for warning in warnings)
         raise RuntimeError(f"post-processing reported warnings: {details}")
@@ -1861,19 +2214,24 @@ def _raise_watch_postprocess_warnings(result: object) -> None:
 # watch per directory in the tree — including every temp directory a build tool
 # churns through inside ``target/`` or ``node_modules/``.  Planning the watches
 # ourselves keeps ignored trees off the OS watch list entirely.  See: #811.
-_WATCH_PLAN_DEPTH = int(os.environ.get("CRG_WATCH_PLAN_DEPTH", "3"))
-_MAX_WATCH_SCHEDULES = int(os.environ.get("CRG_MAX_WATCH_SCHEDULES", "24"))
+_WATCH_PLAN_DEPTH = env_int("CRG_WATCH_PLAN_DEPTH", 3)
+_MAX_WATCH_SCHEDULES = env_int("CRG_MAX_WATCH_SCHEDULES", 24)
 # Splitting a watch costs one watchdog emitter, so it has to buy more than it
 # costs: an ignored tree is only worth excluding once it holds this many
 # directories.  A lone ``__pycache__`` is not worth a thread; ``target/`` is.
-_WATCH_SPLIT_MIN_DIRS = int(os.environ.get("CRG_WATCH_SPLIT_MIN_DIRS", "4"))
-_WATCH_HEALTH_INTERVAL = float(os.environ.get("CRG_WATCH_HEALTH_INTERVAL", "10"))
+_WATCH_SPLIT_MIN_DIRS = env_int("CRG_WATCH_SPLIT_MIN_DIRS", 4)
+_WATCH_HEALTH_INTERVAL = env_float("CRG_WATCH_HEALTH_INTERVAL", 10.0)
 _WATCH_STOP_TIMEOUT = 10.0
 _WATCH_TICK_SECONDS = 1.0
 # A failed recursive promotion is retried no more often than this. Each attempt
 # walks the parent subtree and, on Linux, can leave a partly built inotify
 # instance behind, so retrying every tick would consume the quota it waits for.
 _PROMOTION_RETRY_SECONDS = 30.0
+# Upper bound on the refused-watch record.  It is pruned of directories that no
+# longer exist on every reconciliation tick, so reaching this cap means a tree
+# that genuinely cannot be watched is larger than anyone will read; keeping the
+# most recent refusals is more useful than keeping the first ones.
+_MAX_UNWATCHED_TRACKED = env_int("CRG_MAX_UNWATCHED_TRACKED", 256)
 
 
 def _watch_child_dirs(
@@ -2092,6 +2450,17 @@ class _WatchSupervisor:
         self._ignored_boundaries: dict[str, bool] = {}
         self._degraded = False
         self._promotion_failed = False
+        # Directories the OS refused to watch (inotify ENOSPC, the watch
+        # budget in #811).  Losing coverage quietly is the worst thing a
+        # watcher can do, so this record feeds `degraded` and, when it swallows
+        # everything, ends the process.  A dict, not a set, because it is
+        # bounded by age as well as by existence: refusals are only ever
+        # dropped on a successful reschedule or an explicit release, and a
+        # directory that was refused and then deleted — a build tree recreated
+        # on every run — would otherwise be remembered, and published to the
+        # health file, for as long as the daemon lives.  Path -> wall-clock
+        # time of the most recent refusal, newest last.
+        self._unwatched: dict[str, float] = {}
         self._promotion_retry_at: dict[str, float] = {}
         self._last_health_write = 0.0
         self._last_health_state: tuple[bool, bool, tuple[str, ...]] | None = None
@@ -2106,8 +2475,13 @@ class _WatchSupervisor:
 
     @property
     def degraded(self) -> bool:
-        """True for coarser coverage or a failed promotion in the current sync."""
-        return self._degraded or self._promotion_failed
+        """True for coarser coverage, a failed promotion, or a refused watch."""
+        return self._degraded or self._promotion_failed or bool(self._unwatched)
+
+    @property
+    def unwatched_paths(self) -> list[str]:
+        """Directories the OS refused to watch, so they are not covered."""
+        return sorted(self._unwatched)
 
     def attach(self, observer: Any) -> None:
         """Bind the observer, once the initial build has earned one."""
@@ -2138,15 +2512,25 @@ class _WatchSupervisor:
         try:
             handle = self._observer.schedule(self._handler, key, recursive=recursive)
         except OSError as exc:
-            logger.warning("Could not watch %s: %s", key, exc)
+            # Recording the loss is the whole point.  Swallowing the OSError
+            # here (inotify's ENOSPC when the OS watch budget is exhausted)
+            # left the supervisor watching nothing while `report_health`
+            # published observer_alive=true, degraded=false and `crg-daemon
+            # status` printed "ok" — blind, and claiming otherwise.
+            # `_promote_to_recursive` already marked itself degraded on the
+            # same failure; this path did not.
+            self._note_unwatched(key)
+            logger.warning(
+                "Could not watch %s: %s — coverage of that directory is lost", key, exc
+            )
             return
+        self._unwatched.pop(key, None)
         self._watches[key] = _WatchEntry(handle, _watch_identity(key))
         if recursive:
             self._shallow.discard(key)
         else:
             self._shallow.add(key)
 
-<<<<<<< HEAD
     def request_replan(self) -> None:
         """Reconsider the plan after a directory change seen by watchdog."""
         self._replan_requested = True
@@ -2216,28 +2600,33 @@ class _WatchSupervisor:
             self._degraded = True
         self._remember_ignored_boundaries()
 
-    def _replace_watch(self, path: Path, *, recursive: bool) -> bool:
-        """Register a replacement before releasing the current watch."""
-        key = str(path)
-        entry = self._watches.get(key)
-        if entry is None:
-            self._schedule(path, recursive=recursive)
-            return key in self._watches
-        try:
-            handle = self._observer.schedule(self._handler, key, recursive=recursive)
-        except OSError as exc:
-            logger.warning("Could not replace watch on %s: %s", key, exc)
-            return False
-        self._release_directory(key)
-        self._watches[key] = _WatchEntry(handle, _watch_identity(key))
-        if recursive:
-            self._shallow.discard(key)
-        else:
-            self._shallow.add(key)
-        return True
+    def rewatch_all(self) -> bool:
+        """Re-attempt the whole watch plan after a total loss of coverage.
 
-=======
->>>>>>> origin/watcher/replan
+        An exhausted OS watch budget is often transient — the build tool that
+        consumed it finishes, or the user raises the limit — so a watcher that
+        ended up watching nothing tries once more before giving up.  Returns
+        True when at least one watch is live afterwards.
+        """
+        if self._handler is None:  # pragma: no cover - never scheduled
+            return False
+        self._promotion_retry_at.clear()
+        plan = _plan_watch_paths(
+            self._repo_root,
+            self._ignore_patterns,
+            max_schedules=self._max_schedules,
+        )
+        for path, recursive in plan:
+            self._schedule(path, recursive=recursive)
+        self._prune_unwatched()
+        if self._watches:
+            logger.warning(
+                "Re-established %d watch(es) on %s after a total loss of coverage",
+                len(self._watches),
+                self._repo_root,
+            )
+        return bool(self._watches)
+
     def sync_watches(
         self, *, ignore_patterns: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
@@ -2294,25 +2683,40 @@ class _WatchSupervisor:
                     # A promotion replaced this parent with one recursive
                     # watch, which already covers everything below it.
                     break
-                candidate_key = os.path.join(parent, name)
-                if candidate_key in self._watches:
+                candidate = os.path.join(parent, name)
+                if candidate in self._watches:
                     continue
                 newly_included = (
                     previous_patterns is not self._ignore_patterns
                     and _should_ignore(
-                        Path(candidate_key).relative_to(self._repo_root).as_posix(),
+                        Path(candidate).relative_to(self._repo_root).as_posix(),
                         previous_patterns,
                     )
                 )
-<<<<<<< HEAD
-                if self._adopt_directory(candidate_key, required=newly_included):
-                    adopted.append(candidate_key)
-        self._replan_if_requested()
-=======
                 if self._adopt_directory(candidate, required=newly_included):
                     adopted.append(candidate)
->>>>>>> origin/watcher/replan
+        self._replan_if_requested()
+        self._prune_unwatched()
         return adopted, vanished
+
+    def _note_unwatched(self, key: str) -> None:
+        """Record a directory the OS refused, newest last, and bound the record."""
+        self._unwatched.pop(key, None)
+        self._unwatched[key] = time.time()
+        while len(self._unwatched) > _MAX_UNWATCHED_TRACKED:
+            self._unwatched.pop(next(iter(self._unwatched)))
+
+    def _prune_unwatched(self) -> None:
+        """Forget refusals for directories that are no longer there.
+
+        A refused directory never enters ``_watches``, so neither a successful
+        reschedule nor ``_release_directory`` ever reaches it once it is
+        deleted.  Without this the record only grows: ``degraded`` stays true
+        for the daemon's whole lifetime over directories that do not exist,
+        and ``crg-daemon status`` keeps reporting a gap nobody can close.
+        """
+        for path in [p for p in self._unwatched if not os.path.isdir(p)]:
+            self._unwatched.pop(path, None)
 
     def _children_of(self, parent: str) -> list[str]:
         """Watched paths directly underneath *parent*."""
@@ -2415,6 +2819,8 @@ class _WatchSupervisor:
         entry = self._watches.pop(path, None)
         self._shallow.discard(path)
         self._repaired_roots.discard(path)
+        # A directory we deliberately let go is not a coverage gap.
+        self._unwatched.pop(path, None)
         if entry is None:
             return
         # unschedule() joins the emitter thread with no timeout, and a wedged
@@ -2963,6 +3369,32 @@ def watch(
                 _time.sleep(_WATCH_TICK_SECONDS)
             handler.raise_if_failed()
             _sync_watch_tree(supervisor, handler)
+            if not supervisor.watched_paths:
+                # Nothing is being watched at all: every schedule was refused,
+                # or every watched directory went away. Either way the process
+                # would otherwise sit here forever reporting perfect health
+                # while the graph silently froze. Try to recover once, then
+                # exit loudly so the daemon restarts it.
+                if not supervisor.rewatch_all():
+                    supervisor.report_health(
+                        observer_alive=False,
+                        last_event_at=handler.last_event_at,
+                        events_seen=handler.events_seen,
+                        dead_threads=("no filesystem watches",),
+                        force=True,
+                    )
+                    logger.error(
+                        "No filesystem watches could be established on %s (the OS "
+                        "watch limit is the usual cause); this watcher is exiting "
+                        "rather than reporting health while watching nothing. "
+                        "Raise the limit (Linux: fs.inotify.max_user_watches) or "
+                        "CRG_MAX_WATCH_SCHEDULES, then restart it.",
+                        repo_root,
+                    )
+                    raise RuntimeError(
+                        f"watch observer has no watches on {repo_root}: the OS "
+                        "refused every watch (watch limit exhausted)"
+                    )
             dead, repaired = supervisor.check_liveness()
             for path in repaired:
                 # A rescheduled watch missed whatever happened while it was

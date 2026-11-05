@@ -103,6 +103,9 @@ def test_status_json_is_the_only_stdout_and_includes_current_sha(capsys):
         "current_sha": "current-sha",
         "svn_branch": None,
         "svn_revision": None,
+        # Freshness metadata cannot express "half built": this reports
+        # whether the last build finished its post-processing.
+        "build_incomplete": False,
     }
     assert output.count("\n") == 1
 

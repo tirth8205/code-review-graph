@@ -25,14 +25,14 @@ Core package `code_review_graph/` (Python 3.10+):
 - `prompts.py`: 5 MCP prompts (review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check).
 - `cli.py`: the `code-review-graph` command. `daemon.py` and `daemon_cli.py`: the `crg-daemon` multi-repo watch daemon.
 - `parser.py`: Tree-sitter multi-language parser with fallbacks for notebooks and other formats. `custom_languages.py`: languages defined in `.code-review-graph/languages.toml` (see docs/CUSTOM_LANGUAGES.md).
-- `graph.py`: SQLite graph store (nodes, edges, impact analysis). `migrations.py`: schema migrations; the current schema version is 10 and must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension (CI checks this).
+- `graph.py`: SQLite graph store (nodes, edges, impact analysis). `migrations.py`: schema migrations; the current schema version is 13 and must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension (CI checks this).
 - `incremental.py`: full build, Git/SVN change detection, incremental update, stale-file reconciliation, watch mode. `postprocessing.py`: shared post-build pipeline (signatures, flows, communities, FTS).
 - Post-build resolvers: `python_resolver.py`, `jedi_resolver.py` (optional `enrichment` extra), `spring_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `config_keys.py`, `scoped_resolver.py` (PHP, Rust, C#), `rescript_resolver.py`, `hcl_resolver.py`, `tsconfig_resolver.py` (tsconfig and jsconfig path aliases).
 - `flows.py`: execution flows and criticality. `communities.py`: Leiden via igraph (optional) or file-based grouping, plus the architecture overview. `analysis.py`: hub and bridge nodes, knowledge gaps, surprise scoring, suggested questions.
 - `search.py`: FTS5 keyword search combined with optional vector search. `embeddings.py`: providers for local sentence-transformers, OpenAI-compatible endpoints, Google Gemini, MiniMax and Voyage AI.
 - `changes.py`: risk-scored change analysis. `refactor.py`: rename preview, dead code, suggestions. `hints.py`: `next_tool_suggestions`. `uncertainty.py`: `confidence` notes on empty results. `context_savings.py`: estimated context-savings metadata.
 - `visualization.py`: D3.js HTML graph (D3 is bundled in `assets/`). `exports.py`: JSON, GraphML, Neo4j Cypher, Obsidian, SVG. `wiki.py`: Markdown wiki. `graph_diff.py`: snapshot diffing. `memory.py`: stored Q&A feedback.
-- `skills.py`: `install` (platform MCP configs, hooks, skills, instruction blocks). `_legacy_instructions.py`: instruction blocks shipped by earlier releases. `uninstall.py`: reverses `install`. `enrich.py`: PreToolUse hook enrichment. `forget.py`: drops files from the graph. `registry.py`: multi-repo registry. `http_origin_guard.py`: Host/Origin checks for `serve --http`. `token_benchmark.py` and `eval/`: benchmarks. `constants.py`: shared constants.
+- `skills.py`: `install` (platform MCP configs, hooks, skills, instruction blocks). `_legacy_instructions.py`: instruction blocks shipped by earlier releases. `jsonc.py`: comment-preserving JSONC tokenising and splices, shared by install and uninstall so neither flattens a commented config. `uninstall.py`: reverses `install`. `enrich.py`: PreToolUse hook enrichment. `forget.py`: drops files from the graph. `registry.py`: multi-repo registry. `http_origin_guard.py`: Host/Origin checks for `serve --http`. `token_benchmark.py` and `eval/`: benchmarks. `constants.py`: shared constants.
 - `docs/LLM-OPTIMIZED-REFERENCE.md`: the reference served by `get_docs_section_tool`.
 
 VS Code extension: `code-review-graph-vscode/` (TypeScript, separate `package.json` and `tsconfig.json`). Reads `.code-review-graph/graph.db` directly.
@@ -87,11 +87,12 @@ uv run code-review-graph --help             # full command list
 - Core: `test_parser.py`, `test_graph.py`, `test_incremental.py`, `test_tools.py`, `test_main.py`, `test_cli*.py`.
 - Features: `test_flows.py`, `test_communities.py`, `test_changes.py`, `test_refactor.py`, `test_search.py`, `test_hints.py`, `test_prompts.py`, `test_wiki.py`, `test_embeddings.py`, `test_eval.py`, `test_registry.py`, `test_migrations.py`, `test_uncertainty.py`, `test_context_savings.py`, `test_token_budget.py` (per-tool token budgets).
 - Languages: `test_multilang.py`, `test_custom_languages.py`, `test_notebook.py`, plus per-language files such as `test_php_*.py`, `test_spring_*.py`, `test_kotlin_imports.py`, `test_go_embeddings.py`, `test_cpp_*.py`, `test_typescript_node_extensions.py`, `test_tsconfig_resolver.py`, `test_hcl_parser.py`, `test_dbt_parser.py`, `test_ansible_parser.py`.
-- Regressions by pull request: `test_pr*_edges.py` and similar.
+- Regression modules are named after the behaviour they pin, not the PR that produced them. The originating PR number goes in the module docstring.
 - Watch and daemon: `test_watch_*.py`, `test_daemon*.py`.
-- Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`.
+- Install and platforms: `test_skills.py`, `test_cli_install.py`, `test_uninstall.py`, `test_git_hook_worktree.py`, `test_hermes_install.py`, `test_qoder_bundled_skills.py`, `test_installer_ownership.py` (what install may rewrite and what belongs to the user), `test_released_shapes.py` (reads the hooks and MCP entries every released tag wrote and requires them to still be recognised; needs tags, skips without them), `test_platform_lifecycle.py` (opt-in marker `platform_lifecycle`).
 - Windows: `test_windows_compat.py`, `test_windows_path_identity.py`.
 - Docs and GitHub Action: `test_documentation.py`, `test_action_render.py`.
+- Distribution gate: `test_packaging.py`, marked `packaging` and **skipped by default**. Builds a wheel and an sdist with `python -m build`, installs each into its own virtual environment, and drives the installed program with the checkout out of reach. Needs network and takes a couple of minutes. Run it before a release with `uv run --python 3.13 python -m pytest tests/test_packaging.py -m packaging`.
 - `tests/fixtures/`: sample files per supported language.
 
 ## CI Pipeline
@@ -130,8 +131,16 @@ bd close <id>         # Complete work
 
 Three long-lived branches, one direction: feature PR → `staging` (default) → `testing` → `main` → tag → PyPI.
 Open every PR against `staging`. Never push to or open PRs against `testing` or `main`; those only
-receive promotion PRs, which the maintainer merges by hand with a merge commit. Full rules in
-CONTRIBUTING.md "Branching and promotion".
+receive promotion PRs, always merged with a merge commit.
+
+`staging` → `testing` is automatic: `.github/workflows/auto-promote.yml` runs once a day and merges
+the promotion PR when `staging` is ahead, every required check is green, and the promotion gate has
+not failed on `testing`. The decision lives in `scripts/auto_promote.py`. It merges only a PR it
+opened itself — same repository, correctly aimed, labelled `auto-promotion`, pinned to the commit
+whose checks were read — so a promotion PR you open by hand is left alone. It needs Settings →
+Actions → General → Workflow permissions → *Allow GitHub Actions to create and approve pull
+requests*. **Promotion to `main` is never automatic** — the maintainer opens and merges that PR by
+hand. Full rules in CONTRIBUTING.md "Branching and promotion".
 
 ## Session Completion
 

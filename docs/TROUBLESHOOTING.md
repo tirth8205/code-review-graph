@@ -250,6 +250,75 @@ Current behaviour:
 there is no `--force` flag. After that, `update`, hooks and `watch` stay
 incremental.
 
+## Unusable `graph.db` (corrupt, foreign, or from a newer release)
+
+Every command that opens the graph reports an unusable database in one line
+and exits 1, instead of raising a SQLite traceback:
+
+```
+Error: the graph database at <path> is unreadable (file is not a database). Run `code-review-graph build` to rebuild it from scratch.
+Error: <path> is a SQLite database but not a code-review-graph graph (it holds invoices). Point --data-dir somewhere else, or delete the file and run `code-review-graph build`.
+Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v13). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
+Error: the graph at <path> was built for a different repository root: none of its 12 file(s), such as /other/repo/lib.py, are under /this/repo. Run `code-review-graph build` here, or point --repo at the root it was built for.
+```
+
+The last one is the case that used to be silent: a `graph.db` copied between
+checkouts, or a CI cache restored into the wrong repository, answered every
+question with the other repository's symbols and paths.
+
+**Fix.** Run `code-review-graph build`. For the first case (an unreadable
+file, including a valid SQLite file whose tables are the wrong shape) `build`
+discards the unusable database and its `-wal`/`-shm` sidecars itself, and
+logs one warning saying so; this is what lets the GitHub Action recover from
+a restored cache without anyone clearing it by hand. The others are never
+discarded for you, because deleting somebody else's SQLite file, or a graph
+this build is merely too old to read, is not a recovery: delete the file
+yourself, or point `--repo` / `--data-dir` at the pair that belongs together.
+
+A database another process is writing is not in this list at all. Contention
+is reported as contention (see *Database lock errors* above) and never
+discarded: the graph is healthy and the answer is to try again.
+
+## Unwritable data directory
+
+```
+Error: cannot open the graph database for writing at <path> (attempt to write a readonly database). Check the permissions on <dir>, or set CRG_DATA_DIR to a writable directory.
+```
+
+**Fix.** Make `.code-review-graph/` writable by the user running the command,
+or set `CRG_DATA_DIR` to a directory that is.
+
+## `detect-changes` cannot read the diff
+
+`detect-changes` never reports a clean tree it could not look at. When git is
+missing or too slow, it says so and exits 1:
+
+```
+Error: could not determine the changes: git could not be run ([Errno 2] No such file or directory: 'git'). Install git and make sure it is on PATH.
+Error: could not determine the changes: git timed out after 30s. Raise CRG_GIT_TIMEOUT, or re-run when the repository is not busy.
+```
+
+`No changes detected.` with exit 0 means exactly one thing: the diff was read
+and it was empty. A CI review gate can rely on that distinction. `build` and
+`update` are unaffected — they re-parse the working tree and reconcile by
+content hash, so they still succeed without git.
+
+If only the line-level diff is unreadable while the changed-file list is not,
+the analysis degrades to whole-file scoring and says so rather than failing:
+
+```
+  - Warning: line-level diff unavailable, whole files scored (...)
+```
+
+## Invalid numeric environment variable
+
+A `CRG_*` setting that is not a number no longer aborts the process. The
+documented default is used and the variable is named once:
+
+```
+WARNING: Ignoring invalid CRG_MAX_IMPACT_NODES='' (not a number); using the default 500.
+```
+
 ## Legacy `.code-review-graph.db` at the repository root
 
 Very old releases stored the database as `.code-review-graph.db` in the
@@ -355,6 +424,12 @@ off for the whole repository.
   `<python> -m code_review_graph serve`, depending on what it detects. If the
   launcher it chose is missing, install it (`pip install uv` or `brew install uv`)
   or re-run `code-review-graph install` from the environment you want to use.
+- You can edit the entry yourself, for example
+  `uv run --project /path/to/checkout code-review-graph serve` when the server
+  lives outside the project you are editing. A later `install` leaves a
+  hand-edited entry exactly as you wrote it and says so; it only replaces
+  entries whose command line it recognises as one it wrote itself. The same
+  holds for hooks: a hook command you wrote is never rewritten or removed.
 
 ## Windows / WSL
 

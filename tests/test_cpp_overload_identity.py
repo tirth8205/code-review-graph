@@ -139,7 +139,12 @@ void caller() { process(1); }
         "candidates": [int_overload, double_overload],
         "candidate_count": 2,
         "candidates_truncated": False,
+        # An overload set was never bound to one node, so the row says so and
+        # carries the line the unresolved call is written at.
+        "target_resolution": "unresolved",
+        "call_site": {"line": 3, "file": prefix},
     }]
+    assert callees["resolution_split"] == {"direct": 0, "unresolved": 1}
     assert callees["edges"][0]["ambiguous_targets"] == [
         int_overload,
         double_overload,

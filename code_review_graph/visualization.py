@@ -19,13 +19,17 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
+from typing import Sequence
 
 from .graph import GraphStore, edge_to_dict, node_to_dict
+from .neighbourhood import DEFAULT_DEPTH, DEFAULT_MAX_NODES, NeighbourhoodSpec
+from .neighbourhood import extract as extract_neighbourhood
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +40,10 @@ logger = logging.getLogger(__name__)
 D3_LOCAL_FILENAME = "d3.v7.min.js"
 D3_CDN_URL = "https://d3js.org/d3.v7.min.js"
 D3_SRI_HASH = "sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i"
+
+# Sidecar filenames are derived from the output path; only a plain name is
+# ever emitted into the page so the src attribute cannot be steered.
+_SAFE_SIDECAR_STEM = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 def _d3_script_tags() -> str:
@@ -169,12 +177,61 @@ def _resolve_target(
     return candidates[0]
 
 
-def export_graph_data(store: GraphStore) -> dict:
-    """Export all graph nodes and edges as a JSON-serializable dict.
+def export_graph_data(
+    store: GraphStore,
+    *,
+    seed_symbols: Sequence[str] | None = None,
+    seed_files: Sequence[str] | None = None,
+    seed_flow: str | None = None,
+    path_from: str | None = None,
+    path_to: str | None = None,
+    depth: int = DEFAULT_DEPTH,
+    render_depth: int | None = None,
+    max_nodes: int = DEFAULT_MAX_NODES,
+) -> dict:
+    """Export graph nodes and edges as a JSON-serializable dict.
 
-    Returns ``{"nodes": [...], "edges": [...], "stats": {...},
-    "flows": [...], "communities": [...]}``.
+    With no seed argument this exports the whole repository and returns
+    ``{"nodes": [...], "edges": [...], "stats": {...}, "flows": [...],
+    "communities": [...]}`` — the long-standing behaviour.
+
+    With a seed it exports a *neighbourhood* instead: the nodes within *depth*
+    hops of the seed and the edges among them, with everything else left out
+    of the payload rather than dimmed, plus a ``"neighbourhood"`` block
+    describing the seeds, per-node hop labels and (for a path query) the
+    highlighted path.  See :mod:`code_review_graph.neighbourhood` for the hop
+    semantics — ``CONTAINS`` is structural and never counts as a hop.
+
+    Args:
+        store: The GraphStore to read graph data from.
+        seed_symbols: Symbol queries to seed the neighbourhood with.
+        seed_files: File paths (e.g. the changed files of a review) to seed
+            with; each seeds its File node and its direct members.
+        seed_flow: Execution flow name or id; every node on it becomes a seed.
+        path_from: Start symbol of a shortest-path query.
+        path_to: End symbol of a shortest-path query.
+        depth: Hops of context to include around the seeds.
+        render_depth: Hops drawn before the user expands on click.
+        max_nodes: Hard cap on payload nodes. The outermost hop is trimmed
+            first; once the outer hops are gone the seed set is trimmed too,
+            lowest whole-graph degree first, so the cap always holds. The
+            returned ``"neighbourhood"`` block reports ``seeds_requested``
+            and ``seeds_dropped``.
+
+    Raises:
+        SeedResolutionError: when a seed matches no node in the graph.
+        ValueError: when the seed flags contradict each other.
     """
+    spec = NeighbourhoodSpec.from_args(
+        seed_symbols=seed_symbols,
+        seed_files=seed_files,
+        seed_flow=seed_flow,
+        path_from=path_from,
+        path_to=path_to,
+        depth=depth,
+        render_depth=render_depth,
+        max_nodes=max_nodes,
+    ).validate()
     nodes = []
     seen_qn: set[str] = set()
 
@@ -225,13 +282,16 @@ def export_graph_data(store: GraphStore) -> dict:
         logger.debug("communities unavailable for export: %s", exc)
         communities = []
 
-    return {
+    data = {
         "nodes": nodes,
         "edges": edges,
         "stats": asdict(stats),
         "flows": flows,
         "communities": communities,
     }
+    if spec.is_active:
+        return extract_neighbourhood(data, spec)
+    return data
 
 
 def _aggregate_community(data: dict) -> dict:
@@ -455,12 +515,53 @@ def _resolve_auto_mode(
     return "community" if has_communities else "file"
 
 
+_SIDECAR_GLOBAL = "window.__CRG_GRAPH_DATA__"
+
+
+def _write_sidecar(
+    output_path: Path, data_json: str, sidecar: bool
+) -> tuple[str, str]:
+    """Optionally move the payload into a ``<name>.data.js`` file.
+
+    Returns ``(script_tag, payload_expression)``.  When *sidecar* is false the
+    payload stays inline and the page remains a single file you can email,
+    which is the default on purpose.
+
+    The sidecar is JavaScript rather than ``.json`` deliberately: a page opened
+    from ``file://`` is an opaque origin in every modern browser, so a
+    ``fetch()`` of a neighbouring JSON file is blocked, while a ``<script
+    src=...>`` still loads.  The file content is one assignment of the same
+    JSON document.
+    """
+    if not sidecar:
+        return ("", data_json)
+    stem = output_path.stem
+    if not _SAFE_SIDECAR_STEM.fullmatch(stem):
+        stem = "graph"
+    name = f"{stem}.data.js"
+    (output_path.parent / name).write_text(
+        f"{_SIDECAR_GLOBAL} = {data_json};\n", encoding="utf-8"
+    )
+    return (f'<script src="{name}"></script>', _SIDECAR_GLOBAL)
+
+
 def generate_html(
     store: GraphStore,
     output_path: str | Path,
     mode: str = "auto",
     max_full_nodes: int = DEFAULT_MAX_FULL_NODES,
     max_full_edges: int = DEFAULT_MAX_FULL_EDGES,
+    *,
+    seed_symbols: Sequence[str] | None = None,
+    seed_files: Sequence[str] | None = None,
+    seed_flow: str | None = None,
+    path_from: str | None = None,
+    path_to: str | None = None,
+    depth: int = DEFAULT_DEPTH,
+    render_depth: int | None = None,
+    max_nodes: int = DEFAULT_MAX_NODES,
+    report: dict | None = None,
+    sidecar: bool = False,
 ) -> Path:
     """Generate a self-contained interactive HTML visualization.
 
@@ -471,24 +572,85 @@ def generate_html(
               or ``"file"``.  ``"auto"`` switches to an aggregated mode
               (community, or file when no community data exists) when the
               rendered node count exceeds *max_full_nodes* or the rendered
-              edge count exceeds *max_full_edges*.
+              edge count exceeds *max_full_edges*.  Ignored when a seed is
+              given: a neighbourhood is bounded by construction and is always
+              drawn with the full renderer.
         max_full_nodes: Rendered-node threshold for auto-switching.
         max_full_edges: Rendered-edge threshold for auto-switching.
+        seed_symbols: Symbol queries to seed a k-hop neighbourhood view with.
+        seed_files: File paths (e.g. a review's changed files) to seed with.
+        seed_flow: Execution flow name or id to seed with.
+        path_from: Start symbol of a shortest-path query.
+        path_to: End symbol of a shortest-path query.
+        depth: Hops of context around the seeds.
+        render_depth: Hops drawn before the user expands on click.
+        max_nodes: Hard cap on payload nodes, seeds included.
+        report: Optional dict filled in with the neighbourhood summary
+            (``seeds``, ``seeds_requested``, ``seeds_dropped``, ``truncated``,
+            ``max_nodes``, ``node_count``) so a caller can report a trimmed
+            seed set without re-exporting the graph.
+        sidecar: Write the payload to a ``<name>.data.js`` file next to the
+            page instead of inlining it.  Opt-in: the default is still one
+            self-contained file you can email.
 
     Writes the HTML file to *output_path* and returns the resolved Path.
     """
     output_path = Path(output_path)
     stats = store.get_stats()
-    if stats.total_nodes > 50000:
+    spec = NeighbourhoodSpec.from_args(
+        seed_symbols=seed_symbols,
+        seed_files=seed_files,
+        seed_flow=seed_flow,
+        path_from=path_from,
+        path_to=path_to,
+        depth=depth,
+        render_depth=render_depth,
+        max_nodes=max_nodes,
+    ).validate()
+    if spec.is_active and mode not in ("auto", "full"):
+        raise ValueError(
+            f"mode={mode!r} aggregates the graph into bubbles, which is the "
+            "opposite of a seeded neighbourhood; use mode='full' (or drop "
+            "the seed to draw the whole repository that way)"
+        )
+    if stats.total_nodes > 50000 and not spec.is_active:
         logger.warning(
             "Graph has %d nodes — visualization may be slow. "
-            "Consider filtering by file pattern.", stats.total_nodes,
+            "Consider seeding a neighbourhood with --seed-symbol / "
+            "--seed-file / --seed-flow.", stats.total_nodes,
         )
-    data = export_graph_data(store)
+    data = export_graph_data(
+        store,
+        seed_symbols=seed_symbols,
+        seed_files=seed_files,
+        seed_flow=seed_flow,
+        path_from=path_from,
+        path_to=path_to,
+        depth=depth,
+        render_depth=render_depth,
+        max_nodes=max_nodes,
+    )
+    if report is not None:
+        block = data.get("neighbourhood", {})
+        report.update({
+            "seeds": len(block.get("seeds", [])),
+            "seeds_requested": block.get("seeds_requested", 0),
+            "seeds_dropped": block.get("seeds_dropped", 0),
+            "truncated": bool(block.get("truncated", False)),
+            "max_nodes": block.get("max_nodes", max_nodes),
+            "node_count": len(data["nodes"]),
+        })
 
     # Determine effective mode
     effective_mode = mode
-    if effective_mode == "auto":
+    if spec.is_active:
+        # A neighbourhood never aggregates: the whole point is to keep the
+        # individual symbols a reviewer needs, and the payload is already
+        # bounded by *depth* and *max_nodes*.  An aggregating mode asks for
+        # the opposite of what the seed asked for, so it is refused rather
+        # than silently overridden.
+        effective_mode = "full"
+    elif effective_mode == "auto":
         effective_mode = _resolve_auto_mode(
             node_count=len(data["nodes"]),
             edge_count=len(data["edges"]),
@@ -523,7 +685,9 @@ def generate_html(
     # data: graph content is repo-derived, and running a replace over it would
     # let a node literally named __D3_SCRIPTS__ inject markup into the page.
     html = template.replace("__D3_SCRIPTS__", _d3_script_tags())
-    html = html.replace("__GRAPH_DATA__", data_json)
+    sidecar_tag, payload = _write_sidecar(output_path, data_json, sidecar)
+    html = html.replace("__SIDECAR_SCRIPT__", sidecar_tag)
+    html = html.replace("__GRAPH_DATA__", payload)
     output_path.write_text(html, encoding="utf-8")
     # Ship the vendored D3 build alongside the HTML so the same-origin script
     # reference resolves both under `visualize --serve` and file:// opens.
@@ -546,6 +710,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Code Review Graph</title>
 __D3_SCRIPTS__
+__SIDECAR_SCRIPT__
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -597,6 +762,39 @@ __D3_SCRIPTS__
     z-index: 1000; backdrop-filter: blur(12px);
   }
   #tooltip.visible { opacity: 1; }
+  #nb-bar {
+    position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+    background: rgba(22,27,34,0.95); border: 1px solid #30363d;
+    border-radius: 10px; padding: 8px 14px; font-size: 12px;
+    display: none; align-items: center; gap: 12px; z-index: 11;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5); backdrop-filter: blur(12px);
+    max-width: calc(100% - 32px); flex-wrap: wrap;
+  }
+  #nb-bar.visible { display: flex; }
+  #nb-bar .nb-seed {
+    color: #e6edf3; font-weight: 600;
+    max-width: 46vw; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #nb-bar .nb-meta { color: #9eaab6; }
+  #nb-bar .nb-warn { color: #f0883e; }
+  /* The full seed list is an interaction, not the default: a --seed-changed
+     run has hundreds of paths and painting them all buries the graph. */
+  #nb-seed-list {
+    flex-basis: 100%; max-height: 180px; overflow-y: auto; list-style: none;
+    margin: 2px 0 0; padding: 6px 2px 0; border-top: 1px solid #30363d;
+    color: #c9d1d9; font-size: 11px; line-height: 1.7;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #nb-seed-list li {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #nb-bar button {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 6px; padding: 3px 9px; cursor: pointer; font-size: 12px;
+  }
+  #nb-bar button:hover:not(:disabled) { background: #30363d; }
+  #nb-bar button:disabled { opacity: 0.4; cursor: default; }
   .tt-name { font-weight: 700; font-size: 14px; color: #e6edf3; }
   .tt-kind {
     display: inline-block; font-size: 9px; font-weight: 700;
@@ -820,6 +1018,7 @@ __D3_SCRIPTS__
 <div id="search-results" role="listbox" aria-label="Search results"></div>
 <div id="detail-panel" role="dialog" aria-label="Node detail" aria-modal="false"><button class="dp-close" aria-label="Close detail panel">&times;</button><div id="dp-content" tabindex="-1"></div></div>
 <div id="stats-bar" role="status" aria-label="Graph statistics"></div>
+<div id="nb-bar" role="status" aria-label="Neighbourhood view"></div>
 <div id="community-legend" aria-label="Community legend"></div>
 <div id="tooltip" role="tooltip" aria-live="polite"></div>
 <div id="help-overlay" class="hidden" role="dialog" aria-label="Help overlay" aria-modal="true">
@@ -836,6 +1035,8 @@ __D3_SCRIPTS__
       <tr><td>Click+drag background</td><td>Pan the view</td></tr>
       <tr><td>Search</td><td>Type to filter &mdash; matching nodes stay bright</td></tr>
       <tr><td>Legend edges</td><td>Click edge types in the legend to toggle visibility</td></tr>
+      <tr><td>Click frontier node</td><td>Neighbourhood view: reveal that node&#39;s next ring</td></tr>
+      <tr><td>+1 hop</td><td>Neighbourhood view: reveal the whole next ring at once</td></tr>
     </table>
     <h2 style="margin-top:16px">Keyboard Shortcuts</h2>
     <table>
@@ -844,6 +1045,7 @@ __D3_SCRIPTS__
       <tr><td><kbd>Esc</kbd></td><td>Close panel / search / help</td></tr>
       <tr><td><kbd>Enter</kbd> / <kbd>Space</kbd></td><td>Activate focused node</td></tr>
       <tr><td><kbd>Arrow keys</kbd></td><td>Navigate between nodes</td></tr>
+      <tr><td><kbd>e</kbd></td><td>Neighbourhood view: expand one more hop</td></tr>
     </table>
     <span class="help-dismiss">Click anywhere outside to dismiss</span>
   </div>
@@ -886,6 +1088,38 @@ var edges = graphData.edges.map(function(d) { var o = Object.assign({}, d); o._s
 var stats = graphData.stats;
 var flows = graphData.flows || [];
 var communities = graphData.communities || [];
+// --- Neighbourhood view ---------------------------------------------------
+// Present only when the page was generated with a seed. The payload then
+// holds *only* the k-hop neighbourhood, so there is no "rest of the graph"
+// to dim: expansion reveals rings that are already here, nothing is fetched.
+var neighbourhood = graphData.neighbourhood || null;
+var nbHops = new Map();
+var nbExpanded = new Set();
+var nbVisibleDepth = neighbourhood ? neighbourhood.render_depth : 0;
+if (neighbourhood) {
+  Object.keys(neighbourhood.hops || {}).forEach(function(qn) {
+    nbHops.set(qn, neighbourhood.hops[qn]);
+  });
+}
+var nbPathList = (neighbourhood && neighbourhood.path) || [];
+var nbPathNodes = new Set(nbPathList);
+var nbPathEdges = new Set();
+for (var nbI = 0; nbI + 1 < nbPathList.length; nbI++) {
+  nbPathEdges.add(nbPathList[nbI] + "\u0000" + nbPathList[nbI + 1]);
+  nbPathEdges.add(nbPathList[nbI + 1] + "\u0000" + nbPathList[nbI]);
+}
+function nbShown(qn) {
+  if (!neighbourhood) return true;
+  var h = nbHops.get(qn);
+  if (h == null) return true;
+  return h <= nbVisibleDepth || nbExpanded.has(qn);
+}
+function nbIsPathEdge(e) {
+  if (!nbPathEdges.size) return false;
+  var a = typeof e.source === "object" ? e.source.qualified_name : e._source;
+  var b = typeof e.target === "object" ? e.target.qualified_name : e._target;
+  return nbPathEdges.has(a + "\u0000" + b);
+}
 var nodeById = new Map(nodes.map(function(n) { return [n.qualified_name, n]; }));
 var hiddenEdgeKinds = new Set();
 var hiddenNodeKinds = new Set();
@@ -1025,6 +1259,18 @@ function nodeColor(d) {
   if (communityColoringOn && d.community_id != null) return communityColorScale(d.community_id);
   return KIND_COLOR[d.kind] || "#8b949e";
 }
+// Path-query nodes keep a gold ring so the answer stays visible while the
+// reviewer pans, zooms and expands around it.
+function nodeStroke(d) {
+  if (nbPathNodes.has(d.qualified_name)) return "#f2cc60";
+  return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)";
+}
+function nodeStrokeWidth(d) {
+  if (nbPathNodes.has(d.qualified_name)) return 3;
+  return d.kind === "File" ? 2 : 1;
+}
+function nbEdgeWidth(d) { return nbIsPathEdge(d) ? eStyle(d).width + 2 : eStyle(d).width; }
+function nbEdgeOpacity(d) { return nbIsPathEdge(d) ? 0.95 : eStyle(d).opacity; }
 var linkGroup  = gRoot.append("g").attr("class","links");
 var nodeGroup  = gRoot.append("g").attr("class","nodes");
 var labelGroup = gRoot.append("g").attr("class","labels");
@@ -1043,16 +1289,16 @@ function updateLinks() {
   var enter = linkSel.enter().append("line");
   linkSel = enter.merge(linkSel);
   linkSel
-    .attr("stroke", function(d) { return eColor(d); })
-    .attr("stroke-width", function(d) { return eStyle(d).width; })
+    .attr("stroke", function(d) { return nbIsPathEdge(d) ? "#f2cc60" : eColor(d); })
+    .attr("stroke-width", nbEdgeWidth)
     .attr("stroke-dasharray", function(d) { return eStyle(d).dash; })
-    .attr("opacity", function(d) { return eStyle(d).opacity; })
+    .attr("opacity", nbEdgeOpacity)
     .attr("marker-end", function(d) { return eStyle(d).marker; });
 }
 function updateNodes() {
   var hiddenSet = new Set();
   collapsedFiles.forEach(function(fqn) { allDescendants(fqn).forEach(function(c) { hiddenSet.add(c); }); });
-  nodes.forEach(function(n) { n._hidden = hiddenSet.has(n.qualified_name) || hiddenNodeKinds.has(n.kind); });
+  nodes.forEach(function(n) { n._hidden = hiddenSet.has(n.qualified_name) || hiddenNodeKinds.has(n.kind) || !nbShown(n.qualified_name); });
   var vis = nodes.filter(function(n) { return !n._hidden; });
   var nodeSel = nodeGroup.selectAll("g.node-g").data(vis, function(d) { return d.qualified_name; });
   nodeSel.exit().remove();
@@ -1066,8 +1312,8 @@ function updateNodes() {
   enter.append("path").attr("class","node-shape")
     .attr("d", function(d) { return d3.symbol().type(KIND_SHAPE[d.kind] || d3.symbolCircle).size(KIND_AREA[d.kind] || 113)(); })
     .attr("fill", function(d) { return nodeColor(d); })
-    .attr("stroke", function(d) { return d.kind === "File" ? "rgba(88,166,255,0.3)" : "rgba(255,255,255,0.08)"; })
-    .attr("stroke-width", function(d) { return d.kind === "File" ? 2 : 1; })
+    .attr("stroke", function(d) { return nodeStroke(d); })
+    .attr("stroke-width", function(d) { return nodeStrokeWidth(d); })
     .attr("cursor", "pointer");
   enter
     .on("mouseover", function(ev, d) { highlightConnected(d, true); showTooltip(ev, d); })
@@ -1075,7 +1321,9 @@ function updateNodes() {
     .on("mouseout",  function(ev, d) { highlightConnected(d, false); hideTooltip(); })
     .on("click", function(ev, d) {
       ev.stopPropagation();
+      var grew = ev.shiftKey ? false : nbExpand(d.qualified_name);
       if (d.kind === "File" && !ev.shiftKey) toggleCollapse(d.qualified_name);
+      else if (grew) nbRedraw();
       showDetailPanel(d);
     })
     .call(d3.drag().on("start", dragS).on("drag", dragD).on("end", dragE));
@@ -1084,7 +1332,9 @@ function updateNodes() {
     .on("keydown", function(ev, d) {
       if (ev.key === "Enter" || ev.key === " ") {
         ev.preventDefault();
+        var grewK = ev.shiftKey ? false : nbExpand(d.qualified_name);
         if (d.kind === "File" && !ev.shiftKey) toggleCollapse(d.qualified_name);
+        else if (grewK) nbRedraw();
         showDetailPanel(d);
       } else if (ev.key === "Escape") {
         ev.preventDefault();
@@ -1156,14 +1406,14 @@ function highlightConnected(d, on) {
       .attr("stroke-width", function(e) {
         var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
         var t = typeof e.target === "object" ? e.target.qualified_name : e._target;
-        return (s === d.qualified_name || t === d.qualified_name) ? 2.5 : eStyle(e).width;
+        return (s === d.qualified_name || t === d.qualified_name) ? 2.5 : nbEdgeWidth(e);
       });
     labelSel.transition().duration(150).attr("opacity", function(n) { return connected.has(n.qualified_name) ? 1 : 0.1; });
   } else {
     nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
     linkSel.transition().duration(300)
-      .attr("opacity", function(e) { return eStyle(e).opacity; })
-      .attr("stroke-width", function(e) { return eStyle(e).width; });
+      .attr("opacity", nbEdgeOpacity)
+      .attr("stroke-width", nbEdgeWidth);
     labelSel.transition().duration(300).attr("opacity", 1);
     updateLabelVisibility();
   }
@@ -1175,6 +1425,113 @@ function toggleCollapse(qn) {
     .attr("opacity", function(d) { return collapsedFiles.has(d.qualified_name) ? 0.6 : 0.3; });
   updateNodes();
   simulation.alpha(0.3).restart();
+}
+// Reveal the ring around one node. Everything revealed is already in the
+// payload: a neighbourhood page never goes back to the graph for more.
+function nbExpand(qn) {
+  if (!neighbourhood) return false;
+  var grew = false;
+  edges.forEach(function(e) {
+    var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
+    var t = typeof e.target === "object" ? e.target.qualified_name : e._target;
+    var other = s === qn ? t : (t === qn ? s : null);
+    if (other === null || nbShown(other)) return;
+    nbExpanded.add(other);
+    // Reveal the revealed node's File too, or it floats outside its cluster
+    // and the collapse toggle has nothing to act on.
+    var parent = childToParent.get(other);
+    if (parent && !nbShown(parent)) nbExpanded.add(parent);
+    grew = true;
+  });
+  if (grew) nbRenderBar();
+  return grew;
+}
+function nbExpandRing() {
+  if (!neighbourhood || nbVisibleDepth >= neighbourhood.depth) return false;
+  nbVisibleDepth += 1;
+  nbRenderBar();
+  nbRedraw();
+  return true;
+}
+function nbRedraw() {
+  updateNodes();
+  applyPathHighlight();
+  simulation.alpha(0.3).restart();
+}
+function applyPathHighlight() {
+  if (!nbPathNodes.size) return;
+  nodeGroup.selectAll("g.node-g").select(".node-shape")
+    .attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
+}
+// The seed list can be one symbol or, on --seed-changed, every path in the
+// diff. Show the same three the console shows, count the rest, and keep the
+// full list one click away instead of painting it across the graph.
+var NB_SEEDS_SHOWN = 3;
+var nbSeedListOpen = false;
+function nbSeedEntries() {
+  if (!neighbourhood) return [];
+  var q = neighbourhood.seed_query || [];
+  return q.length ? q : (neighbourhood.seeds || []);
+}
+function nbRenderBar() {
+  var bar = document.getElementById("nb-bar");
+  if (!neighbourhood) return;
+  var shownCount = nodes.filter(function(n) { return nbShown(n.qualified_name); }).length;
+  var entries = nbSeedEntries();
+  var overflow = Math.max(0, entries.length - NB_SEEDS_SHOWN);
+  var seedLabel = entries.slice(0, NB_SEEDS_SHOWN).join(", ") || "neighbourhood";
+  var h = '<span class="nb-seed" title="' + escH(seedLabel) + '">' + escH(seedLabel) + "</span>";
+  if (overflow > 0) {
+    h += '<button id="nb-seed-toggle" type="button" aria-controls="nb-seed-list"'
+      + ' aria-expanded="' + (nbSeedListOpen ? "true" : "false") + '">'
+      + "+" + overflow + " more</button>";
+  }
+  h += '<span class="nb-meta">hop ' + nbVisibleDepth + " of " + neighbourhood.depth
+    + " \u00b7 " + shownCount + " of " + nodes.length + " loaded"
+    + " \u00b7 " + neighbourhood.total_nodes + " in repo</span>";
+  if (neighbourhood.path_error) h += '<span class="nb-warn">' + escH(neighbourhood.path_error) + "</span>";
+  else if (nbPathList.length) {
+    h += '<span class="nb-meta">path: ' + nbPathList.length + " nodes"
+      + (neighbourhood.path_directed ? "" : " (undirected)") + "</span>";
+  }
+  if (neighbourhood.seeds_dropped) {
+    h += '<span class="nb-warn">' + neighbourhood.seeds_dropped + " of "
+      + neighbourhood.seeds_requested + " seeds dropped for --max-nodes "
+      + neighbourhood.max_nodes + "</span>";
+  } else if (neighbourhood.truncated) {
+    h += '<span class="nb-warn">trimmed to ' + neighbourhood.max_nodes + " nodes</span>";
+  }
+  h += '<button id="nb-expand" type="button">+1 hop</button>';
+  h += '<button id="nb-reset" type="button">Reset</button>';
+  if (overflow > 0) {
+    h += '<ul id="nb-seed-list" aria-label="All neighbourhood seeds"'
+      + (nbSeedListOpen ? "" : " hidden") + ">";
+    for (var si = 0; si < entries.length; si++) {
+      h += "<li>" + escH(entries[si]) + "</li>";
+    }
+    h += "</ul>";
+  }
+  bar.textContent = "";
+  bar.insertAdjacentHTML("beforeend", h);
+  bar.classList.add("visible");
+  var expandBtn = document.getElementById("nb-expand");
+  expandBtn.disabled = nbVisibleDepth >= neighbourhood.depth;
+  expandBtn.addEventListener("click", nbExpandRing);
+  document.getElementById("nb-reset").addEventListener("click", function() {
+    nbVisibleDepth = neighbourhood.render_depth;
+    nbExpanded.clear();
+    nbRenderBar();
+    nbRedraw();
+  });
+  var seedToggle = document.getElementById("nb-seed-toggle");
+  if (seedToggle) {
+    seedToggle.addEventListener("click", function() {
+      nbSeedListOpen = !nbSeedListOpen;
+      var list = document.getElementById("nb-seed-list");
+      if (list) list.hidden = !nbSeedListOpen;
+      seedToggle.setAttribute("aria-expanded", nbSeedListOpen ? "true" : "false");
+    });
+  }
 }
 function dragS(ev, d) { if (!ev.active) simulation.alphaTarget(0.1).restart(); d.fx = d.x; d.fy = d.y; }
 function dragD(ev, d) { d.fx = ev.x; d.fy = ev.y; }
@@ -1191,10 +1548,14 @@ simulation.on("tick", function() {
 // Only auto-collapse File nodes on very large graphs, otherwise all edges
 // become invisible because they connect to Functions/Classes that are now
 // hidden beneath collapsed Files. See: #132
-if (N > 2000) {
+// A seeded neighbourhood is small on purpose: never auto-collapse it, or the
+// symbols the reviewer asked to see disappear behind their files.
+if (N > 2000 && !neighbourhood) {
   nodes.forEach(function(n) { if (n.kind === "File") collapsedFiles.add(n.qualified_name); });
 }
+if (neighbourhood) nbRenderBar();
 updateNodes();
+applyPathHighlight();
 function syncViewport() {
   W = getW(); H = getH();
   svg.attr("viewBox", [0, 0, W, H]);
@@ -1366,7 +1727,7 @@ function applyFlowHighlight() {
 }
 function clearFlowHighlight() {
   nodeGroup.selectAll("g.node-g").select(".node-shape").transition().duration(300).attr("opacity", 1);
-  if (linkSel) linkSel.transition().duration(300).attr("opacity", function(e) { return eStyle(e).opacity; });
+  if (linkSel) linkSel.transition().duration(300).attr("opacity", nbEdgeOpacity);
   if (labelSel) labelSel.transition().duration(300).attr("opacity", 1);
   updateLabelVisibility();
 }
@@ -1501,7 +1862,7 @@ function applySearchFilter() {
   if (!searchTerm) {
     nodeGroup.selectAll("g.node-g").select(".node-shape").attr("opacity", 1);
     if (labelSel) labelSel.attr("opacity", 1);
-    if (linkSel) linkSel.attr("opacity", function(e) { return eStyle(e).opacity; });
+    if (linkSel) linkSel.attr("opacity", nbEdgeOpacity);
     updateLabelVisibility();
     return;
   }
@@ -1519,7 +1880,7 @@ function applySearchFilter() {
   if (linkSel) linkSel.attr("opacity", function(e) {
     var s = typeof e.source === "object" ? e.source.qualified_name : e._source;
     var t = typeof e.target === "object" ? e.target.qualified_name : e._target;
-    return (matched.has(s) || matched.has(t)) ? eStyle(e).opacity : 0.02;
+    return (matched.has(s) || matched.has(t)) ? nbEdgeOpacity(e) : 0.02;
   });
 }
 var helpOverlay = document.getElementById("help-overlay");
@@ -1556,6 +1917,9 @@ document.addEventListener("keydown", function(ev) {
   } else if (ev.key === "?") {
     ev.preventDefault();
     toggleHelp();
+  } else if (ev.key === "e" && neighbourhood) {
+    ev.preventDefault();
+    nbExpandRing();
   }
 });
 </script>
@@ -1579,6 +1943,7 @@ _AGGREGATED_HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Code Review Graph (Aggregated)</title>
 __D3_SCRIPTS__
+__SIDECAR_SCRIPT__
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; overflow: hidden; }

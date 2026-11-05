@@ -1,6 +1,6 @@
 # User Guide
 
-Applies to code-review-graph 2.3.8.
+Applies to code-review-graph 2.3.9.
 
 ## Installation
 
@@ -111,7 +111,7 @@ code-review-graph build \
   --embedding-model all-MiniLM-L6-v2
 ```
 
-A refresh only updates a previously embedded graph. It refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
+A refresh only updates a previously embedded graph. On a graph with no embeddings yet it embeds nothing: `build`, `update` (also when it finds no changes) and `postprocess` return `embeddings_refresh_skipped: true` with a warning, and `watch` logs that warning after each update and keeps running. Run `code-review-graph embed` once to create the index. A refresh refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
 
 ### 7. Detect changes with risk scoring
 Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, flows, communities and test gaps.
@@ -142,7 +142,7 @@ Then use `cross_repo_search_tool` to search every registered repository, or pass
 
 ## Context Savings
 
-Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-result-committed) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
+Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
 
 The evaluation runner produces the benchmark numbers quoted in the README:
 
@@ -159,6 +159,10 @@ Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Pyt
 Languages not covered can be added through a `.code-review-graph/languages.toml` file. See [CUSTOM_LANGUAGES.md](CUSTOM_LANGUAGES.md).
 
 ## What Gets Indexed
+
+Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
+Their imports, calls, and references alone do not keep application symbols alive in
+dead-code reports. Normal application callers and ordinary test evidence still count.
 
 - **Nodes**: Files, Classes, Functions/Methods, Types, Tests, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)

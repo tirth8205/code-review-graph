@@ -75,7 +75,13 @@ max_depth: int = 2               # Hops in graph
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
+resolution: str = "all"          # "all" or "direct" (only calls bound to a node)
 ```
+An impacted node that calls or references the changed code in one hop carries
+`call_site` (`line`, plus `file` only when the call is written outside the node's
+own `file_path`) and `call_site_count` when there is more than one.
+`unresolved_call_sites` counts call sites that name a changed symbol but were
+never bound to it, so an empty radius is not read as proof of absence.
 Responses may include estimated `context_savings` metadata.
 
 #### `query_graph_tool`
@@ -86,7 +92,15 @@ target: str     # Node name, qualified name, or file path
 repo_root: str | None
 detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Minimal mode also caps visible results at 5
+resolution: str = "all"          # "all", "direct", or "unresolved"
 ```
+`callers_of`, `callees_of` and `references_to` return one row per call site, not
+one per node. Each row carries `call_site` (`line`, plus `file` only when the
+call is written outside the row's own `file_path`), and rows whose target was
+matched by bare name alone carry `target_resolution: "unresolved"`. The response
+adds `distinct_nodes` and a `resolution_split` of the whole answer. Call sites
+are ordered so every distinct node appears before any node's second call site,
+so truncation never costs a caller.
 
 #### `get_review_context_tool`
 ```
@@ -100,8 +114,16 @@ detail_level: str = "standard"   # "standard" or "minimal"
 max_results: int = 100           # Graph nodes per list (max 100) and edges (max 150)
 max_files: int = 25              # Files listed and given snippets (max 200)
 ```
-Snippets share an 800-line budget across the response. Each list reports its
-untruncated `*_total`, and `context.truncated` marks any cut.
+`changed_files` is ordered by risk score (highest first, per file in
+`context.file_risk`), and both `max_files` and the shared 800-line snippet
+budget are spent in that order. The budget buys whole changed regions -- the
+diff hunks, each widened to its enclosing definition when that definition is
+short enough to read whole -- granted round-robin across the ranked files, so
+a file with one small change costs one small grant and a file with six hunks
+gets six turns. No single file may hold more than 40% of the budget.
+`context.source_regions` reports `shown`, `total`, and an `incomplete` map of
+the files whose regions did not all fit. Each list reports its untruncated
+`*_total`, and `context.truncated` / `context.source_truncated` mark any cut.
 Responses may include estimated `context_savings` metadata.
 
 #### `traverse_graph_tool`
@@ -414,6 +436,20 @@ code-review-graph visualize                    # Interactive HTML graph (needs a
 code-review-graph visualize --format graphml   # Formats: html, json, graphml, cypher, obsidian, svg
 code-review-graph visualize --serve            # Serve graph.html on localhost:8765
 
+# Neighbourhood view: draw a symbol's surroundings instead of the repository.
+# The whole-repo page collapses to one bubble per community past 3000 nodes or
+# 9000 edges; a seeded page ships only the nodes within --depth hops.
+code-review-graph visualize --seed-symbol login             # depth 2 by default
+code-review-graph visualize --seed-symbol login --depth 3   # more context
+code-review-graph visualize --seed-file src/auth.py         # a file and its symbols
+code-review-graph visualize --seed-changed                  # the files in this review
+code-review-graph visualize --seed-changed --seed-changed-base origin/main
+code-review-graph visualize --seed-flow "login request"     # an execution flow
+code-review-graph visualize --path-from login --path-to audit_log
+code-review-graph visualize --seed-symbol login --render-depth 0  # expand on click
+code-review-graph visualize --seed-symbol login --max-nodes 300  # hard cap
+code-review-graph visualize --seed-symbol login --sidecar   # payload in graph.data.js
+
 # Analysis
 code-review-graph detect-changes               # Risk-scored change analysis (read-only)
 code-review-graph detect-changes --base HEAD~3 # Custom base revision
@@ -421,6 +457,12 @@ code-review-graph detect-changes --base origin/main # Branch refs use their merg
 code-review-graph detect-changes --brief       # Compact panel with token-savings estimate
 code-review-graph detect-changes --brief --verify  # ...and cross-check against tiktoken
 code-review-graph detect-changes --churn       # Add opt-in change-frequency risk (CRG_CHURN_WINDOW_DAYS, default 90)
+                                                #   The MCP tools (detect_changes, get_minimal_context) always include it.
+                                                #   Cached per commit; CRG_CHURN_TIMEOUT (5s) and CRG_CHURN_MAX_COMMITS
+                                                #   (2000) bound the git log. A repository that cannot answer in time is
+                                                #   recorded as unavailable for the life of the process, so the timeout is
+                                                #   paid once, and the response says so: `churn_status` is "unavailable"
+                                                #   and the summary carries a "Degraded" line.
 code-review-graph dead-code                    # Functions/classes with no callers or test references
 code-review-graph dead-code --kind Function --file-pattern src/ --json
 
@@ -482,6 +524,41 @@ Notes:
   `dead-code` exit 1 when no graph exists and do not create one. `forget` and
   `dead-code` still move a legacy top-level `.code-review-graph.db` into
   `.code-review-graph/graph.db` before running.
+- `visualize` without a seed exports the whole repository, and falls back to
+  community (or file) bubbles once the rendered graph passes 3000 nodes or
+  9000 edges. With `--seed-symbol`, `--seed-file`, `--seed-changed`,
+  `--seed-flow` or `--path-from/--path-to` it exports a neighbourhood instead:
+  the nodes within `--depth` hops of the seed and the edges among them, with
+  everything else left out of the payload rather than drawn dimmed. A seeded
+  page always uses the full renderer and never aggregates.
+- A hop is a semantic edge (`CALLS`, `IMPORTS_FROM`, `INHERITS`, `IMPLEMENTS`,
+  `TESTED_BY`, `DEPENDS_ON`). `CONTAINS` is structural and is not a hop, so a
+  depth-2 neighbourhood of one function does not swallow its whole module; the
+  containing `File` nodes are still shipped so clustering and collapse work.
+- `--render-depth` (default 1) is how many hops are drawn on open. Clicking a
+  node on the edge of what is drawn reveals its next ring, `+1 hop` reveals a
+  whole ring, and both read from the payload already in the page.
+- `--path-from A --path-to B` highlights the shortest path through `CALLS`,
+  `IMPORTS_FROM` and `INHERITS`, following edge direction where one exists and
+  falling back to an undirected route otherwise. The page says which it used.
+- The default output is still a single self-contained `graph.html` you can
+  email. `--sidecar` moves the payload into `graph.data.js` next to it, which
+  is only worth it for a large neighbourhood.
+- `--max-nodes` (default 1500) is a hard cap on the nodes in the payload, not
+  a hint. The outermost hop goes first; once the outer hops are gone the seed
+  set itself is trimmed, best-connected first by whole-graph degree, ties
+  broken by name so two runs of the same command agree. A `--seed-changed`
+  run over a large review is exactly the case where the seed set is the large
+  thing, so the command prints how many seed nodes it dropped and the page
+  says so too. The nodes on a `--path-from/--path-to` answer are placed
+  first and are never dropped; a `--max-nodes` below the path length is
+  refused rather than half-answered.
+- Flag combinations that cannot mean anything are refused, not ignored:
+  `--seed-changed-base` without `--seed-changed`; `--depth`, `--render-depth`
+  or `--max-nodes` without a seed; any seed or tuning flag with a
+  non-`html` `--format`; `--sidecar` with a non-`html` `--format`;
+  `--mode community` or `--mode file` with a seed (they aggregate, which is
+  the opposite of a neighbourhood); and a `--render-depth` above `--depth`.
 - `install` appends a Git `pre-commit` hook that prints a risk summary before
   each commit. The hook skips linked worktrees unless `CRG_HOOK_WORKTREES=1`
   is set, so a worktree does not build a second graph for another branch.

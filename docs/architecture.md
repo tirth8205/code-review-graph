@@ -58,9 +58,9 @@ All modules live in `code_review_graph/`.
 | `parser.py` | Tree-sitter multi-language parser plus targeted fallbacks; emits nodes and edges per file |
 | `custom_languages.py` | Config-driven languages from `.code-review-graph/languages.toml` |
 | `graph.py` | `GraphStore`: SQLite storage, queries, impact radius |
-| `migrations.py` | Versioned schema migrations, currently v10 (see `schema.md`) |
+| `migrations.py` | Versioned schema migrations, currently v11 (see `schema.md`) |
 | `incremental.py` | File collection and ignore rules, git/SVN change detection, full and incremental builds, post-build resolvers |
-| `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS rebuild, flows, communities, embedding refresh |
+| `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, embedding refresh |
 | `python_resolver.py`, `jedi_resolver.py`, `tsconfig_resolver.py`, `spring_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `rescript_resolver.py`, `hcl_resolver.py`, `scoped_resolver.py` | Post-build cross-file resolution |
 | `flows.py` | Execution flow detection and criticality scoring |
 | `communities.py` | Leiden community detection (igraph) with a file-based fallback |
@@ -86,7 +86,8 @@ All modules live in `code_review_graph/`.
 4. Metadata is written: `last_updated`, `last_build_type`, and the git or SVN head.
 5. Post-build resolvers qualify cross-file targets, then `run_post_processing()` computes
    signatures, rebuilds the FTS index, traces flows, detects communities and refreshes
-   embeddings, unless skipped.
+   embeddings, unless skipped. An incremental update rewrites only the changed files'
+   FTS entries (`search.update_fts_index`); a full build rebuilds the index.
 
 ### Incremental update (`incremental.incremental_update()`)
 1. `get_changed_files()` asks the VCS for changed paths (git diff by default; SVN is
@@ -131,7 +132,8 @@ Python-side traversal instead.
 
 One SQLite database, `.code-review-graph/graph.db`, in WAL mode so readers are not blocked
 during updates. Tables: `nodes`, `edges`, `metadata`, `flows`, `flow_memberships`,
-`communities`, `nodes_fts` (FTS5), `community_summaries`, `flow_snapshots`, `risk_index`, and
+`communities`, `nodes_fts` (FTS5), `nodes_fts_state`, `community_summaries`,
+`flow_snapshots`, `risk_index`, and
 `embeddings` (created by `EmbeddingStore` in the same file). Columns, indexes and the
 migration history are in [schema.md](schema.md).
 

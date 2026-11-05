@@ -1,6 +1,7 @@
 """Tests for the graph storage and query engine."""
 
 import logging
+import os
 import sqlite3
 import tempfile
 import time
@@ -9,7 +10,12 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import code_review_graph.constants as constants_module
-from code_review_graph.graph import GraphStore
+from code_review_graph.errors import GraphStoreError
+from code_review_graph.graph import (
+    CorruptGraphDatabaseError,
+    GraphStore,
+    discard_corrupt_database,
+)
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
@@ -1449,3 +1455,129 @@ class TestPythonDottedModuleImportEvidence:
 
         assert self.store.resolve_bare_tested_by_sources() == 0
         assert self._endpoints("TESTED_BY") == [("compute_total", test_qn)]
+
+
+class TestUnusableDatabaseRecovery:
+    """A restored CI cache that cannot be opened must still be recoverable.
+
+    Two shapes reach ``GraphStore.__init__``: a file SQLite cannot read at
+    all, and a perfectly valid SQLite file whose tables are the wrong shape.
+    ``_init_schema`` uses ``CREATE TABLE IF NOT EXISTS``, so the second is
+    never repaired in place -- without a classification the command dies with
+    a traceback and every run stays red until someone clears the cache by
+    hand, which is the failure the recovery path exists to end.
+    """
+
+    def test_not_a_database_is_classified(self, tmp_path):
+        db = tmp_path / "graph.db"
+        db.write_bytes(b"this is not a sqlite database")
+        with pytest.raises(CorruptGraphDatabaseError):
+            GraphStore(db)
+
+    def test_valid_sqlite_with_the_wrong_tables_is_classified(self, tmp_path):
+        """The file is readable SQLite; only its ``nodes`` table is foreign."""
+        db = tmp_path / "graph.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, junk TEXT)")
+        conn.commit()
+        conn.close()
+        assert db.read_bytes()[:16] == b"SQLite format 3\x00", "fixture must be SQLite"
+        with pytest.raises(CorruptGraphDatabaseError):
+            GraphStore(db)
+
+    def test_discarding_it_makes_the_next_open_succeed(self, tmp_path):
+        """Teeth for the check above: recovery, not merely a nicer error."""
+        db = tmp_path / "graph.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, junk TEXT)")
+        conn.commit()
+        conn.close()
+        with pytest.raises(CorruptGraphDatabaseError):
+            GraphStore(db)
+        assert discard_corrupt_database(db) is True
+        store = GraphStore(db)
+        try:
+            assert store.get_stats().total_nodes == 0
+        finally:
+            store.close()
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
+    @pytest.mark.skipif(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        reason="root ignores the read-only bits this test relies on",
+    )
+    def test_a_readonly_database_is_not_classified(self, tmp_path):
+        """Never discard a healthy graph over an environment problem.
+
+        A read-only checkout raises ``sqlite3.OperationalError`` from the
+        same ``__init__`` block as a mis-shaped schema. Classifying it as
+        unusable would send ``build`` to ``discard_corrupt_database`` and
+        destroy a graph that was never broken.
+
+        It is still reported rather than raised raw: the permission failure
+        is one the tool understands about itself, so it arrives as a
+        ``GraphStoreError`` naming the directory to fix. What must never
+        happen is the *corrupt* classification, which is what the assertion
+        below pins.
+        """
+        db = tmp_path / "graph.db"
+        GraphStore(db).close()
+        before = db.read_bytes()
+        db.chmod(0o444)
+        tmp_path.chmod(0o555)
+        try:
+            with pytest.raises(GraphStoreError) as caught:
+                GraphStore(db)
+            assert not isinstance(caught.value, CorruptGraphDatabaseError), caught.value
+            assert str(tmp_path) in str(caught.value)
+        finally:
+            tmp_path.chmod(0o755)
+            db.chmod(0o644)
+        assert db.read_bytes() == before, "the database was touched"
+
+    def test_classifiers_reject_an_environment_error_message(self, tmp_path):
+        """The narrow half of the classification, at the unit it lives in.
+
+        A healthy graph under load, on a read-only checkout, on a failing
+        disk, or migrated by two processes at once produces an
+        ``OperationalError`` from the same block as a mis-shaped schema.
+        None of them may reach ``discard_corrupt_database``.
+        """
+        from code_review_graph.graph import (
+            _has_incompatible_schema,
+            _is_unreadable_database,
+        )
+
+        db = tmp_path / "graph.db"
+        GraphStore(db).close()
+        messages = (
+            "database is locked",
+            "attempt to write a readonly database",
+            "disk I/O error",
+            # Both of these mean two processes migrated the same healthy
+            # database at once: every migration checks before it alters, so
+            # neither can be produced by a database that is actually wrong.
+            "duplicate column name: signature",
+            "table communities already exists",
+        )
+        for message in messages:
+            exc = sqlite3.OperationalError(message)
+            assert not _is_unreadable_database(db, exc), message
+            assert not _has_incompatible_schema(db, exc), message
+
+    def test_a_schema_message_about_an_unreadable_file_is_not_a_schema_problem(
+        self, tmp_path
+    ):
+        """Both halves of the schema check are load-bearing.
+
+        The message alone must not be enough: a file that cannot answer a
+        read of ``sqlite_master`` is a corrupt file, and is reported as one
+        by the other classifier rather than as a mis-shaped schema.
+        """
+        from code_review_graph.graph import _has_incompatible_schema
+
+        db = tmp_path / "graph.db"
+        db.write_bytes(b"this is not a sqlite database")
+        assert not _has_incompatible_schema(
+            db, sqlite3.OperationalError("no such column: file_path")
+        )

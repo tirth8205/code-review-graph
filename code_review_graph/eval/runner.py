@@ -19,6 +19,7 @@ from code_review_graph.eval.benchmarks import (
     build_performance,
     flow_completeness,
     impact_accuracy,
+    incremental_fidelity,
     multi_hop_retrieval,
     search_quality,
     token_efficiency,
@@ -34,6 +35,7 @@ BENCHMARK_REGISTRY = {
     "build_performance": build_performance.run,
     "multi_hop_retrieval": multi_hop_retrieval.run,
     "agent_baseline": agent_baseline.run,
+    "incremental_fidelity": incremental_fidelity.run,
 }
 
 CONFIGS_DIR = Path(__file__).parent / "configs"

@@ -1,0 +1,366 @@
+# The release gate. Runs when code lands on `testing`, which is the branch a
+# release is cut from, so nothing reaches `main` unverified.
+#
+# It deliberately does NOT run on pull requests. Every job here is slow by
+# design. They install released wheels from PyPI, build distribution artefacts,
+# clone eight third-party repositories and rebuild one corpus nine times, and
+# making a contributor wait an hour for a one-line fix would buy nothing. The per-PR checks in ci.yml stay as they are.
+#
+# Two outcomes, decided per check in scripts/promotion_gate.py and explained in
+# CONTRIBUTING.md:
+#   blocks:  a failure means do not promote `testing` to `main`.
+#   reports: a failure is recorded and surfaced, but does not hold a release.
+#
+# The run posts one summary to the job summary and to the tracking issue. It
+# opens no pull request: promoting to `main` stays the maintainer's decision.
+name: Promotion gate
+
+on:
+  push:
+    branches: [testing]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One gate run per branch at a time. Never cancel a run in progress: each
+# landing on `testing` deserves its own verdict, and a cancelled run is
+# reported as "did not run", not as a pass.
+concurrency:
+  group: promotion-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # ---------------------------------------------------------------- blocking
+  upgrade-path:
+    name: Upgrade from released versions (blocks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The corpus is this repository's own tree exported at each release
+          # tag, so the tags have to be here.
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run the upgrade-path check
+        env:
+          CRG_UPGRADE_TEST: "1"
+        run: >-
+          python scripts/promotion_gate.py run
+          --check upgrade-path
+          --out "gate/upgrade-path.json"
+          -- -m upgrade -q -rxX --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-upgrade-path
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  packaging:
+    name: Wheel and sdist from a clean install (blocks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      # The floor test installs the wheel on the oldest supported interpreter.
+      # Putting 3.10 on PATH first means it is there as `python3.10` while the
+      # job itself runs on 3.12; without it that one test skips.
+      - name: Set up the Python floor
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run the packaging check
+        run: >-
+          python scripts/promotion_gate.py run
+          --check packaging
+          --out "gate/packaging.json"
+          -- tests/test_packaging.py -m packaging -q --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-packaging
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  determinism:
+    name: Rebuild determinism (blocks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run the determinism check
+        run: >-
+          python scripts/promotion_gate.py run
+          --check determinism
+          --out "gate/determinism.json"
+          -- -m determinism -q -rxX --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-determinism
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  suite:
+    name: Full suite with coverage ${{ matrix.python-version }} (blocks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]" pytest-cov
+      # The release checks are excluded by name rather than left to the opt-in
+      # hooks in tests/conftest.py. Four branches add one of those hooks each,
+      # and a merge that drops one would otherwise turn this job into an hour
+      # of cloning. They run in their own jobs above.
+      - name: Run the full suite
+        run: >-
+          python scripts/promotion_gate.py run
+          --check suite
+          --variant "${{ matrix.python-version }}"
+          --out "gate/suite-${{ matrix.python-version }}.json"
+          -- --tb=short -q
+          -m "not browser and not upgrade and not packaging and not corpus and not determinism"
+          --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-suite-${{ matrix.python-version }}
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  e2e:
+    name: End-to-end MCP client ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # The Windows leg reports instead of blocking: process spawning and file
+    # handle timing there is the flakiest surface in this repository. Linux and
+    # macOS block.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run the end-to-end MCP client tests
+        shell: bash
+        run: >-
+          python scripts/promotion_gate.py run
+          --check e2e
+          --variant "${{ matrix.os }}"
+          --out "gate/e2e-${{ matrix.os }}.json"
+          ${{ matrix.os == 'windows-latest' && '--always-pass' || '' }}
+          -- -m e2e -q --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-e2e-${{ matrix.os }}
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # --------------------------------------------------------------- reporting
+  corpus:
+    name: Pinned real-repository corpus (reports)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      # Keeping the shallow clones between runs is the one thing that makes
+      # this check less likely to fail for a reason that is not ours. The key
+      # holds the pinned SHAs, so a re-pin fetches fresh.
+      - name: Cache the pinned clones
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/corpus-cache
+          key: corpus-clones-${{ hashFiles('tests/corpus_baselines.json') }}
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run the corpus check
+        env:
+          CRG_CORPUS_CACHE: ${{ runner.temp }}/corpus-cache
+        run: >-
+          python scripts/promotion_gate.py run
+          --check corpus
+          --always-pass
+          --out "gate/corpus.json"
+          -- -m corpus -q --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-corpus
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  browser:
+    name: Visualization in a real browser (reports)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev,browser-test]"
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      # No coverage flag: a handful of end-to-end page tests would fail the
+      # 65% floor on their own.
+      - name: Run the browser tests
+        run: >-
+          python scripts/promotion_gate.py run
+          --check browser
+          --always-pass
+          --out "gate/browser.json"
+          -- -m browser -q --tb=short
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gate-result-browser
+          path: gate/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ------------------------------------------------------------------ report
+  report:
+    name: Gate result
+    needs: [upgrade-path, packaging, determinism, suite, e2e, corpus, browser]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: gate-result-*
+          merge-multiple: true
+          path: gate-results
+      # A job that timed out or was cancelled uploads nothing. Feeding the
+      # needs context in means the summary says "did not run" for it instead
+      # of quietly leaving it out, which would read as a clean gate.
+      - name: Record the job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: printf '%s' "$NEEDS" > "$RUNNER_TEMP/needs.json"
+      - name: Collate every check into one report
+        id: report
+        run: |
+          # summarize exits 1 when a blocking check did not pass. The report
+          # still has to reach the job summary and the tracking issue, so the
+          # verdict is carried to the last step rather than failing here.
+          set +e
+          python scripts/promotion_gate.py summarize \
+            --results gate-results \
+            --needs "$RUNNER_TEMP/needs.json" \
+            --out "$RUNNER_TEMP/report.md" \
+            --sha "$GITHUB_SHA" \
+            --ref "$GITHUB_REF_NAME" \
+            --event "$GITHUB_EVENT_NAME" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+      - name: Publish to the job summary
+        run: cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish to the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "Promotion gate: testing to main"
+        run: |
+          gh label create promotion-gate --force --color 0E8A16 \
+            --description "Release gate results for testing to main" >/dev/null
+          number=$(gh issue list --state open --label promotion-gate --limit 1 \
+            --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            url=$(gh issue create --title "$TITLE" --label promotion-gate \
+              --body-file "$RUNNER_TEMP/report.md")
+            echo "::notice::opened the tracking issue at $url"
+          else
+            # Body first so the top of the issue is always the current state,
+            # then a comment so the history is readable.
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/report.md" >/dev/null
+            gh issue comment "$number" --body-file "$RUNNER_TEMP/report.md" >/dev/null
+            echo "::notice::updated tracking issue #$number"
+          fi
+      - name: Fail when a blocking check did not pass
+        if: steps.report.outputs.code != '0'
+        run: |
+          echo "::error::a blocking check did not pass; do not promote testing to main"
+          exit 1

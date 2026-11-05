@@ -12,18 +12,22 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from code_review_graph.changes import parse_git_diff_ranges
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _commit_object_exists,
     collect_all_files,
+    discover_review_changes,
     full_build,
     get_all_tracked_files,
     get_changed_files,
@@ -152,6 +156,108 @@ def test_get_staged_and_unstaged_expands_new_untracked_directories(
     assert get_staged_and_unstaged(git_repo_with_unicode_path) == [
         "new/nested.py",
     ]
+
+
+def test_a_wholly_new_directory_reaches_every_review_tool(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Against real git: the case the scoped walk silently deleted.
+
+    ``--untracked-files=normal`` is cheaper -- it does not stat below an
+    untracked directory -- but git then reports that directory as one ``new/``
+    record with no files in it. Discovery would have handed review tools an
+    empty list and ``status: ok``. This test is the reason the walk stays at
+    ``all``: a repository whose only change is a brand-new package must not
+    review as a clean tree.
+    """
+    _git_ok(git_repo_with_unicode_path, "commit", "--allow-empty", "-m", "empty")
+    nested = git_repo_with_unicode_path / "new" / "nested.py"
+    nested.parent.mkdir()
+    nested.write_text("value = 1\n", encoding="utf-8")
+
+    # git itself collapses it; the fix is not to consume that collapsed view.
+    collapsed = _git(
+        git_repo_with_unicode_path,
+        "status", "--porcelain", "--untracked-files=normal",
+    ).stdout
+    assert "new/\n" in collapsed and "nested.py" not in collapsed
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+    assert files == ["new/nested.py"]
+
+
+def test_a_new_package_is_visible_to_every_review_tool(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """The regression, checked where a user would actually meet it.
+
+    A repository whose only change is an uncommitted new package, reviewed
+    through the four MCP tools against real git. Checking
+    ``get_staged_and_unstaged`` alone was not enough: the drop that erased
+    these files lived one layer below the tools, and every tool's own test
+    passed while every tool returned nothing.
+    """
+    from code_review_graph.incremental import full_build, get_db_path
+    from code_review_graph.tools.query import get_impact_radius
+    from code_review_graph.tools.review import (
+        detect_changes_func,
+        get_affected_flows_func,
+        get_review_context,
+    )
+
+    repo = git_repo_with_unicode_path
+    store = GraphStore(get_db_path(repo))
+    try:
+        full_build(repo, store)
+    finally:
+        store.close()
+    # An empty commit makes `git diff HEAD~1` empty, which is the branch that
+    # sends discovery to the working-tree walk.
+    _git_ok(repo, "commit", "--allow-empty", "-m", "empty")
+    (repo / "newfeature").mkdir()
+    (repo / "newfeature" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "newfeature" / "api.py").write_text(
+        "def handler():\n    return 1\n", encoding="utf-8",
+    )
+
+    expected = {"newfeature/__init__.py", "newfeature/api.py"}
+    assert expected <= set(discover_review_changes(repo, "HEAD~1")[0])
+
+    for func in (detect_changes_func, get_review_context, get_impact_radius,
+                 get_affected_flows_func):
+        result = func(repo_root=str(repo))
+        assert result["status"] == "ok", func.__name__
+        summary = result.get("summary", "")
+        assert "No changes detected" not in summary, func.__name__
+        assert "No changed files detected" not in summary, func.__name__
+
+
+def test_a_new_file_in_a_tracked_directory_reaches_discovery(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """The commonest "I added a file" shape, end to end."""
+    _git_ok(git_repo_with_unicode_path, "commit", "--allow-empty", "-m", "empty")
+    (git_repo_with_unicode_path / "brand_new_module.py").write_text(
+        "value = 1\n", encoding="utf-8",
+    )
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+    assert files == ["brand_new_module.py"]
+
+
+def test_discovery_reports_a_timeout_rather_than_a_clean_tree(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """A zero budget is the cheapest way to exhaust one deterministically.
+
+    Whatever the budget is, running out of it must never look like the
+    all-clear a review gate acts on (#262).
+    """
+    with pytest.raises(ChangeDiscoveryError) as excinfo:
+        with patch.dict(os.environ, {"CRG_DISCOVERY_TIMEOUT": "0"}):
+            discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+
+    assert "timed out" in str(excinfo.value)
 
 
 def test_get_staged_and_unstaged_uses_rename_destination(

@@ -1,5 +1,6 @@
 """Tests for multi-repo registry and connection pool."""
 
+import asyncio
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -439,8 +440,11 @@ class TestCrossRepoSearch:
         with patch.object(
             crg_main, "cross_repo_search_func", return_value={"status": "ok"}
         ) as mock_func:
-            cross_repo_search_tool(query="splash", repos=["android"])
-            cross_repo_search_tool(query="splash")
+            underlying = (
+                getattr(cross_repo_search_tool, "fn", None) or cross_repo_search_tool
+            )
+            asyncio.run(underlying(query="splash", repos=["android"]))
+            asyncio.run(underlying(query="splash"))
 
         forwarded = [call.kwargs["repos"] for call in mock_func.call_args_list]
         assert forwarded == [["android"], None]
