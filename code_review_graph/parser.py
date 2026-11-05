@@ -430,13 +430,44 @@ def _is_statically_false_condition(cond) -> bool:
     return False
 
 
+def _is_static_dead_guard_child(parent, child) -> bool:
+    """Return whether *child* enters a statically-dead branch of *parent*."""
+    if parent.type == "if_statement":
+        condition = parent.child_by_field_name("condition")
+        consequence = parent.child_by_field_name("consequence")
+        return (
+            condition is not None
+            and consequence is not None
+            and _is_statically_false_condition(condition)
+            and child.start_byte == consequence.start_byte
+            and child.end_byte == consequence.end_byte
+        )
+
+    if parent.type in ("preproc_if", "preproc_elif"):
+        condition = parent.child_by_field_name("condition")
+        if (
+            condition is None
+            or condition.type != "number_literal"
+            or condition.text != b"0"
+        ):
+            return False
+        alternative = parent.child_by_field_name("alternative")
+        return not (
+            alternative is not None
+            and child.start_byte == alternative.start_byte
+            and child.end_byte == alternative.end_byte
+        )
+
+    return False
+
+
 def _is_in_static_dead_guard(node) -> bool:
     """Return True if *node* sits in a statically-dead branch (non-Python).
 
-    Two independent ancestor walks:
+    Walk the ancestor chain once, checking each parent-child edge:
 
-    * A walk for Go / TS / JS ``if false`` / ``if (0)``.
-    * A walk for C/C++ ``#if 0`` / ``#elif 0``.
+    * Go / TS / JS ``if false`` / ``if (0)``.
+    * C/C++ ``#if 0`` / ``#elif 0``.
 
     Neither walk stops at a function or class boundary. A declaration
     nested inside a dead branch is never evaluated, so calls in its body
@@ -445,40 +476,13 @@ def _is_in_static_dead_guard(node) -> bool:
     JS/TS class declarations are not hoisted, so there is no reachable
     symbol to preserve either.
     """
-    # Go / TS / JS: ``if`` with a statically-false condition.
-    cursor = node.parent
-    while cursor is not None:
-        node_type = cursor.type
-        if node_type == "if_statement":
-            condition = cursor.child_by_field_name("condition")
-            consequence = cursor.child_by_field_name("consequence")
-            if (
-                condition is not None
-                and consequence is not None
-                and _is_statically_false_condition(condition)
-                and _node_is_in_child(node, consequence)
-            ):
-                return True
-        cursor = cursor.parent
-
-    # C / C++: ``#if 0`` / ``#elif 0`` preprocessor block.
-    preproc = node.parent
-    while preproc is not None:
-        if preproc.type in ("preproc_if", "preproc_elif"):
-            condition = preproc.child_by_field_name("condition")
-            if (
-                condition is not None
-                and condition.type == "number_literal"
-                and condition.text == b"0"
-            ):
-                alternative = preproc.child_by_field_name("alternative")
-                if not (
-                    alternative is not None
-                    and _node_is_in_child(node, alternative)
-                ):
-                    return True
-        preproc = preproc.parent
-
+    child = node
+    parent = child.parent
+    while parent is not None:
+        if _is_static_dead_guard_child(parent, child):
+            return True
+        child = parent
+        parent = parent.parent
     return False
 
 
@@ -1173,13 +1177,13 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "csharp": [
         "class_declaration", "interface_declaration",
         "enum_declaration", "struct_declaration",
-        "record_declaration", "record_struct_declaration",
+        "record_declaration",
     ],
     "ruby": ["class", "module"],
     "r": [],  # Classes detected via call pattern-matching, not AST node types
     "perl": ["package_statement", "class_statement", "role_statement"],
     "kotlin": ["class_declaration", "object_declaration"],
-    "swift": ["class_declaration", "struct_declaration", "protocol_declaration"],
+    "swift": ["class_declaration", "protocol_declaration"],
     "php": [
         "class_declaration", "interface_declaration",
         "trait_declaration", "enum_declaration",
@@ -1197,7 +1201,7 @@ _CLASS_TYPES: dict[str, list[str]] = {
     "luau": ["type_definition"],  # Luau type aliases; table-based OOP via constructs handler
     "objc": [
         "class_interface", "class_implementation",
-        "category_interface", "protocol_declaration",
+        "protocol_declaration",
     ],
     "bash": [],  # Shell has no classes
     # Elixir: `defmodule Name do ... end` is a ``call`` node whose first
@@ -1393,7 +1397,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "c": ["call_expression"],
     "cpp": ["call_expression"],
     "csharp": ["invocation_expression", "object_creation_expression"],
-    "ruby": ["call", "method_call"],
+    "ruby": ["call"],
     "r": ["call"],
     "perl": [
         "function_call_expression", "method_call_expression",
@@ -1429,7 +1433,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     # SuffixExpr); calls are walked explicitly in
     # _extract_zig_calls_in_subtree from inside function bodies.
     "zig": [],
-    "powershell": ["command_expression"],
+    "powershell": ["command"],
     "julia": [
         "call_expression",
         "broadcast_call_expression",
@@ -1522,6 +1526,7 @@ _TEST_HELPER_DIR_PATTERNS = [
 
 # Filename conventions.  Matched against the basename alone, so they hold
 # whatever the repository root is.
+_STORYBOOK_FILE_RE = re.compile(r"\.stories\.[jt]sx?$")
 _TEST_NAME_PATTERNS = [
     # Python: pytest/unittest stems plus conftest, which holds fixtures.
     re.compile(r"^test_.*\.py$"),
@@ -1529,6 +1534,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"^conftest\.py$"),
     # JavaScript / TypeScript.
     re.compile(r"\.(?:test|spec)\.[cm]?[jt]sx?$"),
+    # Storybook CSF files demonstrate components; they are not production callers.
+    _STORYBOOK_FILE_RE,
     # Go.
     re.compile(r"_test\.go$"),
     # Ruby.
@@ -3382,10 +3389,14 @@ class CodeParser:
     @staticmethod
     def _has_cpp_header_evidence(root) -> bool:
         """Return whether a parsed ``.h`` tree contains C++-only syntax."""
-        pending = [root]
+        # Carry dead-guard state down the tree.  Calling
+        # ``_is_in_static_dead_guard`` for every node repeatedly walks the
+        # nested ``preproc_elif`` chain in large generated headers, making
+        # this scan quadratic in the number of branches.
+        pending = [(root, False)]
         while pending:
-            node = pending.pop()
-            if node.type == "ERROR" or _is_in_static_dead_guard(node):
+            node, in_dead_guard = pending.pop()
+            if node.type == "ERROR" or in_dead_guard:
                 continue
 
             previous = node.prev_named_sibling
@@ -3409,7 +3420,11 @@ class CodeParser:
                 and node.text in _CPP_HEADER_EVIDENCE_QUALIFIERS
             ):
                 return True
-            pending.extend(node.named_children)
+            for child in node.named_children:
+                pending.append((
+                    child,
+                    in_dead_guard or _is_static_dead_guard_child(node, child),
+                ))
         return False
 
     @staticmethod
@@ -11658,6 +11673,12 @@ class CodeParser:
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
         # protocol uses its own protocol_declaration node type.
         extra: dict = {}
+        # TypeScript interfaces and type aliases share kind Class but have no
+        # runtime body, so changes.py must not report them as test gaps (#1109).
+        if language in ("typescript", "tsx") and child.type in (
+            "interface_declaration", "type_alias_declaration",
+        ):
+            extra["typescript_kind"] = child.type
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
