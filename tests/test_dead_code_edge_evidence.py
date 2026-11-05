@@ -121,6 +121,66 @@ def test_parsed_elixir_modules_with_internal_calls_are_not_dead(tmp_path):
         assert "MyApp.Accounts" not in dead_classes
 
 
+def test_member_call_keeps_class_whose_name_ends_in_a_sigma_alive(tmp_path):
+    # "\u039f\u03a3".lower() ends in a final sigma, but inside "\u039f\u03a3.run"
+    # it lowers to an inner one, so full case folding lost this match.
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "\u039f\u03a3", kind="Class")
+        _edge(store, "CALLS", "/repo/app.py::caller", "\u039f\u03a3.run", "/repo/app.py")
+        store.commit()
+        assert "\u039f\u03a3" not in _dead_names(store)
+
+
+def test_non_ascii_case_is_not_folded_for_member_calls(tmp_path):
+    # SQLite LIKE folds ASCII only, so these are two different names.
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "\u00d6l\u00e7er", kind="Class")
+        _edge(store, "CALLS", "/repo/app.py::caller", "\u00f6l\u00e7er.run", "/repo/app.py")
+        store.commit()
+        assert "\u00d6l\u00e7er" in _dead_names(store)
+
+
+def test_non_ascii_case_is_not_folded_for_suffix_calls(tmp_path):
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "\u00d6l\u00e7er")
+        _edge(store, "CALLS", "/repo/app.py::caller", "pkg::\u00f6l\u00e7er", "/repo/app.py")
+        store.commit()
+        assert "\u00d6l\u00e7er" in _dead_names(store)
+
+
+def test_ascii_case_in_a_non_ascii_name_is_still_folded(tmp_path):
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "\u00d6lcer", kind="Class")
+        _edge(store, "CALLS", "/repo/app.py::caller", "\u00d6LCER.run", "/repo/app.py")
+        store.commit()
+        assert "\u00d6lcer" not in _dead_names(store)
+
+
+def test_story_file_stays_in_the_import_graph(tmp_path):
+    # Stories prove no use, but a file reached through one is still reachable:
+    # use.py imports the story, the story imports one.py.
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "helper", file="/repo/one.py")
+        _node(store, "helper", file="/repo/two.py")
+        _node(store, "caller", file="/repo/use.py")
+        _edge(store, "CALLS", "/repo/use.py::caller", "helper", "/repo/use.py")
+        _edge(store, "IMPORTS_FROM", "/repo/use.py", "/repo/Comp.stories.ts", "/repo/use.py")
+        _edge(store, "IMPORTS_FROM", "/repo/Comp.stories.ts", "/repo/one.py",
+              "/repo/Comp.stories.ts")
+        store.commit()
+        dead = find_dead_code(store)
+        assert {d["file_path"] for d in dead if d["name"] == "helper"} == {"/repo/two.py"}
+
+
+def test_story_call_is_still_not_liveness_evidence(tmp_path):
+    with GraphStore(tmp_path / "g.db") as store:
+        _node(store, "helper")
+        _edge(store, "CALLS", "/repo/Comp.stories.ts::story", "/repo/app.py::helper",
+              "/repo/Comp.stories.ts")
+        store.commit()
+        assert "helper" in _dead_names(store)
+
+
 # --- evidence sources the per-candidate queries consulted -------------------
 
 

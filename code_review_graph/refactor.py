@@ -1901,6 +1901,21 @@ def _collect_type_referenced_names(store: GraphStore) -> set[str]:
     return names
 
 
+_ASCII_FOLD = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz",
+)
+
+
+def _ascii_fold(text: str) -> str:
+    """Fold case the way SQLite ``LIKE`` does: ASCII letters only.
+
+    ``str.lower`` also folds other scripts, which merges distinct names and,
+    because a final sigma lowers differently from an inner one, can make
+    ``"\u039f\u03a3"`` miss itself inside ``"\u039f\u03a3.run"``.
+    """
+    return text.lower() if text.isascii() else text.translate(_ASCII_FOLD)
+
+
 def find_dead_code(
     store: GraphStore,
     kind: Optional[str] = None,
@@ -1978,7 +1993,7 @@ def find_dead_code(
     suffix_call_files: dict[str, set[str]] = {}
     tested_files: dict[str, set[str]] = {}
     member_call_names: set[str] = set()
-    class_names = {node.name.lower() for node in candidates if node.kind == "Class"}
+    class_names = {_ascii_fold(node.name) for node in candidates if node.kind == "Class"}
     max_class_name_length = max(map(len, class_names), default=0)
     class_bases: dict[str, list[str]] = {}
     base_targets: dict[str, set[str]] = {}
@@ -1990,6 +2005,13 @@ def find_dead_code(
         "WHERE e.kind IN ('CALLS', 'TESTED_BY', 'IMPORTS_FROM', 'INHERITS', 'REFERENCES')"
     ):
         edge_kind, source, target, file_path, language = row
+        # The class hierarchy and import graph describe the code, not its use,
+        # so a story still counts here. Only liveness evidence skips stories.
+        if edge_kind == "INHERITS":
+            class_bases.setdefault(source, []).append(target.rsplit("::", 1)[-1])
+            base_targets.setdefault(source, set()).add(target)
+        elif edge_kind == "IMPORTS_FROM":
+            importer_files.setdefault(file_path, set()).add(target)
         if _STORYBOOK_FILE_RE.search(file_path):
             continue
         incoming_kinds.setdefault(target, set()).add(edge_kind)
@@ -1998,7 +2020,7 @@ def find_dead_code(
             bare_files_all.setdefault((edge_kind, target), set()).add(file_path)
         if edge_kind == "CALLS":
             if "::" in target:
-                suffix_call_files.setdefault(target.rsplit("::", 1)[-1].lower(), set()).add(
+                suffix_call_files.setdefault(_ascii_fold(target.rsplit("::", 1)[-1]), set()).add(
                     file_path,
                 )
             # Preserve the old substring heuristic: Widget. also matches
@@ -2006,7 +2028,7 @@ def find_dead_code(
             # Every dot can terminate a class name, including a dotted Elixir
             # module. Bound suffixes by candidate name length, so long file
             # paths do not create a quadratic set of irrelevant substrings.
-            lowered_target = target.lower()
+            lowered_target = _ascii_fold(target)
             for end, character in enumerate(lowered_target):
                 if character == ".":
                     member_call_names.update(
@@ -2016,12 +2038,6 @@ def find_dead_code(
                     )
         elif edge_kind == "TESTED_BY":
             tested_files.setdefault(source, set()).add(file_path)
-        elif edge_kind == "INHERITS":
-            base = target.rsplit("::", 1)[-1]
-            class_bases.setdefault(source, []).append(base)
-            base_targets.setdefault(source, set()).add(target)
-        elif edge_kind == "IMPORTS_FROM":
-            importer_files.setdefault(file_path, set()).add(target)
 
     def _bare_files(name: str, language: str, edge_kind: str = "CALLS") -> set[str]:
         languages = _compatible_edge_languages(language) if language else None
@@ -2216,7 +2232,7 @@ def find_dead_code(
         # ("Class::method"), or workspace-qualified ("pkg/dir::funcName").
         if "CALLS" not in incoming:
             bare_files = _bare_files(node.name, node.language or "")
-            suffix_files = suffix_call_files.get(node.name.lower(), set())
+            suffix_files = suffix_call_files.get(_ascii_fold(node.name), set())
             if any(_is_plausible_caller(file, node.file_path, node.name)
                    for file in bare_files | suffix_files):
                 incoming.add("CALLS")
@@ -2253,7 +2269,7 @@ def find_dead_code(
             or has_references or has_subclasses
         )
         if node.kind == "Class" and no_refs:
-            if node.name.lower() in member_call_names:
+            if _ascii_fold(node.name) in member_call_names:
                 has_callers = True
 
         if not (
