@@ -2716,3 +2716,17 @@ class TestJsGeneratorFunctions:
         sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
         assert sources["visit"] == f"{path.as_posix()}::walk"
         assert sources["load"] == f"{path.as_posix()}::app.items"
+
+    @pytest.mark.parametrize("value", [b"function* () { yield visit(); }", b"() => visit()"])
+    @pytest.mark.parametrize("function_first", [True, False])
+    def test_values_beside_a_function_keep_their_calls(self, value, function_first):
+        """A declaration that mixes a function and a value keeps the value's calls."""
+        parts = [b"walk = " + value, b"result = setup()"]
+        if not function_first:
+            parts.reverse()
+        path = Path("/test/gen.js")
+        nodes, edges = self.parser.parse_bytes(path, b"const " + b", ".join(parts) + b";\n")
+        assert {n.name for n in nodes if n.kind == "Function"} == {"walk"}
+        sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
+        assert sources["visit"] == f"{path.as_posix()}::walk"
+        assert sources["setup"] == path.as_posix()

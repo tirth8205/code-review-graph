@@ -10145,6 +10145,7 @@ class CodeParser:
         declaration, so the caller can skip generic recursion.
         """
         handled = False
+        other_declarators = []
         for declarator in child.children:
             if declarator.type != "variable_declarator":
                 continue
@@ -10159,6 +10160,7 @@ class CodeParser:
                     func_node = sub
 
             if not var_name or not func_node:
+                other_declarators.append(declarator)
                 continue
 
             is_test = _is_test_function(var_name, file_path, repo_root=self._repo_root)
@@ -10205,6 +10207,17 @@ class CodeParser:
         if not handled:
             # Not a function assignment — let generic recursion handle it
             return False
+        # The caller now skips this declaration, so walk the values beside the
+        # function here: ``const f = () => {}, x = setup();`` still calls setup.
+        for declarator in other_declarators:
+            self._extract_from_tree(
+                declarator, source, language, file_path, nodes, edges,
+                enclosing_class=enclosing_class,
+                enclosing_func=enclosing_func,
+                import_map=import_map,
+                defined_names=defined_names,
+                _depth=_depth + 1,
+            )
         return True
 
     def _extract_js_field_function(
