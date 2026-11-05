@@ -1063,6 +1063,7 @@ def get_changed_files(
     strict: bool = False,
     timeout: float | None = None,
     require_vcs: bool = False,
+    include_untracked: bool = True,
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
@@ -1095,6 +1096,8 @@ def get_changed_files(
             It is also what makes the short *timeout* above safe to use: a
             budget that is exhausted has to be reported, not rounded down to
             "no changes".
+        include_untracked: Add untracked files to a Git diff. Pass False to
+            learn whether the tracked diff alone is empty.
     """
     if timeout is None:
         timeout = _GIT_TIMEOUT
@@ -1138,6 +1141,8 @@ def get_changed_files(
             logger.warning("git diff failed while discovering changed files")
             return []
         changed = _decode_name_status_paths(result.stdout)
+        if not include_untracked:
+            return changed
         untracked = _get_untracked_files(
             repo_root,
             timeout=timeout,
@@ -1386,8 +1391,14 @@ def discover_review_changes(
     resolved_base = resolve_review_base(
         repo_root, base, timeout=budget, require_vcs=True,
     )
+    # Untracked files stay out of this check: they must not hide the fallback
+    # from a tracked edit that the diff against the base cannot see.
     changed = get_changed_files(
-        repo_root, resolved_base, timeout=budget, require_vcs=True,
+        repo_root,
+        resolved_base,
+        timeout=budget,
+        require_vcs=True,
+        include_untracked=False,
     )
     if not changed:
         changed = get_staged_and_unstaged(
@@ -1466,11 +1477,24 @@ def _get_untracked_files(
                     f"(rc={result.returncode})"
                 )
             return []
-        return [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
+        files = []
+        for raw_path in result.stdout.split(b"\0"):
+            if not raw_path:
+                continue
+            path = os.fsdecode(raw_path)
+            try:
+                path.encode("utf-8")
+            except UnicodeEncodeError:
+                # SQLite and the path checks cannot hold this name.
+                logger.debug("Skipping untracked path that is not UTF-8: %r", raw_path[:120])
+                continue
+            files.append(path)
+        return files
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
         return []
+
 
 def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     """Return SVN-versioned files by walking the working copy.

@@ -2122,6 +2122,7 @@ class TestDiscoverReviewChanges:
 
         def fake_changed(
             root, base, *, timeout=None, strict=False, require_vcs=False,
+            include_untracked=True,
         ):
             seen["changed"] = (base, timeout, require_vcs)
             return []

@@ -183,6 +183,42 @@ def test_discovery_keeps_unstaged_edits_when_base_does_not_resolve(
     assert set(files) == {"café.py", "new.py"}
 
 
+def test_discovery_keeps_tracked_edit_the_base_diff_cannot_see(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """An untracked file must not hide a file restored to its base contents."""
+    tracked = git_repo_with_unicode_path / "café.py"
+    original = tracked.read_text(encoding="utf-8")
+    tracked.write_text("value = 2\n", encoding="utf-8")
+    _git_ok(git_repo_with_unicode_path, "add", "café.py")
+    _git_ok(git_repo_with_unicode_path, "commit", "-m", "change")
+    tracked.write_text(original, encoding="utf-8")
+    (git_repo_with_unicode_path / "new.py").write_text("value = 3\n", encoding="utf-8")
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+
+    assert set(files) == {"café.py", "new.py"}
+
+
+def test_untracked_path_that_is_not_utf8_does_not_stop_a_build(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """A name Git reports as raw bytes is skipped; the build keeps going."""
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:3] == ["git", "ls-files", "--others"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=b"ok.py\0notes-\xff.py\0")
+        return real_run(cmd, **kwargs)
+
+    (git_repo_with_unicode_path / "ok.py").write_text("value = 1\n", encoding="utf-8")
+    with patch("code_review_graph.incremental.subprocess.run", side_effect=fake_run):
+        files = collect_all_files(git_repo_with_unicode_path)
+
+    assert "ok.py" in files
+    assert not [path for path in files if "notes-" in path]
+
+
 def test_get_staged_and_unstaged_expands_new_untracked_directories(
     git_repo_with_unicode_path: Path,
 ) -> None:
