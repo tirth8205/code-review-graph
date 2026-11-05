@@ -701,7 +701,13 @@ def get_review_context(
                 context["truncated"] = True
 
         # Generate review guidance
-        guidance = _generate_review_guidance(impact, changed_files, root, store)
+        # With nothing matched the graph knows nothing about this change, so
+        # the "well-contained" default would contradict risk="unknown".
+        guidance = (
+            _generate_review_guidance(impact, changed_files, root, store)
+            if graph_files
+            else "- None of these files are in the graph, so the blast radius is unknown."
+        )
         context["review_guidance"] = guidance
 
         summary_parts = [

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..graph import GraphStore
+from ..graph import GraphStore, _sanitize_name
 from ..incremental import find_project_root, get_db_path
 from ..parser import normalize_file_path
 
@@ -248,6 +248,7 @@ def _resolve_graph_file_paths_with_unmatched(
     resolved: list[str] = []
     unmatched: list[str] = []
     seen: set[str] = set()
+    unmatched_seen: set[str] = set()
 
     def add(path: str) -> None:
         if path not in seen:
@@ -282,8 +283,12 @@ def _resolve_graph_file_paths_with_unmatched(
             for matched_path in store.get_files_matching(suffix):
                 matched = True
                 add(matched_path)
-        if not matched and file_path not in unmatched:
-            unmatched.append(file_path)
+        if not matched and file_path not in unmatched_seen:
+            unmatched_seen.add(file_path)
+            # Reported back to the client, and an auto-detected path comes
+            # straight from the working tree, so it is untrusted text. It also
+            # lands in a line of the summary, so it may not start a new line.
+            unmatched.append(_sanitize_name(file_path).replace("\n", " "))
 
     return resolved, unmatched
 

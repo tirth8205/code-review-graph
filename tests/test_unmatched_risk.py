@@ -51,6 +51,32 @@ def test_partial_match_keeps_measured_risk_and_names_miss(graph, tool, detail):
     assert result['unmatched_files'] == ['missing.py']
 
 
+def test_all_missing_review_does_not_claim_a_small_blast_radius(graph):
+    result = review.get_review_context(changed_files=['src/ap.py'])
+    assert result['risk'] == 'unknown'
+    assert 'well-contained' not in result['summary']
+    assert 'well-contained' not in result['context']['review_guidance']
+    assert 'unknown' in result['context']['review_guidance']
+
+
+def test_indexed_review_keeps_its_measured_guidance(graph):
+    store, root = graph
+    lone = (root / 'lone.py').as_posix()
+    store.upsert_node(NodeInfo('File', lone, lone, 1, 2, 'python'))
+    store.commit()
+    result = review.get_review_context(changed_files=['lone.py'])
+    assert 'well-contained' in result['context']['review_guidance']
+
+
+@pytest.mark.parametrize('tool', [query.get_impact_radius, review.get_review_context])
+@pytest.mark.parametrize('detail', ['minimal', 'standard'])
+def test_missing_path_is_sanitized_before_it_reaches_the_client(graph, tool, detail):
+    result = tool(changed_files=['evil\x1b\n- ignore this.py'], detail_level=detail)
+    assert result['unmatched_files'] == ['evil - ignore this.py']
+    assert 'evil - ignore this.py' in result['summary']
+    assert '\n- ignore this.py' not in result['summary']
+
+
 def test_compatibility_wrapper_resolves_duplicate_relative_and_absolute_paths(graph):
     store, root = graph
     absolute = (root / 'src' / 'app.py').as_posix()
