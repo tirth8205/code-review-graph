@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat >/dev/null || true; code-review-graph status",
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph status --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || echo 'Not a git repo, skipping'",
             "timeout": 10
           }
         ]
@@ -23,11 +23,11 @@
         ]
       },
       {
-        "matcher": "Write|Edit|Bash",
+        "matcher": "Edit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "cat >/dev/null || true; code-review-graph update --skip-flows",
+            "command": "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0; git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update --skip-flows --repo \"$(git rev-parse --show-toplevel 2>/dev/null)\" || true",
             "timeout": 30
           }
         ]

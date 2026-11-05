@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -375,6 +376,82 @@ class TestShippedHooksFiles:
             assert command.startswith(self.STDIN_DRAIN), (
                 f"hooks.json command lacks the stdin drain prefix: {command!r}"
             )
+
+    def _shipped_hooks(self) -> dict:
+        data = json.loads((self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+        # Claude Code rejects a plugin hooks file with no top-level "hooks" key.
+        assert set(data) == {"hooks"}
+        return data["hooks"]
+
+    def test_hooks_json_update_hook_matches_edits_only(self):
+        """Matching Bash made ``git status`` run a full build with no graph."""
+        matchers = [entry["matcher"] for entry in self._shipped_hooks()["PostToolUse"]]
+        assert matchers == ["EnterWorktree", "Edit|Write"]
+
+    def test_hooks_json_commands_keep_the_generated_guards(self):
+        """The plugin hooks must guard like the hooks ``install`` writes (#549)."""
+        shipped = self._shipped_hooks()
+        generated = generate_hooks_config(Path("."))["hooks"]
+        assert (
+            shipped["SessionStart"][0]["hooks"][0]["command"]
+            == generated["SessionStart"][0]["hooks"][0]["command"]
+        )
+        assert (
+            shipped["PostToolUse"][1]["hooks"][0]["command"]
+            == generated["PostToolUse"][0]["hooks"][0]["command"]
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+    @pytest.mark.parametrize(
+        ("in_git", "cli", "called"),
+        [
+            pytest.param(True, None, False, id="cli-not-on-path"),
+            pytest.param(False, "exit 0", False, id="outside-git"),
+            pytest.param(True, "exit 7", True, id="cli-fails"),
+        ],
+    )
+    def test_hooks_json_commands_never_report_an_error(self, tmp_path, in_git, cli, called):
+        """Without the guards Claude Code shows a hook error on every event."""
+        git = shutil.which("git")
+        assert git is not None
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").symlink_to(git)
+        (bin_dir / "cat").symlink_to(shutil.which("cat"))
+        log = tmp_path / "cli.log"
+        if cli is not None:
+            fake = bin_dir / "code-review-graph"
+            fake.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n{cli}\n', encoding="utf-8")
+            fake.chmod(0o755)
+        work = tmp_path / "work"
+        work.mkdir()
+        if in_git:
+            subprocess.run([git, "init", "-q"], cwd=work, check=True)
+
+        shipped = self._shipped_hooks()
+        for command, expected in (
+            (shipped["SessionStart"][0]["hooks"][0]["command"], "status"),
+            (shipped["PostToolUse"][1]["hooks"][0]["command"], "update --skip-flows"),
+        ):
+            log.unlink(missing_ok=True)
+            proc = subprocess.run(
+                ["/bin/sh", "-c", command],
+                input="{}",
+                capture_output=True,
+                text=True,
+                cwd=work,
+                env={
+                    "PATH": str(bin_dir),
+                    "HOME": str(tmp_path),
+                    "GIT_CEILING_DIRECTORIES": str(tmp_path),
+                },
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stderr == ""
+            if called:
+                assert log.read_text(encoding="utf-8").startswith(expected)
+            else:
+                assert not log.exists()
 
     def test_session_start_script_drains_stdin(self):
         script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")

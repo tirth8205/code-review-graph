@@ -2,13 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- The Claude Code plugin's hooks load again. `hooks/hooks.json` held a bare
-  event map, which current Claude Code rejects with "hooks.json must have
-  `hooks` (the hook matchers) or `modules` (hooks modules), or both", so the
-  SessionStart and PostToolUse hooks never ran. The events now sit under a
-  top-level `"hooks"` key, the shape the plugins reference documents.
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing
@@ -24,6 +17,15 @@
 
 ### Fixed
 
+- The Claude Code plugin's hooks load again. `hooks/hooks.json` held a bare
+  event map, which current Claude Code rejects with "hooks.json must have
+  `hooks` (the hook matchers) or `modules` (hooks modules), or both", so the
+  SessionStart and PostToolUse hooks never ran. The events now sit under a
+  top-level `"hooks"` key, the shape the plugins reference documents. The hooks
+  carry the same guards as the ones `install` writes, so a missing
+  `code-review-graph`, a folder outside Git or a failed command shows no hook
+  error, and the update hook matches `Edit|Write` only, so a Bash command can no
+  longer start a full build in a repository with no graph.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
