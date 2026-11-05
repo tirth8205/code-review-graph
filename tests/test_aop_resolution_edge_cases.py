@@ -13,12 +13,13 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 import pytest
 
 import code_review_graph
-from code_review_graph.aop_resolver import resolve_aop_advice
+from code_review_graph.aop_resolver import _AspectjPattern, resolve_aop_advice
 from code_review_graph.event_resolver import resolve_spring_events
 from code_review_graph.flows import detect_entry_points
 from code_review_graph.graph import GraphStore
@@ -765,3 +766,137 @@ def test_pathological_double_dot_pointcut_resolves_in_bounded_time(tmp_path: Pat
         )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip().splitlines()[-1] == "0"
+
+
+# ---------------------------------------------------------------------------
+# Pointcut forms from the review of #916.
+# ---------------------------------------------------------------------------
+
+_PAYMENT_SERVICE = """\
+package com.acme.service;
+
+public class PaymentService {
+    public PaymentService() {}
+    @com.acme.Audited public void pay() {}
+    @Audited public void refund() {}
+    public void other() {}
+}
+"""
+
+_ALL_BUSINESS_METHODS = {"PaymentService.other", "PaymentService.pay", "PaymentService.refund"}
+
+
+def _advised(tmp_path: Path, argument: str, annotation: str = "@Before") -> set[str]:
+    aspect = f"""\
+package com.acme;
+
+@Aspect
+public class Probe {{
+    {annotation}({argument})
+    public void advice() {{}}
+    public void helper() {{}}
+}}
+"""
+    sources = {"PaymentService.java": _PAYMENT_SERVICE, "Probe.java": aspect}
+    _, store = _store_sources(tmp_path, sources)
+    with store:
+        resolve_aop_advice(store)
+        return {
+            qualified.rsplit("::", 1)[-1]
+            for _, qualified in _derived_calls(store)
+        }
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "com" + "..*" * 12 + ".zz",
+        "com..*a*a*a..*a*a*a..*a*a*a.zz",
+        "*a*a*a.*a*a*a.*a*a*b",
+        "*a" * 12 + "b",
+    ],
+)
+def test_hostile_patterns_finish_at_once(pattern: str) -> None:
+    subjects = [
+        "com." + ".".join(["a" * 20] * 12) + ".run",
+        "com." + ".".join(["a" * 8] * 30) + ".run",
+        "a" * 40,
+        ".".join(["a" * 40] * 3),
+    ]
+    matcher = _AspectjPattern(pattern)
+    started = time.monotonic()
+    for subject in subjects:
+        assert not matcher.match(subject)
+    assert time.monotonic() - started < 2.0
+
+
+def test_joined_string_literals_are_declined_not_read_in_part(tmp_path: Path) -> None:
+    argument = (
+        '"execution(* com.acme.service.*.*(..))" + " && @annotation(com.acme.Audited)"'
+    )
+    assert _advised(tmp_path, argument) == set()
+
+
+def test_fully_qualified_annotations_are_matched_by_simple_name(tmp_path: Path) -> None:
+    assert _advised(tmp_path, '"@annotation(com.acme.Audited)"') == {
+        "PaymentService.pay", "PaymentService.refund",
+    }
+
+
+def test_fully_qualified_advice_annotation_is_recognised(tmp_path: Path) -> None:
+    advised = _advised(
+        tmp_path,
+        '"execution(* com.acme.service.PaymentService.other(..))"',
+        annotation="@org.aspectj.lang.annotation.Before",
+    )
+    assert advised == {"PaymentService.other"}
+
+
+def test_universal_declaring_type_reaches_packaged_methods(tmp_path: Path) -> None:
+    assert _advised(tmp_path, '"execution(* *.*(..))"') == _ALL_BUSINESS_METHODS
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        (
+            '"execution (* com.acme.service.PaymentService.other(..))"',
+            {"PaymentService.other"},
+        ),
+        ('"@annotation (com.acme.Audited)"', {"PaymentService.pay", "PaymentService.refund"}),
+    ],
+)
+def test_space_before_the_designator_paren_is_accepted(
+    tmp_path: Path, argument: str, expected: set[str],
+) -> None:
+    assert _advised(tmp_path, argument) == expected
+
+
+def test_constructors_and_aspect_methods_are_not_targets(tmp_path: Path) -> None:
+    assert _advised(tmp_path, '"execution(* *(..))"') == _ALL_BUSINESS_METHODS
+
+
+@pytest.mark.parametrize(
+    "argument",
+    ['"execution(@com.acme.Audited * *(..))"', '"execution(!public * *(..))"'],
+)
+def test_qualifiers_the_name_pattern_cannot_see_are_declined(
+    tmp_path: Path, argument: str,
+) -> None:
+    assert _advised(tmp_path, argument) == set()
+
+
+def test_test_methods_are_not_targets(tmp_path: Path) -> None:
+    sources = {
+        "PaymentService.java": _PAYMENT_SERVICE,
+        "Probe.java": (
+            "package com.acme;\n@Aspect\npublic class Probe {\n"
+            '    @Before("execution(* *(..))") public void advice() {}\n}\n'
+        ),
+        "Cases.java": "package com.acme;\nclass Cases {\n    @Test void checks() {}\n}\n",
+    }
+    _, store = _store_sources(tmp_path, sources)
+    with store:
+        resolve_aop_advice(store)
+        targets = {qualified.rsplit("::", 1)[-1] for _, qualified in _derived_calls(store)}
+    assert targets == _ALL_BUSINESS_METHODS

@@ -1,9 +1,8 @@
 import json
-import re
 from pathlib import Path
 
 from code_review_graph.aop_resolver import (
-    _aspectj_pattern_to_regex,
+    _AspectjPattern,
     _parse_execution_expression,
     resolve_aop_advice,
 )
@@ -796,17 +795,17 @@ def test_incremental_annotation_removal_removes_stale_aop_call(tmp_path: Path) -
         assert _aop_edges(store) == []
 
 
-class TestAspectjPatternToRegex:
+class TestAspectjPattern:
     """Direct unit tests for the three documented conversion rules."""
 
     def test_literal_pattern_matches_only_itself(self) -> None:
-        pattern = re.compile("^" + _aspectj_pattern_to_regex("PaymentService") + "$")
+        pattern = _AspectjPattern("PaymentService")
         assert pattern.match("PaymentService")
         assert not pattern.match("PaymentServiceImpl")
         assert not pattern.match("paymentservice")
 
     def test_single_star_does_not_cross_a_dot_boundary(self) -> None:
-        pattern = re.compile("^" + _aspectj_pattern_to_regex("*Service") + "$")
+        pattern = _AspectjPattern("*Service")
         assert pattern.match("PaymentService")
         assert pattern.match("Service")
         assert not pattern.match("internal.Service")
@@ -816,7 +815,7 @@ class TestAspectjPatternToRegex:
         # whole dot-delimited segments, never arbitrary characters. A bare
         # ".*" would also match "comXService" and backtracks catastrophically
         # when repeated (see test_aop_resolution_edge_cases.py).
-        pattern = re.compile("^" + _aspectj_pattern_to_regex("com..Service") + "$")
+        pattern = _AspectjPattern("com..Service")
         assert pattern.match("com.Service")
         assert pattern.match("com.foo.Service")
         assert pattern.match("com.foo.bar.Service")
@@ -825,7 +824,7 @@ class TestAspectjPatternToRegex:
         assert not pattern.match("com..Service")
 
     def test_special_regex_characters_are_escaped(self) -> None:
-        pattern = re.compile("^" + _aspectj_pattern_to_regex("Foo$Bar") + "$")
+        pattern = _AspectjPattern("Foo$Bar")
         assert pattern.match("Foo$Bar")
         assert not pattern.match("FooXBar")
 
@@ -836,9 +835,8 @@ class TestParseExecutionExpression:
             "execution(* com.foo.service.PaymentService.*(..))"
         )
         assert result is not None
-        regex_str, needs_class = result
+        pattern, needs_class = result
         assert needs_class is True
-        pattern = re.compile(regex_str)
         # The full package.Class.method pattern is preserved — no longer
         # reduced to the last two segments (see module docstring / PR #916
         # review) — so it must be matched against the fully qualified
@@ -851,9 +849,8 @@ class TestParseExecutionExpression:
     def test_method_name_only_pattern_needs_class_false(self) -> None:
         result = _parse_execution_expression("execution(* *get*Index(..))")
         assert result is not None
-        regex_str, needs_class = result
+        pattern, needs_class = result
         assert needs_class is False
-        pattern = re.compile(regex_str)
         assert pattern.match("getUserIndex")
         assert not pattern.match("createUser")
 
@@ -871,9 +868,8 @@ class TestParseExecutionExpression:
             "execution(* com.foo.service.*.*(..))"
         )
         assert result is not None
-        regex_str, needs_class = result
+        pattern, needs_class = result
         assert needs_class is True
-        pattern = re.compile(regex_str)
         assert pattern.match("com.foo.service.PaymentService.pay")
         assert not pattern.match("com.foo.repo.UserRepo.repoMethod")
 
@@ -883,7 +879,6 @@ class TestParseExecutionExpression:
         # approximation artifact — so it resolves rather than being rejected.
         result = _parse_execution_expression("execution(* *(..))")
         assert result is not None
-        regex_str, needs_class = result
+        pattern, needs_class = result
         assert needs_class is False
-        pattern = re.compile(regex_str)
         assert pattern.match("anyMethodAtAll")
