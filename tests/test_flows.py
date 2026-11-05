@@ -13,7 +13,7 @@ from code_review_graph.flows import (
     trace_flows,
 )
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 
 
 class TestFlows:
@@ -172,14 +172,11 @@ class TestFlows:
         ep_names = {ep.name for ep in eps}
         assert "query_health" in ep_names
 
-    def test_detect_entry_points_java_override(self):
-        """@Override implements a supertype contract, so the contract is the caller.
+    def test_called_override_is_not_a_flow_root(self):
+        """``@Override`` stops a method reading as dead, not as mid-flow.
 
-        The base is frequently outside the graph — ``Object.hashCode``/``equals``/
-        ``toString`` live in the JDK — so no hierarchy walk can rescue the method
-        either. ``hashCode`` is given a caller here so that rule 1 (no incoming
-        CALLS) cannot carry the assertion on its own: the annotation is the only
-        thing that can make it an entry point.
+        Only dead-code needs it. As a flow root, every called override would add
+        a sub-path of a flow that already exists and push real roots out of the list.
         """
         self._add_func("entry_func")
         self._add_func(
@@ -191,7 +188,7 @@ class TestFlows:
         self._add_call("app.py::entry_func", "app.py::Widget.hashCode")
 
         eps = detect_entry_points(self.store)
-        assert "hashCode" in {ep.name for ep in eps}
+        assert "hashCode" not in {ep.name for ep in eps}
 
     def test_detect_entry_points_junit_lifecycle(self):
         """JUnit lifecycle methods are invoked by the runner, never explicitly.
@@ -216,23 +213,38 @@ class TestFlows:
         eps = {ep.name for ep in detect_entry_points(self.store)}
         assert {"setUp", "tearDown", "initAll", "cleanAll"} <= eps
 
-    def test_detect_entry_points_junit_test_annotation(self):
-        """@Test on a Java method, whose camelCase name carries no ``test`` prefix.
-
-        ``_matches_entry_name`` keys on a ``test``-prefixed name, which Java's
-        convention does not produce.
-        """
-        self._add_func("entry_func")
-        self._add_func(
-            "keepsItsId",
-            parent="WidgetCases",
-            language="java",
-            extra={"decorators": ["Test"]},
+    def test_detect_entry_points_parsed_junit_annotations(self):
+        """Forms read from real Java, which keep their package and arguments."""
+        source = (
+            b"package demo;\n"
+            b"class Cases {\n"
+            b"  @Test void plain() {}\n"
+            b"  @Test(expected = IllegalStateException.class) void withArgs() {}\n"
+            b"  @org.junit.jupiter.api.BeforeEach void qualified() {}\n"
+            b"  @BeforeMethod void testNg() {}\n"
+            b'  @DataProvider(name = "rows") Object[][] rows() { return null; }\n'
+            b"  @TestHelper void lookalike() {}\n"
+            b"  void caller() {\n"
+            b"    plain(); withArgs(); qualified(); testNg(); rows(); lookalike();\n"
+            b"  }\n"
+            b"}\n"
         )
-        self._add_call("app.py::entry_func", "app.py::WidgetCases.keepsItsId")
+        nodes, edges = CodeParser().parse_bytes(Path("Cases.java"), source)
+        for node in nodes:
+            self.store.upsert_node(node)
+        for edge in edges:
+            self.store.upsert_edge(edge)
+        self.store.commit()
 
-        eps = detect_entry_points(self.store)
-        assert "keepsItsId" in {ep.name for ep in eps}
+        kinds = {n.name: n.kind for n in nodes}
+        # The parser takes a bare @Test for a test, so it never reaches the pattern.
+        assert kinds["plain"] == "Test"
+        assert kinds["withArgs"] == "Function"
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"withArgs", "qualified", "testNg", "rows"} <= eps
+        assert "plain" not in eps
+        assert "lookalike" not in eps
 
     def test_override_pattern_is_anchored(self):
         """``^Override$`` must not match a decorator that merely contains it."""

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from code_review_graph.graph import GraphStore
+from code_review_graph.incremental import full_build
 from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 from code_review_graph.refactor import (
     REFACTOR_EXPIRY_SECONDS,
@@ -1168,3 +1169,29 @@ class TestFindDeadCodeJavaAnnotations:
     def test_a_genuinely_unreferenced_method_is_still_reported(self):
         """The fix must narrow the false positives, not silence the query."""
         assert "unusedHelper" in self._dead()
+
+    def test_annotation_forms_the_parser_really_stores(self, tmp_path):
+        """A real build keeps packages and arguments in the stored annotation."""
+        root = tmp_path.resolve()
+        (root / "Harness.java").write_text(
+            "package demo;\n"
+            "public class Harness {\n"
+            "  @java.lang.Override public String toString() { return null; }\n"
+            "  @Override public int hashCode() { return 1; }\n"
+            "  @org.junit.jupiter.api.BeforeEach void qualified() {}\n"
+            "  @Test(expected = IllegalStateException.class) void withArgs() {}\n"
+            "  @BeforeMethod void testNg() {}\n"
+            '  @DataProvider(name = "rows") Object[][] rows() { return null; }\n'
+            "  @Overridable void lookalike() {}\n"
+            "  void unusedHelper() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        with GraphStore(root / "graph.db") as store:
+            full_build(root, store)
+            dead = {d["name"] for d in find_dead_code(store, root=root)}
+
+        assert dead.isdisjoint(
+            {"toString", "hashCode", "qualified", "withArgs", "testNg", "rows"}
+        )
+        assert {"lookalike", "unusedHelper"} <= dead
