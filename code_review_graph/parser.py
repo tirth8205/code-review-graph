@@ -13040,15 +13040,19 @@ class CodeParser:
             self._emit_laravel_endpoint_nodes(
                 node, file_path, nodes, edges, namespace, imports,
             )
-        elif node.type == "member_call_expression" and eloquent_model:
-            self._emit_laravel_relationship_edge(
-                node,
-                file_path,
-                edges,
-                namespace,
-                imports,
-                enclosing_class,
-                enclosing_func,
+        elif node.type == "member_call_expression":
+            if eloquent_model:
+                self._emit_laravel_relationship_edge(
+                    node,
+                    file_path,
+                    edges,
+                    namespace,
+                    imports,
+                    enclosing_class,
+                    enclosing_func,
+                )
+            self._emit_laravel_endpoint_nodes(
+                node, file_path, nodes, edges, namespace, imports,
             )
 
         for child in node.children:
@@ -13274,7 +13278,8 @@ class CodeParser:
             return None
         if value.type not in ("string", "encapsed_string"):
             return None
-        return value.text.decode("utf-8", errors="replace")[1:-1]
+        text = value.text.decode("utf-8", errors="replace")[1:-1]
+        return re.sub(r"\\([\\'])", r"\1", text) if value.type == "string" else text
 
     @classmethod
     def _php_route_literal(cls, node) -> Optional[str]:
@@ -13344,6 +13349,12 @@ class CodeParser:
                         if part is None:
                             return None
                         prefix = self._join_spring_route(prefix, part)
+                    elif key == "controller":
+                        if values[1].type != "class_constant_access_expression":
+                            return None
+                        controller = self._php_class_constant_reference(values[1])
+                        if controller is None:
+                            return None
         return prefix, controller
 
     def _php_route_enclosing_groups(
@@ -13416,9 +13427,20 @@ class CodeParser:
         """Emit parse-time Laravel endpoints using Spring's node and edge shape."""
         if Path(file_path).parent.name != "routes":
             return
-        verb = self._php_route_facade_call(node, namespace, imports)
+        fluent_prefix, fluent_controller = "", None
+        if node.type == "member_call_expression":
+            # Route::middleware('auth')->get(...): the chain may carry settings.
+            name_node = node.child_by_field_name("name")
+            verb = name_node.text.decode("utf-8") if name_node is not None else None
+        else:
+            verb = self._php_route_facade_call(node, namespace, imports)
         if verb not in self._LARAVEL_ROUTE_VERBS or verb in {"resource", "apiResource"}:
             return
+        if node.type == "member_call_expression":
+            fluent = self._php_route_group_settings(node, namespace, imports)
+            if fluent is None:
+                return
+            fluent_prefix, fluent_controller = fluent
         args = self._php_route_arguments(node)
         path_index = 1 if verb == "match" else 0
         if len(args) <= path_index + 1:
@@ -13429,7 +13451,8 @@ class CodeParser:
         context = self._php_route_enclosing_groups(node, namespace, imports)
         if context is None:
             return
-        prefix, group_controller = context
+        prefix = self._join_spring_route(context[0], fluent_prefix)
+        group_controller = fluent_controller or context[1]
         handler = self._php_endpoint_handler(args[path_index + 1], group_controller)
         handler_value = next(
             (c for c in args[path_index + 1].children if c.is_named), None,
@@ -13455,9 +13478,21 @@ class CodeParser:
                         return
                     methods.append(method.upper())
         route = self._join_spring_route(prefix, path)
+        # ``->prefix()`` on the route wraps what the groups already built.
+        current = node
+        while (parent := current.parent) is not None and parent.type == "member_call_expression":
+            name_node = parent.child_by_field_name("name")
+            if name_node is not None and name_node.text == b"prefix":
+                own_args = self._php_route_arguments(parent)
+                part = self._php_route_literal(own_args[0]) if own_args else None
+                if part is None:
+                    return
+                route = self._join_spring_route(part, route)
+            current = parent
         handler_name = handler[1] if handler else "closure"
-        for index, method in enumerate(dict.fromkeys(methods)):
-            name = f"{handler_name}@Route[{node.start_byte}:{index}] {method} {route}"
+        for method in dict.fromkeys(methods):
+            # No position in the name: a line added above must not rename the node.
+            name = f"{handler_name}@Route {method} {route}"
             metadata = {"http_method": method, "route": route, "handler": handler_name}
             nodes.append(NodeInfo(
                 kind="Endpoint", name=name, file_path=file_path,

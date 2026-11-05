@@ -651,6 +651,112 @@ Route::group(['prefix' => "v$n"], fn () => Route::get('g', fn () => 1));
 
         assert [node for node in nodes if node.kind == "Endpoint"] == []
 
+    @staticmethod
+    def _endpoint_routes(nodes):
+        return [
+            (n.extra["http_method"], n.extra["route"]) for n in nodes if n.kind == "Endpoint"
+        ]
+
+    def test_laravel_endpoint_name_survives_a_line_added_above(self, tmp_path):
+        source = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+Route::get('/health', fn () => 'ok');
+Route::match(['get', 'post'], '/both', fn () => 'ok');
+"""
+        route_file = tmp_path / "routes/web.php"
+        parser = CodeParser(tmp_path)
+        before, _ = parser.parse_bytes(route_file, source)
+        after, _ = parser.parse_bytes(route_file, source.replace(b"<?php\n", b"<?php\n// note\n"))
+
+        names = [n.name for n in before if n.kind == "Endpoint"]
+        assert len(set(names)) == 3
+        assert names == [n.name for n in after if n.kind == "Endpoint"]
+
+    def test_laravel_single_quoted_escapes_are_decoded(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        controller = _write_php(repo / "app/Http/Controllers/ItemController.php")
+        source = rb"""<?php
+use Illuminate\Support\Facades\Route;
+Route::get('/it\'s', fn () => 1);
+Route::get('/full', 'App\\Http\\Controllers\\ItemController@index');
+Route::get('/single', 'App\Http\Controllers\ItemController@index');
+"""
+        nodes, edges = CodeParser(repo).parse_bytes(repo / "routes/web.php", source)
+
+        assert self._endpoint_routes(nodes) == [
+            ("GET", "/it's"), ("GET", "/full"), ("GET", "/single"),
+        ]
+        assert [e.source for e in edges if e.kind == "HANDLES"] == [
+            f"{controller.resolve().as_posix()}::ItemController.index",
+        ] * 2
+
+    def test_laravel_group_controller_attribute_overrides_the_outer_one(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        _write_php(repo / "app/Http/Controllers/ItemController.php")
+        other = _write_php(repo / "app/Http/Controllers/OtherController.php")
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ItemController;
+use App\Http\Controllers\OtherController;
+Route::controller(ItemController::class)->group(function () {
+    Route::group(['controller' => OtherController::class], function () {
+        Route::get('/inner', 'index');
+    });
+    Route::group(['controller' => $dynamic], function () {
+        Route::get('/dynamic', 'index');
+    });
+});
+"""
+        nodes, edges = CodeParser(repo).parse_bytes(repo / "routes/web.php", source)
+
+        assert self._endpoint_routes(nodes) == [("GET", "/inner")]
+        assert [e.source for e in edges if e.kind == "HANDLES"] == [
+            f"{other.resolve().as_posix()}::OtherController.index",
+        ]
+
+    def test_laravel_prefix_on_the_route_itself_is_applied(self, tmp_path):
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+Route::get('a', fn () => 1)->prefix('v1');
+Route::get('b', fn () => 1)->name('b')->prefix('v1')->prefix('v2');
+Route::prefix('api')->group(fn () => Route::get('c', fn () => 1)->prefix('v1'));
+Route::get('d', fn () => 1)->prefix($version);
+Route::get('e', fn () => 1)->prefix();
+Route::get('f', fn () => 1)->name('f')->middleware('auth');
+"""
+        nodes, _ = CodeParser(tmp_path).parse_bytes(tmp_path / "routes/web.php", source)
+
+        assert self._endpoint_routes(nodes) == [
+            ("GET", "/v1/a"), ("GET", "/v2/v1/b"), ("GET", "/v1/api/c"), ("GET", "/f"),
+        ]
+
+    def test_laravel_fluent_registration_emits_an_endpoint(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        controller = _write_php(repo / "app/Http/Controllers/ItemController.php")
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ItemController;
+Route::middleware('auth')->get('/a', [ItemController::class, 'index']);
+Route::prefix('api')->middleware('auth')->post('b', fn () => 1);
+Route::controller(ItemController::class)->prefix('api')->put('c', 'index');
+Route::prefix('outer')->group(fn () => Route::prefix('in')->delete('d', fn () => 1));
+Route::prefix($dynamic)->get('skip-prefix', fn () => 1);
+$router->get('skip-receiver', fn () => 1);
+$client->middleware('auth')->get('skip-chain', fn () => 1);
+Route::middleware('auth')->resource('skip-resource', ItemController::class);
+"""
+        nodes, edges = CodeParser(repo).parse_bytes(repo / "routes/web.php", source)
+
+        assert self._endpoint_routes(nodes) == [
+            ("GET", "/a"), ("POST", "/api/b"), ("PUT", "/api/c"), ("DELETE", "/outer/in/d"),
+        ]
+        assert [e.source for e in edges if e.kind == "HANDLES"] == [
+            f"{controller.resolve().as_posix()}::ItemController.index",
+        ] * 2
+
     def test_laravel_route_alias_resolves_grouped_controller_import(self, tmp_path):
         repo = tmp_path / "repo"
         _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})

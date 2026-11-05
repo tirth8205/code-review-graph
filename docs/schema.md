@@ -71,7 +71,8 @@ Columns as for Class.
 A synthesised routed entry point, emitted for Spring request mappings, WebFlux functional
 routes, and static Laravel routes in `routes/*.php`. Metadata includes `http_method`, `route`,
 and `handler`. Controller routes link to the handling method by a `HANDLES` edge. Laravel
-closures have an Endpoint without that edge; resource routes are not expanded yet.
+closures have an Endpoint without that edge; resource routes are not expanded yet, and a prefix
+set outside the routes file (`bootstrap/app.php`, `RouteServiceProvider`) is not seen.
 
 ### Scheduler
 A synthesised node for a `@Scheduled` method. Linked to the method it fires by a `TRIGGERS`
