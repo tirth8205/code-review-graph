@@ -81,6 +81,7 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # -----------------------------------------------------------------------
     java_kinds: dict[str, set[str]] = {}
     class_quals_by_type: dict[str, set[str]] = {}
+    types_by_simple_name: dict[str, set[str]] = {}
     for row in conn.execute(
         "SELECT name, qualified_name, extra FROM nodes "
         "WHERE kind = 'Class' AND language = 'java'"
@@ -92,8 +93,11 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         except (json.JSONDecodeError, TypeError):
             node_extra = {}
         package = node_extra.get("java_package")
-        java_type = f"{package}.{bare}" if isinstance(package, str) and package else bare
+        # The enclosing types belong to the identity: app.Outer.Sink is not app.Sink.
+        local_name = qual.split("::", 1)[-1]
+        java_type = f"{package}.{local_name}" if isinstance(package, str) and package else bare
         class_quals_by_type.setdefault(java_type, set()).add(qual)
+        types_by_simple_name.setdefault(bare, set()).add(java_type)
         java_kind = node_extra.get("java_kind")
         if isinstance(java_kind, str):
             java_kinds.setdefault(java_type, set()).add(java_kind)
@@ -200,6 +204,11 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             continue
         injected_type, java_type = injection
         type_key = java_type or injected_type
+        # A bare identity (wildcard import, older graph) names a repository type
+        # only when exactly one type carries that simple name.
+        same_name = types_by_simple_name.get(type_key, ())
+        if len(same_name) == 1:
+            type_key = next(iter(same_name))
 
         source_is_test = node_is_test.get(source_qual, False)
         kind_values = java_kinds.get(type_key)
@@ -208,11 +217,10 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
             # resolve through its historical bare-name indexes.
             kind_values = java_kinds.get(injected_type)
         java_kind = next(iter(kind_values)) if kind_values and len(kind_values) == 1 else None
-        impl_values = implementors.get(type_key)
-        if not impl_values and type_key != injected_type:
-            # Kotlin/Scala inheritance edges historically use bare names.  Use
-            # them only when the qualified Java identity has no candidates.
-            impl_values = implementors.get(injected_type)
+        # Kotlin/Scala edges and Java files with wildcard imports stay under the
+        # bare name, so they count alongside the qualified candidates: otherwise
+        # one Java implementor beside a Kotlin one would read as the only one.
+        impl_values = implementors.get(type_key, set()) | implementors.get(injected_type, set())
         impls = (
             sorted(impl_values or [])
             if java_kind is None or java_kind in {"interface", "abstract"}

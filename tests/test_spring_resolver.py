@@ -521,3 +521,98 @@ def test_java_kind_is_only_recorded_for_java():
     classes = [node for node in nodes if node.kind == "Class"]
     assert {node.name for node in classes} == {"Base", "Port"}
     assert not [node for node in classes if "java_kind" in node.extra]
+
+
+# ---------------------------------------------------------------------------
+# Type identity the package alone cannot settle (review of #1075).
+# ---------------------------------------------------------------------------
+
+_DEPS_SINK = "package deps;\npublic interface Sink { void emit(String event); }\n"
+
+
+def _kafka_sink(import_line: str) -> str:
+    return (
+        f"package app;\n{import_line}\n"
+        "public class KafkaSink implements Sink {\n"
+        "    public void emit(String event) { }\n"
+        "}\n"
+    )
+
+
+def _autowired_publisher(import_line: str) -> str:
+    return (
+        f"package app;\n{import_line}\n"
+        "import org.springframework.beans.factory.annotation.Autowired;\n"
+        "public class Publisher {\n"
+        "    @Autowired private Sink sink;\n"
+        "    public void publish(String event) { sink.emit(event); }\n"
+        "}\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("implementor_import", "publisher_import"),
+    [
+        ("import deps.*;", "import deps.Sink;"),
+        ("import deps.Sink;", "import deps.*;"),
+        ("import deps.*;", "import deps.*;"),
+    ],
+    ids=["implementor-wildcard", "publisher-wildcard", "both-wildcard"],
+)
+def test_wildcard_import_keeps_the_only_implementor(
+    tmp_path: Path, implementor_import: str, publisher_import: str,
+):
+    files = {
+        "src/main/java/deps/Sink.java": _DEPS_SINK,
+        "src/main/java/app/KafkaSink.java": _kafka_sink(implementor_import),
+        "src/main/java/app/Publisher.java": _autowired_publisher(publisher_import),
+    }
+    with _build_repo(tmp_path, files) as store:
+        assert _publisher_call_target(store).endswith("::KafkaSink.emit")
+
+
+def test_wildcard_import_with_two_same_named_types_stays_on_the_field_type(tmp_path: Path):
+    files = {
+        "src/main/java/deps/Sink.java": _DEPS_SINK,
+        "src/main/java/audit/Sink.java": (
+            "package audit;\npublic interface Sink { void emit(String event); }\n"
+        ),
+        "src/main/java/audit/AuditSink.java": (
+            "package audit;\n"
+            "public class AuditSink implements Sink { public void emit(String event) { } }\n"
+        ),
+        "src/main/java/app/Publisher.java": _autowired_publisher("import deps.*;"),
+    }
+    with _build_repo(tmp_path, files) as store:
+        assert _publisher_call_target(store).endswith("::Sink.emit")
+
+
+def test_java_and_kotlin_implementors_are_not_a_unique_choice(tmp_path: Path):
+    files = {
+        "src/main/java/app/Sink.java": _DEPS_SINK.replace("package deps", "package app"),
+        "src/main/java/app/KafkaSink.java": _kafka_sink(""),
+        "src/main/kotlin/app/KotlinSink.kt": (
+            "package app\nclass KotlinSink : Sink { override fun emit(event: String) {} }\n"
+        ),
+        "src/main/java/app/Publisher.java": _autowired_publisher(""),
+    }
+    with _build_repo(tmp_path, files) as store:
+        assert _publisher_call_target(store).endswith("/Sink.java::Sink.emit")
+
+
+def test_nested_interface_does_not_blur_a_concrete_top_level_homonym(tmp_path: Path):
+    files = {
+        "src/main/java/app/Sink.java": (
+            "package app;\npublic class Sink { public void emit(String event) { } }\n"
+        ),
+        "src/main/java/app/Outer.java": (
+            "package app;\npublic class Outer { public interface Sink { void other(); } }\n"
+        ),
+        "src/main/java/app/SubSink.java": (
+            "package app;\n"
+            "public class SubSink extends Sink { public void emit(String event) { } }\n"
+        ),
+        "src/main/java/app/Publisher.java": _autowired_publisher(""),
+    }
+    with _build_repo(tmp_path, files) as store:
+        assert _publisher_call_target(store).endswith("/Sink.java::Sink.emit")

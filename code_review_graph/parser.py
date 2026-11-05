@@ -1625,6 +1625,7 @@ _SPRING_SCHEDULED_ANNOTATIONS = frozenset({"Scheduled", "Schedules"})
 _SPRING_EVENT_LISTENER_ANNOTATIONS = frozenset({"EventListener"})
 _SPRING_EVENT_PUBLISH_METHODS = frozenset({"publishEvent"})
 _JAVA_PACKAGE_KEY = "__crg_java_package__"
+_JAVA_WILDCARD_KEY = "__crg_java_wildcard__"
 _SPRING_REQUEST_PREFIX_KEY = "__crg_spring_request_prefix__:"
 _JS_IMPORT_ORIGINAL_PREFIX_KEY = "__crg_js_import_original__:"
 # Marks a Python local name bound to a MODULE rather than to a symbol inside
@@ -10645,9 +10646,7 @@ class CodeParser:
                 "field_name": field_name,
             }
             if import_map is not None:
-                extra["java_type"] = self._resolve_java_type_identity(
-                    field_type, import_map,
-                )
+                extra["java_type"] = self._spring_java_type(field_type, import_map)
             edges.append(EdgeInfo(
                 kind="INJECTS",
                 source=qualified_source,
@@ -10688,9 +10687,7 @@ class CodeParser:
                     if param_name:
                         extra["field_name"] = param_name
                     if import_map is not None:
-                        extra["java_type"] = self._resolve_java_type_identity(
-                            param_type, import_map,
-                        )
+                        extra["java_type"] = self._spring_java_type(param_type, import_map)
                     edges.append(EdgeInfo(
                         kind="INJECTS",
                         source=qualified_source,
@@ -11151,6 +11148,14 @@ class CodeParser:
             if found:
                 return found
         return None
+
+    @classmethod
+    def _spring_java_type(cls, type_name: str, import_map: dict[str, str]) -> str:
+        """Identity of a type in Spring DI, bare when a wildcard hides its package."""
+        head = type_name.strip().partition(".")[0]
+        if import_map.get(_JAVA_WILDCARD_KEY) and head not in import_map:
+            return type_name.strip()
+        return cls._resolve_java_type_identity(type_name, import_map)
 
     @staticmethod
     def _resolve_java_type_identity(
@@ -11798,9 +11803,7 @@ class CodeParser:
         for base in bases:
             inheritance_extra = {}
             if language == "java" and import_map is not None:
-                inheritance_extra["java_type"] = self._resolve_java_type_identity(
-                    base, import_map,
-                )
+                inheritance_extra["java_type"] = self._spring_java_type(base, import_map)
             edges.append(EdgeInfo(
                 kind="INHERITS",
                 source=self._qualify(
@@ -15482,7 +15485,10 @@ class CodeParser:
             if not text.startswith("import "):
                 return
             imported = text[len("import "):].rstrip(";").strip()
-            if imported.startswith("static ") or imported.endswith(".*"):
+            if imported.startswith("static "):
+                return
+            if imported.endswith(".*"):
+                import_map[_JAVA_WILDCARD_KEY] = "1"
                 return
             original, separator, alias = imported.partition(" as ")
             local_name = alias.strip() if separator else original.rsplit(".", 1)[-1]
