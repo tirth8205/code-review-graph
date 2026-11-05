@@ -1638,12 +1638,14 @@ def test_windows_job_close_terminates_watcher_children(tmp_path):
     child_file = tmp_path / "children"
     child_code = "import time; time.sleep(60)"
     parent_code = (
-        "import pathlib, subprocess, sys, time\n"
+        "import os, pathlib, subprocess, sys, time\n"
         f"start = pathlib.Path({str(start_file)!r})\n"
         f"children = pathlib.Path({str(child_file)!r})\n"
         "while not start.exists():\n    time.sleep(0.01)\n"
         f"procs = [subprocess.Popen([sys.executable, '-c', {child_code!r}]) for _ in range(2)]\n"
-        "children.write_text('\\n'.join(str(proc.pid) for proc in procs))\n"
+        "partial = children.with_suffix('.tmp')\n"
+        "partial.write_text('\\n'.join(str(proc.pid) for proc in procs))\n"
+        "os.replace(partial, children)\n"
         "time.sleep(60)"
     )
     compile(parent_code, "<parent>", "exec")
@@ -1657,6 +1659,7 @@ def test_windows_job_close_terminates_watcher_children(tmp_path):
         while not child_file.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         child_pids = [int(pid) for pid in child_file.read_text().splitlines()]
+        assert len(child_pids) == 2
 
         job.close()
         process.wait(timeout=10)
