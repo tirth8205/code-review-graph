@@ -781,6 +781,9 @@ def _embedding_search(
     Returns list of ``(node_id, similarity_score)`` tuples.
     Gracefully returns an empty list if embeddings are not available.
     """
+    if store.read_only:
+        # EmbeddingStore creates and migrates its table when opened.
+        return []
     try:
         from .embeddings import EmbeddingStore
     except ImportError:

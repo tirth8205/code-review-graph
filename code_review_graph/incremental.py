@@ -24,7 +24,12 @@ from typing import Any, Callable, NamedTuple, Optional
 
 from .build_state import advance_to_postprocess_pending
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
-from .constants import discovery_timeout, env_float, env_int
+from .constants import (
+    discovery_timeout,
+    env_float,
+    env_int,
+    read_only_requested,
+)
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
 from .parser import CodeParser, normalize_file_path
@@ -492,10 +497,21 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
     ``read_only=True`` to resolve the current path without creating a data
     directory, migrating a legacy database, or deleting side-files.
     """
-    crg_dir = get_data_dir(repo_root, create=not read_only)
+    forced_read_only = read_only_requested()
+    no_writes = read_only or forced_read_only
+    crg_dir = get_data_dir(repo_root, create=not no_writes)
     new_db = crg_dir / "graph.db"
 
-    if read_only:
+    if no_writes:
+        legacy_db = repo_root / ".code-review-graph.db"
+        default_dir = repo_root / ".code-review-graph"
+        if (
+            forced_read_only
+            and not new_db.exists()
+            and legacy_db.is_file()
+            and crg_dir.resolve() == default_dir.resolve()
+        ):
+            return legacy_db
         return new_db
 
     # Migrate legacy database if present (only meaningful when the

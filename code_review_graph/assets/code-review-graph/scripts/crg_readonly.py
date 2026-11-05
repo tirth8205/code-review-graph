@@ -247,7 +247,12 @@ def main() -> int:
         print(f"CRG fallback unavailable: {exc}", file=sys.stderr)
         return 127
     try:
-        completed = subprocess.run(command, cwd=str(root), check=False)
+        completed = subprocess.run(
+            command,
+            cwd=str(root),
+            check=False,
+            env={**os.environ, "CRG_READ_ONLY": "1"},
+        )
     except (FileNotFoundError, OSError) as exc:
         print(f"CRG fallback unavailable: {exc}", file=sys.stderr)
         return 127
