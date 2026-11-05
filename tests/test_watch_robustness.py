@@ -973,10 +973,9 @@ class TestWatchLoop:
             ):
                 watch(repo, store)
             assert store.get_all_files() == ["/somewhere/else/mod.py"], "nothing was deleted"
-            # Started before startup reconciliation (PR #1108), and torn down
-            # again when it refuses the graph.
-            observer.return_value.stop.assert_called()
-            observer.return_value.join.assert_called()
+            # Refused before an observer exists, so no event can queue a batch
+            # against the wrong graph (PR #1108).
+            observer.assert_not_called()
         finally:
             store.close()
 
