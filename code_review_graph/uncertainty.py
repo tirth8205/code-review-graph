@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from .constants import GIT_TIMEOUT
 from .graph import _sanitize_name
+from .incremental import _load_ignore_patterns, _should_ignore
 from .parser import normalize_file_path
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -293,7 +294,7 @@ def _live_git_head(root: Path) -> str | None:
     return _read_live_git_head(root)
 
 
-def _untracked_sources(root: Path, store: GraphStore) -> int:
+def _untracked_sources(root: Path, store: GraphStore) -> int | None:
     """Count source files git has never seen, which the index cannot contain.
 
     ``update`` discovers changes through git, so a file that was never added
@@ -306,7 +307,8 @@ def _untracked_sources(root: Path, store: GraphStore) -> int:
     "Source" is calibrated from the graph rather than a fixed extension list,
     so a repo whose languages this build does not parse never reports a file
     the index was never going to hold. ``--exclude-standard`` honours
-    ``.gitignore``, so build output and vendored trees stay out.
+    ``.gitignore``, and the graph's own ignore rules are applied on top, since
+    ``git add`` cannot bring in a file the graph is told to skip.
 
     A file the graph already holds is not counted: ``watch`` indexes a new
     file whether or not git has seen it. ``ls-files`` lists only what lies
@@ -315,11 +317,10 @@ def _untracked_sources(root: Path, store: GraphStore) -> int:
     relative to ``root``. ``git status --porcelain`` does neither: it reports
     the whole repository relative to the top level, and those paths never
     match a stored one once the graph root is a subfolder.
+
+    Returns ``None`` when the scan could not run, which proves nothing either
+    way. A clean tree returns before the graph's file inventory is read.
     """
-    indexed_files = set(store.get_all_files())
-    indexed_suffixes = {Path(f).suffix for f in indexed_files if Path(f).suffix}
-    if not indexed_suffixes:
-        return 0
     try:
         result = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard", "-z", "--", "."],
@@ -328,18 +329,28 @@ def _untracked_sources(root: Path, store: GraphStore) -> int:
             timeout=GIT_TIMEOUT,
             stdin=subprocess.DEVNULL,
         )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
-        return 0
+    except (OSError, subprocess.SubprocessError):
+        return None
     if result.returncode != 0:
+        return None
+    candidates = [os.fsdecode(record) for record in result.stdout.split(b"\0") if record]
+    if not candidates:
         return 0
-    count = 0
-    for record in result.stdout.split(b"\0"):
-        if not record:
-            continue
-        path = root / os.fsdecode(record)
-        if path.suffix in indexed_suffixes and normalize_file_path(path) not in indexed_files:
-            count += 1
-    return count
+    # Stored paths may be absolute or repo-relative; anchoring handles both.
+    indexed_files = {normalize_file_path(root / stored) for stored in store.get_all_files()}
+    # Lowercased because that is how the parser picks a language by suffix.
+    indexed_suffixes = {
+        suffix for suffix in (Path(stored).suffix.lower() for stored in indexed_files) if suffix
+    }
+    if not indexed_suffixes:
+        return 0
+    ignore_patterns = _load_ignore_patterns(root)
+    return sum(
+        1 for relative in candidates
+        if Path(relative).suffix.lower() in indexed_suffixes
+        and normalize_file_path(root / relative) not in indexed_files
+        and not _should_ignore(relative, ignore_patterns)
+    )
 
 
 def _is_untracked_note(note: str) -> bool:
@@ -375,6 +386,9 @@ def _settled(root: Path, store: GraphStore, verified: bool) -> tuple[str | None,
     on the one that happens to have metadata.
     """
     untracked = _untracked_sources(root, store)
+    if untracked is None:
+        # The scan failed, so the caller may not claim a real absence.
+        return None, False
     if untracked:
         return _untracked_note(untracked), False
     return None, verified

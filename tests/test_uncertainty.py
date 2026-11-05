@@ -737,13 +737,13 @@ def test_untracked_sources_is_zero_when_the_graph_indexed_nothing(repo):
         assert uncertainty._untracked_sources(repo, store) == 0
 
 
-def test_untracked_sources_is_zero_when_git_is_not_a_repository(repo):
-    """A git failure is not evidence of anything: zero, not a raise."""
-    # The fixture's .git is a bare directory, so `git status` exits non-zero.
+def test_untracked_sources_is_unknown_when_git_is_not_a_repository(repo):
+    """A git failure is not evidence of anything: unknown, not a raise."""
+    # The fixture's .git is a bare directory, so `git ls-files` exits non-zero.
     (repo / "consumer.py").write_text("import auth\n", encoding="utf-8")
 
     with _store(repo) as store:
-        assert uncertainty._untracked_sources(repo, store) == 0
+        assert uncertainty._untracked_sources(repo, store) is None
 
 
 def test_untracked_sources_survives_a_missing_git_binary(repo, monkeypatch):
@@ -753,7 +753,70 @@ def test_untracked_sources_survives_a_missing_git_binary(repo, monkeypatch):
     monkeypatch.setattr(uncertainty.subprocess, "run", _raise_file_not_found)
 
     with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) is None
+
+
+def test_failed_scan_withdraws_the_verified_claim(repo, monkeypatch):
+    """A scan that timed out cannot back the "real absence" sentence."""
+    _tracked_repo(repo)
+
+    def timed_out(*_args, **_kwargs):
+        raise uncertainty.subprocess.TimeoutExpired("git", 1)
+
+    monkeypatch.setattr(uncertainty.subprocess, "run", timed_out)
+    with _store(repo) as store:
+        assert uncertainty._settled(repo, store, True) == (None, False)
+
+
+def test_clean_tree_does_not_read_the_file_inventory(repo, monkeypatch):
+    """Every empty answer lands here, so a clean tree must stay cheap."""
+    _tracked_repo(repo)
+    ignore = repo / ".git" / "info" / "exclude"
+    ignore.write_text(".code-review-graph/\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        def unexpected():
+            pytest.fail("a clean tree must not read the file inventory")
+
+        monkeypatch.setattr(store, "get_all_files", unexpected)
         assert uncertainty._untracked_sources(repo, store) == 0
+
+
+def test_untracked_sources_matches_repo_relative_stored_paths(repo):
+    """Graphs may store repo-relative paths, as _staleness already allows."""
+    _tracked_repo(repo)
+    (repo / "watched.py").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        store.upsert_node(NodeInfo(
+            kind="File", name="watched.py", file_path="watched.py",
+            line_start=1, line_end=1, language="python",
+        ))
+        store.commit()
+        assert uncertainty._untracked_sources(repo, store) == 0
+
+
+def test_untracked_sources_compares_suffixes_without_case(repo):
+    """The parser lowercases suffixes, so consumer.PY is Python source."""
+    _tracked_repo(repo)
+    (repo / "consumer.PY").write_text("import auth\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) == 1
+
+
+def test_untracked_sources_skips_files_the_graph_is_told_to_ignore(repo):
+    """`git add` cannot bring these in, so naming them would be a dead end."""
+    _tracked_repo(repo)
+    (repo / ".code-review-graphignore").write_text("generated/**\n", encoding="utf-8")
+    (repo / "generated").mkdir()
+    (repo / "generated" / "output.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "lib.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "real.py").write_text("x = 1\n", encoding="utf-8")
+
+    with _store(repo) as store:
+        assert uncertainty._untracked_sources(repo, store) == 1
 
 
 def _raise_file_not_found(*_args, **_kwargs):
