@@ -14,15 +14,15 @@
   `package.json` with `workspaces` inside the repository, maps each member's
   `name` to its directory, and reads `exports` (subpaths, conditions,
   fallback arrays and `*` patterns, with Node's key priority; a `null` entry
-  blocks the subpath), then `source`, `module`, `main`, `types` and
+  or an unlisted subpath stays unresolved), then `source`, `module`, `main`, `types` and
   `typings`. A target under `dist/`, `build/`, `out/` or `lib/` is tried
   under `src/` with source extensions first, because compiled output is
   normally absent from a checkout. tsconfig `paths` still win when both
   apply. Because a wrong edge is worse than a missing one, an unscoped name
   resolves only when the importing package declares it as a dependency, Node
-  builtin names such as `events` never resolve to a workspace member, probes
-  are case-exact on every platform, and a target the build would not index
-  keeps the bare specifier.
+  builtin names such as `events` never resolve to a workspace member, a name
+  two members share resolves to neither, probes are case-exact on every
+  platform, and a target the build would not index keeps the bare specifier.
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing

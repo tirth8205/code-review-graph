@@ -8,15 +8,17 @@ aliases, so :class:`~code_review_graph.tsconfig_resolver.TsconfigResolver`
 never sees them.
 
 Entry points come from ``exports`` (subpaths, conditions, fallback arrays
-and ``*`` patterns, with Node's key priority and ``null`` blocking), then
+and ``*`` patterns, with Node's key priority and ``null`` blocking; a
+subpath a package's ``exports`` does not list stays unresolved), then
 ``source``/``module``/``main``/``types``. Packages usually point those at
 compiled output under ``dist/``, which a checkout does not contain, so a
 build-output target is first retried under ``src/`` with source
 extensions, then probed as written.
 
 A wrong edge is worse than a missing one, so the resolver stays inside the
-repository, probes case-exactly, never claims Node builtin names, and only
-maps an unscoped name when the importing package declares it.
+repository, probes case-exactly, never claims Node builtin names, skips a
+name two members share, and only maps an unscoped name when the importing
+package declares it.
 """
 
 from __future__ import annotations
@@ -52,6 +54,18 @@ _FORMAT_DIRS = frozenset({"esm", "cjs", "mjs", "es", "umd", "types"})
 
 # Suffixes of compiled files whose source twin has a different extension.
 _COMPILED_SUFFIXES = (".d.ts", ".d.mts", ".d.cts", ".js", ".mjs", ".cjs", ".jsx")
+
+# The source extension that keeps a compiled file's module format, tried first.
+_NATIVE_SOURCE_SUFFIXES = {".d.mts": ".mts", ".mjs": ".mts", ".d.cts": ".cts", ".cjs": ".cts"}
+
+# NodeNext spells a TypeScript file with its compiled extension. Same mapping
+# as the parser's relative-import branch.
+_SOURCE_SUBSTITUTIONS = {
+    ".js": (".ts", ".tsx", ".jsx"),
+    ".jsx": (".ts", ".tsx"),
+    ".mjs": (".mts", ".ts", ".tsx"),
+    ".cjs": (".cts", ".ts", ".tsx"),
+}
 
 # Preferred order when flattening an ``exports`` conditions object. Every
 # reachable target is tried; the order decides which wins when several
@@ -260,6 +274,10 @@ class WorkspaceResolver:
             candidate = base.with_suffix(ext) if not base.suffix else Path(str(base) + ext)
             if exists(candidate):
                 return candidate
+        for ext in _SOURCE_SUBSTITUTIONS.get(base.suffix, ()):
+            candidate = base.with_suffix(ext)
+            if exists(candidate):
+                return candidate
         if base.is_dir():
             for ext in _PROBE_EXTENSIONS:
                 candidate = base / f"index{ext}"
@@ -380,17 +398,27 @@ def _load_workspace(root: Path, patterns: list[str]) -> _Workspace:
         if (cleaned := _clean_pattern(p.strip()[1:])) is not None
     ]
     packages: dict[str, _Package] = {}
+    duplicates: set[str] = set()
 
     for package_dir in _expand_patterns(root, include):
         rel = package_dir.relative_to(root).as_posix()
-        if any(fnmatch.fnmatch(rel, pattern) for pattern in exclude):
+        if any(_glob_match(rel, pattern) for pattern in exclude):
             continue
         manifest = _read_json(package_dir / "package.json")
         if not isinstance(manifest, dict):
             continue
         name = manifest.get("name")
-        if isinstance(name, str) and name and name not in packages:
-            packages[name] = _Package(package_dir, manifest)
+        if not isinstance(name, str) or not name:
+            continue
+        if name in packages:
+            duplicates.add(name)
+        packages[name] = _Package(package_dir, manifest)
+
+    # Package managers disagree on which member owns a shared name (npm refuses
+    # the layout, pnpm links the last), so no edge can claim one of them.
+    for name in sorted(duplicates):
+        logger.warning("WorkspaceResolver: skipping %s, used by several members", name)
+        del packages[name]
 
     return _Workspace(root, packages)
 
@@ -422,6 +450,23 @@ def _expand_patterns(root: Path, patterns: list[str]) -> list[Path]:
     return [found[key] for key in sorted(found)]
 
 
+def _glob_match(path: str, pattern: str) -> bool:
+    """Match by path component: ``**`` spans any number, ``*`` stays inside one."""
+    parts = path.split("/")
+    # reachable[i]: the pattern so far can consume exactly parts[:i].
+    reachable = [True] + [False] * len(parts)
+    for piece in pattern.split("/"):
+        if piece == "**":
+            for i in range(1, len(reachable)):
+                reachable[i] = reachable[i] or reachable[i - 1]
+        else:
+            reachable = [False] + [
+                reachable[i] and fnmatch.fnmatchcase(parts[i], piece)
+                for i in range(len(parts))
+            ]
+    return reachable[-1]
+
+
 def _walk_globstar(root: Path, pattern: str) -> list[Path]:
     """Expand a ``**`` workspace glob with os.walk, pruning node_modules."""
     static: list[str] = []
@@ -439,7 +484,7 @@ def _walk_globstar(root: Path, pattern: str) -> list[Path]:
         if "package.json" not in filenames:
             continue
         directory = Path(dirpath)
-        if fnmatch.fnmatch(directory.relative_to(root).as_posix(), pattern):
+        if _glob_match(directory.relative_to(root).as_posix(), pattern):
             matches.append(directory)
     return matches
 
@@ -490,16 +535,17 @@ def _exports_targets(exports: Any, subpath: str) -> list[str]:
     """Targets ``exports`` maps *subpath* to, or ``_BLOCKED`` when Node would refuse it.
 
     A matched entry with no reachable target (``null``, ``[null]``, ``[]``,
-    all conditions ``null``) blocks the subpath; an unmatched subpath falls
-    back to conventional probing instead.
+    all conditions ``null``) blocks the subpath, and so does a subpath the map
+    does not list (``ERR_PACKAGE_PATH_NOT_EXPORTED``). A malformed ``exports``
+    counts as absent.
     """
     if isinstance(exports, (str, list)):
-        return (_flatten_targets(exports) or _BLOCKED) if subpath == "." else []
+        return (_flatten_targets(exports) or _BLOCKED) if subpath == "." else _BLOCKED
     if not isinstance(exports, dict):
         return []
     keys = [k for k in exports if isinstance(k, str)]
     if not any(k.startswith(".") for k in keys):  # a bare conditions object for "."
-        return (_flatten_targets(exports) or _BLOCKED) if subpath == "." else []
+        return (_flatten_targets(exports) or _BLOCKED) if subpath == "." else _BLOCKED
     if subpath in exports:
         return _flatten_targets(exports[subpath]) or _BLOCKED
 
@@ -518,7 +564,7 @@ def _exports_targets(exports: Any, subpath: str) -> list[str]:
             if best is None or rank[:2] > best[:2]:
                 best = rank
     if best is None:
-        return []
+        return _BLOCKED
     _, _, prefix, suffix, key = best
     stem = subpath[len(prefix): len(subpath) - len(suffix)]
     return [t.replace("*", stem) for t in _flatten_targets(exports[key])] or _BLOCKED
@@ -549,25 +595,33 @@ def _target_candidates(base: Path, target: str, subpath: str) -> list[Path]:
         return []
 
     candidates: list[Path] = []
+    written = base.joinpath(*parts)
     if len(parts) > 1 and parts[0] in _BUILD_OUTPUT_DIRS:
-        stem = _strip_compiled_suffix(parts[-1])
+        names = _source_names(parts[-1])
+        # A target that already names source is what it says, even under lib/.
+        if names == [parts[-1]] and PurePosixPath(parts[-1]).suffix:
+            candidates.append(written)
         middle = parts[1:-1]
-        kept = base.joinpath("src", *middle, stem)
-        if middle and middle[0] in _FORMAT_DIRS:
-            stripped = base.joinpath("src", *middle[1:], stem)
-            # dist/types/ mirrors src/ -- unless the subpath itself asks for it.
-            if middle[0] in subpath.split("/"):
-                candidates.extend([kept, stripped])
+        for name in names:
+            kept = base.joinpath("src", *middle, name)
+            if middle and middle[0] in _FORMAT_DIRS:
+                stripped = base.joinpath("src", *middle[1:], name)
+                # dist/types/ mirrors src/ -- unless the subpath itself asks for it.
+                if middle[0] in subpath.split("/"):
+                    candidates.extend([kept, stripped])
+                else:
+                    candidates.extend([stripped, kept])
             else:
-                candidates.extend([stripped, kept])
-        else:
-            candidates.append(kept)
-    candidates.append(base.joinpath(*parts))
+                candidates.append(kept)
+    candidates.append(written)
     return candidates
 
 
-def _strip_compiled_suffix(name: str) -> str:
+def _source_names(name: str) -> list[str]:
+    """Names a compiled file's source may have, its own module format first."""
     for suffix in _COMPILED_SUFFIXES:
         if name.endswith(suffix) and len(name) > len(suffix):
-            return name[: -len(suffix)]
-    return name
+            stem = name[: -len(suffix)]
+            native = _NATIVE_SOURCE_SUFFIXES.get(suffix)
+            return [stem + native, stem] if native else [stem]
+    return [name]

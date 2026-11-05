@@ -204,6 +204,76 @@ class TestPackageEntry:
 
         assert self.resolver.resolve("@acme/shared/does-not-exist", str(importer)) is None
 
+    def test_subpath_exports_does_not_list_stays_unresolved(self, tmp_path):
+        # Node refuses these with ERR_PACKAGE_PATH_NOT_EXPORTED.
+        importer = _monorepo(tmp_path)
+        indexes = {}
+        for name, exports in (
+            ("map", {".": "./src/index.ts"}),
+            ("string", "./src/index.ts"),
+            ("conditions", {"import": "./src/index.ts"}),
+        ):
+            pkg = _package(
+                tmp_path, f"packages/{name}", {"name": f"@acme/{name}", "exports": exports},
+            )
+            indexes[name] = _touch(pkg / "src" / "index.ts")
+            _touch(pkg / "src" / "private.ts")
+
+        for name, index in indexes.items():
+            assert _same(self.resolver.resolve(f"@acme/{name}", str(importer)), index)
+            assert self.resolver.resolve(f"@acme/{name}/private", str(importer)) is None
+
+    def test_root_is_blocked_when_exports_lists_only_subpaths(self, tmp_path):
+        importer = _monorepo(tmp_path)
+        pkg = _package(tmp_path, "packages/a", {
+            "name": "@acme/a", "main": "src/index.ts", "exports": {"./x": "./src/x.ts"},
+        })
+        _touch(pkg / "src" / "index.ts")
+        x = _touch(pkg / "src" / "x.ts")
+
+        assert self.resolver.resolve("@acme/a", str(importer)) is None
+        assert _same(self.resolver.resolve("@acme/a/x", str(importer)), x)
+
+    def test_malformed_exports_counts_as_absent(self, tmp_path):
+        importer = _monorepo(tmp_path)
+        pkg = _package(tmp_path, "packages/a", {"name": "@acme/a", "exports": 1})
+        index = _touch(pkg / "src" / "index.ts")
+
+        assert _same(self.resolver.resolve("@acme/a", str(importer)), index)
+
+    def test_source_target_with_a_compiled_extension(self, tmp_path):
+        # NodeNext spelling: the wrong answer here is the conventional src/index.ts.
+        importer = _monorepo(tmp_path)
+        pkg = _package(
+            tmp_path, "packages/a", {"name": "@acme/a", "exports": {".": "./src/entry.js"}},
+        )
+        _touch(pkg / "src" / "index.ts")
+        entry = _touch(pkg / "src" / "entry.ts")
+
+        assert _same(self.resolver.resolve("@acme/a", str(importer)), entry)
+
+    def test_compiled_target_prefers_the_source_of_its_own_format(self, tmp_path):
+        importer = _monorepo(tmp_path)
+        pkg = _package(tmp_path, "packages/a", {
+            "name": "@acme/a",
+            "exports": {".": "./dist/entry.mjs", "./c": "./dist/other.cjs"},
+        })
+        _touch(pkg / "src" / "entry.ts")
+        native = _touch(pkg / "src" / "entry.mts")
+        _touch(pkg / "src" / "other.ts")
+        other = _touch(pkg / "src" / "other.cts")
+
+        assert _same(self.resolver.resolve("@acme/a", str(importer)), native)
+        assert _same(self.resolver.resolve("@acme/a/c", str(importer)), other)
+
+    def test_source_target_under_a_build_directory_wins_over_src(self, tmp_path):
+        importer = _monorepo(tmp_path)
+        pkg = _package(tmp_path, "packages/a", {"name": "@acme/a", "main": "lib/index.ts"})
+        written = _touch(pkg / "lib" / "index.ts")
+        _touch(pkg / "src" / "index.ts")
+
+        assert _same(self.resolver.resolve("@acme/a", str(importer)), written)
+
     def test_types_directory_layout_resolves_the_package_root(self, tmp_path):
         # dist/types/ mirrors src/, so dist/types/index.d.ts is src/index.ts,
         # never the src/types/ barrel that happens to share the segment.
@@ -333,6 +403,48 @@ class TestWorkspaceDiscovery:
 
         assert _same(self.resolver.resolve("@acme/a", str(importer)), index)
         assert self.resolver.resolve("@acme/fake", str(importer)) is None
+
+    def test_name_two_members_share_resolves_to_neither(self, tmp_path):
+        importer = _monorepo(tmp_path)
+        for member in ("b", "c"):
+            pkg = _package(tmp_path, f"packages/{member}", {"name": "@acme/dupe"})
+            _touch(pkg / "src" / "index.ts")
+        other = _package(tmp_path, "packages/d", {"name": "@acme/other"})
+        index = _touch(other / "src" / "index.ts")
+
+        assert self.resolver.resolve("@acme/dupe", str(importer)) is None
+        assert _same(self.resolver.resolve("@acme/other", str(importer)), index)
+
+    def test_globstar_spans_no_directories_too(self, tmp_path):
+        importer = _monorepo(tmp_path, workspaces=["packages/**/shared"])
+        direct = _package(tmp_path, "packages/shared", {"name": "@acme/direct"})
+        direct_index = _touch(direct / "src" / "index.ts")
+        deep = _package(tmp_path, "packages/a/b/shared", {"name": "@acme/deep"})
+        deep_index = _touch(deep / "src" / "index.ts")
+
+        assert _same(self.resolver.resolve("@acme/direct", str(importer)), direct_index)
+        assert _same(self.resolver.resolve("@acme/deep", str(importer)), deep_index)
+
+    def test_star_stays_inside_one_directory(self, tmp_path):
+        importer = _monorepo(tmp_path, workspaces=["packages/**/x*"])
+        deep = _package(tmp_path, "packages/x1/deep/pkg", {"name": "@acme/deep"})
+        _touch(deep / "src" / "index.ts")
+
+        assert self.resolver.resolve("@acme/deep", str(importer)) is None
+
+    def test_negated_globstar_spans_no_directories_too(self, tmp_path):
+        importer = _monorepo(tmp_path, workspaces=["packages/*", "!packages/**/shared"])
+        shared = _package(tmp_path, "packages/shared", {"name": "@acme/shared"})
+        _touch(shared / "src" / "index.ts")
+
+        assert self.resolver.resolve("@acme/shared", str(importer)) is None
+
+    def test_negated_star_stays_inside_one_directory(self, tmp_path):
+        importer = _monorepo(tmp_path, workspaces=["packages/**", "!packages/a*"])
+        deep = _package(tmp_path, "packages/a/deep", {"name": "@acme/deep"})
+        index = _touch(deep / "src" / "index.ts")
+
+        assert _same(self.resolver.resolve("@acme/deep", str(importer)), index)
 
     def test_no_workspace_root_returns_none(self, tmp_path):
         _write_json(tmp_path / "package.json", {"name": "single-app"})

@@ -162,3 +162,25 @@ def test_importers_of_and_impact_cross_the_package_boundary(tmp_path):
     )
     assert impact["status"] == "ok"
     assert importer.as_posix() in impact["impacted_files"]
+
+
+def test_export_with_no_language_keeps_the_bare_specifier(tmp_path):
+    """A CSS export resolves to a real file, but no node would answer to it."""
+    (tmp_path / ".code-review-graph").mkdir()
+    _write(tmp_path / "package.json", json.dumps({"workspaces": ["packages/*"]}))
+    _write(tmp_path / "packages" / "ui" / "package.json", json.dumps({
+        "name": "@acme/ui",
+        "exports": {".": "./src/index.ts", "./styles.css": "./src/index.css"},
+    }))
+    _write(tmp_path / "packages" / "ui" / "src" / "index.ts", "export const ui = 1\n")
+    _write(tmp_path / "packages" / "ui" / "src" / "index.css", "body {}\n")
+    importer = _write(
+        tmp_path / "packages" / "ui" / "src" / "page.ts",
+        "import '@acme/ui/styles.css'\nimport { ui } from '@acme/ui'\n",
+    )
+
+    _, edges = CodeParser(tmp_path).parse_file(importer)
+
+    targets = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+    assert "@acme/ui/styles.css" in targets
+    assert (tmp_path / "packages" / "ui" / "src" / "index.ts").resolve().as_posix() in targets
