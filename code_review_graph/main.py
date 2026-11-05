@@ -245,7 +245,7 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
 async def build_or_update_graph_tool(
     full_rebuild: bool = False,
     repo_root: Optional[str] = None,
@@ -302,7 +302,7 @@ async def build_or_update_graph_tool(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
 async def run_postprocess_tool(
     flows: bool = True,
     communities: bool = True,
@@ -564,7 +564,7 @@ async def semantic_search_nodes_tool(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})
 async def embed_graph_tool(
     repo_root: Optional[str] = None,
     model: Optional[str] = None,
@@ -1054,7 +1054,7 @@ async def apply_refactor_tool(
     )
 
 
-@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True})
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})
 async def generate_wiki_tool(
     repo_root: Optional[str] = None,
     force: bool = False,
