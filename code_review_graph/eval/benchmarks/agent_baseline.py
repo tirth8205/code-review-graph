@@ -108,8 +108,8 @@ def grep_rank(
     question is about tests. A test names a symbol far more often than the
     one place it is defined, so raw match count puts the whole test suite
     above the implementation; left uncorrected this benchmark would compare
-    the graph against a grep nobody would accept, and overstate the ratio in
-    the graph's favour. The graph's own search carries the same correction
+    the graph against a grep nobody would accept. The graph's own search
+    carries the same correction
     (``search._TEST_RANK_PENALTY``), so both sides are ranked on the same
     footing.
     """
@@ -177,6 +177,7 @@ def run(repo_path: Path, store, config: dict) -> list[dict]:
                 limit=5,
                 provider=config.get("_embedding_provider"),
                 model=config.get("_embedding_model"),
+                repo_root=repo_path,
             )
         except Exception as exc:
             logger.warning("hybrid_search failed on %r: %s", question, exc)

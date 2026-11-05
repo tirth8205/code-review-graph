@@ -76,6 +76,13 @@ _MAX_EXPANDED_SOURCE_LINES = 700
 _MAX_EXPANDED_HITS = 3
 _MAX_NEIGHBORS_PER_HIT = 4
 
+# Lines alone do not bound a reply: one minified line can be megabytes.
+_MAX_SEARCH_SOURCE_CHARS = 80_000
+_MAX_SEARCH_SOURCE_CHARS_PER_NODE = 12_000
+
+# _sanitize_name cuts names sent to clients to this length.
+_SANITIZED_NAME_MAX = 256
+
 # ---------------------------------------------------------------------------
 # Tool 2: get_impact_radius
 # ---------------------------------------------------------------------------
@@ -1137,9 +1144,14 @@ class _SourceBudget:
         self._root = root
         self._root_resolved = root.resolve()
         self._left = total
+        self._chars_left = _MAX_SEARCH_SOURCE_CHARS
         self._per_node = per_node
         self._files: dict[str, list[str]] = {}
         self.omitted = 0
+
+    @property
+    def exhausted(self) -> bool:
+        return self._left <= 0 or self._chars_left <= 0
 
     def _lines(self, raw_path: str) -> list[str]:
         lines = self._files.get(raw_path)
@@ -1152,7 +1164,17 @@ class _SourceBudget:
             # The graph stores paths it parsed from inside the repo, but a
             # stale row must never be able to read outside it.
             path.resolve().relative_to(self._root_resolved)
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # Notebook nodes are numbered in the parser's joined-up code cells,
+            # so slicing the file by those numbers returns the wrong text.
+            if path.suffix.lower() == ".ipynb" or (
+                text.split("\n", 1)[0] == "# Databricks notebook source"
+            ):
+                lines = []
+            else:
+                # Not splitlines(): it also breaks on form feeds and U+2028,
+                # which the parser does not count, so later lines would shift.
+                lines = text.split("\n")
         except (OSError, UnicodeDecodeError, ValueError) as exc:
             logger.warning(
                 "Could not read %s for a source snippet: %s", raw_path, exc,
@@ -1167,7 +1189,7 @@ class _SourceBudget:
         """Attach ``source`` to *target*; return whether anything was added."""
         if not raw_path or not start or not end or end < start:
             return False
-        if self._left <= 0:
+        if self.exhausted:
             self.omitted += 1
             return False
         lines = self._lines(raw_path)
@@ -1180,11 +1202,17 @@ class _SourceBudget:
         snippet = lines[start - 1:start - 1 + span]
         if not snippet:
             return False
-        target["source"] = "\n".join(snippet)
-        target["source_lines"] = [start, start + len(snippet) - 1]
-        if end - start + 1 > len(snippet):
+        text = "\n".join(snippet)
+        char_cap = min(_MAX_SEARCH_SOURCE_CHARS_PER_NODE, self._chars_left)
+        cut = len(text) > char_cap
+        if cut:
+            text = text[:char_cap]
+        target["source"] = text
+        target["source_lines"] = [start, start + text.count("\n")]
+        if cut or end - start + 1 > len(snippet):
             target["source_truncated"] = True
         self._left -= len(snippet)
+        self._chars_left -= len(text)
         return True
 
 
@@ -1199,6 +1227,20 @@ def _neighbor_entry(node: GraphNode) -> dict[str, Any]:
     }
 
 
+def _stored_qualified_name(store: GraphStore, hit: dict[str, Any]) -> str | None:
+    """Return the name edges are keyed on; a hit's own may be cut for display."""
+    qname = hit.get("qualified_name")
+    if not qname or len(qname) < _SANITIZED_NAME_MAX:
+        return qname
+    for node in store.get_nodes_by_file(hit.get("file_path") or ""):
+        if (
+            node.line_start == hit.get("line_start")
+            and _sanitize_name(node.qualified_name) == qname
+        ):
+            return node.qualified_name
+    return qname
+
+
 def _attach_neighbors(
     results: list[dict[str, Any]],
     store: GraphStore,
@@ -1211,7 +1253,7 @@ def _attach_neighbors(
     stops the caller opening the same files by hand.
     """
     for hit in results[:_MAX_EXPANDED_HITS]:
-        qname = hit.get("qualified_name")
+        qname = _stored_qualified_name(store, hit)
         if not qname:
             continue
         try:
@@ -1228,8 +1270,15 @@ def _attach_neighbors(
             seen: set[str] = set()
             entries: list[dict[str, Any]] = []
             for edge in edges:
-                if edge.kind != "CALLS" or len(entries) >= _MAX_NEIGHBORS_PER_HIT:
+                if edge.kind != "CALLS":
                     continue
+                if len(entries) >= _MAX_NEIGHBORS_PER_HIT:
+                    break
+                if budget.exhausted:
+                    # A hot symbol can have thousands of edges; stop looking
+                    # them up once nothing more can be returned.
+                    budget.omitted += 1
+                    break
                 other = getattr(edge, attr, None)
                 if not other or other in seen or other == qname:
                     continue
@@ -1292,7 +1341,7 @@ def semantic_search_nodes(
         mode_out: list[str] = []
         results = hybrid_search(
             store, query, kind=kind, limit=limit, context_files=context_files,
-            model=model, provider=provider, _out_mode=mode_out,
+            model=model, provider=provider, _out_mode=mode_out, repo_root=root,
         )
 
         search_mode = mode_out[0] if mode_out else "keyword"
@@ -1309,13 +1358,21 @@ def semantic_search_nodes(
                 else _MAX_SEARCH_SOURCE_LINES,
                 per_node,
             )
-            for hit in results:
+            # Expansion was asked for, so lower-ranked hits must not spend the
+            # budget before the top hits' callers and callees get any of it.
+            top = results[:_MAX_EXPANDED_HITS] if expand_neighbors else results
+            for hit in top:
                 budget.attach(
                     hit, hit.get("file_path"),
                     hit.get("line_start"), hit.get("line_end"),
                 )
             if expand_neighbors:
                 _attach_neighbors(results, store, budget)
+            for hit in results[len(top):]:
+                budget.attach(
+                    hit, hit.get("file_path"),
+                    hit.get("line_start"), hit.get("line_end"),
+                )
             source_omitted = budget.omitted
 
         summary = f"Found {len(results)} node(s) matching '{query}'" + (

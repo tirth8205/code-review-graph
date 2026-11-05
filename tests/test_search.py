@@ -398,6 +398,24 @@ class TestTestFileRanking:
 
         assert ratio("dispatch_request fixture") > ratio("dispatch_request")
 
+    def test_test_directories_count_when_the_root_is_known(self):
+        """The graph stores absolute paths; tests/helpers.py is still test code."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="dispatch_request",
+            file_path="/repo/tests/helpers.py", line_start=1, line_end=2,
+            language="python",
+        ), file_hash="abc123")
+        self.store._conn.commit()
+        rebuild_fts_index(self.store)
+
+        def score(**kw):
+            return {
+                r["file_path"]: r["score"]
+                for r in hybrid_search(self.store, "dispatch_request", **kw)
+            }["/repo/tests/helpers.py"]
+
+        assert score(repo_root="/repo") < score()
+
     def test_kind_filter_test_is_not_penalised(self):
         """kind="Test" is an explicit request for test code."""
         paths = self._paths("dispatch_request", kind="Test")

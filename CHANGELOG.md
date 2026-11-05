@@ -16,9 +16,10 @@
 - The README and `docs/REPRODUCING.md` publish the first canonical
   `agent_baseline` capture (2026-09-22): against a grep-and-read-top-3-files
   baseline, the graph answer is a median 6.65x smaller across 18 questions on
-  6 repositories (range 4.2x to 72.6x). The per-repo CSVs are in
-  `evaluate/results/`; the 2026-05-25 `impact_accuracy` CSVs are removed, as
-  the 2026-08-02 captures replace them.
+  6 repositories (range 4.2x to 72.6x). It predates the test-file ranking
+  below, so a run today gives different numbers until it is redone. The
+  per-repo CSVs are in `evaluate/results/`; the 2026-05-25 `impact_accuracy`
+  CSVs are removed, as the 2026-08-02 captures replace them.
 
 ### Changed
 

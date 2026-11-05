@@ -233,7 +233,10 @@ class TestTools:
                 line_start=ls, line_end=le, language="python",
             ))
         store.upsert_edge(EdgeInfo(
-            kind="CALLS", source=f"{src}::wsgi_app", target=f"{src}::dispatch",
+            # Qualified names hold the POSIX spelling, also on Windows (#774).
+            kind="CALLS",
+            source=f"{src.as_posix()}::wsgi_app",
+            target=f"{src.as_posix()}::dispatch",
             file_path=str(src), line=2,
         ))
         store.commit()
@@ -297,6 +300,172 @@ class TestTools:
             "login", include_source=True, detail_level="minimal",
         )
         assert all("source" not in r for r in out["results"])
+
+    @staticmethod
+    def _search_store(monkeypatch, tmp_path, build):
+        """Fill a graph with *build*, and make searches open a fresh store on it."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        build(store)
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+    @staticmethod
+    def _fn(src, name, start, end):
+        return NodeInfo(
+            kind="Function", name=name, file_path=str(src),
+            line_start=start, line_end=end, language="python",
+        )
+
+    def test_include_source_lines_match_the_parser(self, monkeypatch, tmp_path):
+        """A form feed is not a new line to the parser, so must not shift the slice."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "ff.py"
+        src.write_text("import os\n\x0c\ndef real():\n    return 1\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "real", 3, 4)),
+        )
+
+        hit = semantic_search_nodes("real", include_source=True)["results"][0]
+        assert hit["source"] == "def real():\n    return 1"
+
+    def test_include_source_skips_notebooks(self, monkeypatch, tmp_path):
+        """Notebook line numbers are not file line numbers: no snippet beats a wrong one."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        ipynb = tmp_path / "nb.ipynb"
+        ipynb.write_text('{\n "cells": [\n  1\n ]\n}\n', encoding="utf-8")
+        dbx = tmp_path / "dbx.py"
+        dbx.write_text(
+            "# Databricks notebook source\n# MAGIC %md\n# MAGIC x\n\n"
+            "def dbx_fn():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(ipynb, "nb_fn", 1, 2))
+            store.upsert_node(self._fn(dbx, "dbx_fn", 2, 3))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        for name in ("nb_fn", "dbx_fn"):
+            hit = semantic_search_nodes(name, include_source=True)["results"][0]
+            assert "source" not in hit
+
+    def test_include_source_caps_characters(self, monkeypatch, tmp_path):
+        """One minified line must not get past a budget counted in lines."""
+        from code_review_graph.tools.query import (
+            _MAX_SEARCH_SOURCE_CHARS_PER_NODE,
+            semantic_search_nodes,
+        )
+
+        src = tmp_path / "min.py"
+        src.write_text("huge = '" + "x" * 500_000 + "'\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "huge", 1, 1)),
+        )
+
+        hit = semantic_search_nodes("huge", include_source=True)["results"][0]
+        assert len(hit["source"]) == _MAX_SEARCH_SOURCE_CHARS_PER_NODE
+        assert hit["source_truncated"] is True
+
+    def test_expand_neighbors_gets_budget_before_lower_hits(self, monkeypatch, tmp_path):
+        """Twelve long hits used to spend it all, so nothing got its callers."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "many.py"
+        src.write_text("\n".join(f"line{i}" for i in range(4000)), encoding="utf-8")
+
+        def build(store):
+            for i in range(20):
+                store.upsert_node(self._fn(src, f"widget_{i}", 1 + i * 100, 80 + i * 100))
+            store.upsert_node(self._fn(src, "caller_fn", 3000, 3010))
+            for i in range(20):
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::caller_fn",
+                    target=f"{src.as_posix()}::widget_{i}",
+                    file_path=str(src), line=3001 + i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        results = semantic_search_nodes(
+            "widget", include_source=True, expand_neighbors=True,
+        )["results"]
+        assert all(hit["callers"][0]["name"] == "caller_fn" for hit in results[:3])
+
+    def test_expand_neighbors_stops_when_budget_is_gone(self, monkeypatch, tmp_path):
+        """Thousands of edges must not mean thousands of lookups for no source."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "hub.py"
+        src.write_text("\n".join(f"line{i}" for i in range(2000)), encoding="utf-8")
+
+        def build(store):
+            store.upsert_node(self._fn(src, "hub", 1, 60))
+            for i in range(200):
+                store.upsert_node(self._fn(src, f"c{i}", 100 + i, 101 + i))
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::c{i}",
+                    target=f"{src.as_posix()}::hub",
+                    file_path=str(src), line=i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+        monkeypatch.setattr(query_mod, "_MAX_EXPANDED_SOURCE_LINES", 60)
+        calls = []
+        real_get_node = GraphStore.get_node
+        monkeypatch.setattr(
+            GraphStore, "get_node", lambda s, q: calls.append(q) or real_get_node(s, q),
+        )
+
+        result = semantic_search_nodes(
+            "hub", include_source=True, expand_neighbors=True, limit=1,
+        )
+        assert calls == []
+        assert result["source_omitted"] == 1
+
+    def test_expand_neighbors_finds_edges_of_long_names(self, monkeypatch, tmp_path):
+        """Edges are keyed on the whole name, not the 256 characters a hit shows."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        long_name = "a" * 300
+        src = tmp_path / "long.py"
+        src.write_text(
+            f"def {long_name}():\n    return callee()\n\ndef callee():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(src, long_name, 1, 2))
+            store.upsert_node(self._fn(src, "callee", 4, 5))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{src.as_posix()}::{long_name}",
+                target=f"{src.as_posix()}::callee",
+                file_path=str(src), line=2,
+            ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        hit = semantic_search_nodes(
+            long_name, include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert [c["name"] for c in hit["callees"]] == ["callee"]
 
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""

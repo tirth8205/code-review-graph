@@ -11,6 +11,7 @@ import logging
 import re
 import sqlite3
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from .graph import GraphStore, _sanitize_name, identifier_words
@@ -884,6 +885,7 @@ def hybrid_search(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     _out_mode: Optional[list[str]] = None,
+    repo_root: Optional[str | Path] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid search combining FTS5 BM25 and vector embeddings via RRF.
 
@@ -1031,7 +1033,9 @@ def hybrid_search(
             row_keys = row.keys()
             is_test = bool(row["is_test"]) if "is_test" in row_keys else False
             if not is_test and file_path:
-                is_test = is_test_file(file_path)
+                # The graph stores absolute paths, so without the root only
+                # file names count and tests/helpers.py reads as production.
+                is_test = is_test_file(file_path, repo_root)
             if is_test:
                 boost *= _TEST_RANK_PENALTY
 

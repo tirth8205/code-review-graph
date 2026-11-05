@@ -529,6 +529,7 @@ async def semantic_search_nodes_tool(
     detail_level: str = "standard",
     include_source: bool = False,
     expand_neighbors: bool = False,
+    max_source_lines: int = 60,
 ) -> dict:
     """Search for code entities by name, keyword, or semantic similarity.
 
@@ -557,6 +558,8 @@ async def semantic_search_nodes_tool(
         expand_neighbors: With include_source, also return each top hit's direct
                           callers and callees with their source, so one call
                           answers "how does X work". Default: False.
+        max_source_lines: With include_source, the most lines per snippet
+                          (1-60). Default: 60.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -565,6 +568,7 @@ async def semantic_search_nodes_tool(
             query=query, kind=kind, limit=limit, repo_root=root,
             model=model, provider=provider, detail_level=detail_level,
             include_source=include_source, expand_neighbors=expand_neighbors,
+            max_source_lines=max_source_lines,
         ),
         root,
     )

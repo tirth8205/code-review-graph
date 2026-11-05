@@ -373,11 +373,15 @@ embeddings, clean clones at the pinned SHAs, every row `status=ok`.
 
 Across all 18 questions: **median 6.65x, mean 14.81x, range 4.2x to 72.6x**.
 
-Reproduce with:
+Run it with:
 
 ```bash
 code-review-graph eval --benchmark agent_baseline --embed
 ```
+
+This capture predates test-file ranking in `hybrid_search` and `grep_rank`, so a run today
+gives different numbers until the capture is redone. At the code-review-graph pin the grep
+baseline alone moves from 41,674 / 15,028 / 21,701 tokens to 41,586 / 27,764 / 29,207.
 
 Two things this number is not:
 
