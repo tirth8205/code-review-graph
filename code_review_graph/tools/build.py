@@ -31,7 +31,6 @@ from ..incremental import (
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
-from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
@@ -388,8 +387,14 @@ def _run_postprocess(
     # Incremental mode also triggers when pre-replacement capture preserved
     # entry-point QNs even if the relative changed_files list alone would
     # miss absolute graph paths (#569).
-    use_incremental = not full_rebuild and (
-        bool(changed_files) or bool(entry_point_qns) or communities_were_affected
+    use_incremental = (
+        not full_rebuild
+        and not build_result.get("identity_rebuild")
+        and (
+            bool(changed_files)
+            or bool(entry_point_qns)
+            or communities_were_affected
+        )
     )
 
     stage_started = time.perf_counter()

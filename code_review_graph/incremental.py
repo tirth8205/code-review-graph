@@ -1910,6 +1910,11 @@ def _can_batch_store(store: GraphStore, parser: Any) -> bool:
     )
 
 
+# These languages are parsed by bounded fallbacks or config readers, so no
+# grammar package is loaded for them and probing one only costs a subprocess.
+_NO_GRAMMAR_LANGUAGES = frozenset({"rescript", "vbnet", "yaml", "properties"})
+
+
 def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
     """Pre-warm grammar load probes concurrently before spawning worker pool."""
     try:
@@ -1936,8 +1941,14 @@ def _prewarm_parser_probes(parser: Any, rel_paths: list[str]) -> None:
             grammars.update(("php", "html"))
         elif lang == "c" and suffix == ".h":
             grammars.update(("c", "cpp"))
+        elif lang in _NO_GRAMMAR_LANGUAGES:
+            continue
         else:
             grammars.add(lang)
+    custom = getattr(parser, "_custom_languages", None) or {}
+    grammars = {
+        getattr(custom.get(g), "grammar", None) or g for g in grammars
+    }
     unprobed = [
         g for g in grammars if g not in parser_mod._PARSER_PROBE_RESULTS
     ]
@@ -2074,7 +2085,6 @@ def full_build(
     file_count = len(files)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
-    batch_writes = _can_batch_store(store, parser)
     pending_batch: list[tuple[str, list, list, str]] = []
 
     if use_serial or file_count < 8:
@@ -2105,13 +2115,7 @@ def full_build(
                 # the VCS anchor and exit 0 while those files were missing
                 # from the graph for good. The build stops instead, so no
                 # anchor is written and the next run rebuilds.
-                if batch_writes:
-                    pending_batch.append((str(full_path), parsed[0], parsed[1], parsed[2]))
-                    if len(pending_batch) >= 200:
-                        store.store_file_batch(pending_batch)
-                        pending_batch.clear()
-                else:
-                    store.store_file_nodes_edges(str(full_path), *parsed)
+                store.store_file_nodes_edges(str(full_path), *parsed)
                 total_nodes += len(parsed[0])
                 total_edges += len(parsed[1])
             if i % 50 == 0 or i == file_count:
@@ -2139,18 +2143,12 @@ def full_build(
                         cpp_errors.add(str(rel_path))
                     continue
                 full_path = repo_root / rel_path
-                if batch_writes:
-                    pending_batch.append((str(full_path), nodes, edges, fhash))
-                    if len(pending_batch) >= 200:
-                        store.store_file_batch(pending_batch)
-                        pending_batch.clear()
-                else:
-                    store.store_file_nodes_edges(
-                        str(full_path),
-                        nodes,
-                        edges,
-                        fhash,
-                    )
+                store.store_file_nodes_edges(
+                    str(full_path),
+                    nodes,
+                    edges,
+                    fhash,
+                )
                 total_nodes += len(nodes)
                 total_edges += len(edges)
                 if i % 200 == 0 or i == file_count:
@@ -2364,17 +2362,6 @@ def incremental_update(
     errors = []
     missing_paths: set[str] = set()
 
-    # Pre-fetch stored file hashes once when get_nodes_by_file is unpatched,
-    # avoiding N per-file get_nodes_by_file() queries across all_files.
-    fast_hash_lookup: dict[str, str | None] | None = None
-    if (
-        all_files
-        and type(getattr(store, "_conn", None)) is sqlite3.Connection
-        and getattr(type(store), "get_nodes_by_file", None) is GraphStore.get_nodes_by_file
-        and "get_nodes_by_file" not in getattr(store, "__dict__", {})
-    ):
-        fast_hash_lookup = store.get_file_hashes()
-
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
     # Importers re-parsed with unchanged bytes, and the hash that was checked.
@@ -2475,7 +2462,6 @@ def incremental_update(
         store.store_file_nodes_edges(str(repo_root / rel_path), nodes, edges, fhash)
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
-    batch_writes = _can_batch_store(store, parser)
     pending_batch: list[tuple[str, list, list, str]] = []
     parsed_files = 0
 

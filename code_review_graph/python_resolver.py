@@ -122,7 +122,7 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
             "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
             updates,
         )
-        conn.commit()
+        store.commit()
         store._invalidate_cache()
 
     result = {

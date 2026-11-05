@@ -518,7 +518,7 @@ def resolve_scoped_calls(store: GraphStore) -> dict:
         )
 
     if resolved:
-        conn.commit()
+        store.commit()
 
     logger.info(
         "Scoped resolver: resolved %d CALLS edges across %d files",

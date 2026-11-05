@@ -272,7 +272,7 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         )
 
     if resolved:
-        conn.commit()
+        store.commit()
 
     logger.info("Spring DI resolver: resolved %d CALLS edges in %d Java files",
                 resolved, len(java_files))

@@ -43,8 +43,8 @@ from .constants import (
     MAX_IMPACT_DEPTH,
     MAX_IMPACT_NODES,
     env_int,
-    read_only_requested,
     normalize_file_path,
+    read_only_requested,
     release_os_memory,
 )
 from .errors import GraphStoreError, is_lock_error
@@ -750,7 +750,9 @@ class GraphStore:
                 conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             conn.execute("PRAGMA cache_size=-2000")
-            conn.execute("PRAGMA temp_store=MEMORY")
+            # FILE keeps the impact-radius working tables reclaimable; the
+            # compile-time default is memory on some SQLite builds.
+            conn.execute("PRAGMA temp_store=FILE")
             _assert_usable_database(conn, self.db_path)
             if self.read_only and conn.execute(
                 "SELECT 1 FROM sqlite_master "
@@ -840,6 +842,7 @@ class GraphStore:
             dict[str, set[str]],
         ] | None = None
         self._cache_lock = threading.Lock()
+        self._cache_epoch = 0
         # Identifies the read transaction currently open on this connection,
         # so a reader cannot roll back a transaction a writer took from it.
         self._active_read_txn: object | None = None
@@ -870,6 +873,7 @@ class GraphStore:
     def _invalidate_cache(self) -> None:
         """Invalidate the cached NetworkX graph after write operations."""
         with self._cache_lock:
+            self._cache_epoch += 1
             self._nxg_cache = None
             self._bare_endpoint_context_cache = None
 
@@ -933,6 +937,7 @@ class GraphStore:
         row = self._conn.execute(
             "SELECT id FROM nodes WHERE qualified_name = ?", (qualified,)
         ).fetchone()
+        self._invalidate_cache()
         return row["id"]
 
     def upsert_edge(self, edge: EdgeInfo) -> int:
@@ -957,6 +962,7 @@ class GraphStore:
                 " updated_at=? WHERE id=?",
                 (edge.line, extra, confidence, confidence_tier, now, existing["id"]),
             )
+            self._invalidate_cache()
             return existing["id"]
 
         self._conn.execute(
@@ -967,7 +973,9 @@ class GraphStore:
             (edge.kind, edge.source, edge.target, edge.file_path, edge.line, extra,
              confidence, confidence_tier, now),
         )
-        return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        edge_id = self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        self._invalidate_cache()
+        return edge_id
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
@@ -1269,10 +1277,12 @@ class GraphStore:
 
     def commit(self) -> None:
         self._conn.commit()
+        self._invalidate_cache()
 
     def rollback(self) -> None:
         """Rollback the current transaction."""
         self._conn.rollback()
+        self._invalidate_cache()
 
     # --- Read operations ---
 
@@ -1622,6 +1632,8 @@ class GraphStore:
         TESTED_BY edges. Only reaching a real Test declaration supplies evidence;
         a fixture's is_test flag alone cannot vouch for production code.
         """
+        from .parser import is_test_file
+
         routes: dict[str, dict[str, Any]] = {}
         frontier = {qn: {qn} for qn in seeds if "::" in qn}
         expanded = {qn: set(origins) for qn, origins in frontier.items()}
@@ -2341,6 +2353,7 @@ class GraphStore:
         cached = getattr(self, "_bare_endpoint_context_cache", None)
         if cached is not None:
             return cached
+        epoch = self._cache_epoch
 
         # bare_name -> [(qualified_name, defining_file)]
         node_lookup: dict[str, list[tuple[str, str]]] = {}
@@ -2441,7 +2454,10 @@ class GraphStore:
             import_targets,
             ambiguous_import_targets,
         )
-        self._bare_endpoint_context_cache = result
+        with self._cache_lock:
+            # Publish only if no write invalidated the context meanwhile.
+            if self._cache_epoch == epoch:
+                self._bare_endpoint_context_cache = result
         return result
 
     def _resolve_bare_endpoints(self, kind: str, endpoint: str) -> int:

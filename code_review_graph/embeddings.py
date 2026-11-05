@@ -1532,7 +1532,6 @@ class EmbeddingStore:
     ) -> list[tuple[str, float]]:
         """Score every stored vector one component at a time (no numpy)."""
         # Process in chunks, only matching current provider
-        scored: list[tuple[str, float]] = []
         cursor = self._conn.execute(
             "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
             (provider_name,),

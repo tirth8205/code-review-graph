@@ -18,13 +18,15 @@ import sys
 import threading
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import anyio.to_thread
 from fastmcp import FastMCP
 
 from . import __version__
+from . import incremental as _incremental
 from .constants import env_int
+from .incremental import get_db_path, start_watch_thread
 
 if TYPE_CHECKING:
     from .graph import GraphStore
@@ -256,19 +258,20 @@ async def _offload(
             their builds would make the documented remedy a new bug.
         timeout_hint: Advice appended to the timeout message.
     """
-    impl_candidate = tool_name[:-5] if tool_name.endswith("_tool") else tool_name
-    for _cand in (impl_candidate, f"{impl_candidate}_func", tool_name):
-        if _cand in _LAZY_TOOL_NAMES and _cand not in globals():
-            _resolve_attr(_cand)
-            break
-    if provenance and "with_provenance" not in globals():
-        _resolve_attr("with_provenance")
-
-    run_fn = (
-        (lambda: _resolve_attr("with_provenance")(work(), root))
-        if provenance
-        else work
-    )
+    def run_fn() -> Any:
+        # Resolve lazy attributes inside the worker: on a cold call the import
+        # pulls in _common, the parser and the grammar package, which would
+        # otherwise block the event loop before the timeout even starts.
+        impl_candidate = (
+            tool_name[:-5] if tool_name.endswith("_tool") else tool_name
+        )
+        for _cand in (impl_candidate, f"{impl_candidate}_func", tool_name):
+            if _cand in _LAZY_TOOL_NAMES and _cand not in globals():
+                _resolve_attr(_cand)
+                break
+        if provenance:
+            return _resolve_attr("with_provenance")(work(), root)
+        return work()
 
     tool_timeout = env_int("CRG_TOOL_TIMEOUT", 0)
     if not bounded or tool_timeout <= 0:

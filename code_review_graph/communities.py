@@ -13,6 +13,7 @@ import re
 import sqlite3
 from collections import Counter, defaultdict, namedtuple
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from .constants import env_int
@@ -353,6 +354,33 @@ def _reassign_test_nodes(
     return reassigned
 
 
+def _load_igraph() -> bool:
+    """Import igraph lazily; a failed import disables the package for good.
+
+    ``find_spec("igraph")`` only proves the package directory exists. The
+    import itself can still fail when a native dependency is missing, so the
+    flag is cleared here and every caller falls back to file-based grouping
+    instead of returning an empty community set.
+    """
+    global ig, IGRAPH_AVAILABLE
+    if not IGRAPH_AVAILABLE:
+        return False
+    if ig is not None:
+        return True
+    try:
+        import igraph as _ig  # type: ignore[import-untyped]
+        # A native build can import and still fail on first attribute access,
+        # so touch the type we need while the handlers are still in scope.
+        _ig.Graph
+    except (ImportError, OSError, AttributeError) as exc:
+        # A missing native library surfaces as OSError, not ImportError.
+        logger.warning("igraph import failed (%s); using file-based communities", exc)
+        IGRAPH_AVAILABLE = False
+        return False
+    ig = _ig
+    return True
+
+
 def _detect_leiden(
     nodes: list[GraphNode],
     edges: Sequence[GraphEdge | _CommunityEdge],
@@ -365,15 +393,7 @@ def _detect_leiden(
     and skips the recursive sub-community splitting pass that caused
     exponential blow-up on large repos (>100k nodes).
     """
-    global ig
-    if ig is None and IGRAPH_AVAILABLE:
-        try:
-            import igraph as _ig  # type: ignore[import-untyped]
-
-            ig = _ig
-        except ImportError:
-            pass
-    if ig is None:
+    if not _load_igraph():
         return []
 
     qn_to_idx: dict[str, int] = {}
@@ -584,7 +604,7 @@ def _split_oversized(
     Uses Leiden on the subgraph of oversized communities. If igraph is
     not available, returns communities unchanged.
     """
-    if not IGRAPH_AVAILABLE:
+    if not _load_igraph():
         return communities
 
     total = sum(
@@ -841,7 +861,7 @@ def detect_communities(
         len(unique_nodes), len(all_edges),
     )
 
-    if IGRAPH_AVAILABLE:
+    if _load_igraph():
         logger.info("Detecting communities with Leiden algorithm (igraph)")
         results = _detect_leiden(unique_nodes, all_edges, min_size)
     else:
