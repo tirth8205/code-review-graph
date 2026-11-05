@@ -67,6 +67,11 @@ def test_approved_test_verb_in_test_file_is_still_test_code():
     b"1UL..3UL | Measure-Object",
     b"1d..3d | Measure-Object",
     b"1 .. 3 | Measure-Object",
+    b"function Get-Many { foreach ($i in 1..$n) { Get-Leaf } }",
+    b"1..$n | Measure-Object",
+    b"1..$items.Count | Measure-Object",
+    b"function Get-Many { foreach ($i in 0..($n - 1)) { Get-Leaf } }",
+    b"1..($n) | Measure-Object",
 ])
 def test_numeric_ranges_are_not_command_calls(source):
     _, edges = CodeParser().parse_bytes(Path("app.ps1"), source)
@@ -104,3 +109,22 @@ def test_python_and_bash_still_extract_functions_and_calls(name, source):
     nodes, edges = CodeParser().parse_bytes(Path(name), source)
     assert {"helper", "caller"} <= {n.name for n in nodes if n.kind == "Function"}
     assert any(e.kind == "CALLS" and e.target.endswith("helper") for e in edges)
+
+
+@pytest.mark.parametrize("name", ["Health.Tests.ps1", "health.tests.ps1"])
+def test_pester_file_outside_a_tests_directory_is_test_code(name):
+    nodes, edges = CodeParser(repo_root=Path("/repo")).parse_bytes(
+        Path("/repo") / name, b"function Test-Health { Get-State }",
+    )
+    node = next(n for n in nodes if n.name == "Test-Health")
+    assert node.is_test
+    assert any(e.kind == "TESTED_BY" and e.source == "Get-State" for e in edges)
+
+
+@pytest.mark.parametrize("scope", ["global", "script", "local", "private", "SCRIPT"])
+def test_scope_qualifier_is_not_part_of_the_function_name(scope):
+    nodes, edges = CodeParser().parse_bytes(
+        Path("app.ps1"), f"function {scope}:Get-Thing {{ }}\nGet-Thing\n".encode(),
+    )
+    assert "Get-Thing" in {n.name for n in nodes if n.kind == "Function"}
+    assert any(e.kind == "CALLS" and e.target == "app.ps1::Get-Thing" for e in edges)

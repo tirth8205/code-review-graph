@@ -1552,6 +1552,8 @@ _TEST_NAME_PATTERNS = [
     re.compile(r"_test\.dart$"),
     # R.
     re.compile(r"^test[_-].*\.[rR]$"),
+    # PowerShell (Pester).
+    re.compile(r"\.tests\.ps1$", re.IGNORECASE),
     # ReScript.
     re.compile(r"[_.]test\.resi?$"),
     # Julia.
@@ -2947,9 +2949,14 @@ _POWERSHELL_NUMBER_PATTERN = (
     r"|\d+(?:u[ysl]?|[yslnd])?"
     r"|(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?d?)(?:[kmgtp]b)?"
 )
+# The right side can also be a variable or, with nothing after the dots in the
+# command name, a parenthesised expression: 1..$n, 1..$a.Count, 0..($n - 1).
 _POWERSHELL_RANGE_RE = re.compile(
-    rf"{_POWERSHELL_NUMBER_PATTERN}\.\.{_POWERSHELL_NUMBER_PATTERN}", re.IGNORECASE,
+    rf"{_POWERSHELL_NUMBER_PATTERN}\.\.(?:{_POWERSHELL_NUMBER_PATTERN}|\$.*)?",
+    re.IGNORECASE,
 )
+# function script:Get-Thing defines Get-Thing; callers do not write the scope.
+_POWERSHELL_SCOPE_RE = re.compile(r"^(?:global|local|private|script):", re.IGNORECASE)
 
 
 class CodeParser:
@@ -17029,7 +17036,8 @@ class CodeParser:
         if language == "powershell":
             for child in node.children:
                 if child.type in ("function_name", "simple_name"):
-                    return child.text.decode("utf-8", errors="replace")
+                    name = child.text.decode("utf-8", errors="replace")
+                    return _POWERSHELL_SCOPE_RE.sub("", name)
             return None
         # Dart: function_signature has a return-type node before the identifier;
         # search only for 'identifier' to avoid returning the return type name.
