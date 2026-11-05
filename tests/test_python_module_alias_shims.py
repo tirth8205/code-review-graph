@@ -534,3 +534,17 @@ def test_symlink_outside_the_repository_is_never_read(tmp_path, monkeypatch):
     parser = CodeParser(repo_root=root)
     parser.parse_file(root / "caller.py")
     assert reads == []
+
+
+def test_module_too_deep_for_ast_keeps_the_file_as_the_module(repo, tmp_path):
+    """Importers keep their edges when the imported file defeats ``ast.parse``."""
+    shim = _write(
+        repo, "deep.py",
+        SHIM.format(module="app.services.billing")
+        + "x = " + "+".join(["1"] * 60000) + "\n",
+    )
+    caller = _write(repo, "caller.py", "import deep\n\n\ndef go():\n    deep.charge(1)\n")
+    parser = CodeParser(repo_root=repo)
+    _, edges = parser.parse_file(caller)
+    assert {e.target for e in edges if e.kind == "IMPORTS_FROM"} == {shim.resolve().as_posix()}
+    assert "charge" in {e.target for e in edges if e.kind == "CALLS"}

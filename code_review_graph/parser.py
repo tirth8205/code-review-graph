@@ -15117,7 +15117,8 @@ class CodeParser:
             return None
         try:
             tree = ast.parse(source)
-        except (SyntaxError, ValueError):
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            # A file ast cannot read must not cost its importers their edges.
             return None
 
         def writes_own_entry(target: ast.AST) -> bool:
