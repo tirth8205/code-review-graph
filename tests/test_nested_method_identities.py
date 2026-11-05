@@ -7,6 +7,7 @@ import pytest
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, incremental_update
 from code_review_graph.parser import CodeParser
+from code_review_graph.postprocessing import run_post_processing
 
 SOURCES = {
     'python': '''class Alpha:
@@ -175,6 +176,17 @@ def test_deeper_enclosing_chains_keep_methods_apart(language):
     }
     assert _calls_from(edges, f'{path}::A.B.Same.run') == {f'{path}::A.B.Same.helper'}
     assert _calls_from(edges, f'{path}::C.Same.run') == {f'{path}::C.Same.helper'}
+
+
+@pytest.mark.parametrize('language', ['python', 'ruby'])
+def test_deep_method_is_contained_by_the_class_node_that_exists(language):
+    path = 'm.py' if language == 'python' else 'm.rb'
+    _, nodes, edges = _parse(path, DEEP[language])
+    classes = {f'{path}::{n.parent_name}.{n.name}' for n in nodes
+               if n.kind == 'Class' and n.parent_name}
+    assert _contains_sources(edges, f'{path}::A.B.Same.run') == {f'{path}::B.Same'}
+    assert _contains_sources(edges, f'{path}::C.Same.run') == {f'{path}::C.Same'}
+    assert {f'{path}::B.Same', f'{path}::C.Same'} <= classes
 
 
 RUBY_NESTED_USER = '''module Admin
@@ -497,6 +509,49 @@ def test_scope_index_is_limited_to_python_and_ruby(language, source):
     import_map = {}
     parser._index_ambiguous_method_scopes(tree.root_node, language, import_map)
     assert import_map == {}
+
+
+@pytest.mark.parametrize('name, source, caller, member', [
+    ('m.rb', '''module Alpha
+  class Same
+    def helper
+    end
+  end
+end
+module Beta
+  class Same
+    def run
+      helper()
+    end
+  end
+end
+''', 'Beta.Same.run', 'Alpha.Same.helper'),
+    ('m.py', '''class Alpha:
+    class Same:
+        def helper(self):
+            pass
+class Beta:
+    class Same:
+        def run(self):
+            helper()
+''', 'Beta.Same.run', 'Alpha.Same.helper'),
+], ids=['ruby', 'python'])
+def test_missing_member_stays_unbound_through_a_full_build(
+    tmp_path, monkeypatch, name, source, caller, member,
+):
+    """Post-build resolution must not pick the other class's member either."""
+    monkeypatch.setenv('CRG_SERIAL_PARSE', '1')
+    (tmp_path / name).write_text(source, encoding='utf-8')
+    path = (tmp_path / name).as_posix()
+    with GraphStore(tmp_path / 'graph.db') as store:
+        full_build(tmp_path, store)
+        run_post_processing(store)
+        targets = {
+            e.target_qualified for e in store.get_edges_by_source(f'{path}::{caller}')
+            if e.kind == 'CALLS'
+        }
+    assert f'{path}::{member}' not in targets
+    assert targets == {'helper'}
 
 
 def _write_repo(root):

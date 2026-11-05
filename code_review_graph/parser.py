@@ -5372,7 +5372,17 @@ class CodeParser:
                     continue
                 if entries and not any(parent is None for _, parent in entries):
                     # A same-named member in a different lexical class is
-                    # not evidence of the target of this unbound call.
+                    # not evidence of the target of this unbound call. The
+                    # class binding stops post-build resolution choosing it.
+                    edge = EdgeInfo(
+                        kind=edge.kind, source=edge.source, target=edge.target,
+                        file_path=edge.file_path, line=edge.line,
+                        extra={
+                            **edge.extra,
+                            "receiver_binding": "class",
+                            "receiver_class": scope,
+                        },
+                    )
                     resolved.append(edge)
                     continue
             if (
@@ -11964,7 +11974,11 @@ class CodeParser:
         container_scope = enclosing_class
         if language in ("python", "ruby") and import_map is not None:
             parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
-            container_scope = parent_name
+            # A Class node's identity is its direct parent plus its own name,
+            # however deep it sits, so CONTAINS must use the same two parts.
+            container_scope = (
+                ".".join(parent_name.split(".")[-2:]) if parent_name else parent_name
+            )
             enclosing_class = parent_name
         julia_qualifier: Optional[str] = None
         if language == "julia":
