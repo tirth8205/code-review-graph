@@ -122,7 +122,9 @@ class TsconfigResolver:
         opened through, normalized without following symlinks, so a base config
         reached through a symlink anchors where the link sits.
         """
-        canonical = str(tsconfig_path.resolve())
+        # By the path it was opened through, like its anchors: two symlinks to
+        # one file resolve a relative ``extends`` from different directories.
+        canonical = os.path.abspath(tsconfig_path)
         if canonical in seen:
             logger.debug("TsconfigResolver: cycle detected at %s", canonical)
             return {}

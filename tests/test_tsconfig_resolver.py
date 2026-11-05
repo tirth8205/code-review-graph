@@ -750,3 +750,39 @@ class TestExtendsAnchoringMatchesTsc:
 
         result = TsconfigResolver().resolve_alias("@x/foo", str(importer))
         assert result == str(target.resolve())
+
+    def test_two_symlinks_to_one_config_do_not_cut_the_chain_short(self, tmp_path):
+        # Both links read the same file, but its ``../base.json`` means a different
+        # file from each, so the chain is finite and reaches the root config.
+        target = _write_source(tmp_path / "libs" / "shared" / "src" / "index.ts")
+        _write_json(tmp_path / "base.json", {
+            "compilerOptions": {"baseUrl": ".", "paths": _SHARED_ALIAS},
+        })
+        shared = _write_json(tmp_path / "tools" / "shared.json", {"extends": "../base.json"})
+        (tmp_path / "one" / "two").mkdir(parents=True)
+        try:
+            os.symlink(shared, tmp_path / "one" / "two" / "base.json")
+            os.symlink(shared, tmp_path / "one" / "base.json")
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+        _write_json(tmp_path / "apps" / "tsconfig.json", {"extends": "../one/two/base.json"})
+        importer = _write_source(tmp_path / "apps" / "main.ts")
+
+        result = TsconfigResolver().resolve_alias("@acme/shared", str(importer))
+        assert result == str(target.resolve())
+
+    def test_a_symlink_that_loops_back_still_terminates(self, tmp_path):
+        (tmp_path / "a").mkdir()
+        try:
+            os.symlink(".", tmp_path / "a" / "link", target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks are not available")
+        _write_json(tmp_path / "a" / "tsconfig.json", {
+            "extends": "./link/tsconfig.json",
+            "compilerOptions": {"paths": {"@x": ["./x.ts"]}},
+        })
+        local = _write_source(tmp_path / "a" / "x.ts")
+        importer = _write_source(tmp_path / "a" / "main.ts")
+
+        result = TsconfigResolver().resolve_alias("@x", str(importer))
+        assert result == str(local.resolve())
