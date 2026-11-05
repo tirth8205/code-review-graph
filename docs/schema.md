@@ -3,7 +3,9 @@
 The graph is one SQLite database, `.code-review-graph/graph.db`, opened in WAL mode.
 The base tables and indexes come from `_SCHEMA_SQL` in `code_review_graph/graph.py`.
 Everything else is added by the versioned migrations in `code_review_graph/migrations.py`.
-The current schema version is 10.
+The current schema version is 13, the highest key in `MIGRATIONS`. A database
+below that is migrated on open, in order, by every migration above its own
+version.
 
 ## Node Types
 

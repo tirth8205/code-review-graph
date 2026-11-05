@@ -25,7 +25,7 @@ Core package `code_review_graph/` (Python 3.10+):
 - `prompts.py`: 5 MCP prompts (review_changes, architecture_map, debug_issue, onboard_developer, pre_merge_check).
 - `cli.py`: the `code-review-graph` command. `daemon.py` and `daemon_cli.py`: the `crg-daemon` multi-repo watch daemon.
 - `parser.py`: Tree-sitter multi-language parser with fallbacks for notebooks and other formats. `custom_languages.py`: languages defined in `.code-review-graph/languages.toml` (see docs/CUSTOM_LANGUAGES.md).
-- `graph.py`: SQLite graph store (nodes, edges, impact analysis). `migrations.py`: schema migrations; the current schema version is 10 and must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension (CI checks this).
+- `graph.py`: SQLite graph store (nodes, edges, impact analysis). `migrations.py`: schema migrations; the current schema version is 13 and must equal `SUPPORTED_SCHEMA_VERSION` in the VS Code extension (CI checks this).
 - `incremental.py`: full build, Git/SVN change detection, incremental update, stale-file reconciliation, watch mode. `postprocessing.py`: shared post-build pipeline (signatures, flows, communities, FTS).
 - Post-build resolvers: `python_resolver.py`, `jedi_resolver.py` (optional `enrichment` extra), `spring_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `config_keys.py`, `scoped_resolver.py` (PHP, Rust, C#), `rescript_resolver.py`, `hcl_resolver.py`, `tsconfig_resolver.py` (tsconfig and jsconfig path aliases).
 - `flows.py`: execution flows and criticality. `communities.py`: Leiden via igraph (optional) or file-based grouping, plus the architecture overview. `analysis.py`: hub and bridge nodes, knowledge gaps, surprise scoring, suggested questions.

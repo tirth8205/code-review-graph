@@ -2,16 +2,101 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The MCP server instructions now route by question type instead of introducing
+  the server as a code-review tool. With deferred tool loading an agent sees
+  only the tool names and these instructions, so "for code reviews" kept it on
+  Grep for callers, importers and covering tests everywhere else. The new text
+  maps each relationship question to its tool and leaves plain-text search to
+  Grep. Measured with Claude Code on one TypeScript monorepo: across 8 ordinary
+  tasks that never mention the graph (implement, review, brainstorm, plan), the
+  graph was used in 1 run before and 6 after; plain-text questions stayed on
+  Grep (0 of 4 moved). `tests/test_server_instructions.py` keeps every tool and
+  query pattern the text names registered.
+
+### Fixed
+
+- An explicit embedding refresh (`--embedding-provider` with
+  `--embedding-model`, or the `embedding_provider` and `embedding_model`
+  arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
+  graph with no embeddings yet now reports that it embedded nothing. `build`,
+  `update` and `postprocess` return `embeddings_refresh_skipped: true` and a
+  warning to run `code-review-graph embed` once, and so does an `update`
+  that finds no changes. `watch` logs the same warning after each update and
+  keeps running; a refresh that fails against an existing index still stops
+  it, as before. The refresh used to return `ok` with no embedding field,
+  the same result as a build that never asked for one. It still loads no
+  model and makes no network call in that case (#1070).
+- A rename rewrites the import statements that name the symbol (#1107).
+  The preview looked for import edges that target the symbol, but Python
+  import edges target the imported module's file, so `from pkg.util import
+  helper` was never edited and the applied code raised `ImportError`. The
+  preview now reads the defining module and every module that imports it,
+  and follows Python's scope rules: `from module import name` in every
+  spelling (several names on a line, parenthesized over several lines with
+  comments, `as` aliases, relative imports), packages that re-export the
+  name and their `__all__`, `import module` then `module.name`, and
+  imports inside functions. Calls that no import statement names are still
+  found through the graph's call edges and resolved the same way:
+  `pkg.util.name()` after `import pkg`, `sub.util.name()` after
+  `from pkg import sub`, and a module bound by `importlib.import_module`.
+  JavaScript and TypeScript get the same for `import { name }`,
+  `import { name as x }`, local export lists, `export { name } from` and
+  `export * from` barrels (also a public barrel nothing in the repository
+  imports from), and `ns.name` through `import * as ns`, `import ns =
+  require()`, `const ns = require()`, `await import()` and
+  `import().then()`. A CommonJS `module.exports = { name }` keeps its key,
+  so its importers keep the old name. An alias keeps its own name; a
+  parameter, local, comprehension variable or class attribute that reuses
+  the name is left alone, and so are comments, strings and longer names
+  that contain it. A call inside a shell `"$(...)"` is code and is renamed.
+- Rename edits are exact. Each one carries the `column` where the old name
+  starts and the `site` it is (`definition`, `call`, `reference`,
+  `import`, `export`, `attribute`, `__all__`), and applying replaces the
+  name only there. Before, applying replaced the first substring match on
+  the line (`helper_count` became `double_count`) and, when the line had
+  none, the first match anywhere in the file. A method call chained over
+  several lines, or made inside an f-string, is renamed where its name is
+  rather than in a comment or the string's text. An edit that no longer
+  matches is skipped and counted in `edits_skipped`. CRLF line endings, a
+  byte-order mark and non-ASCII text survive, and a file that is not UTF-8
+  is no longer rewritten with replacement characters.
+- `refactor_tool(mode="rename")` resolves `old_name` exactly. It accepts a
+  name, `Class.method` or a qualified name such as `pkg/util.py::helper`.
+  When a bare name belongs to several symbols the first by file and line
+  is renamed, and the preview's new `qualified_name` says which; pass a
+  qualified name to pick another. A name that matches no symbol is
+  `not_found` instead of falling back to a symbol whose name merely
+  contains it.
+
+## [2.3.9] - 2026-09-18
+
 ### Added
 
+- `visualize` can draw a neighbourhood instead of the whole repository. The
+  D3 page falls back to one bubble per community past 3000 nodes or 9000
+  edges, which a shallow clone of django (45,111 nodes, 397,762 edges)
+  passes by 15x and 44x, so every serious codebase got the bubble view. Nine
+  new flags seed a view and bound it: `--seed-symbol`, `--seed-file`,
+  `--seed-changed` with `--seed-changed-base`, `--seed-flow`, `--path-from`
+  and `--path-to` for a shortest path, and `--depth`, `--render-depth` and
+  `--max-nodes` for how much is carried and drawn. Nodes outside the
+  neighbourhood are absent from the payload rather than dimmed. A hop is a
+  semantic edge (CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, TESTED_BY,
+  DEPENDS_ON); CONTAINS is structural and deliberately not a hop. Search,
+  filters, community colouring, the flow selector and the keyboard
+  shortcuts all keep working, and the default output is still one
+  self-contained HTML file. The whole-repository view is unchanged when no
+  seed flag is passed.
 - `cross_repo_search_tool` accepts `repos`, a list of registry aliases or
   folder names, to search only part of the registry. Names that match no
   entry come back in `unknown` and names that match several entries in
   `ambiguous`; both lists are bounded like every other list (#915).
 - `query_graph_tool` resolves dotted targets such as
-  `Details.QueryHandler.Handle` through an indexed `nodes.symbol` column.
-  This is schema version 10; existing databases migrate on open and the
-  VS Code extension accepts the new version (#942, #934).
+  `Details.QueryHandler.Handle` through an indexed `nodes.symbol` column,
+  added by migration v10. See *Upgrade notes* for the full schema move
+  (#942, #934).
 - `update` and `build_or_update_graph_tool` report files that failed to
   parse: the status is `partial`, the summary names the files and the CLI
   prints a warning on stderr. A failed file keeps its previous graph rows
@@ -20,9 +105,13 @@
   a linked Git worktree (#953).
 - `CRG_DISCOVERY_TIMEOUT` bounds each Git command that discovers what
   changed when a review tool or command was not handed an explicit file
-  list. It defaults to 5 seconds, never exceeds `CRG_GIT_TIMEOUT`, and is
-  read on every call rather than frozen at import. `CRG_GIT_TIMEOUT` keeps
-  its 30-second default and still governs build, update and watch (#262).
+  list. It defaults to 5 seconds, capped at `CRG_GIT_TIMEOUT` so an
+  unset-but-lowered general budget still wins; setting it explicitly is an
+  instruction and is used as given, above `CRG_GIT_TIMEOUT` included. When
+  it is unset and `CRG_GIT_TIMEOUT` was set explicitly, discovery inherits
+  that value, so the documented remedy for slow Git keeps working. Read on
+  every call rather than frozen at import. `CRG_GIT_TIMEOUT` keeps its
+  30-second default and still governs build, update and watch (#262).
 - `staging` is promoted to `testing` automatically, once a day, when it has
   commits `testing` lacks, every required status check is green on its tip,
   and the promotion gate has not failed on the `testing` tip.
@@ -41,10 +130,46 @@
 
 ### Changed
 
-- Hints, `next_tool_suggestions`, the prompt templates and the generated
-  instruction blocks name the registered tools (`detect_changes_tool`, not
-  `detect_changes`), so agents are no longer told to call tools that do
-  not exist (#821).
+- Keyword search is rebuilt, and it needs a rebuilt graph. `_fts_search`
+  wrapped the whole query in one pair of double quotes, so every multi-word
+  search was an exact-adjacency phrase match: on a build of this repository
+  `password hashing` returned 0 rows. Queries are now built from tokens —
+  each quoted, given a prefix term when it carries at least three
+  alphanumeric characters, ANDed first and ORed only if the AND finds
+  nothing, so recall widens without costing precision. A phrase typed in
+  quotes stays a phrase and suppresses the OR widening, and the expression a
+  prose question builds is bounded. Two new indexed columns feed it:
+  `nodes.docstring` (2,451 of this repository's 6,517 nodes carried a
+  docstring the FTS index could not see, because an external-content FTS5
+  table can only index real columns of its content table) and
+  `nodes.name_tokens`, the camelCase splits `unicode61` cannot produce,
+  which raises inner-camel segment recall@20 from 24.7% to 54.7% for a 2.7%
+  larger index. An exact-identifier boost and a symbol-name coverage boost
+  keep BM25 precise against the widened candidate set; the shipped
+  `search_quality` benchmark goes from MRR 0.667 to 1.000.
+- A test gap that tests reach only through a caller is reported as its own
+  class rather than as an unqualified gap. `TESTED_BY` is a direct edge, so
+  a private helper the suite exercises only through the public function
+  above it carried none and was reported untested — 5 of the 74 gaps on one
+  measured delta, including `main.py::_offload`. Each changed symbol is now
+  classified in one batched pass: direct `TESTED_BY`, else a two-hop upward
+  walk over incoming `CALLS` looking for a tested caller, which is the new
+  `GraphStore.get_caller_test_routes`. Reachability is reported as a note,
+  never as coverage: the gap set is unchanged, gap order stays class-blind
+  so truncation cannot hide a real gap first, and risk scoring is not
+  discounted — 32 of the 504 symbols the walk reaches are never executed by
+  the suite, and no depth, fan-out or same-file rule tried moved that below
+  ~5%. Reached gaps carry `covered_via`, `covered_depth` and `covered_by`,
+  and the rendered pull-request comment gives them their own heading with an
+  "indirect" Tested column. Two new environment variables bound the walk:
+  `CRG_CALLER_TEST_ROUTE_DEPTH` (default 2 — over the measured delta depths
+  3, 4 and 5 rescue exactly zero) and `CRG_CALLER_TEST_ROUTE_MAX_CALLERS`
+  (default 500).
+- Hints, `next_tool_suggestions` and the prompt templates name the
+  registered tools (`detect_changes_tool`, not `detect_changes`), so agents
+  are no longer told to call tools that do not exist. The generated
+  instruction blocks already named them and are unchanged from 2.3.8, so
+  reinstalling is not needed for this fix (#821).
 - `detect_changes`, `get_review_context`, `get_affected_flows`,
   `get_impact_radius`, `get_minimal_context` and `update --brief` resolve a
   branch ref to its merge base with `HEAD`, matching GitHub's "Files
@@ -78,9 +203,9 @@
   works out what changed gets `CRG_DISCOVERY_TIMEOUT` (5 seconds) rather
   than the 30-second `CRG_GIT_TIMEOUT`, and runs with `require_vcs`, so
   exhausting that budget raises a `ChangeDiscoveryError` and the tool
-  answers `status: error`. Shortening a budget that failed *silently* would
-  only have made #913's false all-clear easier to hit, and would have
-  extended it to the base resolution, where a timed-out merge base
+  answers `status: error`. A shorter budget on its own would not have been
+  enough: discovery that ran out of time *silently* is what produced
+  #913's false all-clear, and the same silence at the base resolution
   degrades a three-dot diff into a two-dot one. Raising `CRG_GIT_TIMEOUT`
   still raises discovery with it, so the documented remedy for slow Git
   keeps working (#262).
@@ -108,19 +233,22 @@
   `extra.import_scope`, and the read path expands a directory to its member
   files. `importers_of` matches edges targeting a file's own package,
   `imports_of` reports `import_target_kind`, and the impact traversal
-  follows a package target at every hop without spending one. Emitting an
-  edge per member file instead would make the edge count grow with imports
-  times package size. On kubernetes/kubernetes that was 588,972 edges against
-  the 93,650 recorded now, one per import statement (73,507 of the 588,972
-  came from a single imported package), and 524.6s of build time against
-  about 146s. It also made an incremental update disagree with a rebuild,
-  because an edge's targets then depend on which files were in the package
-  when the importing file happened to be parsed.
-- Resolving imports that previously resolved to nothing costs build time and
-  disk, on every repository measured, and never saves either. Measured
-  against the graph built before this change: a kubernetes/kubernetes build
-  goes from 115.1s and 122.8s to 148.7s and 146.5s (about 24% slower) and its
-  database from 4.41 GB to 5.36 GB (21.5% larger), run isolated and
+  follows a package target at every hop without spending one. One edge per
+  package keeps the edge count proportional to import statements rather
+  than to imports times package size: kubernetes/kubernetes records 93,650
+  import edges where an edge per member file would be 588,972 (73,507 of
+  them from one imported package), and builds in about 146s rather than
+  524.6s. It also keeps an incremental update in agreement with a rebuild,
+  which a per-member fan-out cannot do, because an edge's targets would then
+  depend on which files were in the package when the importing file happened
+  to be parsed.
+- Binding imports that previously stayed bare costs build time and disk, on
+  every repository measured, and never saves either. Measured with the
+  import change off and on against the same parent commit — which already
+  carried the batched writes below, so these figures isolate the import
+  change and are not a comparison against 2.3.8: a kubernetes/kubernetes
+  build goes from 115.1s and 122.8s to 148.7s and 146.5s (about 24% slower)
+  and its database from 4.41 GB to 5.36 GB (21.5% larger), run isolated and
   alternating on one idle machine; cli/cli goes from a 7.6s build and a
   281.1 MB database to 9.3s and 325.9 MB. What that buys is that a bound
   import also lets the call resolver attribute cross-file calls: on cli/cli
@@ -235,7 +363,62 @@
   exits non-zero if it is still running (#958).
 - The Qoder skills are bundled in the wheel, so `install --platform qoder`
   works from a pip install and never copies the target project's own
-  `skills/` directory (#909).
+  `skills/` directory. `uninstall` removes those bundled workflows from
+  `.qoder/skills/` too — it derived the list from the target project's own
+  top-level `skills/` directory, which a normal repository does not have, so
+  it removed none of them (#909).
+
+### Upgrade notes
+
+- **Schema version: 9 → 13.** Four migrations land in this release, and they
+  run automatically the first time any command opens the graph:
+  - v10 adds the indexed `nodes.symbol`, back-filled from `qualified_name`.
+  - v11 adds the indexed `edges.target_resolution`, back-filled over every
+    `CALLS` and `REFERENCES` row. It is what the `references_to` entry above
+    means by `target_resolution: "unresolved"`.
+  - v12 adds `nodes_fts_state`, the mirror of the FTS index.
+  - v13 adds `nodes.docstring` and `nodes.name_tokens`, back-fills both —
+    `name_tokens` in a Python loop over every node — then drops and rebuilds
+    `nodes_fts`.
+
+  v13 is a full-table rewrite plus a complete FTS5 rebuild. On a large graph
+  (this release measures kubernetes/kubernetes at 5.36 GB) the first open
+  after upgrading will take a while and is not resumable. Back the database
+  up first if that matters, or delete it and run `code-review-graph build`.
+
+  Rolling back needs a rebuild. Migrations are forward-only, and 2.3.8 has
+  no newer-database check — it opens a v13 graph without complaining and
+  reads it with a v9 reader. This release adds that check, so a 2.3.9 build
+  reading a future schema says so in one line instead.
+- **The VS Code extension has to be repackaged and republished.** Any
+  extension build a user can already have installed rejects a v13 database
+  with "Database was created with a newer version (schema v13). Update the
+  extension." — the only tagged release, `vscode-v0.2.1`, accepts v6, and the
+  untagged 0.2.2 in this repository accepted v9. The extension is versioned
+  and published separately from the Python package, so upgrading the CLI
+  does not upgrade it. This repository now carries 0.3.0, which accepts v13;
+  until that `.vsix` is built and installed, the Code Graph panel will
+  report the error above after the CLI migrates the graph.
+- **Run `code-review-graph build` once to get the parser fixes.** `update`
+  skips any file whose hash is unchanged, and nothing stamps the parser
+  version into the graph, so a file that has not been edited is never
+  re-parsed after an upgrade. Every parse-time fix above — Go and Ruby
+  import resolution, per-specifier Go import lines, Ruby `require` dispatch,
+  Kotlin imports, PHP `include`/`require`, `import a.b as c`, Go receiver
+  comments, Go embedded `INHERITS`, tsconfig `.mts`/`.cts` — changes a file's
+  rows only when that file is re-parsed. `importers_of` on a Go package
+  stays at 0 until then, and the `extra.import_scope` read path has no edges
+  to expand. The search changes are the exception: migration v13 back-fills
+  `nodes.docstring` from what the parser already stored in `extra`, so
+  keyword search improves without a rebuild.
+- **Re-run `code-review-graph install` to pick up the hook and config
+  changes.** The generated pre-commit hook is not self-updating; reinstall
+  is what replaces an earlier release's block with the one that skips
+  automatic checks in a linked worktree.
+- **GitHub Action cache.** The cache key segment moves from `schema9` to
+  `schema13`, so the first run after upgrading restores no graph cache and
+  builds from scratch. Self-hosted runners can delete the old
+  `code-review-graph-schema9-*` entries.
 
 ## [2.3.8] - 2026-08-21
 

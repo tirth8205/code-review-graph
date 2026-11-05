@@ -16,7 +16,7 @@ from ..changes import (  # noqa: F401
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..errors import ChangeDiscoveryError
 from ..flows import get_affected_flows as _get_affected_flows
-from ..graph import GraphNode, edge_to_dict, node_to_dict
+from ..graph import GraphNode, GraphStore, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import (
     discover_review_changes,
@@ -691,7 +691,7 @@ def get_review_context(
                 context["truncated"] = True
 
         # Generate review guidance
-        guidance = _generate_review_guidance(impact, changed_files, root)
+        guidance = _generate_review_guidance(impact, changed_files, root, store)
         context["review_guidance"] = guidance
 
         summary_parts = [
@@ -725,7 +725,10 @@ def get_review_context(
 
 
 def _generate_review_guidance(
-    impact: dict, changed_files: list[str], repo_root: "str | Path | None" = None,
+    impact: dict,
+    changed_files: list[str],
+    repo_root: "str | Path | None" = None,
+    store: "GraphStore | None" = None,
 ) -> str:
     """Generate review guidance based on the impact analysis.
 
@@ -733,6 +736,12 @@ def _generate_review_guidance(
     than an absolute one. Without it, directory conventions are skipped for
     absolute paths, which can leave a test helper in the untested list but
     never hides a production gap. See #1023.
+
+    *store* lets this split the untested list the same way ``detect_changes``
+    does. CLAUDE.md sends reviewers through both tools in one session, so when
+    one says a symbol "lacks test coverage" and the other says a tested caller
+    reaches it, the reviewer gets two answers and no way to pick. Without a
+    store the wording still stays inside what an edge check can support.
     """
     guidance_parts = []
 
@@ -750,10 +759,34 @@ def _generate_review_guidance(
         and not is_test_file(f.file_path, repo_root)
     ]
     if untested:
+        routes: dict = {}
+        if store is not None:
+            try:
+                routes = store.get_caller_test_routes(
+                    (f.qualified_name for f in untested),
+                    repo_root=str(repo_root) if repo_root else None,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("caller-route lookup failed: %s", exc)
+                routes = {}
+        unreached = [f for f in untested if f.qualified_name not in routes]
+        indirect = [f for f in untested if f.qualified_name in routes]
+        # "no direct test", never "untested": a test reaching this code through
+        # importlib, a fixture or a subprocess leaves no edge behind.
         guidance_parts.append(
-            f"- {len(untested)} changed function(s) lack test coverage: "
+            f"- {len(untested)} changed function(s) have no direct test: "
             + ", ".join(n.name for n in untested[:5])
         )
+        if indirect:
+            guidance_parts.append(
+                f"  - of those, {len(indirect)} are reached only through a "
+                "caller (a call path, not a record of execution): "
+                + ", ".join(n.name for n in indirect[:5])
+            )
+            guidance_parts.append(
+                f"  - {len(unreached)} have no tested caller found: "
+                + ", ".join(n.name for n in unreached[:5])
+            )
 
     # Check for wide blast radius
     if len(impact["impacted_nodes"]) > 20:

@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -530,6 +530,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 单份变更报告中分析的最大变更函数数 | `500` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 传递性调用者/被调用者扩展的最大前沿规模 | `50` |
+| `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
+| `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |
 | `CRG_TOOL_TIMEOUT` | 只读 MCP 工具的超时秒数（`0` 表示禁用）。不限制写入类工具：build、postprocess、embed、wiki 和 apply-refactor | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden 社区检测的随机种子 | `42` |
