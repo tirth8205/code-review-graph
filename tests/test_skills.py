@@ -2412,7 +2412,7 @@ class TestOpenCodePluginContent:
 
     def test_v1_runs_commands_from_worktree_without_repo_override(self):
         content = _opencode_plugin_content(1)
-        assert "const baseDir = worktree || directory" in content
+        assert 'const baseDir = worktree && worktree !== "/" ? worktree : directory' in content
         assert '--repo' not in content
         assert 'execFileAsync("code-review-graph", args' in content
         assert '["update", "--skip-flows"]' in content
@@ -2440,6 +2440,24 @@ class TestOpenCodeVersionDetection:
         )
         monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
         assert _detect_opencode_major_version() == 2
+
+    @pytest.mark.parametrize(
+        ("output", "major"),
+        [
+            ("1.19.4-beta.1\n", 1),
+            ("1.19.4+build.7\n", 1),
+            ("opencode v1.19.4-rc.2+sha.5\n", 1),
+            ("2.1.4-next.3\n", 2),
+            ("2.1\n", 2),
+        ],
+    )
+    def test_detects_major_with_semver_suffix(self, monkeypatch, output, major):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout=output, stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == major
 
     def test_returns_none_when_binary_is_missing(self, monkeypatch):
         monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: None)

@@ -300,9 +300,13 @@ function recorded(file, args, options, callback) {
   calls.push({ file, args: [...(args ?? [])], cwd: options?.cwd, timeout: options?.timeout })
   return original.apply(this, arguments)
 }
+let inflight = 0
+let maxInflight = 0
 recorded[util.promisify.custom] = (file, args, options) => {
   calls.push({ file, args: [...(args ?? [])], cwd: options?.cwd, timeout: options?.timeout })
-  return originalPromise(file, args, options)
+  inflight += 1
+  maxInflight = Math.max(maxInflight, inflight)
+  return originalPromise(file, args, options).finally(() => { inflight -= 1 })
 }
 cp.execFile = recorded
 syncBuiltinESMExports()
@@ -460,17 +464,35 @@ report.afterIgnored = { calls: since(mark), results: ignoredAfter }
 
 report.afterUpdates = {}
 for (const tool of ["edit", "write", "patch", "Edit"]) {
+  await waitFor(() => inflight === 0)
   mark = calls.length
   const result = await settle(() => after({ tool, status: "completed", input: {}, result: {} }))
   report.afterUpdates[tool] = { calls: since(mark), result }
 }
 
+// Edits during a run share one follow-up run; two runs never overlap, because
+// the second would read the first's in-progress marker as a crashed build.
+await waitFor(() => inflight === 0)
+env({ FAKE_CRG_SLEEP: "0.3" })
+mark = calls.length
+maxInflight = 0
+for (let i = 0; i < 4; i += 1) {
+  await after({ tool: "edit", status: "completed", input: {}, result: {} })
+}
+const startedAtOnce = since(mark).length
+await waitFor(() => since(mark).length >= 2 && inflight === 0)
+await sleep(100)
+report.afterBurst = { startedAtOnce, total: since(mark).length, maxInflight }
+env({})
+
+await waitFor(() => inflight === 0)
 env({ FAKE_CRG_SLEEP: "2" })
 mark = calls.length
 report.afterDoesNotWait = await settle(() =>
   after({ tool: "write", status: "completed", input: {}, result: {} }))
 report.afterDoesNotWait.calls = since(mark)
 
+await waitFor(() => inflight === 0)
 env({ PATH: basePath })
 mark = calls.length
 report.afterMissingCli = await settle(() =>
@@ -666,6 +688,11 @@ def test_successful_edit_write_patch_update_the_graph(harness):
         assert _argv(entry["calls"]) == [["update", "--skip-flows"]], tool
         assert entry["calls"][0]["cwd"] == harness["base"]
         assert entry["calls"][0]["timeout"] == 60_000
+
+
+def test_edits_during_an_update_share_one_follow_up_run(harness):
+    burst = harness["report"]["afterBurst"]
+    assert burst == {"startedAtOnce": 1, "total": 2, "maxInflight": 1}
 
 
 def test_failed_or_unrelated_tool_calls_do_not_update(harness):

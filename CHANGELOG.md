@@ -27,7 +27,9 @@
   2.0.0–2.0.24 can load it without a runtime `@opencode/plugin` dependency.
   This fixes the V2 loader error `Plugin must export a default definition with
   an id and an effect or setup function` without dropping 1.x support (#1038,
-  #947).
+  #947). Each plugin instance runs one graph update at a time, and edits made
+  during a run share one follow-up run, because an overlapping update reads the
+  first run's in-progress marker as a crashed build and does a full rebuild.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

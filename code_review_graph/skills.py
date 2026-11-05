@@ -2894,7 +2894,9 @@ def _detect_opencode_major_version() -> int | None:
     if result.returncode != 0:
         return None
     output = f"{result.stdout}\n{result.stderr}".strip()
-    match = re.search(r"(?:^|\s)v?(\d+)\.\d+(?:\.\d+)?(?:\s|$)", output)
+    # Accept SemVer suffixes: 1.19.4-beta.1 is still major 1, and misreading it
+    # as "unknown" would write the 2.x template for a 1.x host.
+    match = re.search(r"(?:^|\s)v?(\d+)\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.+-]*)?(?:\s|$)", output)
     return int(match.group(1)) if match else None
 
 
@@ -2928,15 +2930,40 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
   }
 }
 
+// One update at a time, per plugin instance. A second run started while one is
+// going reads its in-progress marker as a crashed build and does a full rebuild.
+// Edits that land during a run share a single follow-up run.
+function makeUpdater(cwd: string): () => Promise<void> {
+  let running = false
+  let pending = false
+  return async () => {
+    if (running) {
+      pending = true
+      return
+    }
+    running = true
+    try {
+      do {
+        pending = false
+        await runQuiet(["update", "--skip-flows"], cwd, 60_000)
+      } while (pending)
+    } finally {
+      running = false
+    }
+  }
+}
+
 const CodeReviewGraphPlugin: Plugin = async ({ directory, worktree }) => {
-  // Prefer the worktree root. Falling back to `directory` still lets the CRG
-  // CLI discover the repository root when OpenCode starts in a subdirectory.
-  const baseDir = worktree || directory
+  // Prefer the worktree root. OpenCode reports "/" as the worktree outside Git,
+  // so SVN and graph-only projects must use `directory`. The CRG CLI discovers
+  // the repository root when that is a subdirectory.
+  const baseDir = worktree && worktree !== "/" ? worktree : directory
+  const requestUpdate = makeUpdater(baseDir)
 
   return {
     event: async ({ event }) => {
       if (event.type === "file.edited") {
-        await runQuiet(["update", "--skip-flows"], baseDir, 60_000)
+        await requestUpdate()
       }
 
       if (event.type === "session.created") {
@@ -3019,11 +3046,35 @@ async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise
   }
 }
 
+// One update at a time, per plugin instance. A second run started while one is
+// going reads its in-progress marker as a crashed build and does a full rebuild.
+// Edits that land during a run share a single follow-up run.
+function makeUpdater(cwd: string): () => Promise<void> {
+  let running = false
+  let pending = false
+  return async () => {
+    if (running) {
+      pending = true
+      return
+    }
+    running = true
+    try {
+      do {
+        pending = false
+        await runQuiet(["update", "--skip-flows"], cwd, 60_000)
+      } while (pending)
+    } finally {
+      running = false
+    }
+  }
+}
+
 export default {
   id: "code-review-graph",
   async setup(ctx) {
     const baseDir = ctx.location.directory
     const controller = new AbortController()
+    const requestUpdate = makeUpdater(baseDir)
 
     // Show graph status when a new session starts.
     void (async () => {
@@ -3049,7 +3100,7 @@ export default {
       if (event.status !== "completed") return
       const tool = String(event.tool ?? "").toLowerCase()
       if (tool !== "edit" && tool !== "write" && tool !== "patch") return
-      void runQuiet(["update", "--skip-flows"], baseDir, 60_000)
+      void requestUpdate()
     })
 
     // Detect changes before git commit commands.
