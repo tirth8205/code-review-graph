@@ -17330,9 +17330,13 @@ class CodeParser:
                 # Only a constant scope names a namespace. ``class klass::Inner``
                 # (identifier) and ``class self::Foo`` (self) resolve their scope
                 # at runtime, so there is no static namespace to record -- fall
-                # through and emit nothing, as before this branch existed.
+                # through and emit nothing, as before this branch existed. The
+                # root of the chain decides: ``klass::Outer::Inner`` is no more
+                # static than ``klass::Inner``.
                 scope = name_child.child_by_field_name("scope")
-                if scope is None or scope.type in ("constant", "scope_resolution"):
+                while scope is not None and scope.type == "scope_resolution":
+                    scope = scope.child_by_field_name("scope")
+                if scope is None or scope.type == "constant":
                     for sub in reversed(name_child.children):
                         if sub.type == "constant":
                             return sub.text.decode("utf-8", errors="replace")

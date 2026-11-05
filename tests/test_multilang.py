@@ -1605,6 +1605,46 @@ class TestRubyParsing:
         # Same identity as the unanchored spelling at the top level.
         assert self.parser._node_qualified(classes["B"]).endswith("anchored.rb::A.B")
 
+    @pytest.mark.parametrize(
+        "declaration",
+        [
+            "class klass::Inner",
+            "class self::Foo",
+            "class klass::Outer::Inner",
+            "class self::Outer::Inner",
+            "class make()::Outer::Inner",
+            "module klass::Outer::Inner",
+        ],
+    )
+    def test_runtime_scope_chain_emits_no_class(self, tmp_path, declaration):
+        """A chain rooted at a runtime value records no static namespace."""
+        path = tmp_path / "runtime_scope.rb"
+        path.write_text(f"{declaration}\n  def run; end\nend\n")
+
+        nodes, _ = self.parser.parse_file(path)
+
+        assert [n for n in nodes if n.kind == "Class"] == []
+        assert [n.parent_name for n in nodes if n.kind == "Function"] == [None]
+
+    @pytest.mark.parametrize(
+        "declaration, name, parent",
+        [
+            ("class A::B::C", "C", "A.B"),
+            ("class ::A::B", "B", "A"),
+            ("class ::A", "A", None),
+        ],
+    )
+    def test_constant_rooted_scope_chain_still_emits_class(
+        self, tmp_path, declaration, name, parent,
+    ):
+        path = tmp_path / "constant_scope.rb"
+        path.write_text(f"{declaration}\nend\n")
+
+        nodes, _ = self.parser.parse_file(path)
+
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert [(n.name, n.parent_name) for n in classes] == [(name, parent)]
+
     def test_scope_resolution_without_constant_is_not_fatal(self):
         """The fallthrough branch: no ``constant`` child, no crash.
 
