@@ -754,6 +754,7 @@ class TestWatchDaemon:
         daemon._current_repos = {r.alias: r for r in config.repos}
         daemon._children = {"alpha": mock_alpha, "beta": mock_beta}
 
+        # A new repo directory for alpha with a different path (no graph.db).
         new_repo = tmp_path / "repo-a-v2"
         new_repo.mkdir()
         (new_repo / ".git").mkdir()

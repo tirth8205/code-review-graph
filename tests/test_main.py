@@ -720,7 +720,7 @@ class TestGraphBackedToolProvenanceCoverage:
             assert attaches, (
                 f"{category}: {tool_name} does not attach graph provenance"
             )
-    
+
     @pytest.mark.parametrize(("tool_name", "offloads"), [
         ("get_docs_section_tool", False),
         ("list_repos_tool", False),

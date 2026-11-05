@@ -771,6 +771,10 @@ class TestConcurrentAccess:
     @staticmethod
     def _seed_v1_database(db: Path) -> None:
         """Create a version 1 database with pending migrations."""
+        # parent_name and extra are in the base CREATE TABLE and no migration
+        # adds them, so a real v1 database carries both; the backfills from v13
+        # on read them, and a seed without them would fail for that reason
+        # rather than for the race this test is about.
         seed = sqlite3.connect(str(db))
         try:
             seed.executescript(
@@ -788,7 +792,7 @@ class TestConcurrentAccess:
             seed.close()
 
     def test_concurrent_first_open_should_not_race_in_migrations(
-    self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Two openers, both past the column check before either alters.
 
@@ -807,7 +811,7 @@ class TestConcurrentAccess:
             result = real_has_column(conn, table, column)
             if (table, column) == ("nodes", "signature"):
                 seen.append("checked")
-                gate.wait()
+                gate.wait()  # both openers have now decided the column is absent
             return result
 
         monkeypatch.setattr(migrations_mod, "_has_column", gated_has_column)
@@ -831,6 +835,7 @@ class TestConcurrentAccess:
         for thread in threads:
             thread.join(timeout=60)
 
+        # Canary: both really reached the check-then-act window.
         assert len(seen) == 2, f"barrier never engaged both openers: {seen}"
         assert errors == [], f"{type(errors[0]).__name__}: {errors[0]}"
 
@@ -1658,7 +1663,7 @@ class TestWatcherUnderStress:
         for i in range(20):
             (src / f"new{i}.py").unlink()
 
-        for i in range(20, 30):
+        for i in range(20, 30):  # modify ten survivors
             (src / f"new{i}.py").write_text(
                 f"def n{i}(): return {i} * 2\n",
                 encoding="utf-8",
@@ -1686,6 +1691,8 @@ class TestWatcherUnderStress:
             self._apply_rapid_file_changes(repo)
 
             expected = self._disk_files(repo)
+            # Canary: the churn really reshaped the tree, so convergence is a
+            # claim about the watcher rather than about nothing having moved.
             assert len(expected) == 30, sorted(expected)
             assert expected != before
 
@@ -1697,6 +1704,9 @@ class TestWatcherUnderStress:
                 f"extra={sorted(self._graph_files(repo) - expected)}"
             )
 
+            # Canary: the watcher observed real events and still calls itself
+            # live. Health is republished on a timer, so poll rather than
+            # read once.
             assert _wait_for(
                 lambda: self._health(health_dir).get("events_seen", 0) > 0
             ), self._health(health_dir)

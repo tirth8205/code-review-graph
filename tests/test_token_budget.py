@@ -892,7 +892,7 @@ class TestTruncationContract:
         assert community["members_truncated"] is True
         # ``size`` is the real member count, not the truncated list length.
         assert community["size"] > len(community["members"])
-    
+
     def test_detect_changes_flows_carry_no_step_lists(self, repo):
         """#849's payload must not leak back in through detect_changes."""
         result = asyncio.run(crg_main.detect_changes_tool(
@@ -903,7 +903,7 @@ class TestTruncationContract:
 
         flows = result["affected_flows"]
         assert flows
-        assert all(map(lambda flow: "steps" not in flow, flows)), (
+        assert all("steps" not in flow for flow in flows), (
             "detect_changes embeds per-flow metadata only; full step "
             "lists are what made get_affected_flows return 247k tokens"
         )

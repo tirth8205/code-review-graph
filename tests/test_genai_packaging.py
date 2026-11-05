@@ -89,13 +89,15 @@ def test_lock_pins_google_genai_within_pyproject_bounds():
     assert 1 <= major < 3, version
 
 
-@pytest.mark.parametrize("pkg", _lock()["package"], ids=lambda pkg: pkg["name"])
-def test_lock_registry_sources_are_pypi_only(pkg):
+def test_lock_registry_sources_are_pypi_only():
     """Supply-chain guard: external packages must come from pypi.org."""
-    expected_source = {"code-review-graph": {"editable": "."}}.get(
-        pkg["name"], {"registry": "https://pypi.org/simple"}
-    )
-    assert pkg["source"] == expected_source
+    expected = {"code-review-graph": {"editable": "."}}
+    unexpected = {
+        pkg["name"]: pkg["source"]
+        for pkg in _lock()["package"]
+        if pkg["source"] != expected.get(pkg["name"], {"registry": "https://pypi.org/simple"})
+    }
+    assert not unexpected
 
 
 def test_lock_requires_dist_matches_pyproject():

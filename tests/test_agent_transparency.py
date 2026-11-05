@@ -303,7 +303,7 @@ class TestSymbolDisambiguation:
         assert result["status"] == "ok"
         assert result["target"] == target
         assert result["results"] == []
-    
+
     def _seed_java_fqn_graph(self, store, root):
         java_target = str(root / "OrderHandler.java") + "::OrderHandler.process"
         java_caller = str(root / "OrderRouter.java") + "::route"

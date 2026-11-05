@@ -456,7 +456,7 @@ class TestChanges:
             repo_root=repo_root,
         )
         assert len(result["affected_flows"]) >= 1
- 
+
     def test_analyze_changes_review_priorities_ordered(self):
         """Review priorities are ordered by descending risk score."""
         # Create several functions with varying risk levels.

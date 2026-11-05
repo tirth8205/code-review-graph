@@ -2626,7 +2626,7 @@ class TestBashParsing:
 
     def test_functions_have_no_parent(self):
         """Bash has no classes so every function should be top-level."""
-        
+
         functions = [node for node in self.nodes if node.kind == "Function"]
 
         assert functions
@@ -4076,10 +4076,9 @@ class TestHCLParsing:
         contains = [e for e in self.edges if e.kind == "CONTAINS"]
         targets = {e.target for e in contains}
         # All non-File nodes should be contained by the file
-        non_file_nodes = filter(lambda node: node.kind != "File", self.nodes)
-        expected_targets = set(
-            map(lambda node: f"{node.file_path}::{node.name}", non_file_nodes)
-        )
+        expected_targets = {
+            f"{node.file_path}::{node.name}" for node in self.nodes if node.kind != "File"
+        }
 
         assert expected_targets
         assert expected_targets <= targets
@@ -4563,7 +4562,7 @@ class TestAnsibleTasksParsing:
         file_path_str = str(_TASKS_FILE)
         sources = {e.source for e in self.edges if e.kind == "CONTAINS"}
         assert file_path_str in sources
-    
+
     def test_tasks_have_no_parent_play(self):
         tasks = [node for node in self.nodes if node.kind == "Function"]
 

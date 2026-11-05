@@ -292,6 +292,8 @@ class TestTargetResolutionColumn:
 
             assert rows["src/app.py::run"] == "direct"
             assert rows["run"] == "unresolved"
+            # The column means nothing for an import edge; it stays NULL
+            # rather than claiming a file path is an unresolved call.
             assert rows["src/lib.py"] is None
 
             indexes = {

@@ -1098,7 +1098,7 @@ def test_cross_file_scoped_resolution_rechecks_candidate_changes(tmp_path: Path)
             nodes, edges = parser.parse_file(path)
             store.store_file_nodes_edges(str(path), nodes, edges)
 
-        # Primeiro cenário: resolução para A::run(int)
+        # First: the call resolves to A::run(int).
         assert store.resolve_cpp_scoped_call_targets() == 1
 
         call, tested_by = _get_scoped_call_edges(store, caller)
@@ -1108,7 +1108,7 @@ def test_cross_file_scoped_resolution_rechecks_candidate_changes(tmp_path: Path)
         assert tested_by.source_qualified == f"{callee_path.as_posix()}::A.run(int)"
         assert tested_by.extra == call.extra
 
-        # Segundo cenário: duas sobrecargas geram ambiguidade
+        # Second: two overloads make it ambiguous.
         _reindex_cpp_source(
             store,
             parser,
@@ -1125,7 +1125,7 @@ def test_cross_file_scoped_resolution_rechecks_candidate_changes(tmp_path: Path)
         assert tested_by.source_qualified == "A::run"
         assert tested_by.extra == call.extra
 
-        # Terceiro cenário: resolução para A::run(double)
+        # Third: the call resolves to A::run(double).
         _reindex_cpp_source(
             store,
             parser,

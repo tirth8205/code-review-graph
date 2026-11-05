@@ -570,7 +570,7 @@ class TestCommunities:
     def test_igraph_available_is_bool(self):
         """IGRAPH_AVAILABLE is a boolean."""
         assert isinstance(IGRAPH_AVAILABLE, bool)
-    
+
     def _seed_sparse_graph_for_fallback(self):
         """Prepare a sparse graph containing only CONTAINS edges."""
         self.store.upsert_node(
@@ -612,6 +612,8 @@ class TestCommunities:
         """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
         self._seed_sparse_graph_for_fallback()
 
+        # With high min_size, Leiden may produce tiny clusters that get dropped.
+        # The fallback to file-based should still produce results.
         result = detect_communities(self.store, min_size=2)
 
         assert isinstance(result, list)

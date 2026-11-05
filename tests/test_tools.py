@@ -1430,7 +1430,7 @@ class TestFlowTools:
         result = list_flows(repo_root=str(self.root), limit=1)
         assert result["status"] == "ok"
         assert len(result["flows"]) <= 1
-    
+
     def test_list_flows_kind_filter(self):
         result = list_flows(repo_root=str(self.root), kind="Function")
 
@@ -1793,7 +1793,7 @@ class TestCommunityTools:
         assert "Architecture:" in result["summary"]
         assert "communities" in result["summary"]
         assert "cross-community edges" in result["summary"]
-    
+
     def test_get_architecture_overview_defaults_to_compact_output(self):
         result = get_architecture_overview_func(repo_root=str(self.root))
 
@@ -1801,7 +1801,7 @@ class TestCommunityTools:
 
         communities = result["communities"]
         assert communities
-        assert all(map(lambda community: "members" not in community, communities))
+        assert all("members" not in community for community in communities)
 
         assert result["context_savings"]["estimated"] is True
         assert set(result["context_savings"]) == {
@@ -1824,7 +1824,7 @@ class TestCommunityTools:
         for c in result["communities"]:
             assert "members" not in c
             assert "name" in c and "size" in c and "cohesion" in c
-    
+
     def test_get_architecture_overview_minimal_aggregates_edges(self):
         std = get_architecture_overview_func(
             repo_root=str(self.root), detail_level="standard"
@@ -1833,6 +1833,8 @@ class TestCommunityTools:
             repo_root=str(self.root), detail_level="minimal"
         )
 
+        # Minimal edges are pair-aggregated, so one pair stands for every
+        # standard edge in this fixture.
         std_edges = std["cross_community_edges"]
         pairs = minimal["cross_community_edges"]
 

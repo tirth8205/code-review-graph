@@ -4,10 +4,11 @@ import io
 import json
 import logging
 import sys
-import pytest
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from code_review_graph import cli
 
@@ -489,7 +490,7 @@ class TestDetectChangesEndToEnd:
             stdin=subprocess.DEVNULL,
             timeout=30,
         )
-    
+
     def _create_repo_with_committed_change(self, tmp_path):
         repo = tmp_path / "repo"
         src = repo / "src"
@@ -510,6 +511,7 @@ class TestDetectChangesEndToEnd:
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-q", "-m", "initial")
 
+        # Commit a change inside greet() so HEAD~1..HEAD touches lines 1-3.
         app.write_text(
             "def greet(name):\n"
             "    message = 'hi there ' + name\n"
@@ -526,12 +528,14 @@ class TestDetectChangesEndToEnd:
         return repo
 
     def test_detect_changes_maps_committed_change_to_functions(
-    self, tmp_path, capsys, monkeypatch,):
+        self, tmp_path, capsys, monkeypatch,
+    ):
         monkeypatch.delenv("CRG_DATA_DIR", raising=False)
         monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
 
         repo = self._create_repo_with_committed_change(tmp_path)
 
+        # Build the graph after the change (stores absolute native paths).
         from code_review_graph.graph import GraphStore
         from code_review_graph.incremental import full_build, get_db_path
 
@@ -548,9 +552,12 @@ class TestDetectChangesEndToEnd:
         out = capsys.readouterr().out
         result = json.loads(out[out.index("{"):])
 
+        # The diff must map to >0 functions — not silently come up empty.
         names = {f["name"] for f in result["changed_functions"]}
         assert "greet" in names
 
+        # The token-savings metadata must not be the misleading
+        # 100%-on-empty case (tiny response because nothing was mapped).
         savings = result["context_savings"]
         assert result["changed_functions"]
         assert savings["saved_percent"] < 100
@@ -603,7 +610,7 @@ def test_explicit_monorepo_subproject_runs_a_real_graph_search(
     monkeypatch,
     capsys,
 ):
-    
+
     """The CLI must open the graph at the explicit subproject, not its parent repo."""
 
     nested = _prepare_monorepo_subproject(tmp_path, monkeypatch)
