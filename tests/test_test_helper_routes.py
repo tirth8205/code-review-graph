@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from code_review_graph.changes import analyze_changes
+from code_review_graph.changes import analyze_changes, compute_risk_score
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
 from code_review_graph.parser import EdgeInfo, NodeInfo
@@ -55,6 +55,17 @@ def test_tests_for_finds_all_tests_that_call_the_same_helper(graph):
     result = graph.get_transitive_tests(widget)
     assert {row["qualified_name"] for row in result} == set(tests)
     assert all(row["indirect"] for row in result)
+
+
+def test_helper_routes_leave_the_full_untested_risk(graph):
+    widget, helper, _ = chain(graph, count=0)
+    before = compute_risk_score(graph, graph.get_node(widget))
+    for index in range(5):
+        test = node(graph, f"renders_{index}", "/repo/widget.spec.tsx", kind="Test", is_test=True)
+        call(graph, test, helper)
+    graph.commit()
+    assert len(graph.get_transitive_tests(widget)) == 5
+    assert compute_risk_score(graph, graph.get_node(widget)) == before
 
 
 def test_helper_tested_by_edges_alone_do_not_claim_a_test_path(graph):

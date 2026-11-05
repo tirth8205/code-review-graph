@@ -1267,7 +1267,12 @@ class GraphStore:
             yield self._row_to_edge(row)
 
     def get_transitive_tests(
-        self, qualified_name: str, max_depth: int = 1, max_frontier: int | None = None,
+        self,
+        qualified_name: str,
+        max_depth: int = 1,
+        max_frontier: int | None = None,
+        *,
+        include_helper_routes: bool = True,
     ) -> list[dict]:
         """Find tests covering a node, including indirect (transitive) coverage.
 
@@ -1278,7 +1283,10 @@ class GraphStore:
         2. Indirect: follow outgoing CALLS edges up to *max_depth* hops,
            then collect TESTED_BY edges on each callee.
         3. Follow incoming CALLS through test helpers to actual Test nodes,
-           allowing *max_depth* helpers between the symbol and a test.
+           allowing *max_depth* helpers between the symbol and a test. Pass
+           ``include_helper_routes=False`` to leave this step out: a call path
+           is a pointer to a test, not a record of coverage, so risk scoring
+           must not count it.
 
         Returns a list of dicts with node fields plus ``indirect: bool``.
 
@@ -1465,7 +1473,7 @@ class GraphStore:
                             results.append(d)
             frontier = next_frontier
 
-        if max_depth > 0:
+        if max_depth > 0 and include_helper_routes:
             for route in self._get_test_helper_routes(
                 input_qns, max_depth + 1, max_frontier, self.get_repo_root(),
             ).values():
