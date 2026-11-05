@@ -64,7 +64,8 @@ rebase, including `git pull` in either mode, so the graph follows the checked
 out code between commits. A file checkout and `commit --amend` do not trigger
 an update, and the checkout a rebase makes before replaying local commits is
 skipped in favour of a single update when the rebase finishes. They share the
-pre-commit hook's worktree rule and `--no-hooks` switch.
+pre-commit hook's worktree rule and `--no-hooks` switch. An existing hook that
+is not a shell script is left alone, with a warning.
 
 ## Core Workflow
 

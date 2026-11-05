@@ -11,7 +11,8 @@
   rebase makes before replaying local commits; `post-rewrite` updates once the
   rebase has finished and ignores `--amend`, which `pre-commit` already covers.
   Each block is marked, appended to an existing hook, skipped in linked
-  worktrees unless `CRG_HOOK_WORKTREES=1`, and removed by `uninstall`.
+  worktrees unless `CRG_HOOK_WORKTREES=1`, and removed by `uninstall`. An
+  existing hook that is not a shell script is left alone, with a warning.
   `--no-hooks` skips them along with `pre-commit`.
 
 ### Changed
