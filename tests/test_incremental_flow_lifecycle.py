@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from code_review_graph.flows import get_flow_by_id
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     full_build,
@@ -321,11 +322,55 @@ class TestBuildToolParity:
             ).fetchall()
         assert [tuple(r) for r in ids_second] == [tuple(r) for r in ids_first]
 
+    def test_hook_edits_keep_a_flow_through_the_edited_file(self, repo: Path) -> None:
+        """``update --skip-flows`` must not lose a flow whose entry point is elsewhere.
+
+        The next plain update has no reason to look at that entry point again,
+        so a flow dropped here would stay gone until a full post-process.
+        """
+        (repo / "app.py").write_text(
+            "from util import helper\n\n\ndef main():\n    return helper()\n"
+        )
+        (repo / "util.py").write_text("def helper():\n    return 1\n")
+        _commit_all(repo, "split")
+        _build(repo, full=True)
+
+        (repo / "util.py").write_text("def helper():\n    return 2\n")
+        _commit_all(repo, "hook edit")
+        _build(repo, full=False, postprocess="minimal")
+        (repo / "lonely.py").write_text(LONELY + "\n# touched\n")
+        _commit_all(repo, "another file")
+        _build(repo, full=False)
+
+        assert "main" in _flow_names(repo)
+        _assert_matches_full_rebuild(repo, communities=False)
+
+    def test_retrace_replaces_a_flow_that_lost_its_rows_in_the_changed_file(
+        self, repo: Path,
+    ) -> None:
+        """A renamed callee must not leave the old flow beside the re-traced one."""
+        (repo / "app.py").write_text(
+            "from util import helper\n\n\ndef main():\n    return helper()\n"
+        )
+        (repo / "util.py").write_text("def helper():\n    return 1\n")
+        _commit_all(repo, "split")
+        _build(repo, full=True)
+
+        (repo / "app.py").write_text(
+            "from util import renamed\n\n\ndef main():\n    return renamed()\n"
+        )
+        (repo / "util.py").write_text("def renamed():\n    return 1\n")
+        _commit_all(repo, "rename callee")
+        _build(repo, full=False)
+
+        assert _flow_names(repo).count("main") == 1
+        _assert_matches_full_rebuild(repo, communities=False)
+
     @pytest.mark.parametrize("level", ["none", "minimal"])
     def test_postprocess_skipped_leaves_no_dangling_rows(
         self, repo: Path, level: str,
     ) -> None:
-        """Without flow tracing, changed files' flows are dropped, not left dangling."""
+        """Without flow tracing, flows stay and follow their nodes to the new IDs."""
         _build(repo, full=True)
         with GraphStore(get_db_path(repo)) as store:
             solo_before = store._conn.execute(
@@ -340,6 +385,12 @@ class TestBuildToolParity:
             solo_after = store._conn.execute(
                 "SELECT id, entry_point_id FROM flows WHERE name = 'solo_a'"
             ).fetchall()
+            flow = store._conn.execute(
+                "SELECT id FROM flows WHERE name = 'main'"
+            ).fetchone()
+            assert flow is not None, "a re-parsed file's flow was lost"
+            detail = get_flow_by_id(store, flow[0])
+            assert {step["name"] for step in detail["steps"]} == {"main", "helper"}
         assert [tuple(r) for r in solo_after] == [tuple(r) for r in solo_before]
 
         # An explicit postprocess afterwards restores full-rebuild parity.

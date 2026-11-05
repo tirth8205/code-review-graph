@@ -169,6 +169,75 @@ def capture_affected_flow_entry_points(
     return entry_qns
 
 
+def capture_flow_node_ids(store: GraphStore, file_paths: list[str]) -> dict[int, str]:
+    """Map the IDs of flow nodes in *file_paths* to their qualified names.
+
+    Must run **before** node replacement, which gives every node a new ID.
+    """
+    captured: dict[int, str] = {}
+    for i in range(0, len(file_paths), _SQL_BATCH):
+        batch = file_paths[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(batch))
+        rows = store._conn.execute(
+            f"SELECT id, qualified_name FROM nodes "  # nosec B608
+            f"WHERE file_path IN ({placeholders}) AND ("
+            f"id IN (SELECT node_id FROM flow_memberships) "
+            f"OR id IN (SELECT entry_point_id FROM flows))",
+            batch,
+        ).fetchall()
+        captured.update({row[0]: row[1] for row in rows})
+    return captured
+
+
+def remap_flow_node_ids(store: GraphStore, old_ids: dict[int, str]) -> int:
+    """Point stored flows at the new rows of re-parsed nodes (#569).
+
+    ``update --skip-flows``, the path the installed hooks run, never re-traces.
+    Deleting the flows of a re-parsed file would lose them until the next full
+    post-process, so they stay, keyed to the same symbols by qualified name.
+    Nodes that no longer exist are left for :func:`purge_orphan_flow_data`.
+
+    Returns the number of nodes remapped.
+    """
+    conn = store._conn
+    new_ids: dict[int, int] = {}
+    for old_id, qualified_name in old_ids.items():
+        row = conn.execute(
+            "SELECT id FROM nodes WHERE qualified_name = ?", (qualified_name,),
+        ).fetchone()
+        if row is not None and row[0] != old_id:
+            new_ids[old_id] = row[0]
+    if not new_ids:
+        return 0
+
+    if conn.in_transaction:
+        logger.warning("Rolling back uncommitted transaction before BEGIN IMMEDIATE")
+        conn.rollback()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for old_id, new_id in new_ids.items():
+            conn.execute(
+                "UPDATE flow_memberships SET node_id = ? WHERE node_id = ?",
+                (new_id, old_id),
+            )
+            conn.execute(
+                "UPDATE flows SET entry_point_id = ? WHERE entry_point_id = ?",
+                (new_id, old_id),
+            )
+        for flow_id, path_json in conn.execute("SELECT id, path_json FROM flows").fetchall():
+            path = json.loads(path_json)
+            if any(node_id in new_ids for node_id in path):
+                conn.execute(
+                    "UPDATE flows SET path_json = ? WHERE id = ?",
+                    (json.dumps([new_ids.get(n, n) for n in path]), flow_id),
+                )
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return len(new_ids)
+
+
 def clear_flows_for_files(store: GraphStore, file_paths: list[str]) -> set[str]:
     """Delete flows that touch *file_paths* before those nodes are replaced.
 
@@ -731,7 +800,21 @@ def incremental_trace_flows(
                 path_batch,
             ).fetchall()
             affected_ids.extend(r[0] for r in affected_rows)
-        affected_ids = list(dict.fromkeys(affected_ids))
+    # A captured entry point's flow may have lost every row in the changed
+    # files (the function it called was renamed). It is re-traced below, so
+    # the old row has to go or the flow would be stored twice.
+    preserved = sorted(preserved_entry_qns)
+    for i in range(0, len(preserved), _SQL_BATCH):
+        qn_batch = preserved[i:i + _SQL_BATCH]
+        placeholders = ",".join("?" * len(qn_batch))
+        affected_rows = conn.execute(
+            f"SELECT f.id FROM flows f "  # nosec B608
+            f"JOIN nodes n ON n.id = f.entry_point_id "
+            f"WHERE n.qualified_name IN ({placeholders})",
+            qn_batch,
+        ).fetchall()
+        affected_ids.extend(r[0] for r in affected_rows)
+    affected_ids = list(dict.fromkeys(affected_ids))
 
     # ------------------------------------------------------------------
     # 2. Collect old entry-point node IDs / QNs before deletion

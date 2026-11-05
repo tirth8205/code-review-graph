@@ -2067,17 +2067,21 @@ def incremental_update(
     # deletion. After nodes are removed/recreated the old IDs are gone, so
     # postprocess can no longer discover affected flows via membership JOINs
     # (#569). Include deleted/renamed/stale paths here — not only to_parse.
-    # Flows are cleared only after a successful replacement parse (or for
-    # permanent removals) so a failed parse keeps existing flow/community state.
+    # A failed parse keeps its flow/community state. A successful one remaps it
+    # below; nothing is deleted unless its file is gone, because the hooks run
+    # ``update --skip-flows`` and would never get the flows back.
     from .communities import (
         capture_community_assignments,
         purge_empty_communities,
         remap_community_assignments,
     )
     from .flows import (
+        capture_affected_flow_entry_points,
+        capture_flow_node_ids,
         clear_flows_for_files,
         expand_changed_file_paths,
         purge_orphan_flow_data,
+        remap_flow_node_ids,
     )
 
     # Pass raw relative/absolute paths; expand_changed_file_paths owns
@@ -2092,6 +2096,7 @@ def incremental_update(
     )
     community_by_qn = capture_community_assignments(store, lifecycle_paths)
     cleared_entry_qns: set[str] = set()
+    flow_node_ids: dict[int, str] = {}
 
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
@@ -2110,7 +2115,7 @@ def incremental_update(
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
                 continue
-            # Parse succeeded: clear flows for this file, then replace nodes.
+            # Parse succeeded: note this file's flows, then replace its nodes.
             # Same reasoning as the serial loop in full_build: a failed write
             # is not a failed parse. Letting it propagate stops the update
             # before the freshness anchor is advanced, so the next run still
@@ -2118,7 +2123,8 @@ def incremental_update(
             file_paths = expand_changed_file_paths(
                 store, [rel_path], repo_root=repo_root,
             )
-            cleared_entry_qns |= clear_flows_for_files(store, file_paths)
+            cleared_entry_qns |= capture_affected_flow_entry_points(store, file_paths)
+            flow_node_ids |= capture_flow_node_ids(store, file_paths)
             store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
             remaining_identity.discard(rel_path)
             parsed_files += 1
@@ -2140,7 +2146,8 @@ def incremental_update(
                 file_paths = expand_changed_file_paths(
                     store, [rel_path], repo_root=repo_root,
                 )
-                cleared_entry_qns |= clear_flows_for_files(store, file_paths)
+                cleared_entry_qns |= capture_affected_flow_entry_points(store, file_paths)
+                flow_node_ids |= capture_flow_node_ids(store, file_paths)
                 store.store_file_nodes_edges(
                     str(repo_root / rel_path),
                     nodes,
@@ -2166,6 +2173,7 @@ def incremental_update(
     # Remap surviving community IDs onto replacement nodes, drop orphan flow
     # rows, and remove community rows that no longer have any members.
     remap_community_assignments(store, community_by_qn)
+    remap_flow_node_ids(store, flow_node_ids)
     purge_orphan_flow_data(store)
     purge_empty_communities(store)
 

@@ -397,7 +397,9 @@ update against clean rebuild:
 Benchmark wall time 79.1 s (8 clean builds plus 8 incremental updates).
 
 `nodes` and `nodes_fts` match everywhere: node rows and the search index are faithful. Every
-other divergence traces to one of three defects, none of which is fixed here.
+other divergence traces to one of three defects. The table was measured before #673, which
+fixes defects 1 and 2 below (flows and community assignment now follow re-parsed nodes), so
+expect smaller numbers until it is captured again.
 
 **1. `flow_memberships` is orphaned by every re-parse.** `flow_memberships.node_id` is a
 bare integer with no foreign key and no cascade, and `GraphStore._replace_file_data` deletes
@@ -432,8 +434,8 @@ file reorders it. Same set, different order, so the graph is not byte-reproducib
 
 Every edit kind is listed in `incremental_fidelity.KNOWN_FAILURES`, which keeps the run from
 reporting them as unexpected. `tests/test_incremental_fidelity.py` guards against a kind that
-currently passes starting to diverge, and carries two `xfail` tests that document defects 1
-and 2 at the level of the defect.
+currently passes starting to diverge, and carries two `xfail` tests, now passing, that pin
+defects 1 and 2 at the level of the defect.
 
 ## Weekly CI run (report-only)
 
