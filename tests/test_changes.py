@@ -245,13 +245,22 @@ class TestChanges:
         # Untested gets 0.30, tested gets 0.05 for test coverage component.
         assert untested_score > tested_score
 
-    def test_risk_score_lifecycle_method_has_no_untested_penalty(self):
-        """Lifecycle methods do not retain the untested risk penalty (#865)."""
-        self._add_func("setUp", path="a.py", line_start=1, line_end=10)
-        node = self.store.get_node("a.py::setUp")
+    def test_risk_score_test_lifecycle_method_has_no_untested_penalty(self):
+        """A lifecycle method in test code has no coverage to lack (#865)."""
+        self._add_func("setUp", path="tests/test_a.py", line_start=1, line_end=10)
+        node = self.store.get_node("tests/test_a.py::setUp")
         assert node is not None
 
         assert compute_risk_score(self.store, node) == 0.0
+
+    def test_risk_score_production_lifecycle_name_keeps_untested_penalty(self):
+        """The exemption is a name, so production code keeps its coverage risk."""
+        for name, path in (("__init__", "service.py"), ("setUp", "installer.py")):
+            self._add_func(name, path=path, line_start=1, line_end=10)
+            node = self.store.get_node(f"{path}::{name}")
+            assert node is not None
+
+            assert compute_risk_score(self.store, node) == pytest.approx(0.30)
 
     def test_risk_score_security_keywords_boost(self):
         """Functions with security keywords score higher."""
