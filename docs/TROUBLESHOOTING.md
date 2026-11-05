@@ -258,7 +258,7 @@ and exits 1, instead of raising a SQLite traceback:
 ```
 Error: the graph database at <path> is unreadable (file is not a database). Run `code-review-graph build` to rebuild it from scratch.
 Error: <path> is a SQLite database but not a code-review-graph graph (it holds invoices). Point --data-dir somewhere else, or delete the file and run `code-review-graph build`.
-Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v10). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
+Error: the graph database at <path> was written by a newer code-review-graph (schema v99; this build understands v13). Upgrade code-review-graph, or delete the file and run `code-review-graph build`.
 Error: the graph at <path> was built for a different repository root: none of its 12 file(s), such as /other/repo/lib.py, are under /this/repo. Run `code-review-graph build` here, or point --repo at the root it was built for.
 ```
 

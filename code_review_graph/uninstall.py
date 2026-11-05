@@ -948,6 +948,37 @@ def _generated_skill_slugs() -> list[str]:
     return [filename.rsplit(".", 1)[0] for filename in skills._SKILLS]
 
 
+def _qoder_skill_names(repo_root: Path, report: UninstallReport) -> list[str]:
+    """Return every ``.qoder/skills`` name this project has ever installed.
+
+    Two shapes, because two releases wrote two different things:
+
+    * Current (#909): ``install`` copies the workflows bundled in the
+      distribution, so their names come from :func:`skills.bundled_skill_names`
+      — the same answer the installer acts on. A normal user repository has no
+      top-level ``skills/`` directory, so deriving the list from one removed
+      nothing at all.
+    * Before #909: ``install`` copied the *target project's* own top-level
+      ``skills/`` directory. Repositories set up by those releases still carry
+      those copies, and only that directory names them, so it is still read.
+
+    Union, not replacement: dropping the legacy source would strand the files
+    an older release installed.
+    """
+    names: list[str] = list(skills.bundled_skill_names())
+    source_skills = repo_root / "skills"
+    if source_skills.is_dir() and not source_skills.is_symlink():
+        try:
+            candidates = list(source_skills.iterdir())
+        except OSError as exc:
+            report.errors.append(f"{source_skills}: list failed ({exc})")
+        else:
+            for candidate in candidates:
+                if candidate.is_dir() and (candidate / "SKILL.md").is_file():
+                    names.append(candidate.name)
+    return list(dict.fromkeys(names))
+
+
 def _remove_legacy_mcp_configs(
     repo_root: Path,
     home: Path,
@@ -1063,21 +1094,13 @@ def _process_repo(
                 report,
                 dry_run=dry_run,
             )
-    source_skills = repo_root / "skills"
-    if source_skills.is_dir() and not source_skills.is_symlink():
-        try:
-            candidates = list(source_skills.iterdir())
-        except OSError as exc:
-            report.errors.append(f"{source_skills}: list failed ({exc})")
-        else:
-            for candidate in candidates:
-                if candidate.is_dir() and (candidate / "SKILL.md").is_file():
-                    _remove_skill_file(
-                        repo_root / ".qoder" / "skills" / candidate.name / "SKILL.md",
-                        repo_root,
-                        report,
-                        dry_run=dry_run,
-                    )
+    for name in _qoder_skill_names(repo_root, report):
+        _remove_skill_file(
+            repo_root / ".qoder" / "skills" / name / "SKILL.md",
+            repo_root,
+            report,
+            dry_run=dry_run,
+        )
 
     # Every variant is matched per file, so which section a given path was
     # written with no longer has to be worked out here.

@@ -202,6 +202,24 @@ MAX_IMPACT_DEPTH = env_int("CRG_MAX_IMPACT_DEPTH", 2)
 MAX_BFS_DEPTH = env_int("CRG_MAX_BFS_DEPTH", 15)
 MAX_SEARCH_RESULTS = env_int("CRG_MAX_SEARCH_RESULTS", 20)
 
+# How far up the CALLS graph a test-gap report looks for a tested caller
+# before calling a changed symbol unreached. Measured on this repository's
+# staging..testing delta rather than picked: hop 1 accounts for 6 of the 7
+# recoverable symbols and hop 2 for the last one, while hops 3-5 recover
+# nothing and each one re-labels roughly another 8% of all production symbols
+# as "covered". Two hops is where the rule still discriminates. See #1047.
+CALLER_TEST_ROUTE_DEPTH = env_int("CRG_CALLER_TEST_ROUTE_DEPTH", 2)
+
+# A frontier node with more incoming CALLS than this is a hub, and is not
+# expanded when walking up for a tested caller. Two reasons, both measured on
+# this repository: "one of my 1,800 callers has a test" is no evidence about
+# this symbol, and expanding a hub is what makes the walk expensive. The
+# limit is per node, never a budget shared across the change set -- a shared
+# budget lets one hub in a pull request erase the routes of every other
+# symbol in it. 500 sits above this graph's 99.5th percentile of in-degree
+# (374) and excludes 10 of 3,415 call targets. See #1047.
+CALLER_TEST_ROUTE_MAX_CALLERS = env_int("CRG_CALLER_TEST_ROUTE_MAX_CALLERS", 500)
+
 # Impact traversal engine: "sql" (bounded SQLite relaxation) or "networkx".
 BFS_ENGINE = os.environ.get("CRG_BFS_ENGINE", "sql")
 

@@ -179,7 +179,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -530,6 +530,8 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 전이적 호출자/피호출자 확장의 최대 프런티어 크기 | `50` |
+| `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
+| `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |
 | `CRG_TOOL_TIMEOUT` | 읽기 전용 MCP 도구의 제한 시간(초. `0`이면 해제). 쓰기 작업(build / postprocess / embed / wiki / apply-refactor)에는 적용되지 않음 | `0` |
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn`의 커밋 수를 세는 기간 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden 커뮤니티 탐지의 시드 | `42` |

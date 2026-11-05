@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
@@ -57,7 +57,7 @@ which run on Node 24. Self-hosted runners must be version `2.327.1` or newer.
 To turn the review into a merge gate:
 
 ```yaml
-      - uses: tirth8205/code-review-graph@v2.3.8
+      - uses: tirth8205/code-review-graph@v2.3.9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fail-on-risk: high
