@@ -42,13 +42,14 @@ def _resolve_repo(raw: str | None) -> Path:
         root = Path(raw).expanduser().resolve()
         if not root.is_dir():
             raise ValueError(f"Repository directory does not exist: {root}")
-        if not any(
-            (parent / marker).exists()
-            for parent in (root, *root.parents)
-            for marker in (".code-review-graph", ".git", ".svn")
-        ):
-            raise ValueError(f"No repository marker found at or above: {root}")
-        return root
+        # The CLI looks for the graph in --repo itself, so a subdirectory has to
+        # become its repository root or a healthy graph reads as missing.
+        for parent in (root, *root.parents):
+            if any(
+                (parent / marker).exists() for marker in (".code-review-graph", ".git", ".svn")
+            ):
+                return parent
+        raise ValueError(f"No repository marker found at or above: {root}")
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],

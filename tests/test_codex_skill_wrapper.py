@@ -59,3 +59,35 @@ def test_fallback_routes_query_and_rejects_mutation(tmp_path):
     assert result.returncode == 127
     assert "No repository marker" in result.stderr
     assert not captured.exists()
+
+
+def test_subdirectory_repo_resolves_to_its_repository_root(tmp_path):
+    """The CLI reads the graph from --repo, so a subdirectory would look unbuilt."""
+    wrapper = (
+        Path(__file__).parents[1]
+        / "code_review_graph/assets/code-review-graph/scripts/crg_readonly.py"
+    )
+    repo = tmp_path / "repo"
+    nested = repo / "pkg" / "sub"
+    nested.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    captured = tmp_path / "argv.json"
+    fake_cli = tmp_path / "fake crg"
+    fake_cli.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        "with open(os.environ['CAPTURE_ARGV'], 'w') as out:\n"
+        "    json.dump(sys.argv[1:], out)\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o755)
+
+    result = subprocess.run(
+        [sys.executable, str(wrapper), "status", "--repo", str(nested)],
+        env={**os.environ, "CRG_BIN": str(fake_cli), "CAPTURE_ARGV": str(captured)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(captured.read_text()) == ["status", "--json", "--repo", str(repo.resolve())]
