@@ -7186,6 +7186,7 @@ class CodeParser:
         duplicate_count = 0
         unsupported_key_count = 0
         alias_indices: dict[str, int] = {}
+        skipped_seen: set[int] = set()
         truncated = False
 
         def qualified(schema_path: str, document_index: int) -> str:
@@ -7244,7 +7245,6 @@ class CodeParser:
             document_index: int,
             depth: int,
             line_start: int,
-            line_end: int,
             extra: dict[str, Any],
             yaml_merge: bool,
             line_is_key: bool,
@@ -7254,7 +7254,9 @@ class CodeParser:
             original_target = shared_targets[id(value_node)]
             reference_line = next_alias_line(value_node, line_start)
             node_line_start = min(line_start, reference_line) if line_is_key else reference_line
-            node_line_end = max(node_line_start, line_end, reference_line)
+            # The alias is this one reference. Its target's own end is elsewhere,
+            # and past later keys when the alias sits inside its own anchor.
+            node_line_end = max(node_line_start, reference_line)
             alias_identity = f"alias:{identity_path}@{reference_line}"
             target = qualified(alias_identity, document_index)
             nodes.append(NodeInfo(
@@ -7314,7 +7316,6 @@ class CodeParser:
                     document_index,
                     depth,
                     line_start,
-                    line_end,
                     extra,
                     yaml_merge,
                     line_is_key,
@@ -7501,25 +7502,28 @@ class CodeParser:
                     merge_context=yaml_merge or bool(extra.get("merge_key")),
                 )
 
-        def consume_skipped_aliases(
-            skipped_node: object,
-            ancestors: frozenset[int] = frozenset(),
-        ) -> None:
-            """Advance alias positions hidden below unsupported complex keys."""
+        def consume_skipped_aliases(skipped_node: object) -> None:
+            """Advance alias positions hidden below unsupported complex keys.
+
+            Anchors in here never enter ``shared_targets``, so an alias leads
+            back into a node already walked. Walking it again would double the
+            work at every link of a chain of aliases, and would also count the
+            aliases inside it twice though the source holds them once.
+            """
             skipped_id = id(skipped_node)
             if skipped_id in shared_targets:
                 next_alias_line(skipped_node, _yaml_line(skipped_node))
                 return
-            if skipped_id in ancestors:
+            if skipped_id in skipped_seen:
                 return
-            skipped_ancestors = ancestors | {skipped_id}
+            skipped_seen.add(skipped_id)
             if isinstance(skipped_node, _YamlMapping):
                 for child_key, child_value in skipped_node.value:
-                    consume_skipped_aliases(child_key, skipped_ancestors)
-                    consume_skipped_aliases(child_value, skipped_ancestors)
+                    consume_skipped_aliases(child_key)
+                    consume_skipped_aliases(child_value)
             elif isinstance(skipped_node, _YamlSequence):
                 for child in skipped_node.value:
-                    consume_skipped_aliases(child, skipped_ancestors)
+                    consume_skipped_aliases(child)
 
         def visit_mapping(
             mapping_node: object,
@@ -7595,7 +7599,8 @@ class CodeParser:
                                 "path": bounded_exact_path,
                                 **duplicate_group,
                             })
-                is_merge = raw_key == "<<"
+                # The tag, not the text: a quoted "<<" is an ordinary string key.
+                is_merge = key_tag == "tag:yaml.org,2002:merge"
                 if is_merge:
                     extra["merge_key"] = True
                 emit_node(

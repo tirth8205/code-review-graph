@@ -256,6 +256,67 @@ def test_alias_bomb_with_unemittable_anchors_stays_bounded(tmp_path: Path) -> No
     assert _endpoints_exist(nodes, edges)
 
 
+def test_alias_chain_below_a_complex_key_stays_linear(tmp_path: Path) -> None:
+    links = "".join(f"  - &a{i} [*a{i - 1}, *a{i - 1}]\n" for i in range(1, 60))
+    source = f"? - &a0 [x]\n{links}: value\nafter: 1\n".encode()
+
+    # Each link doubles the walk unless a node is walked once, so this ends
+    # within a test run only if the walk is linear.
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "bomb.yml", source)
+
+    assert "$.after" in {n.name for n in nodes}
+
+
+def test_alias_below_a_complex_key_still_advances_later_alias_lines(tmp_path: Path) -> None:
+    source = (
+        b"base: &b 1\n"
+        b"? [*b]\n"
+        b": skipped\n"
+        b"copy: *b\n"
+    )
+
+    nodes, edges = CodeParser().parse_bytes(tmp_path / "skipped.yml", source)
+
+    copy = next(n for n in nodes if n.name == "$.copy")
+    assert (copy.line_start, copy.line_end) == (4, 4)
+    assert [e.line for e in edges if e.kind == "REFERENCES"] == [4]
+
+
+def test_alias_inside_its_own_anchor_ends_on_its_own_line(tmp_path: Path) -> None:
+    source = b"root: &r\n  self: *r\n  later: value\n"
+
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "recursive.yml", source)
+
+    spans = {n.name: (n.line_start, n.line_end) for n in nodes if n.kind == "YamlPath"}
+    assert spans["$.root.self"] == (2, 2)
+    assert spans["$.root"] == (1, 3)
+
+
+def test_only_a_plain_merge_key_is_a_merge(tmp_path: Path) -> None:
+    source = (
+        b"base: &b\n"
+        b"  a: 1\n"
+        b"quoted:\n"
+        b"  \"<<\": *b\n"
+        b"tagged:\n"
+        b"  !!str <<: *b\n"
+        b"real:\n"
+        b"  <<: *b\n"
+    )
+
+    nodes, edges = CodeParser().parse_bytes(tmp_path / "merge.yml", source)
+
+    merges = {n.name: n.extra["yaml_merge"] for n in nodes if n.extra.get("is_alias")}
+    assert merges == {
+        '$.quoted["<<"]': False,
+        '$.tagged["<<"]': False,
+        '$.real["<<"]': True,
+    }
+    assert [e.extra["yaml_merge"] for e in edges if e.kind == "REFERENCES"] == [
+        False, False, True,
+    ]
+
+
 def test_depth_limit_truncates_without_dangling_edges(tmp_path: Path) -> None:
     depth = 150
     source = "root:\n" + "".join(f"{'  ' * d}c:\n" for d in range(1, depth))
