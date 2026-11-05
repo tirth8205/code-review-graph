@@ -4495,7 +4495,7 @@ class CodeParser:
         self, path: Path, source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
         """Extract graph structure from Robot Framework tables."""
-        text = source.decode("utf-8", errors="replace")
+        text = source.decode("utf-8-sig", errors="replace")
         file_path = normalize_file_path(path)
         lines = text.splitlines()
         nodes = [NodeInfo(
@@ -4512,15 +4512,38 @@ class CodeParser:
         current: Optional[tuple[str, str, int, str]] = None
         ignored_settings = {
             "[arguments]", "[documentation]", "[return]", "[returns]",
-            "[setup]", "[teardown]", "[timeout]", "[tags]", "[template]",
+            "[timeout]", "[tags]",
         }
-        control_stack: list[str] = []
+        # Each of these names a keyword to run, unlike the settings above.
+        keyword_settings = {"[setup]", "[teardown]", "[template]"}
+        suite_keyword_settings = {
+            "suite setup", "suite teardown", "test setup", "test teardown",
+            "test template", "task setup", "task teardown", "task template",
+        }
+        # Robot spells these in upper case only: `End` can be a user keyword.
+        block_starts = {"IF", "FOR", "WHILE", "TRY", "GROUP"}
+        block_branches = {"ELSE IF", "ELSE", "EXCEPT", "FINALLY"}
+        statements = {"BREAK", "CONTINUE", "RETURN", "VAR"}
+        control_words = block_starts | block_branches | statements | {"END"}
+        section_names = {
+            "setting": "settings", "test case": "test cases", "task": "tasks",
+            "keyword": "keywords",
+        }
 
         def qualified(name: str) -> str:
             return f"{file_path}::{name}"
 
         def normalize_keyword(name: str) -> str:
             return re.sub(r"[\s_]+", "", name).casefold()
+
+        def add_call(source_name: str, target: str, line: int) -> None:
+            edges.append(EdgeInfo(
+                kind="CALLS",
+                source=source_name,
+                target=target,
+                file_path=file_path,
+                line=line,
+            ))
 
         def finish(end_line: int) -> None:
             nonlocal current
@@ -4537,25 +4560,40 @@ class CodeParser:
             stripped = raw_line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            pipe_row = stripped.startswith("|")
-            if pipe_row:
-                cells = [cell.strip() for cell in stripped.strip("|").split("|") if cell.strip()]
+            if stripped.startswith("|"):
+                # `| name |` defines; `|   | Keyword |` sits in the body, the
+                # same way an indented row does in the space-separated format.
+                row = re.split(r"\s\|(?:\s|$)", stripped[1:] + " ")
+                is_body_row = not row[0].strip()
+                cells = [cell.strip() for cell in row if cell.strip()]
             else:
+                is_body_row = raw_line[:1].isspace()
                 cells = [cell.strip() for cell in re.split(r"\s{2,}|\t+", raw_line) if cell.strip()]
             if not cells:
                 continue
-            section_match = re.fullmatch(r"\*\*\*\s*(.+?)\s*\*\*\*", cells[0])
+            section_match = re.fullmatch(r"\*+\s*(.+?)\s*\*+", cells[0])
             if section_match:
                 finish(line_number - 1)
                 section = section_match.group(1).casefold()
+                section = section_names.get(section, section)
                 continue
+            if cells[0] == "...":
+                continue  # A continuation row only adds arguments.
 
             if section == "settings":
                 setting = cells[0].casefold()
+                if setting in suite_keyword_settings and len(cells) > 1:
+                    if cells[1].casefold() != "none":
+                        add_call(file_path, cells[1], line_number)
+                    continue
                 if setting in {"library", "resource", "variables"} and len(cells) > 1:
                     target = cells[1]
                     if setting == "resource":
-                        target = normalize_file_path((path.parent / target).resolve())
+                        target = target.replace("${CURDIR}", str(path.parent))
+                        if "${" not in target:
+                            target = normalize_file_path(
+                                os.path.normpath(path.parent / target),
+                            )
                     edges.append(EdgeInfo(
                         kind="IMPORTS_FROM",
                         source=file_path,
@@ -4569,15 +4607,13 @@ class CodeParser:
             if section not in {"test cases", "tasks", "keywords"}:
                 continue
 
-            is_definition = not pipe_row and not raw_line[:1].isspace()
-            if is_definition:
+            if not is_body_row:
                 finish(line_number - 1)
                 name = cells[0]
                 is_test = section in {"test cases", "tasks"}
                 node_kind = "Test" if is_test else "Function"
                 qname = qualified(name)
                 current = (node_kind, name, line_number, qname)
-                control_stack.clear()
                 nodes.append(NodeInfo(
                     kind=node_kind,
                     name=name,
@@ -4598,99 +4634,38 @@ class CodeParser:
 
             if current is None:
                 continue
-            while cells:
-                assignment = re.match(r"^[$@&%]\{[^}]+\}=(?:\s+(.*))?$", cells[0])
-                if assignment is not None and assignment.group(1):
-                    cells[0] = assignment.group(1)
-                    break
-                if assignment is not None:
-                    cells.pop(0)
-                    continue
-                assignment_index = next(
-                    (
-                        index
-                        for index, cell in enumerate(cells)
-                        if re.fullmatch(r"[$@&%]\{[^}]+\}=", cell)
-                    ),
-                    None,
-                )
-                if assignment_index is not None and all(
-                    re.fullmatch(r"[$@&%]\{[^}]+\}", cell)
-                    for cell in cells[:assignment_index]
-                ):
-                    cells = cells[assignment_index + 1:]
-                break
+            # A row may open by assigning variables, with or without `=`, and a
+            # single space can separate the `=` from the keyword.
+            first = re.fullmatch(r"([$@&]\{[^}]+\}\s*=)\s+(.+)", cells[0])
+            if first is not None:
+                cells = [first.group(2), *cells[1:]]
+            while cells and re.fullmatch(r"[$@&]\{[^}]+\}\s*=?", cells[0]):
+                cells = cells[1:]
             if not cells:
                 continue
             keyword = cells[0]
-            if keyword.casefold() in ignored_settings:
+            setting = keyword.casefold()
+            if setting in keyword_settings:
+                if len(cells) > 1 and cells[1].casefold() != "none":
+                    add_call(current[3], cells[1], line_number)
                 continue
-            if keyword == "...":
+            if setting in ignored_settings:
                 continue
-            control_keyword = " ".join(keyword.casefold().split())
-            if control_keyword in {"if", "for", "while"} and len(cells) > 1:
-                if (
-                    control_keyword == "if"
-                    and len(cells) > 2
-                    and cells[2].casefold() not in {
-                        "and", "or", "not", "==", "!=", "<", ">", "<=", ">=", "in", "is",
-                    }
-                ):
-                    else_index = next(
-                        (
-                            index for index, cell in enumerate(cells[3:], 3)
-                            if cell.casefold() == "else"
-                        ),
-                        None,
-                    )
-                    branch_keywords = [cells[2]]
-                    if else_index is not None and else_index + 1 < len(cells):
-                        branch_keywords.append(cells[else_index + 1])
-                    for branch_keyword in branch_keywords:
-                        edges.append(EdgeInfo(
-                            kind="CALLS",
-                            source=current[3],
-                            target=branch_keyword,
-                            file_path=file_path,
-                            line=line_number,
-                        ))
-                    continue
-                control_stack.append(control_keyword)
+            if keyword == "IF" and len(cells) > 2:
+                # Inline IF: the condition sits in cell 1, a keyword in cell 2,
+                # and each later branch names its own keyword.
+                branches = [cells[2]]
+                for index, cell in enumerate(cells):
+                    if cell == "ELSE IF" and index + 2 < len(cells):
+                        branches.append(cells[index + 2])
+                    elif cell == "ELSE" and index + 1 < len(cells):
+                        branches.append(cells[index + 1])
+                for branch in branches:
+                    if branch not in control_words:
+                        add_call(current[3], branch, line_number)
                 continue
-            if control_keyword == "try":
-                control_stack.append(control_keyword)
-                continue
-            if (
-                control_keyword == "else if"
-                and control_stack
-                and control_stack[-1] == "if"
-                and len(cells) > 1
-            ):
-                continue
-            if (
-                control_keyword == "else"
-                and control_stack
-                and control_stack[-1] in {"if", "try"}
-            ):
-                continue
-            if (
-                control_keyword in {"except", "finally"}
-                and control_stack
-                and control_stack[-1] == "try"
-            ):
-                continue
-            if control_keyword == "end" and control_stack:
-                control_stack.pop()
-                continue
-            if pipe_row and len(cells) == 1:
-                continue
-            edges.append(EdgeInfo(
-                kind="CALLS",
-                source=current[3],
-                target=keyword,
-                file_path=file_path,
-                line=line_number,
-            ))
+            if keyword not in control_words:
+                add_call(current[3], keyword, line_number)
 
         finish(len(lines))
 
@@ -4728,15 +4703,20 @@ class CodeParser:
         for edge in edges:
             if edge.kind != "CALLS":
                 continue
-            normalized = normalize_keyword(edge.target)
-            matches = keyword_definitions.get(normalized, [])
+            matches = keyword_definitions.get(normalize_keyword(edge.target), [])
+            if not matches:
+                # Robot ignores a leading BDD word when it looks up a keyword.
+                edge.target = re.sub(
+                    r"^(?:given|when|then|and|but)\s+", "", edge.target, flags=re.IGNORECASE,
+                )
+                matches = keyword_definitions.get(normalize_keyword(edge.target), [])
             if len(matches) == 1:
                 edge.target = self._node_qualified(matches[0])
 
         test_qnames = {
             self._node_qualified(node)
             for node in nodes
-            if node.is_test
+            if node.kind == "Test"
         }
         for edge in list(edges):
             if edge.kind == "CALLS" and edge.source in test_qnames:

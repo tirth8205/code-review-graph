@@ -139,7 +139,7 @@ Instead of feeding a whole corpus to the model, the graph returns a slice shaped
   <img src="diagrams/diagram9_language_coverage.png" alt="Language coverage by category: Web, Backend, Systems, Mobile, Scripting, Shells, Domain, and Other, plus Jupyter and Databricks notebooks" width="90%" />
 </p>
 
-The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), and Perl XS files (`.xs`). Other YAML and other `.properties` files are not treated as source code.
+The parser extracts functions, classes, imports, call sites, inheritance and tests, using Tree-sitter where a grammar exists and targeted fallbacks elsewhere. Supported: Python, JavaScript/TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Spring Boot application config (`application.properties`, `application.yml`, `application.yaml` and their `application-<profile>` variants; key names and value types only, never values), Vue/Svelte SFCs, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb`), Perl XS files (`.xs`), and Robot Framework files (`.robot`, `.resource`). Other YAML and other `.properties` files are not treated as source code.
 
 PHP projects also get repository-bounded Composer PSR-4 resolution, Blade template references, and Laravel Route and Eloquent edges when the source shows explicit framework imports, model inheritance and receiver evidence.
 
@@ -278,10 +278,8 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 
 | Feature | Details |
 |---------|---------|
-| **Graph diff** | Compare graph snapshots over time: new/removed nodes, edges, community changes |
-| **Memory loop** | Persist Q&A results as markdown for re-ingestion, so the graph grows from queries |
 | **Incremental updates** | Re-parses only files whose hash changed. On a ~3,000-file repo a two-file edit takes ~2.5 s on the hook path ([measured](docs/REPRODUCING.md#incremental-update-latency)). |
-| **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above, including Robot Framework (`.robot`, `.resource`). |
+| **Language and notebook support** | See [Language coverage](#language-coverage-and-notebooks) above. |
 | **Framework-aware PHP parsing** | Repository-bounded Composer PSR-4 imports, Blade template references, evidence-gated Laravel Route-to-controller and Eloquent relationship edges |
 | **Framework-aware Java parsing** | Spring dependency-injection call resolution, request endpoints and WebFlux routes, scheduled triggers, application-event publisher-to-listener edges, Temporal workflow and activity edges, and Spring Boot config keys indexed without their values |
 | **Blast-radius analysis** | Which functions, classes and files are likely affected by a change |
@@ -292,7 +290,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
 | **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
-| **Edge confidence** | Three-tier confidence (EXTRACTED/INFERRED/AMBIGUOUS) with float scores on edges |
+| **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
 | **Export formats** | GraphML (Gephi/yEd), Neo4j Cypher, Obsidian vault, JSON, and SVG (SVG needs matplotlib from the `eval` extra) |
 | **Token benchmarking** | `code_review_graph/token_benchmark.py` measures whole-corpus tokens against graph query tokens per question |
