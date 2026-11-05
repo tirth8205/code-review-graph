@@ -437,19 +437,19 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
 
 
 def _legacy_codex_hook_commands() -> set[str]:
-    """Exact user hook commands written before the current stdin guard."""
-    return {
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph update --skip-flows"
-            " || true"
-        ),
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph status"
-            " || echo 'Not a git repo, skipping'"
-        ),
-    }
+    """Exact user hook commands from before the payload-scoped subcommands."""
+    update = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        " || true"
+    )
+    status = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph status"
+        " || echo 'Not a git repo, skipping'"
+    )
+    stdin_guard = "cat >/dev/null || true; "
+    return {update, status, stdin_guard + update, stdin_guard + status}
 
 
 def _clean_hook_data(

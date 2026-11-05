@@ -17,6 +17,12 @@
 
 ### Fixed
 
+- Codex hooks act on the repository named by the event's `cwd` instead of the
+  directory Codex was launched from, so they cannot update the wrong graph. The
+  generated hooks now run the new `hook-update` and `hook-status` commands, which
+  ignore a missing, relative or non-repository `cwd`. Upgrade the package before
+  running `install --platform codex` again; `install` and `uninstall` both
+  recognise the hooks earlier releases wrote.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

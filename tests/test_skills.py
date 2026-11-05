@@ -579,8 +579,11 @@ class TestGenerateCodexHooksConfig:
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert post_cmd == "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-update; else cat >/dev/null; fi; }"
-        assert session_cmd == "cat | { if command -v code-review-graph >/dev/null 2>&1; then code-review-graph hook-status; else cat >/dev/null; fi; }"
+        for command, subcommand in ((post_cmd, "hook-update"), (session_cmd, "hook-status")):
+            assert command == (
+                "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+                f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+            )
 
 
 class TestInstallCodexHooks:
@@ -641,6 +644,45 @@ class TestInstallCodexHooks:
         data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
         assert len(data["hooks"]["PostToolUse"]) == 1
         assert len(data["hooks"]["SessionStart"]) == 1
+
+    def test_reinstall_replaces_the_v2_3_9_hooks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        released = {
+            "PostToolUse": (
+                "Write|Edit|Bash",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph update --skip-flows || true",
+            ),
+            "SessionStart": (
+                "startup|resume",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph status || echo 'Not a git repo, skipping'",
+            ),
+        }
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir()
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        event: [
+                            {
+                                "matcher": matcher,
+                                "hooks": [{"type": "command", "command": command}],
+                            }
+                        ]
+                        for event, (matcher, command) in released.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        install_codex_hooks(tmp_path / "repo")
+
+        assert json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"] == (
+            generate_codex_hooks_config(tmp_path / "repo")["hooks"]
+        )
 
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")

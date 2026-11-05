@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+
 def _payload_cwd(payload: Any) -> Path | None:
     if not isinstance(payload, dict):
         return None
@@ -54,15 +55,28 @@ def run_update_hook() -> None:
 def _update_repo(repo_root: Path) -> None:
     from .tools.build import build_or_update_graph
 
-    build_or_update_graph(full_rebuild=False, repo_root=str(repo_root), postprocess="minimal")
+    try:
+        result = build_or_update_graph(
+            full_rebuild=False, repo_root=str(repo_root), postprocess="minimal"
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    if result.get("status") == "error":
+        print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+        sys.exit(1)
 
 
 def run_status_hook() -> None:
-    """Delegate to the normal status command for a valid hook payload cwd."""
+    """Delegate to the normal status command for a valid hook payload cwd.
+
+    Status only informs. A repository with no graph is normal, so its
+    diagnostic is enough and the session start must not report a failed hook.
+    """
     repo_root = _hook_repo()
     if repo_root is None:
         return
-    subprocess.run(
-        ["code-review-graph", "status", "--repo", str(repo_root)],
-        check=True,
-    )
+    try:
+        subprocess.run(["code-review-graph", "status", "--repo", str(repo_root)], check=False)
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
