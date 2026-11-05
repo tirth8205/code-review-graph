@@ -33,34 +33,10 @@ _CHILD_START_TIMEOUT = 60.0
 _CHILD_STOP_TIMEOUT = 10.0
 _GIT_TIMEOUT = 10.0
 _PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-_CHILD_ENV_KEYS = frozenset(
-    {
-        "HOME",
-        "LANG",
-        "NO_COLOR",
-        "PATH",
-        "TMPDIR",
-        "USER",
-        "LOGNAME",
-        "VIRTUAL_ENV",
-        "SYSTEMROOT",
-        "WINDIR",
-        "CRG_HOME",
-        "CRG_BFS_ENGINE",
-        "CRG_CHURN_WINDOW_DAYS",
-        "CRG_DISCOVERY_TIMEOUT",
-        "CRG_GIT_TIMEOUT",
-        "CRG_MSG",
-        "CRG_NESTED_OUTPUT_SCAN",
-        "CRG_PARSE_EXECUTOR",
-        "CRG_PARSE_WORKERS",
-        "CRG_RECURSE_SUBMODULES",
-        "CRG_SERIAL_PARSE",
-        "CRG_TOOLS",
-        "PYTHONIOENCODING",
-        "PYTHONUNBUFFERED",
-    }
-)
+# A child is an ordinary ``serve``, so it inherits what ``serve`` would: embedding
+# credentials, tool timeouts, limits, proxies, the Windows home variables. Only
+# what would break the one-root-per-child isolation is removed.
+_CHILD_ENV_DROPPED = frozenset({"CRG_DATA_DIR", "CRG_REPO_ROOT"})
 
 
 class MultiWorktreeError(RuntimeError):
@@ -92,7 +68,7 @@ def _run_git(root: Path, *args: str) -> str:
             timeout=_GIT_TIMEOUT,
             check=False,
         )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         raise MultiWorktreeError(f"Git command failed: {' '.join(args)}") from exc
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -103,11 +79,15 @@ def _run_git(root: Path, *args: str) -> str:
 
 
 def _canonical_git_identity(path: str | Path) -> tuple[Path, Path]:
-    candidate = Path(path).expanduser()
-    if not candidate.is_absolute():
-        raise MultiWorktreeError("repo_root must be an absolute path")
-    candidate = candidate.resolve()
-    if not candidate.is_dir():
+    try:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            raise MultiWorktreeError("repo_root must be an absolute path")
+        candidate = candidate.resolve()
+        is_directory = candidate.is_dir()
+    except (OSError, RuntimeError, ValueError) as exc:  # a NUL byte, a symlink loop
+        raise MultiWorktreeError(f"repo_root cannot be resolved: {exc}") from exc
+    if not is_directory:
         raise MultiWorktreeError(f"repo_root is not a directory: {candidate}")
 
     root = Path(_run_git(candidate, "rev-parse", "--show-toplevel")).resolve()
@@ -227,16 +207,15 @@ class _Child:
         if self.router.auto_watch:
             command.append("--auto-watch")
 
+        # A single process-wide override would make every worktree use the same
+        # database, and GIT_DIR and friends would point every child at one
+        # checkout. Per-repository Registry data_dir remains supported.
         env = {
             key: value
             for key, value in os.environ.items()
-            if key in _CHILD_ENV_KEYS or key.startswith("LC_")
+            if key not in _CHILD_ENV_DROPPED and not key.startswith("GIT_")
         }
         env["PYTHONPATH"] = str(_PACKAGE_ROOT)
-        # A single process-wide override would make every worktree use the
-        # same database. Per-repository Registry data_dir remains supported.
-        env.pop("CRG_DATA_DIR", None)
-        env.pop("CRG_REPO_ROOT", None)
         self.process = subprocess.Popen(
             command,
             cwd=str(self.root),
@@ -413,6 +392,7 @@ class MultiWorktreeRouter:
         self.output_lock = threading.Lock()
         self.initialize_params: dict[str, Any] | None = None
         self.shutdown = False
+        self.waiting_for_start = threading.BoundedSemaphore(_MAX_INFLIGHT_REQUESTS)
 
     @property
     def primary_root(self) -> Path:
@@ -502,6 +482,13 @@ class MultiWorktreeRouter:
                     and child.process is not None
                     and child.process.poll() is None
                 ):
+                    # Tools re-read the Registry on every call, so a data_dir
+                    # changed now could alias another worktree's database.
+                    if self.db_paths.get(root) != db_path:
+                        raise MultiWorktreeError(
+                            f"the graph database for {root} changed to {db_path} while "
+                            "its server is running; restart this MCP session"
+                        )
                     return child
                 else:
                     for other_root, other_db_path in self.db_paths.items():
@@ -596,8 +583,10 @@ class MultiWorktreeRouter:
             request_id = params.get("requestId") if isinstance(params, dict) else None
             child = None
             if request_id is not None:
+                # A cancelled request need not get a response, so it must stop
+                # counting as in flight now. A late response is simply dropped.
                 with self.routes_lock:
-                    route = self.routes.get(_request_key(request_id))
+                    route = self.routes.pop(_request_key(request_id), None)
                 if route is not None:
                     child = route[0]
             if child is not None:
@@ -666,6 +655,40 @@ class MultiWorktreeRouter:
                 params["arguments"] = arguments
                 message = dict(message)
                 message["params"] = params
+        if self._child_is_running(root):
+            self._route(root, message)
+            return
+        # Starting a child can take a minute when it is unhealthy. This loop is
+        # the only reader of stdin, so it must not wait: every other worktree's
+        # requests and cancellations would wait with it.
+        if not self.waiting_for_start.acquire(blocking=False):
+            if "id" in message:
+                self.write(_json_error(message["id"], -32002, "too many in-flight requests"))
+            return
+
+        def start_then_route() -> None:
+            try:
+                self._route(root, message)
+            finally:
+                self.waiting_for_start.release()
+
+        threading.Thread(
+            target=start_then_route,
+            name=f"crg-multi-worktree-start-{root.name}",
+            daemon=True,
+        ).start()
+
+    def _child_is_running(self, root: Path) -> bool:
+        with self.children_lock:
+            child = self.children.get(root)
+            return (
+                child is not None
+                and not child.starting
+                and child.process is not None
+                and child.process.poll() is None
+            )
+
+    def _route(self, root: Path, message: dict[str, Any]) -> None:
         try:
             self._forward(self.get_child(root), message)
         except Exception as exc:
@@ -719,7 +742,8 @@ def run_multi_worktree_server(
     atexit.register(router.close)
 
     def _stop_on_signal(signum: int, _frame: Any) -> None:
-        router.close()
+        # Not router.close(): this may have interrupted the main thread inside
+        # a lock that close() needs. run() closes once the stack has unwound.
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGINT, _stop_on_signal)

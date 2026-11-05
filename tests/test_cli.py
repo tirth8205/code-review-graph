@@ -146,6 +146,28 @@ class TestServeCommand:
 
         router.assert_not_called()
 
+    @pytest.mark.parametrize("flag,value", [("--port", "5555"), ("--host", "127.0.0.1")])
+    def test_serve_multi_worktree_rejects_http_options(self, flag, value):
+        argv = ["code-review-graph", "serve", "--repo", "repo-root", "--multi-worktree"]
+        with patch.object(sys, "argv", [*argv, flag, value]):
+            with patch(
+                "code_review_graph.multi_worktree.run_multi_worktree_server"
+            ) as router:
+                with pytest.raises(SystemExit) as stopped:
+                    cli.main()
+
+        assert stopped.value.code == 2
+        router.assert_not_called()
+
+    def test_serve_multi_worktree_outside_git_is_one_clear_error(self, tmp_path, capsys):
+        argv = ["code-review-graph", "serve", "--repo", str(tmp_path), "--multi-worktree"]
+        with patch.object(sys, "argv", argv):
+            with pytest.raises(SystemExit) as stopped:
+                cli.main()
+
+        assert stopped.value.code == 2
+        assert "Git command failed" in capsys.readouterr().err
+
     def test_serve_multi_worktree_rejects_global_data_dir(self, monkeypatch):
         monkeypatch.setenv("CRG_DATA_DIR", "/tmp/shared-graph")
         argv = [
