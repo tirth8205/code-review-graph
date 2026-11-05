@@ -1058,6 +1058,27 @@ _CPP_HEADER_EVIDENCE_TYPES = frozenset({
 
 _CPP_HEADER_EVIDENCE_QUALIFIERS = frozenset({b"consteval", b"constinit"})
 
+# Comments and literals can hold any word, so they are blanked before the scan.
+_CPP_HEADER_NON_CODE_RE = re.compile(
+    rb"""/\*.*?(?:\*/|\Z)|//[^\n]*|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'""",
+    re.DOTALL,
+)
+
+# Text every shape above needs. It decides only whether to run the C++ parse, and
+# the tree check still has the last word, so it may match too much but must never
+# miss. Keep it a superset of _CPP_HEADER_EVIDENCE_TYPES (Q_SIGNALS masks to
+# ``public``). Base clauses and lambdas have no keyword: a base clause is a colon
+# after ``struct`` or ``union``, and a capture list is a ``]`` not followed by what
+# ends a C subscript. The gaps are capped so repeated keywords stay linear.
+_CPP_HEADER_TEXT_EVIDENCE_RE = re.compile(
+    rb"\b(?:class|namespace|template|concept|using|public|private|protected"
+    rb"|constexpr|noexcept|consteval|constinit|Q_SIGNALS)\b"
+    rb"|::|->"
+    rb"|\benum\b[^;{}]{0,1024}\bstruct\b"
+    rb"|\b(?:struct|union)\b[^;{}]{0,1024}:"
+    rb"|\]\s*(?:\[\[|[^\s;,)=\[\].+\-*/%&|^!?:>])",
+)
+
 _CPP_QT_STRUCTURAL_MACRO_REPLACEMENTS = {
     b"QT_BEGIN_NAMESPACE": b" " * len(b"QT_BEGIN_NAMESPACE"),
     b"QT_END_NAMESPACE": b" " * len(b"QT_END_NAMESPACE"),
@@ -3431,13 +3452,8 @@ class CodeParser:
     @staticmethod
     def _has_cpp_header_text_evidence(source: bytes) -> bool:
         """Cheaply decide whether a C header merits a speculative C++ parse."""
-        return any(
-            token in source
-            for token in (
-                b"class", b"namespace", b"template", b"::",
-                b"constexpr", b"noexcept", b"->",
-            )
-        )
+        code = _CPP_HEADER_NON_CODE_RE.sub(b" ", source)
+        return _CPP_HEADER_TEXT_EVIDENCE_RE.search(code) is not None
 
     @staticmethod
     def _mask_cpp_qt_macros(source: bytes) -> bytes:
