@@ -2068,6 +2068,12 @@ def find_dead_code(
         if node.extra.get("verilog_kind"):
             continue
 
+        # A TS abstract signature is a contract with no body, reached through
+        # its implementations, so it cannot be dead on its own (like Python's
+        # @abstractmethod, handled below).
+        if node.extra.get("abstract"):
+            continue
+
         # Skip entry points (by name pattern or decorator, not just "uncalled").
         if _is_entry_point(node):
             continue

@@ -1252,8 +1252,14 @@ _TS_TYPE_DECLARATIONS = frozenset({
 _FUNCTION_TYPES: dict[str, list[str]] = {
     "python": ["function_definition"],
     "javascript": ["function_declaration", "method_definition", "arrow_function"],
-    "typescript": ["function_declaration", "method_definition", "arrow_function"],
-    "tsx": ["function_declaration", "method_definition", "arrow_function"],
+    "typescript": [
+        "function_declaration", "method_definition", "abstract_method_signature",
+        "arrow_function",
+    ],
+    "tsx": [
+        "function_declaration", "method_definition", "abstract_method_signature",
+        "arrow_function",
+    ],
     "go": ["function_declaration", "method_declaration"],
     "rust": ["function_item", "function_signature_item"],
     "java": ["method_declaration", "constructor_declaration"],
@@ -11949,6 +11955,8 @@ class CodeParser:
                 )
         if julia_qualifier:
             method_extra["julia_module_qualifier"] = julia_qualifier
+        if child.type == "abstract_method_signature":
+            method_extra["abstract"] = True
         if language == "java" and deco_list:
             endpoint_count = self._emit_spring_endpoint_nodes(
                 child,

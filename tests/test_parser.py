@@ -2753,3 +2753,60 @@ class TestTypeScriptAbstractClasses:
                 assert store.get_node(base_qn) is not None
                 assert store.get_node(f"{base_qn}.describe") is not None
                 assert store.get_node(impl_qn) is not None
+
+    def test_abstract_method_is_a_node_and_catches_this_calls(self):
+        """``this.step()`` in the base must land on a real node, not a phantom."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for name in ("base.ts", "panel.tsx"):
+                path = Path(tmp_dir) / name
+                path.write_text(
+                    "export abstract class Base {\n"
+                    "  abstract step(): void;\n"
+                    "  run() { this.step(); }\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
+
+                nodes, edges = self.parser.parse_file(path)
+
+                step = [n for n in nodes if n.name == "step"]
+                assert [n.kind for n in step] == ["Function"]
+                assert step[0].parent_name == "Base"
+                assert step[0].extra["abstract"] is True
+                assert any(
+                    e.kind == "CALLS"
+                    and e.source == f"{path.as_posix()}::Base.run"
+                    and e.target == f"{path.as_posix()}::Base.step"
+                    for e in edges
+                )
+
+    def test_subclass_method_called_through_abstract_base_is_not_dead(self):
+        """Indexing the base bound ``this.step()`` to it, so the override check
+        has to find the abstract declaration or the override reads as unused."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            (root / "shapes.ts").write_text(
+                "export abstract class Middle {\n"
+                "  abstract step(): void;\n"
+                "  abstract unused(): void;\n"
+                "  run() { this.step(); }\n"
+                "}\n"
+                "export class Leaf extends Middle {\n"
+                "  step() {}\n"
+                "  unused() {}\n"
+                "  orphan() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            with GraphStore(root / "graph.db") as store:
+                assert full_build(root, store)["errors"] == []
+                dead = {d["qualified_name"] for d in find_dead_code(store, root=root)}
+
+            shapes = f"{(root / 'shapes.ts').as_posix()}"
+            assert f"{shapes}::Leaf.step" not in dead
+            # A signature has no body to delete; its implementations stay reportable.
+            assert f"{shapes}::Middle.unused" not in dead
+            assert f"{shapes}::Leaf.orphan" in dead
