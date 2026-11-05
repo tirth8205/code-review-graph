@@ -119,6 +119,9 @@ class _PyReceiverContext(NamedTuple):
     symbol_names: dict[str, str]
     local_returns: dict[str, str]
     property_returns: dict[tuple[str, str], str]
+    # Names that different ``from`` imports bind to different modules. The
+    # origin map keeps only the last, which says nothing about a given scope.
+    conflicting_origins: frozenset[str] = frozenset()
 
 
 @lru_cache(maxsize=512)
@@ -253,7 +256,11 @@ def _python_static_truth(
 
 
 class _PythonUnreachableCallVisitor(ast.NodeVisitor):
-    """Collect calls inside branches whose condition is statically false."""
+    """Collect calls and attribute loads in statically false branches.
+
+    An attribute and a call on it start at one position, and both are dead or
+    both live, so one set serves the two questions.
+    """
 
     def __init__(
         self,
@@ -266,6 +273,11 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._typing_modules = typing_modules
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if self._dead:
             self.positions.add((node.lineno, node.col_offset))
         self.generic_visit(node)
@@ -3340,7 +3352,7 @@ class CodeParser:
                 python_receiver_evidence,
                 python_property_read_edges,
             ) = self._collect_python_receiver_evidence(
-                tree.root_node, file_path_str,
+                tree.root_node, file_path_str, source,
             )
         else:
             python_receiver_evidence = {}
@@ -6205,7 +6217,7 @@ class CodeParser:
     # consulted anywhere.
 
     def _collect_python_receiver_evidence(
-        self, root, file_path: str,
+        self, root, file_path: str, source: bytes = b"",
     ) -> tuple[
         dict[tuple[int, str], tuple[str, str]],
         list[EdgeInfo],
@@ -6231,6 +6243,7 @@ class CodeParser:
         ambiguous_property_classes: set[str] = set()
         symbol_origins: dict[str, str] = {}
         symbol_names: dict[str, str] = {}
+        conflicting_origins: set[str] = set()
         local_returns: dict[str, str] = {}
         property_returns: dict[tuple[str, str], str] = {}
         ambiguous_returns: set[str] = set()
@@ -6291,9 +6304,14 @@ class CodeParser:
                     node, file_path, module_bindings, imported_names,
                 )
             elif node.type == "import_from_statement":
+                earlier_origins = dict(symbol_origins)
                 self._python_from_import_bindings(
                     node, file_path, module_bindings, imported_names,
                     symbol_origins, symbol_names,
+                )
+                conflicting_origins.update(
+                    name for name, origin in earlier_origins.items()
+                    if symbol_origins.get(name) != origin
                 )
             for child in node.children:
                 scan_declarations(
@@ -6321,6 +6339,7 @@ class CodeParser:
             symbol_names=symbol_names,
             local_returns=local_returns,
             property_returns=property_returns,
+            conflicting_origins=frozenset(conflicting_origins),
         )
 
         module_env: dict[str, tuple[str, str]] = {}
@@ -6339,6 +6358,9 @@ class CodeParser:
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
         property_read_edges: list[EdgeInfo] = []
+        dead_positions = (
+            _python_unreachable_call_positions(source) if source else frozenset()
+        )
 
         def bind_targets(
             left, value, type_node, env, class_fields, current_class,
@@ -6353,6 +6375,24 @@ class CodeParser:
                 )
                 if bound is not None:
                     env[name] = bound
+
+        def parameter_names(function_node) -> set[str]:
+            """Every name a function's parameter list binds."""
+            parameters = function_node.child_by_field_name("parameters")
+            names: set[str] = set()
+            for parameter in parameters.named_children if parameters else ():
+                name = parameter if parameter.type == "identifier" else next(
+                    (
+                        grandchild
+                        for child in (parameter, *parameter.named_children)
+                        for grandchild in (child, *child.named_children)
+                        if grandchild.type == "identifier"
+                    ),
+                    None,
+                )
+                if name is not None:
+                    names.add(name.text.decode("utf-8", errors="replace"))
+            return names
 
         def first_parameter_name(function_node) -> Optional[str]:
             parameters = function_node.child_by_field_name("parameters")
@@ -6413,7 +6453,9 @@ class CodeParser:
             while parent is not None:
                 if parent.type in ("attribute", "subscript", "augmented_assignment"):
                     return False
-                if parent.type in ("assignment", "for_statement"):
+                if parent.type == "as_pattern_target":
+                    return True
+                if parent.type in ("assignment", "for_statement", "for_in_clause"):
                     target = parent.child_by_field_name("left")
                     return (
                         target is not None
@@ -6457,6 +6499,10 @@ class CodeParser:
             if node_type == "function_definition":
                 scoped = dict(env)
                 scoped.update(class_fields)
+                parameters = parameter_names(node)
+                # A parameter hides any field or outer name it shares a name with.
+                for name in parameters:
+                    scoped.pop(name, None)
                 for name, type_name in self._collect_function_typed_parameters(
                     node, "python",
                 ).items():
@@ -6467,14 +6513,17 @@ class CodeParser:
                     if name_node is not None
                     else current_function
                 )
+                # A closure still sees the method's receiver unless it hides it.
                 receiver_name = (
                     instance_receiver_parameter(node)
                     if current_class and current_function is None
-                    else None
+                    else None if instance_receiver_name in parameters
+                    else instance_receiver_name
                 )
                 class_receiver = (
                     class_receiver_parameter(node)
                     if current_class and current_function is None
+                    else None if class_receiver_name in parameters
                     else class_receiver_name
                 )
                 for child in node.children:
@@ -6533,6 +6582,8 @@ class CodeParser:
                 )
                 if (
                     not is_attribute_store_target(node)
+                    and (node.start_point[0] + 1, node.start_point[1])
+                    not in dead_positions
                     and owner_evidence is not None
                     and owner_evidence[0] == "class"
                     and property_name_node is not None
@@ -6695,7 +6746,7 @@ class CodeParser:
             return context.file_path, owner_type, context.property_returns[local_key]
 
         origin = context.symbol_origins.get(owner_type)
-        if not origin:
+        if not origin or owner_type in context.conflicting_origins:
             return None
         actual_class = context.symbol_names.get(owner_type, owner_type)
         annotations = self._python_module_property_return_annotations(origin)
@@ -6758,7 +6809,12 @@ class CodeParser:
         class_names: set[str] = set()
         ambiguous_classes: set[str] = set()
 
-        def visit(node, owner_class: Optional[str] = None, in_function: bool = False):
+        def visit(
+            node, owner_class: Optional[str] = None, in_function: bool = False,
+            depth: int = 0,
+        ):
+            if depth > self._MAX_AST_DEPTH:
+                return
             if node.type == "class_definition":
                 name_node = node.child_by_field_name("name")
                 nested_class = (
@@ -6771,7 +6827,7 @@ class CodeParser:
                         ambiguous_classes.add(nested_class)
                     class_names.add(nested_class)
                 for child in node.children:
-                    visit(child, nested_class, False)
+                    visit(child, nested_class, False, depth + 1)
                 return
             if node.type == "function_definition":
                 if owner_class and not in_function:
@@ -6790,10 +6846,10 @@ class CodeParser:
                             else ""
                         )
                 for child in node.children:
-                    visit(child, owner_class, True)
+                    visit(child, owner_class, True, depth + 1)
                 return
             for child in node.children:
-                visit(child, owner_class, in_function)
+                visit(child, owner_class, in_function, depth + 1)
 
         visit(tree.root_node)
         if ambiguous_classes:
@@ -6868,6 +6924,15 @@ class CodeParser:
         if not annotation:
             return ("unknown", "")
         type_name = self._base_type_name(annotation)
+        if (
+            type_name
+            and definition[0] != context.file_path
+            and (type_name in context.class_names or type_name in context.imported_names)
+            and context.symbol_origins.get(type_name) != definition[0]
+        ):
+            # The annotation names a class in the getter's module. Here the
+            # same spelling is some other class, so it says nothing.
+            return ("unknown", "")
         return ("class", type_name) if type_name else ("builtin", "")
 
     @staticmethod

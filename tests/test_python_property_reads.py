@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from code_review_graph.graph import GraphStore
 from code_review_graph.parser import CodeParser
 
@@ -244,3 +246,177 @@ def test_property_reads_skip_ambiguous_same_named_classes(tmp_path: Path) -> Non
         if edge.extra and edge.extra.get("python_property_read")
     ]
     assert property_reads == []
+
+
+GETTER = (
+    "class C:\n"
+    "    @property\n"
+    "    def value(self) -> int:\n"
+    "        return 1\n\n"
+)
+
+
+def _targets(root: Path, tmp_path: Path, caller: str, file_name: str = "models.py") -> set[str]:
+    store = _parse_repo(root, tmp_path / "graph.db")
+    try:
+        path = (root / file_name).resolve().as_posix()
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges "
+            "WHERE kind = 'CALLS' AND source_qualified = ?",
+            (f"{path}::{caller}",),
+        ).fetchall()
+        return {row["target_qualified"].rsplit("/", 1)[-1] for row in rows}
+    finally:
+        store.close()
+
+
+def _repo(tmp_path: Path, **files: str) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    for name, source in files.items():
+        (root / f"{name}.py").write_text(source, encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "        with mgr() as self.value:\n            pass\n",
+        "        return [None for self.value in mgr]\n",
+    ],
+    ids=["with-as", "comprehension"],
+)
+def test_binding_forms_store_to_the_property_without_reading_it(tmp_path, body):
+    root = _repo(tmp_path, models=GETTER + "    def m(self, mgr):\n" + body)
+    assert "models.py::C.value" not in _targets(root, tmp_path, "C.m")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "        with self.value as other:\n            pass\n",
+        "        return [None for item in self.value]\n",
+    ],
+    ids=["with-value", "comprehension-iterable"],
+)
+def test_values_of_binding_forms_are_still_reads(tmp_path, body):
+    root = _repo(tmp_path, models=GETTER + "    def m(self):\n" + body)
+    assert "models.py::C.value" in _targets(root, tmp_path, "C.m")
+
+
+def test_closure_reads_through_the_captured_receiver(tmp_path):
+    root = _repo(
+        tmp_path,
+        models=GETTER
+        + "    def m(self):\n"
+        + "        def callback():\n            return self.value\n"
+        + "        return callback\n",
+    )
+    assert "models.py::C.value" in _targets(root, tmp_path, "C.callback")
+
+
+def test_closure_parameter_hides_the_receiver(tmp_path):
+    root = _repo(
+        tmp_path,
+        models=GETTER
+        + "    def m(self):\n"
+        + "        def callback(self):\n            return self.value\n"
+        + "        return callback\n",
+    )
+    assert "models.py::C.value" not in _targets(root, tmp_path, "C.callback")
+
+
+@pytest.mark.parametrize(
+    "guard, header",
+    [("False", ""), ("TYPE_CHECKING", "from typing import TYPE_CHECKING\n")],
+    ids=["false", "type-checking"],
+)
+def test_unreachable_read_is_not_a_getter_call(tmp_path, guard, header):
+    root = _repo(
+        tmp_path,
+        models=header + GETTER
+        + f"    def dead(self):\n        if {guard}:\n            return self.value\n"
+        + "    def live(self):\n"
+        + f"        if {guard}:\n            pass\n        return self.value\n",
+    )
+    assert "models.py::C.value" not in _targets(root, tmp_path, "C.dead")
+    assert "models.py::C.value" in _targets(root, tmp_path, "C.live")
+
+
+def test_name_imported_from_two_modules_gives_no_getter_edge(tmp_path):
+    root = _repo(
+        tmp_path,
+        a=GETTER,
+        b=GETTER,
+        models=(
+            "def f():\n    from a import C\n    c = C()\n    return c.value\n"
+            "def g():\n    from b import C\n    c = C()\n    return c.value\n"
+        ),
+    )
+    for caller in ("f", "g"):
+        targets = _targets(root, tmp_path, caller)
+        assert "a.py::C.value" not in targets
+        assert "b.py::C.value" not in targets
+
+
+def test_parameter_does_not_inherit_a_field_of_the_same_name(tmp_path):
+    root = _repo(
+        tmp_path,
+        models=GETTER
+        + "class Holder:\n"
+        + "    def __init__(self):\n        self.orch = C()\n"
+        + "    def unknown(self, orch):\n        return orch.value\n"
+        + "    def typed(self, orch: C):\n        return orch.value\n"
+        + "    def field(self):\n        return self.orch.value\n",
+    )
+    assert "models.py::C.value" not in _targets(root, tmp_path, "Holder.unknown")
+    assert "models.py::C.value" in _targets(root, tmp_path, "Holder.typed")
+    assert "models.py::C.value" in _targets(root, tmp_path, "Holder.field")
+
+
+def test_return_type_from_another_module_is_not_a_same_named_local_class(tmp_path):
+    root = _repo(
+        tmp_path,
+        a=(
+            "class Engine:\n    @property\n    def token(self) -> int:\n        return 1\n\n"
+            "class Orch:\n    @property\n    def engine(self) -> Engine:\n"
+            "        return Engine()\n"
+        ),
+        models=(
+            "from a import Orch\n\n"
+            "class Engine:\n    @property\n    def token(self) -> int:\n        return 2\n\n"
+            "def f(o: Orch):\n    v = o.engine\n    return v.token\n"
+        ),
+    )
+    targets = _targets(root, tmp_path, "f")
+    assert "a.py::Orch.engine" in targets
+    assert "models.py::Engine.token" not in targets
+
+
+def test_return_type_imported_from_the_getters_module_is_kept(tmp_path):
+    root = _repo(
+        tmp_path,
+        a=(
+            "class Engine:\n    @property\n    def token(self) -> int:\n        return 1\n\n"
+            "class Orch:\n    @property\n    def engine(self) -> Engine:\n"
+            "        return Engine()\n"
+        ),
+        models=(
+            "from a import Engine, Orch\n\n"
+            "def f(o: Orch):\n    v = o.engine\n    return v.token\n"
+        ),
+    )
+    assert "a.py::Engine.token" in _targets(root, tmp_path, "f")
+
+
+def test_imported_module_too_deep_to_walk_keeps_the_callers_edges(tmp_path):
+    root = _repo(
+        tmp_path,
+        a=GETTER + "x = " + "+".join(["1"] * 60000) + "\n",
+        models="from a import C\n\ndef f():\n    c = C()\n    helper()\n    return c.value\n",
+    )
+    assert "helper" in {
+        edge.target
+        for edge in CodeParser(repo_root=root).parse_file(root / "models.py")[1]
+        if edge.kind == "CALLS"
+    }
