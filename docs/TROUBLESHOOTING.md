@@ -213,9 +213,12 @@ exit `75` (`EX_TEMPFAIL`).
 - Two different repositories never block each other, and a graph stored
   outside the working tree (`CRG_DATA_DIR`, `--data-dir`) keeps its lock with
   it.
-- Because the name and location are fixed, a wrapper script can exclude itself
-  from a build with `flock -n .code-review-graph/write.lock <command>`, and
-  both sides exclude each other.
+- Because the name and location are fixed, another tool that writes the graph
+  can exclude itself from a build with
+  `flock -n .code-review-graph/write.lock <its own command>`, and both sides
+  exclude each other. Do not wrap a `code-review-graph` command this way: it
+  takes this lock itself, so it finds the wrapper holding it and skips, or waits
+  forever with `--wait`.
 
 ## Large repositories
 

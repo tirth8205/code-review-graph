@@ -24,15 +24,18 @@ Properties this relies on, all of them deliberate:
   else is prevented from reading or writing the database.
 * **Scoped to one repository's database.** The lock file sits in the data
   directory next to ``graph.db``, so two repositories built at once never
-  block each other. The name is fixed (``write.lock``) and documented, so
-  external tooling can exclude itself from a build with
-  ``flock -n .code-review-graph/write.lock code-review-graph build``.
+  block each other. The name is fixed (``write.lock``) and documented, so an
+  external writer can exclude itself from a build with
+  ``flock -n .code-review-graph/write.lock <its own command>``. Never wrap a
+  ``code-review-graph`` command this way: it would find the wrapper holding the
+  lock and stand down, or wait forever with ``--wait``.
 * **Non-blocking by default.** Skipping is the right answer for a hook: the
   in-flight build already covers the same working tree. Callers that want to
   wait (a human running ``build``/``update`` by hand) ask for it.
 * **Kernel-released.** ``flock`` drops the lock when the holder dies, including
   on ``SIGKILL`` where no cleanup code of ours runs, so a crashed build never
-  wedges a repository.
+  wedges a repository. A forked child would keep it alive, so children close
+  their copy straight away.
 * **``flock``, not ``lockf``.** flock locks belong to the open file
   description, so a probe from a second descriptor cannot silently drop a lock
   this process already holds.
@@ -40,9 +43,11 @@ Properties this relies on, all of them deliberate:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sys
+import weakref
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +59,12 @@ logger = logging.getLogger(__name__)
 #: git hooks and wrapper scripts can take the same lock with
 #: ``flock -n .code-review-graph/write.lock ...`` and be excluded by it.
 WRITE_LOCK_NAME = "write.lock"
+
+#: The errors flock gives when somebody else holds the lock. Any other error
+#: says nothing about a second writer: a network share may not support flock.
+_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES})
+
+_HELD_LOCKS: weakref.WeakSet[WriteLock] = weakref.WeakSet()
 
 
 def write_lock_path(db_path: Path) -> Path:
@@ -78,8 +89,10 @@ def _flock(handle: Any, blocking: bool) -> bool:
     flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
     try:
         fcntl.flock(handle.fileno(), flags)
-    except OSError:
-        return False
+    except OSError as exc:
+        if exc.errno in _HELD_ERRNOS:
+            return False
+        raise
     return True
 
 
@@ -137,10 +150,19 @@ class WriteLock:
             # asked for anyway.
             logger.warning("Cannot open write lock %s: %s", self.path, exc)
             return True
-        if not _flock(handle, blocking):
+        try:
+            taken = _flock(handle, blocking)
+        except OSError as exc:
+            # No lock support is not a competing writer. Degrade the same way
+            # as a lock file that cannot be opened.
+            logger.warning("Cannot lock %s: %s", self.path, exc)
+            handle.close()
+            return True
+        if not taken:
             handle.close()
             return False
         self._handle = handle
+        _HELD_LOCKS.add(self)
         self._record_holder(handle)
         return True
 
@@ -164,6 +186,7 @@ class WriteLock:
         handle, self._handle = self._handle, None
         if handle is None:
             return
+        _HELD_LOCKS.discard(self)
         try:
             handle.seek(0)
             handle.truncate()
@@ -185,3 +208,25 @@ class WriteLock:
 
     def __exit__(self, *_exc: object) -> None:
         self.release()
+
+
+def _close_inherited_locks() -> None:
+    """Close a forked child's copy of each lock, leaving the parent's held.
+
+    flock belongs to the open file description, which a fork shares, so the
+    lock lasts until every copy is closed. Parse workers can outlive a killed
+    build, and each one would keep the repository locked. Closing a copy does
+    not unlock the parent's, and the lock file is not touched.
+    """
+    for lock in list(_HELD_LOCKS):
+        handle, lock._handle = lock._handle, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:  # pragma: no cover - best-effort cleanup
+                pass
+    _HELD_LOCKS.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_close_inherited_locks)

@@ -26,7 +26,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "cat >/dev/null || true; code-review-graph update --skip-flows",
+          "command": "cat >/dev/null || true; code-review-graph update --skip-flows || true",
           "timeout": 30
         }
       ]

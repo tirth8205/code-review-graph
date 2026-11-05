@@ -295,15 +295,14 @@ class TestBuildUpdateCommands:
 
         assert mock_build.call_args.kwargs["wait_for_lock"] is True
 
-    def test_update_that_stood_down_exits_zero_and_says_who_owns_the_build(
+    def test_update_that_stood_down_exits_tempfail_and_says_who_owns_the_build(
         self, capsys,
     ):
-        """A skipped run is not a failure.
+        """A skipped run is neither a success nor a failure.
 
-        Commit hooks and agent hooks run this command on every edit; reporting
-        an overlap as a non-zero exit turns a normal race into an error the
-        user has to interpret. The message names the holder so a stale lock is
-        distinguishable from a live one.
+        The distinct exit code lets a hook tell an overlap from a broken graph.
+        The message names the holder so a stale lock is distinguishable from a
+        live one.
         """
         argv = ["code-review-graph", "update", "--repo", "repo-root"]
         result = {

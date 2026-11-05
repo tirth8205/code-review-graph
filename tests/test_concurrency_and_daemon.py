@@ -2492,8 +2492,8 @@ class TestSingleFlightWriteLock:
         """The regression this lock exists for: a burst must not stack parses.
 
         Eight hooks firing at once used to mean eight process pools and eight
-        parses of the same tree. All eight now exit 0, at most one of them
-        parses, and the graph ends up correct.
+        parses of the same tree. Each now exits 0 or EX_TEMPFAIL, the runs that
+        stand down parse nothing, and the graph ends up correct.
         """
         home = tmp_path / "home"
         repo = _make_repo(tmp_path / "repo", 12)

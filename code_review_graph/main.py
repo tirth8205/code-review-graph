@@ -261,8 +261,8 @@ async def build_or_update_graph_tool(
     By default performs an incremental update (only changed files).
     Set full_rebuild=True to re-parse every file.
 
-    Only one build runs per repository at a time. When a commit hook, an
-    editor-save hook or the watcher is already building, this returns
+    Only one build runs per repository at a time. When a commit hook or an
+    editor-save hook is already building, this returns
     immediately with ``status="contended"``, ``skipped=true`` and the
     ``holder_pid`` that owns the work, rather than queueing a second parse of
     the same files behind it; retry once that build finishes. From a shell,
