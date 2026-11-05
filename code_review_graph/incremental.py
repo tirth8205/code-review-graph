@@ -257,6 +257,7 @@ DEFAULT_IGNORE_PATTERNS = [
     "*.lock",
     "package-lock.json",
     "pnpm-lock.yaml",
+    "**/pnpm-lock.yaml",
     "yarn.lock",
     "*.db",
     "*.sqlite",

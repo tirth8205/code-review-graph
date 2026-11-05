@@ -2900,7 +2900,25 @@ def _yaml_line(node: object) -> int:
 
 
 def _yaml_end_line(node: object) -> int:
-    return node.end_mark.line + 1  # type: ignore[attr-defined]
+    """Return the last source line of *node*, 1-based and inclusive.
+
+    A block collection or block scalar ends at the next token, so its end mark
+    sits on the line of whatever follows, which may be a sibling key. When only
+    indentation comes before the mark on that line, the node ended earlier: on
+    the last line before it that is not blank.
+    """
+    mark = node.end_mark  # type: ignore[attr-defined]
+    buffer, line_start = mark.buffer, mark.pointer - mark.column
+    if buffer is None or buffer[line_start:mark.pointer].strip():
+        return mark.line + 1
+    line = mark.line
+    while line > 1:
+        previous = buffer.rfind("\n", 0, line_start - 1) + 1
+        if buffer[previous:line_start].strip():
+            break
+        line_start = previous
+        line -= 1
+    return max(line, 1)
 
 
 def _yaml_get_key(mapping_node: object, key: str) -> Optional[object]:

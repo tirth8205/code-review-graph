@@ -180,7 +180,7 @@ These paths are excluded by default. A leading `/` anchors the pattern at the re
 **/vendor/**    /storage/**    /bootstrap/cache/**    /public/build/**
 **/.bundle/**   **/.gradle/**   *.jar   **/.dart_tool/**   **/.pub-cache/**   **/cdk.out/**
 /coverage/**    **/.cache/**    /.tmp/**    /tmp/**
-*.min.js    *.min.css    *.map    *.lock    package-lock.json    yarn.lock
+*.min.js    *.min.css    *.map    *.lock    package-lock.json    pnpm-lock.yaml    **/pnpm-lock.yaml    yarn.lock
 *.db    *.sqlite    *.db-journal    *.db-wal
 ```
 

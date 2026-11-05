@@ -600,10 +600,6 @@ def test_truncated_line_samples_fall_back_to_the_node_span(tmp_path: Path) -> No
     assert "$.items[*].name" in changed
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="_yaml_end_line ends block collections on the next sibling key's line",
-)
 def test_appending_a_sibling_key_does_not_flag_the_previous_block(
     tmp_path: Path,
 ) -> None:
@@ -617,6 +613,37 @@ def test_appending_a_sibling_key_does_not_flag_the_previous_block(
 
     assert appended == {"$", "$.deploy", "$.deploy.region"}
     assert "$.build" not in renamed_key
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # A nested block ends at the next key, which is not in column zero.
+        (b"one:\n  a:\n    b: 1\n  c: 2\n", {"$.one.a": (2, 3), "$.one.c": (4, 4)}),
+        # Blank lines before the next key belong to neither.
+        (b"one:\n  a: 1\n\n\ntwo: 2\n", {"$.one": (1, 2), "$.two": (5, 5)}),
+        # A block scalar ends the same way, nested or not.
+        (b"one:\n  s: |\n    x\n    y\n  t: 1\n", {"$.one.s": (2, 4), "$.one.t": (5, 5)}),
+        (b"s: |\n  x\n\nt: 1\n", {"$.s": (1, 2), "$.t": (4, 4)}),
+        # The end of the file and of a document close a block too.
+        (b"one:\n  a: 1\n", {"$": (1, 2), "$.one": (1, 2)}),
+        (b"one:\n  a: 1", {"$": (1, 2), "$.one": (1, 2)}),
+        (b"one:\n  a: 1\n---\ntwo: 2\n", {"$.one": (1, 2)}),
+        # Content before the mark means the node really ends on that line.
+        (b"one: [1,\n  2]\ntwo: 3\n", {"$.one": (1, 2)}),
+        (b"one: x\n  y\ntwo: 3\n", {"$.one": (1, 2)}),
+        (b"one:\r\n  a: 1\r\ntwo: 2\r\n", {"$.one": (1, 2)}),
+        (b"", {}),
+    ],
+)
+def test_node_ranges_end_on_their_own_last_line(
+    tmp_path: Path, source: bytes, expected: dict[str, tuple[int, int]],
+) -> None:
+    nodes, _ = CodeParser().parse_bytes(tmp_path / "ranges.yml", source)
+
+    spans = {n.name: (n.line_start, n.line_end) for n in nodes if n.kind == "YamlPath"}
+
+    assert expected.items() <= spans.items()
 
 
 def test_unchanged_sibling_scalar_is_not_reported(tmp_path: Path) -> None:
@@ -674,18 +701,12 @@ def test_cli_search_accepts_yaml_path_kind() -> None:
     assert args.kind == "YamlPath"
 
 
-_NESTED_PNPM_XFAIL = pytest.mark.xfail(
-    strict=True,
-    reason="'pnpm-lock.yaml' ignore pattern matches only the repository root",
-)
-
-
 @pytest.mark.parametrize(
     "relative",
     [
         "pnpm-lock.yaml",
-        pytest.param("packages/web/pnpm-lock.yaml", marks=_NESTED_PNPM_XFAIL),
-        pytest.param("docs/site/pnpm-lock.yaml", marks=_NESTED_PNPM_XFAIL),
+        "packages/web/pnpm-lock.yaml",
+        "docs/site/pnpm-lock.yaml",
     ],
 )
 def test_pnpm_lockfiles_are_ignored_at_any_depth(relative: str) -> None:
