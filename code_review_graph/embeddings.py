@@ -1205,6 +1205,9 @@ class EmbeddingStore:
         )
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
+        # The file this connection holds open. If graph.db is later replaced,
+        # the connection keeps reading the old file; see _cached_vectors().
+        self._conn_file_id = self._file_identity(self.db_path)
 
         # Migration for existing DBs missing the provider column
         try:
@@ -1381,9 +1384,11 @@ class EmbeddingStore:
         a zero vector).
 
         None, and the caller reads SQLite instead, unless ``CRG_VECTOR_CACHE``
-        is ``1``. Also None for a database that is not a file, and while this
+        is ``1``. Also None for a database that is not a file, while this
         connection holds an uncommitted transaction whose rows only it can
-        see.
+        see, and when the file at this path is no longer the one this
+        connection has open, since its rows would then be cached as the new
+        file's.
 
         An entry is valid while ``PRAGMA data_version`` on a long-lived
         watcher connection stays put. That value moves whenever any other
@@ -1408,6 +1413,8 @@ class EmbeddingStore:
                 token = cls._vector_cache_token(db)
             except (sqlite3.Error, OSError) as exc:
                 logger.warning("Vector cache unavailable for %s: %s", db, exc)
+                return None
+            if token[0] != self._conn_file_id:
                 return None
 
             key = (db, provider_name, dims)
@@ -1448,6 +1455,15 @@ class EmbeddingStore:
             for start in range(0, len(blobs), _SEARCH_CHUNK_ROWS)
         ]) if blobs else np.zeros(0)
         return names, np.asarray(rows, dtype=np.intp), matrix, norms
+
+    @staticmethod
+    def _file_identity(path: str | Path) -> tuple[int, int] | None:
+        """(device, inode) of *path*, or None if it cannot be read."""
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return stat.st_dev, stat.st_ino
 
     @classmethod
     def _vector_cache_token(cls, db: str) -> tuple[tuple[int, int], int]:

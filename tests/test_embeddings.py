@@ -481,8 +481,14 @@ class TestEmbeddingStoreVectorCache(TestEmbeddingStoreSearch):
                 st = real_stat(path, *args, **kwargs)
                 return os.stat_result((st.st_mode, st.st_ino + 1) + tuple(st)[2:])
 
+            # A store opened on the new file. The open one still holds the old
+            # file, so it must not fill the cache.
             with patch.object(os, "stat", replaced):
-                assert store.search("query") == [("a", 1.0)]
+                replacement = self._store(tmp_path, [1.0, 0.0])
+                try:
+                    assert replacement.search("query") == [("a", 1.0)]
+                finally:
+                    replacement.close()
 
             ((new_id, new_watcher),) = EmbeddingStore._vector_cache_watchers.values()
             assert new_id != old_id
@@ -492,6 +498,35 @@ class TestEmbeddingStoreVectorCache(TestEmbeddingStoreSearch):
             assert self._entry() is not entry
         finally:
             store.close()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows refuses to replace a file the watcher holds open",
+    )
+    def test_a_store_on_a_replaced_file_does_not_cache_its_old_rows(self, tmp_path):
+        pytest.importorskip("numpy")
+        old = self._store(tmp_path, [1.0, 0.0])
+        new = None
+        try:
+            self._insert(old, "old_node", [1.0, 0.0])
+            old.search("query")
+
+            replacement = self._store(tmp_path, [1.0, 0.0], name="replacement.db")
+            self._insert(replacement, "new_node", [1.0, 0.0])
+            replacement.close()
+            os.replace(tmp_path / "replacement.db", tmp_path / "embeddings.db")
+
+            # The open store reads the old file, and that is all it may do.
+            assert [name for name, _ in old.search("query")] == ["old_node"]
+
+            new = self._store(tmp_path, [1.0, 0.0])
+            assert [name for name, _ in new.search("query")] == ["new_node"]
+            assert [name for name, _ in old.search("query")] == ["old_node"]
+            assert [name for name, _ in new.search("query")] == ["new_node"]
+        finally:
+            old.close()
+            if new is not None:
+                new.close()
 
     def test_clear_vector_cache_closes_the_watchers(self, tmp_path):
         pytest.importorskip("numpy")
