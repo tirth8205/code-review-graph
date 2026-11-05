@@ -82,6 +82,27 @@ logger = logging.getLogger(__name__)
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
+_DEPENDENTS_PENDING_KEY = "dependents_reparse_pending"
+
+
+def _load_dependents_pending(store: GraphStore) -> set[str]:
+    """Importers whose forced re-parse failed, for the next update to retry.
+
+    Their seed's new hash is already stored, so nothing else would find them.
+    """
+    try:
+        files = json.loads(store.get_metadata(_DEPENDENTS_PENDING_KEY) or "[]")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(files, list):
+        return set()
+    return {
+        path for path in files
+        if isinstance(path, str)
+        and path
+        and not Path(path).is_absolute()
+        and ".." not in Path(path).parts
+    }
 
 
 def _load_cpp_identity_pending(store: GraphStore) -> set[str] | None:
@@ -1833,6 +1854,7 @@ def full_build(
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
     _store_cpp_identity_pending(store, cpp_errors)
+    store.set_metadata(_DEPENDENTS_PENDING_KEY, "[]")
     # Storing is over: every file that could be parsed has its rows. Recorded
     # before the anchor and before post-processing, so a process killed from
     # here on leaves a graph that ``postprocess`` can genuinely finish, told
@@ -1965,22 +1987,26 @@ def incremental_update(
     )
 
     # Find dependent files (files that import from changed files)
-    dependent_files: set[str] = set()
+    dependents_pending = _load_dependents_pending(store)
+    dependent_files: set[str] = set(dependents_pending)
     for rel_path in changed_files:
         full_path = normalize_file_path(repo_root / rel_path)
         # Duplicate watch notifications do not invalidate dependents. A real
         # content change does: an unchanged importer's resolved edges can still
         # refer to the old export identity, so its own hash is not sufficient.
+        # A path with no rows has no stored hash to compare, and may be a large
+        # file the graph never indexes, so it is not read here.
         existing = store.get_nodes_by_file(full_path)
-        try:
-            current_hash = current_hashes.get(normalize_file_path(rel_path))
-            if current_hash is None:
-                current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
-                current_hashes[normalize_file_path(rel_path)] = current_hash
-            if existing and existing[0].file_hash == current_hash:
-                continue
-        except (OSError, PermissionError):
-            pass
+        if existing:
+            try:
+                current_hash = current_hashes.get(normalize_file_path(rel_path))
+                if current_hash is None:
+                    current_hash = hashlib.sha256((repo_root / rel_path).read_bytes()).hexdigest()
+                    current_hashes[normalize_file_path(rel_path)] = current_hash
+                if existing[0].file_hash == current_hash:
+                    continue
+            except (OSError, PermissionError):
+                pass
         deps = find_dependents(store, full_path)
         for d in deps:
             # Convert back to relative path if needed
@@ -2000,6 +2026,8 @@ def incremental_update(
 
     # Separate deleted/unparseable files from files that need re-parsing
     to_parse: list[str] = []
+    # Importers re-parsed with unchanged bytes, and the hash that was checked.
+    edges_only: dict[str, str] = {}
     for rel_path in all_files:
         if _should_ignore(rel_path, ignore_patterns):
             if rel_path in remaining_identity:
@@ -2038,15 +2066,24 @@ def incremental_update(
             existing_nodes = store.get_nodes_by_file(str(abs_path))
             if (
                 rel_path not in remaining_identity
-                and rel_path not in dependent_files
                 and fhash is not None
                 and existing_nodes
                 and existing_nodes[0].file_hash == fhash
             ):
-                continue
+                if rel_path not in dependent_files:
+                    continue
+                edges_only[rel_path] = fhash
         except (OSError, PermissionError):
             pass
         to_parse.append(rel_path)
+
+    def store_parsed(rel_path: str, nodes: list, edges: list, fhash: str) -> None:
+        # Same bytes, same symbols: keep the node ids that flows and communities
+        # refer to. Only what the file's edges resolve to can have moved.
+        if edges_only.get(rel_path) == fhash:
+            store.store_file_edges(str(repo_root / rel_path), edges)
+        else:
+            store.store_file_nodes_edges(str(repo_root / rel_path), nodes, edges, fhash)
 
     # Persist deletions before store_file_nodes_edges() opens its own
     # explicit transaction — avoids nested transaction errors.
@@ -2071,7 +2108,7 @@ def incremental_update(
             # is not a failed parse. Letting it propagate stops the update
             # before the freshness anchor is advanced, so the next run still
             # sees this file as changed.
-            store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
+            store_parsed(rel_path, nodes, edges, fhash)
             remaining_identity.discard(rel_path)
             parsed_files += 1
             total_nodes += len(nodes)
@@ -2089,16 +2126,15 @@ def incremental_update(
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
                     continue
-                store.store_file_nodes_edges(
-                    str(repo_root / rel_path),
-                    nodes,
-                    edges,
-                    fhash,
-                )
+                store_parsed(rel_path, nodes, edges, fhash)
                 remaining_identity.discard(rel_path)
                 parsed_files += 1
                 total_nodes += len(nodes)
                 total_edges += len(edges)
+
+    failed_dependents = dependent_files & {error["file"] for error in errors}
+    if failed_dependents != dependents_pending:
+        store.set_metadata(_DEPENDENTS_PENDING_KEY, json.dumps(sorted(failed_dependents)))
 
     removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
     files_updated = parsed_files + len(stale_files) + removed_files

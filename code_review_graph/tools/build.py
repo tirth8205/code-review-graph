@@ -768,8 +768,12 @@ def build_or_update_graph(
         # incremental path and is a no-op when the state is already advanced.
         advance_to_postprocess_pending(store)
 
-        # Pass changed_files for incremental flow/community detection
-        changed = result.get("changed_files") if not full_rebuild else None
+        # Pass every re-parsed file for incremental flow/community detection
+        changed = (
+            [*result.get("changed_files", []), *result.get("dependent_files", [])]
+            if not full_rebuild
+            else None
+        )
         warnings = _run_postprocess(
             store,
             build_result,
