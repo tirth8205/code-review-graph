@@ -2,7 +2,7 @@
 
 Resolves TypeScript path aliases (e.g., ``@/ -> src/``) declared in
 ``compilerOptions.paths``, and non-relative specifiers against
-``compilerOptions.baseUrl`` when no ``paths`` entry resolves them, so that
+``compilerOptions.baseUrl`` when no ``paths`` pattern matches them, so that
 ``IMPORTS_FROM`` edges can point to real file paths instead of raw alias
 strings. Plain-JS projects (Vue,
 Nuxt, Vite) declare the same aliases in ``jsconfig.json``, which shares
@@ -63,12 +63,13 @@ class TsconfigResolver:
                     or config.get("_tsconfig_dir", "")
                 )
                 resolved = self._match_and_probe(import_str, paths, Path(anchor))
-                if resolved:
+                # tsc stops at a pattern that matched, even when no target exists.
+                if resolved or any(_match_pattern(p, import_str) is not None for p in paths):
                     return resolved
 
-            # Like tsc, resolve a specifier no paths entry resolved against baseUrl.
+            # Like tsc, a specifier no paths pattern matched resolves against baseUrl.
             base_url_dir: Optional[str] = config.get("_base_url_dir")
-            if base_url_dir:
+            if base_url_dir and _stays_under_base_url(import_str):
                 joined = os.path.normpath(Path(base_url_dir) / import_str)
                 found = _probe_path(Path(joined).resolve())
                 return str(found) if found else None
@@ -287,6 +288,11 @@ def _match_pattern(pattern: str, import_str: str) -> Optional[str]:
 
     end = len(import_str) - len(suffix_pat) if suffix_pat else len(import_str)
     return import_str[len(prefix):end]
+
+
+def _stays_under_base_url(import_str: str) -> bool:
+    """Whether joining *import_str* to baseUrl cannot leave baseUrl."""
+    return not os.path.isabs(import_str) and ".." not in re.split(r"[\\/]", import_str)
 
 
 def _probe_path(base: Path) -> Optional[Path]:
