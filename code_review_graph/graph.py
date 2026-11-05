@@ -729,6 +729,14 @@ class GraphStore:
                 conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             _assert_usable_database(conn, self.db_path)
+            if self.read_only and conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'nodes'"
+            ).fetchone() is None:
+                raise GraphStoreError(
+                    f"No graph found at {self.db_path}. "
+                    "Run `code-review-graph build` first."
+                )
             self._conn = conn
             if not self.read_only:
                 self._init_schema()
