@@ -223,8 +223,8 @@ class TestCommunities:
         # Add many TESTED_BY cross-community edges (well above the threshold of 10)
         for i in range(20):
             self.store.upsert_edge(EdgeInfo(
-                kind="TESTED_BY", source=f"auth.py::login",
-                target=f"db.py::query", file_path="auth.py", line=i + 100,
+                kind="TESTED_BY", source="auth.py::login",
+                target="db.py::query", file_path="auth.py", line=i + 100,
             ))
         self.store.commit()
 
@@ -705,6 +705,51 @@ class TestCommunities:
             self.store, ["auth.py"], repo_root=tmp_path, force=True,
         )
         assert count >= 0
+
+    def test_incremental_detect_redetects_reparsed_file_with_unassigned_nodes(self):
+        """Reparsed nodes need community assignment after file replacement."""
+        self._seed_two_clusters()
+        store_communities(self.store, detect_communities(self.store, min_size=2))
+
+        reparsed_nodes = [
+            NodeInfo(
+                kind="File", name="auth.py", file_path="auth.py",
+                line_start=1, line_end=100, language="python",
+            ),
+            NodeInfo(
+                kind="Function", name="authenticate", file_path="auth.py",
+                line_start=5, line_end=20, language="python",
+            ),
+            NodeInfo(
+                kind="Function", name="check_token", file_path="auth.py",
+                line_start=25, line_end=40, language="python",
+            ),
+            NodeInfo(
+                kind="Function", name="authorize", file_path="auth.py",
+                line_start=45, line_end=60, language="python",
+            ),
+        ]
+        reparsed_edges = [
+            EdgeInfo(
+                kind="CALLS", source="auth.py::authenticate",
+                target="auth.py::check_token", file_path="auth.py", line=10,
+            ),
+            EdgeInfo(
+                kind="CALLS", source="auth.py::authorize",
+                target="auth.py::check_token", file_path="auth.py", line=50,
+            ),
+        ]
+        self.store.store_file_batch([("auth.py", reparsed_nodes, reparsed_edges, "a2")])
+
+        detected = incremental_detect_communities(self.store, ["auth.py"])
+
+        assigned = self.store._conn.execute(
+            "SELECT COUNT(*) FROM nodes "
+            "WHERE file_path = ? AND kind != 'File' AND community_id IS NOT NULL",
+            ("auth.py",),
+        ).fetchone()[0]
+        assert detected > 0
+        assert assigned == 3
 
 
 class TestCommunityPrReconciliation:
