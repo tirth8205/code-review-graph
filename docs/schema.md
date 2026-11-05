@@ -88,7 +88,7 @@ A synthesised node for a Spring application event, created after the build by
 ### YamlPath
 A path-addressable mapping key or sequence shape parsed from generic `.yml` / `.yaml` files. Repeated sequence entries are aggregated under `[*]` paths with bounded occurrence/range samples, allowing similarly shaped files to be compared without one graph node per list item. Scalar values are deliberately discarded.
 
-The persisted `extra` JSON is the internal source of truth. Query, search, and change-analysis responses expose its safe public subset under one nested `yaml` object:
+The persisted `extra` JSON is the internal source of truth. Query and change-analysis responses expose its safe public subset under one nested `yaml` object:
 
 | Property | Type | Description |
 |----------|------|-------------|

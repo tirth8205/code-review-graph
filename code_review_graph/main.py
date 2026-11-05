@@ -942,7 +942,7 @@ async def detect_changes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
-        max_results: Maximum changed functions, test gaps, and changed files
+        max_results: Maximum changed functions, YAML paths, test gaps, and changed files
             to return; the matching *_total fields report the full counts.
             Default: 25.
         max_flows: Maximum affected flows to embed. Embedded flows carry

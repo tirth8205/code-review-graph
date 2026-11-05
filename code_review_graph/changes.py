@@ -786,7 +786,7 @@ def analyze_changes(
         changed_yaml_paths = changed_yaml_paths[:_max_yaml_paths]
 
     # Keep one public YAML metadata contract. ``node_to_dict`` owns
-    # sanitization and output limits for query, search, and change analysis.
+    # sanitization and output limits for query and change analysis.
     yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
 
     churn_counts: dict[str, int] | None = None
@@ -924,7 +924,7 @@ def analyze_changes(
     summary_parts = [
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
-        f"  - {len(changed_yaml_paths)} changed YAML path(s)",
+        *([f"  - {len(changed_yaml_paths)} changed YAML path(s)"] if changed_yaml_paths else []),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
         f"  - Overall risk score: {overall_risk:.2f}",

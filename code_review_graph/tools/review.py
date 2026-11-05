@@ -958,7 +958,7 @@ def detect_changes_func(
             changed_yaml_path_count, test_gap_count, and the top three code
             review priorities (text only).
             Default: "standard".
-        max_results: Maximum changed functions and test gaps to return
+        max_results: Maximum changed functions, YAML paths and test gaps to return
             (default 25, capped at 200). ``changed_functions_total`` and
             ``test_gaps_total`` report the untruncated counts.
         max_flows: Maximum affected flows to embed (default 20, capped at
@@ -1090,12 +1090,20 @@ def detect_changes_func(
             files, files_total, files_cut = _bounded(
                 changed_files, max_results, _MAX_REVIEW_FILES,
             )
-            any_cut = funcs_cut or gaps_cut or flows_cut or files_cut
+            yaml_paths, yaml_paths_total, yaml_paths_cut = _bounded(
+                analysis.get("changed_yaml_paths", []),
+                max_results, _MAX_CHANGED_FUNCTIONS,
+            )
+            any_cut = (
+                funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or bool(analysis.get("yaml_paths_truncated"))
+            )
             summary = analysis.get("summary", "")
             if any_cut:
                 summary += (
                     "\n  - Response bounded: "
                     f"{len(funcs)} of {funcs_total} changed function(s), "
+                    f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
                     f"{len(gaps)} of {gaps_total} test gap(s), "
                     f"{len(flows)} of {flows_total} flow(s) shown"
                 )
@@ -1107,6 +1115,8 @@ def detect_changes_func(
                 "changed_file_count": files_total,
                 "changed_functions": funcs,
                 "changed_functions_total": funcs_total,
+                "changed_yaml_paths": yaml_paths,
+                "changed_yaml_paths_total": yaml_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),

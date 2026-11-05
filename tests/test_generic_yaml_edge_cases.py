@@ -628,6 +628,49 @@ def test_detect_changes_reports_yaml_paths_end_to_end(tmp_path: Path, monkeypatc
     assert minimal["changed_yaml_path_count"] == 3
     assert "3 changed YAML path(s)" in minimal["summary"]
 
+    bounded = detect_changes_func(base="HEAD~1", repo_root=str(repo), max_results=1)
+
+    assert len(bounded["changed_yaml_paths"]) == 1
+    assert bounded["changed_yaml_paths_total"] == 3
+    assert bounded["truncated"] is True
+    assert "1 of 3 changed YAML path(s)" in bounded["summary"]
+
+
+def test_yaml_paths_stay_out_of_the_summary_when_none_changed(tmp_path: Path) -> None:
+    path = tmp_path / "app.py"
+    with GraphStore(tmp_path / "graph.db") as store:
+        nodes, edges = CodeParser().parse_bytes(path, b"def run():\n    return 1\n")
+        store.store_file_nodes_edges(str(path), nodes, edges)
+        result = analyze_changes(
+            store, changed_files=[str(path)], changed_ranges={str(path): [(1, 2)]},
+        )
+
+    assert result["changed_yaml_paths"] == []
+    assert "YAML" not in result["summary"]
+
+
+def test_analysis_cap_counts_as_truncated_in_the_tool(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+    monkeypatch.setenv("CRG_MAX_CHANGED_YAML_PATHS", "1")
+    monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / ".gitignore").write_text(".code-review-graph/\n", encoding="utf-8")
+    config = repo / "settings.yml"
+    config.write_text("a: 1\nb: 2\n", encoding="utf-8")
+    _commit_all(repo, "initial")
+    with GraphStore(get_db_path(repo)) as store:
+        full_build(repo, store)
+    config.write_text("a: 3\nb: 4\n", encoding="utf-8")
+    _commit_all(repo, "change both")
+    with GraphStore(get_db_path(repo)) as store:
+        incremental_update(repo, store)
+
+    result = detect_changes_func(base="HEAD~1", repo_root=str(repo))
+
+    assert result["yaml_paths_truncated"] is True
+    assert result["truncated"] is True
+
 
 def test_changed_yaml_path_cap_is_reported(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("CRG_MAX_CHANGED_YAML_PATHS", "2")
