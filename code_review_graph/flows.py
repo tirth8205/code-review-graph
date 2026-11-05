@@ -16,6 +16,7 @@ from typing import Optional
 
 from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .graph import FlowAdjacency, GraphNode, GraphStore, _sanitize_name
+from .parser import is_test_file as _is_test_file
 from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
@@ -152,16 +153,6 @@ def _matches_entry_name(node: GraphNode) -> bool:
     return False
 
 
-_TEST_FILE_RE = re.compile(
-    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$)",
-)
-
-
-def _is_test_file(file_path: str) -> bool:
-    """Return True if *file_path* looks like a test file."""
-    return bool(_TEST_FILE_RE.search(file_path))
-
-
 def detect_entry_points(
     store: GraphStore,
     include_tests: bool = False,
@@ -188,8 +179,15 @@ def detect_entry_points(
     entry_points: list[GraphNode] = []
     seen_qn: set[str] = set()
 
+    # Stored file paths are absolute; the root turns them back into project
+    # paths so ``tests/`` means the repository's own tests and not a parent
+    # directory of the checkout. See :func:`code_review_graph.parser.is_test_file`.
+    repo_root = store.get_repo_root()
+
     for node in candidate_nodes:
-        if not include_tests and (node.is_test or _is_test_file(node.file_path)):
+        if not include_tests and (
+            node.is_test or _is_test_file(node.file_path, repo_root)
+        ):
             continue
         if node.extra.get("verilog_kind"):
             continue

@@ -12,6 +12,7 @@ import re
 from collections import Counter, defaultdict
 from typing import Any
 
+from .constants import env_int
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
 
 # Fixed seed for igraph's RNG so Leiden community detection is reproducible
@@ -409,8 +410,7 @@ def _detect_leiden(
         g.vcount(), g.ecount(),
     )
 
-    import os
-    seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+    seed = env_int("CRG_LEIDEN_SEED", _LEIDEN_SEED)
     # Deterministic seeding for benchmark reproducibility — community
     # detection is not a security-sensitive context. nosec B311.
     ig.set_random_number_generator(random.Random(seed))  # nosec B311
@@ -646,8 +646,7 @@ def _split_oversized(
                 directed=False,
             )
             g.es["weight"] = ig_weights
-            import os
-            seed = int(os.environ.get("CRG_LEIDEN_SEED", _LEIDEN_SEED))
+            seed = env_int("CRG_LEIDEN_SEED", _LEIDEN_SEED)
             # Deterministic seeding for benchmark reproducibility — community
             # detection is not a security-sensitive context. nosec B311.
             ig.set_random_number_generator(random.Random(seed))  # nosec B311

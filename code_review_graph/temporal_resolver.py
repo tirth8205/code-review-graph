@@ -106,12 +106,13 @@ def resolve_temporal_calls(store: GraphStore) -> dict:
     # -----------------------------------------------------------------------
     implementors: dict[str, list[str]] = {}
     for row in conn.execute(
-        "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'INHERITS'"
+        "SELECT e.source_qualified, e.target_qualified FROM edges e "
+        "JOIN nodes n ON n.qualified_name = e.source_qualified "
+        "WHERE e.kind = 'INHERITS' AND n.language IN ('java', 'kotlin', 'scala')"
     ).fetchall():
         iface = row["target_qualified"]
         impl = row["source_qualified"]
-        if any(impl.startswith(f) for f in java_files) or "::" in impl:
-            implementors.setdefault(iface, []).append(impl)
+        implementors.setdefault(iface, []).append(impl)
 
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
