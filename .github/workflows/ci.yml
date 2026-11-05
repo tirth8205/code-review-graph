@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, testing, staging]
   pull_request:
-    branches: [main]
+    branches: [main, testing, staging]
+  # Manual trigger for the upgrade-path job, which is far too slow and network
+  # heavy for every pull request. Run it before cutting a release.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,6 +21,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Lint with ruff
@@ -31,6 +36,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev]" mypy types-networkx
       - name: Run mypy
@@ -44,6 +51,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install bandit
         run: pip install bandit[toml]
       - name: Run bandit security scan
@@ -77,15 +86,105 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
+      # Full history with tags: tests/test_released_shapes.py reads the
+      # installer artifacts out of every released tag, and skips itself in a
+      # shallow checkout that has none.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev]" pytest-cov
+      # -m "not browser" keeps tests/test_visualization_browser.py out of this
+      # job: it needs the "browser-test" extra and a Chromium build, and runs
+      # in the separate "viz-browser" job below. Without the marker filter the
+      # module is collected here and skipped via importorskip, which would make
+      # the coverage run quietly depend on Playwright being absent.
+      # "not upgrade" excludes tests/test_upgrade_path.py by name rather than
+      # relying on its CRG_UPGRADE_TEST opt-in: it installs three releases from
+      # PyPI and takes minutes, so it belongs in the manual job below.
       - name: Run tests with coverage
-        run: pytest --tb=short -q --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+        run: >-
+          pytest --tb=short -q -m "not browser and not upgrade"
+          --cov=code_review_graph --cov-report=term-missing --cov-fail-under=65
+
+  viz-browser:
+    name: Visualization browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev,browser-test]"
+      - name: Install Chromium
+        run: python -m playwright install --with-deps chromium
+      # No coverage flag: this job runs a handful of end-to-end page tests and
+      # would fail the 65% floor on its own.
+      - name: Run browser tests
+        run: pytest -m browser -q
+
+  e2e:
+    name: E2E MCP client (${{ matrix.os }})
+    # Not a required check: it spawns real subprocesses, so a flaky runner
+    # should not block a merge. Treat a failure here as a real signal anyway.
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run end-to-end MCP client tests
+        run: pytest -m e2e -q
+
+  upgrade-path:
+    name: Upgrade path from released versions
+    # Manual only. Installs three releases from PyPI, builds a real graph with
+    # each, then upgrades it with the code in this checkout. Minutes of wall
+    # clock and hundreds of MB of disk, so it runs before a release rather than
+    # on every pull request. Needs a full checkout: the corpus is this
+    # repository's own tree exported at each release tag.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+      - name: Run upgrade-path tests
+        env:
+          CRG_UPGRADE_TEST: "1"
+        run: pytest -m upgrade -q -rxX
 
   google-embeddings:
     name: Google embeddings (${{ matrix.extra }})
@@ -99,6 +198,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install optional dependency set
         run: pip install -e ".[${{ matrix.extra }}]"
       - name: Construct Google embedding provider
@@ -114,6 +215,8 @@ jobs:
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: pyproject.toml
       - name: Install dependencies
         run: pip install -e ".[dev]"
       - name: Run native daemon and resource-handle tests

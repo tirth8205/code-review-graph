@@ -595,6 +595,32 @@ class TestObserverLiveness:
         # No watch root to attribute it to, so there is nothing to reschedule.
         assert supervisor.check_liveness() == (["fake-emitter"], [])
 
+    @pytest.mark.parametrize("component", ["reader", "emitter"])
+    def test_thread_dying_before_first_tick_is_repaired_once(self, tmp_path, component):
+        """#891: missing a live sample must not hide an early thread death."""
+        supervisor, observer, watched, thread, gate = self._watched(tmp_path)
+        if component == "emitter":
+            thread.watch = FakeWatch(str(watched), True)
+            observer.emitters = [thread]
+        gate.set()
+        thread.join(timeout=5)
+
+        assert supervisor.check_liveness() == ([], [str(watched)])
+        assert observer.scheduled.count((str(watched), True)) == 2
+
+        replacement, replacement_gate = _live_thread()
+        if component == "emitter":
+            replacement.watch = FakeWatch(str(watched), True)
+            observer.emitters = [replacement]
+        else:
+            observer.emitters = [FakeEmitter(replacement, root=str(watched))]
+        replacement_gate.set()
+        replacement.join(timeout=5)
+
+        # The replacement also dies before its first liveness tick. A second
+        # death must be reported so the daemon can restart this watcher.
+        assert supervisor.check_liveness() == ([replacement.name], [])
+
     def test_unstarted_thread_is_never_mistaken_for_a_dead_one(self, tmp_path):
         """A watch scheduled mid-tick must not read as a corpse."""
         observer = FakeObserver()
@@ -781,6 +807,28 @@ class TestWatchLoop:
         assert health["observer_alive"] is False
         assert health["stalled"] is True
         assert health["dead_threads"] == ["fake-inotify-buffer"]
+
+    def test_reader_dying_before_first_tick_stalls_watch_health(self, tmp_path):
+        thread, gate = _live_thread()
+        observer = FakeObserver()
+        observer.emitters = [FakeEmitter(thread)]
+
+        def die_before_first_tick():
+            gate.set()
+            thread.join(timeout=5)
+
+        with GraphStore(tmp_path / "graph.db") as store:
+            with pytest.raises(RuntimeError, match="watch observer stopped"):
+                self._watch_with(
+                    tmp_path, store, observer, _tick_driver(die_before_first_tick),
+                )
+
+        health = read_watch_health(tmp_path)
+        assert health is not None
+        assert health["observer_alive"] is False
+        assert health["stalled"] is True
+        assert health["dead_threads"] == [thread.name]
+        assert observer.stopped is True
 
     def test_cli_watch_turns_a_dead_observer_into_exit_code_1(self):
         """The daemon restarts on process exit, so the exit code has to be non-zero."""
@@ -1429,3 +1477,59 @@ class TestStatusSurfacesStalls:
 
         assert "stalled" in caplog.text
         restart.assert_not_called()
+
+
+class TestUnstattablePaths:
+    """Issue #897: an event on a path the OS cannot stat must not end the loop.
+
+    ``collect_all_files`` already skips paths past the OS name limits
+    (``incremental.py``), but the watch path walked them with a bare
+    ``Path.exists()``, which propagates ``ENAMETOOLONG`` instead of answering
+    ``False``.  The exception reached ``process``'s ``except BaseException``,
+    set ``failure`` and turned the next ``raise_if_failed`` into the end of the
+    watch loop.
+    """
+
+    @staticmethod
+    def _overlong(tmp_path: Path) -> str:
+        # One component past NAME_MAX (255 bytes) is enough; the path never
+        # has to exist, since stat fails before the lookup.
+        return str(tmp_path / ("a" * 300) / "module.py")
+
+    def test_path_the_os_cannot_stat_is_dropped_not_raised(self, tmp_path):
+        from watchdog.events import FileModifiedEvent
+
+        from code_review_graph.incremental import _create_watch_handler
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            handler = _create_watch_handler(tmp_path, store, None)
+            handler.process([FileModifiedEvent(self._overlong(tmp_path))])
+            handler.raise_if_failed()
+        finally:
+            store.close()
+
+    def test_an_overlong_event_does_not_hide_a_real_one(self, tmp_path):
+        """The bad event is dropped; the good one in the same batch still lands."""
+        from watchdog.events import FileModifiedEvent
+
+        from code_review_graph.incremental import _create_watch_handler
+
+        real = tmp_path / "real.py"
+        real.write_text("def hi():\n    return 1\n", encoding="utf-8")
+
+        store = GraphStore(tmp_path / "graph.db")
+        try:
+            handler = _create_watch_handler(tmp_path, store, None)
+            handler.process(
+                [
+                    FileModifiedEvent(self._overlong(tmp_path)),
+                    FileModifiedEvent(str(real)),
+                ]
+            )
+            handler.raise_if_failed()
+            assert any(
+                Path(file_path).name == "real.py" for file_path in store.get_all_files()
+            )
+        finally:
+            store.close()

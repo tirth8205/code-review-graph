@@ -23,7 +23,7 @@ import pytest
 
 import code_review_graph.uncertainty as uncertainty
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 from code_review_graph.tools.query import (
     get_impact_radius,
     query_graph,
@@ -251,6 +251,41 @@ def test_php_gap_reaches_a_real_query_response(repo):
 
     assert result["result_count"] == 0
     assert "container-resolved" in result["confidence"]
+
+
+@pytest.mark.parametrize(
+    ("include_expression", "expected_count"),
+    [
+        ("'target.php'", 1),
+        ('"target.php"', 1),
+        ('$path', 0),
+        ('"$path/target.php"', 0),
+        ('"target\\x2ephp"', 0),
+    ],
+)
+def test_php_import_uncertainty_is_limited_to_dynamic_includes(
+    repo, include_expression, expected_count,
+):
+    target = repo / "target.php"
+    target.write_text("<?php function target() {}\n", encoding="utf-8")
+    entry = repo / "entry.php"
+    entry.write_text(f"<?php include {include_expression};\n", encoding="utf-8")
+    parser = CodeParser()
+    with _store(repo) as store:
+        for path in (target, entry):
+            nodes, edges = parser.parse_file(path)
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+        store.commit()
+
+    result = query_graph(pattern="imports_of", target=str(entry), repo_root=str(repo))
+    assert result["result_count"] == expected_count
+    if expected_count:
+        assert "confidence" not in result
+    else:
+        assert "dynamic include/require" in result["confidence"]
 
 
 # ---------------------------------------------------------------------------

@@ -1,16 +1,19 @@
-# Legal & Privacy
+# Legal and Privacy
 
-**License:** MIT (see [LICENSE](../LICENSE) in project root)
+**Licence:** MIT. See [LICENSE](../LICENSE) in the project root; `pyproject.toml` declares
+the same licence.
 
-**Privacy:**
-- Zero telemetry
-- All graph data stored locally in `.code-review-graph/graph.db`
-- Core graph build, review, search, and CLI/MCP workflows run locally
-- Optional local embeddings may download a sentence-transformers model from HuggingFace when first used
-- Optional cloud embedding providers (`openai`, `google`, `minimax`, `voyage`) send embedded source snippets to the configured provider only when explicitly selected
-- Remote embedding providers print an egress warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set
-- Streamable HTTP MCP transport binds to localhost by default
+**Privacy**
 
-**Data:** Core graph data stays on your machine. If you opt into a cloud embedding provider, the text being embedded leaves your machine under that provider's terms.
+- No telemetry.
+- Graph data is stored locally, by default in `.code-review-graph/graph.db`.
+- Graph build, review, search and the CLI/MCP workflows run on your machine.
+- The optional local embedding provider downloads a sentence-transformers model from
+  Hugging Face on first use.
+- The optional cloud embedding providers (`openai`, `google`, `minimax`, `voyage`) send the
+  text being embedded to that provider, and only when you select one. They print an egress
+  warning unless `CRG_ACCEPT_CLOUD_EMBEDDINGS=1` is set.
+- The Streamable HTTP MCP transport (`serve --http`) binds to localhost and validates the
+  `Host` and `Origin` headers.
 
-**Warranty:** Provided as-is, without warranty of any kind.
+**Warranty:** provided as is, without warranty of any kind, as stated in the MIT licence.

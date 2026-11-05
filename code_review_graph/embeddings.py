@@ -1310,12 +1310,36 @@ def embed_all_nodes(graph_store: GraphStore, embedding_store: EmbeddingStore) ->
     if not embedding_store.available:
         return 0
 
-    all_files = graph_store.get_all_files()
-    all_nodes: list[GraphNode] = []
-    for f in all_files:
-        all_nodes.extend(graph_store.get_nodes_by_file(f))
-
+    # Legacy stores may hold paths that normalized file lookups cannot reach.
+    all_nodes = graph_store.get_all_nodes(exclude_files=True)
     return embedding_store.embed_nodes(all_nodes)
+
+
+# Reported by build and post-process paths when an explicit refresh finds no
+# vectors, so a caller who asked for a refresh learns that nothing was embedded.
+REFRESH_SKIPPED_WARNING = (
+    "Embedding refresh skipped: this graph has no embeddings yet. Run "
+    "`code-review-graph embed` (MCP: embed_graph_tool) once with the same "
+    "provider and model to create them."
+)
+
+
+def has_embeddings(graph_store: GraphStore) -> bool:
+    """True when the graph database holds at least one stored vector.
+
+    Reads the schema first, so the check never creates the ``embeddings``
+    table and never resolves a provider.
+    """
+    has_table = graph_store._conn.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type = 'table' AND name = 'embeddings'",
+    ).fetchone()
+    if has_table is None:
+        return False
+    has_rows = graph_store._conn.execute(
+        "SELECT 1 FROM embeddings LIMIT 1",
+    ).fetchone()
+    return has_rows is not None
 
 
 def refresh_embeddings(
@@ -1328,8 +1352,9 @@ def refresh_embeddings(
 
     This function is deliberately not called by default build paths.  Callers
     must supply both provider and model explicitly.  A graph with no existing
-    vectors returns before provider resolution, so routine builds cannot load
-    a local model, contact a cloud service, or incur API cost.
+    vectors returns ``None`` before provider resolution, so routine builds
+    cannot load a local model, contact a cloud service, or incur API cost;
+    the build paths report that case with ``REFRESH_SKIPPED_WARNING``.
 
     Existing vectors must all use the identity resolved from the requested
     provider/model (including the endpoint for OpenAI-compatible providers).
@@ -1342,16 +1367,7 @@ def refresh_embeddings(
             "Embedding refresh requires an explicit provider and model.",
         )
 
-    has_table = graph_store._conn.execute(
-        "SELECT 1 FROM sqlite_master "
-        "WHERE type = 'table' AND name = 'embeddings'",
-    ).fetchone()
-    if has_table is None:
-        return None
-    has_rows = graph_store._conn.execute(
-        "SELECT 1 FROM embeddings LIMIT 1",
-    ).fetchone()
-    if has_rows is None:
+    if not has_embeddings(graph_store):
         return None
     try:
         rows = graph_store._conn.execute(
@@ -1391,9 +1407,7 @@ def refresh_embeddings(
             )
 
         purged = embedding_store.purge_orphans()
-        all_nodes: list[GraphNode] = []
-        for file_path in graph_store.get_all_files():
-            all_nodes.extend(graph_store.get_nodes_by_file(file_path))
+        all_nodes = graph_store.get_all_nodes(exclude_files=True)
         embedded = embedding_store.embed_nodes(all_nodes)
         return {"embedded": embedded, "purged": purged}
     finally:
