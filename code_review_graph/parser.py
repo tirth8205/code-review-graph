@@ -5029,7 +5029,7 @@ class CodeParser:
         "when", "begin", "declare", "exception", "return", "raise", "is",
         "as", "procedure", "function", "trigger", "package", "cursor",
         "type", "record", "table", "pragma", "and", "or", "not", "in",
-        "exists", "between", "into",
+        "exists", "between", "into", "over",
         # Scalar/collection type names — precede `(` in declarations
         # (`v_x VARCHAR2(50);`), not calls.
         "varchar", "varchar2", "nvarchar2", "number", "char", "nchar",
@@ -5895,12 +5895,18 @@ class CodeParser:
                 continue
             seen.add(target)
             line = text[: body_start + m.start()].count("\n") + 1
+            # `pkg.proc(` is stored under `proc`, as other languages store
+            # `obj.method()`. Members are keyed `pkg$body.proc(params)`, so the
+            # dotted spelling can never resolve: the member would look uncalled
+            # to `callers_of` and `dead-code`.
+            receiver = target.rpartition(".")[0]
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=caller_qualified,
-                target=target,
+                target=last,
                 file_path=file_path_str,
                 line=line,
+                extra={"receiver": receiver} if receiver else {},
             ))
 
     def _walk_sql_tree(

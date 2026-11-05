@@ -3967,8 +3967,7 @@ class TestPLSQLParsing:
 
     def test_trigger_call_edge(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
-        targets = {e.target for e in calls}
-        assert "audit_pkg.log_change" in targets
+        assert ("log_change", {"receiver": "audit_pkg"}) in [(e.target, e.extra) for e in calls]
 
     def test_package_member_call_edges(self):
         calls = [e for e in self.edges if e.kind == "CALLS"]
@@ -4638,6 +4637,48 @@ class TestPLSQLHelpers:
             (e.source.rsplit(".", 1)[-1], e.target) for e in edges if e.kind == "CALLS"
         }
         assert calls == {("run(x NUMBER)", "one"), ("run(y DATE)", "two")}
+
+    def test_package_qualified_call_reaches_the_member(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.refactor import find_dead_code
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "billing.pkb").write_text(
+            "CREATE OR REPLACE PACKAGE BODY billing AS\n"
+            "  PROCEDURE charge(p_id NUMBER) IS\n"
+            "  BEGIN\n"
+            "    NULL;\n"
+            "  END charge;\n"
+            "END billing;\n/\n",
+        )
+        (tmp_path / "notify.prc").write_text(
+            "CREATE OR REPLACE PROCEDURE notify_user(p_id NUMBER) IS\n"
+            "BEGIN\n"
+            "  app.billing.charge(p_id);\n"
+            "END notify_user;\n/\n",
+        )
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            full_build(tmp_path, store)
+            dead = find_dead_code(store)
+
+        result = query_graph("callers_of", "charge", str(tmp_path))
+
+        assert [row["name"] for row in result["results"]] == ["notify_user"]
+        assert "charge" not in {item["name"] for item in dead}
+
+    def test_analytic_over_clause_is_not_a_call(self):
+        source = (
+            b"CREATE OR REPLACE PROCEDURE p IS\n"
+            b"BEGIN\n"
+            b"  SELECT SUM(a) OVER (ORDER BY b) INTO v FROM t;\n"
+            b"END p;\n"
+        )
+
+        _, edges = CodeParser().parse_bytes(Path("p.prc"), source)
+
+        assert [e.target for e in edges if e.kind == "CALLS"] == []
 
     def test_block_end_uses_the_named_end_index(self):
         text = "BEGIN a; END; BEGIN b; END foo; END bar;"
