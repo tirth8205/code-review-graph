@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import uuid
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -2447,6 +2448,7 @@ class _WatchSupervisor:
         self._live_threads: dict[int, threading.Thread] = {}
         self._repaired_roots: set[str] = set()
         self._replan_requested = False
+        self._replan_retry_at = 0.0
         self._ignored_boundaries: dict[str, bool] = {}
         self._degraded = False
         self._promotion_failed = False
@@ -2550,12 +2552,22 @@ class _WatchSupervisor:
     def _replan_if_requested(self) -> None:
         if not self._replan_requested:
             return
+        if time.monotonic() < self._replan_retry_at:
+            # Still cooling down after a refusal: the old plan stays in place
+            # and health keeps reporting it.
+            self._promotion_failed = True
+            return
         self._replan_requested = False
         plan, fallback = _plan_watch_paths_with_status(
             self._repo_root,
             self._ignore_patterns,
             max_schedules=self._max_schedules,
         )
+        if fallback and self._watches:
+            # Nothing fits the budget. What is installed already covers the
+            # repository, and a root watch would hand every ignored tree back.
+            self._remember_ignored_boundaries()
+            return
         desired = {str(path): recursive for path, recursive in plan}
         current = {path: path not in self._shallow for path in self._watches}
         provisional: list[tuple[str, Any, bool]] = []
@@ -2578,13 +2590,22 @@ class _WatchSupervisor:
                 handle = self._observer.schedule(self._handler, key, recursive=recursive)
                 provisional.append((key, handle, recursive))
         except OSError as exc:
-            logger.warning("Could not apply watch replan: %s", exc)
+            logger.warning(
+                "Could not apply watch replan; keeping existing watches and retrying "
+                "in %.0fs: %s",
+                _PROMOTION_RETRY_SECONDS,
+                exc,
+            )
             for key, handle, _ in provisional:
                 _run_time_boxed(
-                    lambda: self._observer.unschedule(handle),
+                    partial(self._observer.unschedule, handle),
                     f"rollback watch registration {key}",
                     timeout=_WATCH_STOP_TIMEOUT,
                 )
+            # Nothing else asks again on a quiet repository.
+            self._replan_requested = True
+            self._replan_retry_at = time.monotonic() + _PROMOTION_RETRY_SECONDS
+            self._promotion_failed = True
             return
 
         for current_path in current:
@@ -2596,8 +2617,12 @@ class _WatchSupervisor:
                 self._shallow.discard(key)
             else:
                 self._shallow.add(key)
-        if fallback:
-            self._degraded = True
+        # The plan in place is now exactly the one asked for, and every watch in
+        # it was accepted, so nothing from an earlier plan is still outstanding.
+        self._replan_retry_at = 0.0
+        self._degraded = fallback
+        self._unwatched.clear()
+        self._promotion_retry_at.clear()
         self._remember_ignored_boundaries()
 
     def rewatch_all(self) -> bool:
@@ -2695,8 +2720,8 @@ class _WatchSupervisor:
                 )
                 if self._adopt_directory(candidate, required=newly_included):
                     adopted.append(candidate)
-        self._replan_if_requested()
         self._prune_unwatched()
+        self._replan_if_requested()
         return adopted, vanished
 
     def _note_unwatched(self, key: str) -> None:
