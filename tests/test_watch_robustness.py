@@ -36,6 +36,7 @@ from code_review_graph.incremental import (
     _load_ignore_patterns,
     _plan_watch_paths,
     _should_ignore,
+    _sync_watch_tree,
     _WatchSupervisor,
     clear_nested_ignore_cache,
     incremental_update,
@@ -334,6 +335,82 @@ class TestNewDirectoryAdoption:
         assert supervisor.degraded is True
         assert health["degraded"] is True
         assert health["failed_paths"] == [str(created)]
+
+    def test_refused_directory_is_indexed_once_then_on_recovery(self, tmp_path):
+        """Each tick retries the watch, but must not re-read the tree each time."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        created = tmp_path / "services"
+        created.mkdir()
+        handler = MagicMock()
+        handler.ignore_patterns = supervisor._ignore_patterns
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            _sync_watch_tree(supervisor, handler)
+            _sync_watch_tree(supervisor, handler)
+            _sync_watch_tree(supervisor, handler)
+        refused_events = [call.args[0] for call in handler.dispatch.call_args_list]
+        assert [(e.event_type, e.src_path) for e in refused_events] == [
+            ("created", str(created)),
+        ]
+        assert supervisor.degraded is True
+
+        handler.dispatch.reset_mock()
+        _sync_watch_tree(supervisor, handler)
+        recovered_events = [call.args[0] for call in handler.dispatch.call_args_list]
+        assert [(e.event_type, e.src_path) for e in recovered_events] == [
+            ("created", str(created)),
+        ]
+        assert str(created) in supervisor.watched_paths
+        assert supervisor.degraded is False
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is False
+        assert health["failed_paths"] == []
+
+    def test_refused_directory_that_vanishes_leaves_the_health_record(self, tmp_path):
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        created = tmp_path / "short_lived"
+        created.mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            supervisor.sync_watches()
+            assert supervisor.unwatched_paths == [str(created)]
+            created.rmdir()
+            supervisor.sync_watches()
+
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is False
+        assert health["failed_paths"] == []
+
+    def test_refused_directories_do_not_defeat_the_health_rate_limit(self, tmp_path):
+        """Churn in the refused list alone must not rewrite the health file."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        (tmp_path / "stays_refused").mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            supervisor.sync_watches()
+            supervisor.report_health(observer_alive=True, force=True)
+            with patch("code_review_graph.incremental.os.replace") as replace:
+                for index in range(20):
+                    churned = tmp_path / f"build{index}"
+                    churned.mkdir()
+                    supervisor.sync_watches()
+                    supervisor.report_health(observer_alive=True)
+                    churned.rmdir()
+                    supervisor.sync_watches()
+                    supervisor.report_health(observer_alive=True)
+
+        replace.assert_not_called()
 
     def test_recreated_directory_is_watched_again(self, tmp_path):
         """`rm -rf src && mkdir src` must not leave src unwatched forever."""
