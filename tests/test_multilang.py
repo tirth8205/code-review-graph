@@ -4585,6 +4585,37 @@ class TestPLSQLHelpers:
         assert by_line[0].line_end == 5  # pkg_a.foo's own bare END, not pkg_b's
         assert by_line[1].line_end == 13
 
+    @pytest.mark.parametrize(
+        "lead",
+        [
+            b"INSERT INTO t VALUES ('it\\'s');\n",  # MySQL backslash escape
+            b"# it's a MySQL comment\n",
+            b'SELECT "it\'s" FROM a;\n',
+            b"COPY people (id, name) FROM stdin;\n1\tO'Brien\n\\.\n",  # pg_dump row
+            b"DO $x$ don't $x$;\n",  # Postgres dollar quoting
+        ],
+    )
+    def test_plain_sql_apostrophe_does_not_hide_later_statements(self, lead):
+        # Oracle's quoting rules do not hold in other dialects, so the blanking
+        # must not run on them: one stray apostrophe would flip its string state.
+        source = lead + (
+            b"CREATE PROCEDURE later() BEGIN SELECT * FROM orders; END;\n"
+            b"SELECT 1 FROM users;\n"
+        )
+
+        nodes, edges = CodeParser().parse_bytes(Path("dump.sql"), source)
+
+        assert "later" in {n.name for n in nodes if n.kind == "Function"}
+        tables = {e.target for e in edges if e.kind == "IMPORTS_FROM"}
+        assert {"orders", "users"} <= tables
+
+    def test_plain_sql_procedure_name_may_start_with_a_digit(self):
+        source = b"CREATE PROCEDURE 2fa_check() BEGIN SELECT 1; END;\n"
+
+        nodes, _ = CodeParser().parse_bytes(Path("mysql.sql"), source)
+
+        assert [n.name for n in nodes if n.kind == "Function"] == ["2fa_check"]
+
     def test_block_end_search_is_not_quadratic_on_many_members(self):
         # Each member's unbounded search used to cost O(remaining file
         # size); bounding it to the enclosing package body's own end keeps

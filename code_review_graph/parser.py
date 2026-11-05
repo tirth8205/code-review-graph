@@ -4973,9 +4973,10 @@ class CodeParser:
     # Regex for CREATE PROCEDURE — tree-sitter SQL grammar emits an ERROR node
     # for this statement, so we fall back to a regex scan. Leading `\b`
     # keeps this from matching "RECREATE PROCEDURE ..." as if it were
-    # "CREATE PROCEDURE ...".
+    # "CREATE PROCEDURE ...". It also serves other dialects, and MySQL allows
+    # a name to start with a digit, so this is wider than `_PLSQL_IDENT`.
     _SQL_PROC_RE = re.compile(
-        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*)",
+        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+(\w[\w$#]*(?:\.\w[\w$#]*)*)",
         re.IGNORECASE,
     )
 
@@ -5394,23 +5395,26 @@ class CodeParser:
                 tree.root_node, source, file_path_str, nodes, edges,
             )
 
-        # Comments and string-literal contents blanked to spaces (identical
-        # length/newlines to `text`, so line numbers computed against either
-        # are interchangeable). Computed unconditionally and used for dialect
-        # detection itself, not just the passes it gates — a comment in an
-        # otherwise plain T-SQL/MySQL file mentioning an Oracle-ish word
-        # (e.g. "-- migrated from Oracle VARCHAR2") must not trip Oracle
-        # detection, or that file would get the same body-span computation
-        # (and the same false CALLS edges spanning to EOF) that motivated
-        # gating this in the first place.
-        clean_text = self._strip_plsql_noise(text)
-
         # Whether the PL/SQL-specific passes below (body-span computation
         # and CALLS extraction) should run at all. Plain ANSI/T-SQL/MySQL
         # `.sql` files skip them entirely — computing a body span for a
         # dialect that doesn't use `END;` terminators is what caused the
         # false CALLS edges flagged in the PR #785 review.
-        is_plsql = self._is_plsql_dialect(path, clean_text)
+        #
+        # Blanking comments and strings only makes sense for Oracle's quoting
+        # rules. A MySQL `\'` or `#` comment, a `"it's"`, or a pg_dump COPY row
+        # holding an apostrophe would flip its string state and blank real
+        # statements, so anything else keeps the raw text. Blanking can only
+        # remove a signal, so the raw check also spares plain files the cost.
+        # The second check stops a comment that merely mentions an Oracle word
+        # ("-- migrated from Oracle VARCHAR2") from counting as a signal.
+        clean_text = text
+        is_plsql = self._is_plsql_dialect(path, text)
+        if is_plsql:
+            clean_text = self._strip_plsql_noise(text)
+            is_plsql = self._is_plsql_dialect(path, clean_text)
+            if not is_plsql:
+                clean_text = text
 
         # Names already captured by the tree-sitter pass, so the Oracle-style
         # FUNCTION regex fallback below doesn't double-count ANSI-style
