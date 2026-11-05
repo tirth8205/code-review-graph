@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 import pytest
 
@@ -32,7 +32,8 @@ def test_main_auto_watch_supplies_shared_postprocessing(tmp_path, monkeypatch):
     crg_main.main(repo_root=str(tmp_path), auto_watch=True)
 
     start_watch.assert_called_once_with(
-        tmp_path, store, daemon=True, on_files_updated=run_post_processing,
+        tmp_path, store, daemon=True,
+        on_files_updated=run_post_processing, stop_event=ANY,
     )
     store.close.assert_called_once_with()
 
@@ -107,6 +108,8 @@ def test_main_auto_watch_reconciliation_keeps_fts_consistent(tmp_path, monkeypat
 
     def start_and_join(*args, **kwargs):
         # Forward only what main supplies: never inject the missing callback here.
+        # Stop already set, so watch() does its startup work and leaves its loop.
+        kwargs["stop_event"].set()
         thread = start_watch(*args, **kwargs)
         assert thread is not None
         thread.join(timeout=5)
@@ -115,10 +118,7 @@ def test_main_auto_watch_reconciliation_keeps_fts_consistent(tmp_path, monkeypat
 
     monkeypatch.setattr(crg_main, "start_watch_thread", start_and_join)
     monkeypatch.setattr(crg_main.mcp, "run", Mock())
-    with (
-        patch("watchdog.observers.Observer") as observer,
-        patch("time.sleep", side_effect=KeyboardInterrupt),
-    ):
+    with patch("watchdog.observers.Observer") as observer:
         crg_main.main(repo_root=str(repo), auto_watch=True)
     observer.return_value.start.assert_called_once_with()
 
@@ -193,74 +193,63 @@ def test_mcp_auto_watch_event_batches_keep_fts_consistent(tmp_path, monkeypatch)
 
     observer = FakeObserver()
     ready = threading.Event()
-    stop = threading.Event()
-    threads = []
     start_watch = incremental.start_watch_thread
 
     def capture_thread(*args, **kwargs):
+        # The first loop tick occurs after reconciliation, handler.start(),
+        # and observer.start(). main() sets this event once MCP has returned.
+        stop_event = kwargs["stop_event"]
+        real_wait = stop_event.wait
+
+        def signal_ready_then_wait(timeout=None):
+            ready.set()
+            return real_wait(timeout)
+
+        stop_event.wait = signal_ready_then_wait
         thread = start_watch(*args, **kwargs)
         assert thread is not None
-        threads.append(thread)
         return thread
 
-    def wait_for_batches(_seconds):
-        # The first loop tick occurs after reconciliation, handler.start(),
-        # and observer.start(). Keep the watcher alive while MCP handles tests.
-        ready.set()
-        stop.wait(timeout=10)
-        raise KeyboardInterrupt
-
     def exercise_batches(**kwargs):
-        try:
-            assert ready.wait(timeout=5), "watcher did not reach its post-startup loop"
-            assert observer.started and observer.handler is not None
-            handler = observer.handler
-            assert handler.events_seen == 0
-            with GraphStore(db_path) as store:
-                assert_fts_consistent(store, ("alphaHelper", "betaCaller"))
+        assert ready.wait(timeout=5), "watcher did not reach its post-startup loop"
+        assert observer.started and observer.handler is not None
+        handler = observer.handler
+        assert handler.events_seen == 0
+        with GraphStore(db_path) as store:
+            assert_fts_consistent(store, ("alphaHelper", "betaCaller"))
 
-                created = repo / "extra.py"
-                created.write_text("def gammaHelper():\n    return 3\n", encoding="utf-8")
-                # Reuse the synchronous batch boundary used by existing watcher
-                # tests: process() returns after real updates and post-processing.
-                handler.process([FileCreatedEvent(str(created))])
-                handler.raise_if_failed()
-                assert handler.events_seen == 1
-                assert_fts_consistent(store, ("alphaHelper", "betaCaller", "gammaHelper"))
+            created = repo / "extra.py"
+            created.write_text("def gammaHelper():\n    return 3\n", encoding="utf-8")
+            # Reuse the synchronous batch boundary used by existing watcher
+            # tests: process() returns after real updates and post-processing.
+            handler.process([FileCreatedEvent(str(created))])
+            handler.raise_if_failed()
+            assert handler.events_seen == 1
+            assert_fts_consistent(store, ("alphaHelper", "betaCaller", "gammaHelper"))
 
-                source.write_text(
-                    "def deltaHelper():\n    return 4\n\n"
-                    "def betaCaller():\n    return 2\n",
-                    encoding="utf-8",
-                )
-                handler.process([FileModifiedEvent(str(source))])
-                handler.raise_if_failed()
-                assert handler.events_seen == 2
-                assert_fts_consistent(
-                    store, ("deltaHelper", "betaCaller", "gammaHelper"), ("alphaHelper",),
-                )
+            source.write_text(
+                "def deltaHelper():\n    return 4\n\n"
+                "def betaCaller():\n    return 2\n",
+                encoding="utf-8",
+            )
+            handler.process([FileModifiedEvent(str(source))])
+            handler.raise_if_failed()
+            assert handler.events_seen == 2
+            assert_fts_consistent(
+                store, ("deltaHelper", "betaCaller", "gammaHelper"), ("alphaHelper",),
+            )
 
-                created.unlink()
-                handler.process([FileDeletedEvent(str(created))])
-                handler.raise_if_failed()
-                assert handler.events_seen == 3
-                assert not store.get_nodes_by_file(str(created))
-                assert_fts_consistent(
-                    store, ("deltaHelper", "betaCaller"), ("alphaHelper", "gammaHelper"),
-                )
-        finally:
-            stop.set()
-            # main() closes its GraphStore as soon as the mocked transport exits.
-            # Join first so neither watch nor its debouncer outlives that store.
-            for thread in threads:
-                thread.join(timeout=5)
-                assert not thread.is_alive(), "watcher did not stop after event batches"
+            created.unlink()
+            handler.process([FileDeletedEvent(str(created))])
+            handler.raise_if_failed()
+            assert handler.events_seen == 3
+            assert not store.get_nodes_by_file(str(created))
+            assert_fts_consistent(
+                store, ("deltaHelper", "betaCaller"), ("alphaHelper", "gammaHelper"),
+            )
 
     monkeypatch.setattr(crg_main, "start_watch_thread", capture_thread)
     monkeypatch.setattr(crg_main.mcp, "run", exercise_batches)
-    with (
-        patch("watchdog.observers.Observer", return_value=observer),
-        patch("time.sleep", side_effect=wait_for_batches),
-    ):
+    with patch("watchdog.observers.Observer", return_value=observer):
         crg_main.main(repo_root=str(repo), auto_watch=True)
     assert observer.stopped
