@@ -16,6 +16,16 @@ from .visualization import export_graph_data
 logger = logging.getLogger(__name__)
 
 
+class MissingOptionalDependencyError(ImportError):
+    """An export needs a package that a default install does not ship.
+
+    Subclasses ``ImportError`` so existing callers keep working, but is
+    specific enough that a CLI can catch it and print the one-line install
+    hint instead of a traceback — without swallowing an ImportError raised
+    by a genuinely broken install of a required package.
+    """
+
+
 # -------------------------------------------------------------------
 # JSON export
 # -------------------------------------------------------------------
@@ -55,8 +65,43 @@ def export_json(store: GraphStore, output_path: Path) -> Path:
 # GraphML export (for Gephi, yEd, Cytoscape)
 # -------------------------------------------------------------------
 
+#: The GraphML 1.0 namespace. Every GraphML reader keys off this exact URI.
+GRAPHML_NS = "http://graphml.graphdrawing.org/xmlns"
+#: Canonical location of the schema, for the ``xsi:schemaLocation`` pair.
+GRAPHML_SCHEMA = "http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd"
+
+#: Characters XML 1.0 forbids outright — not even as a character reference.
+#:
+#: This is exactly the complement of the XML 1.0 ``Char`` production below
+#: U+0020: everything from U+0000 to U+001F except tab, newline and carriage
+#: return. U+007F (DEL) is deliberately *not* here. ``Char`` admits the whole
+#: of ``[#x20-#xD7FF]``, so DEL is a legal XML 1.0 character, and
+#: ``_sanitize_name`` keeps it in a node name. Dropping it would rewrite the
+#: identity this export carries: two names differing only by a DEL would come
+#: back from the file as one, which is the newline-collision bug this export
+#: already avoids for ``node/@id``, in a smaller form.
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xml_text(value: object) -> str:
+    """Escape a value for XML element content.
+
+    Drops the control characters XML 1.0 cannot represent at all, then
+    escapes the markup characters. Element content (unlike an attribute
+    value) is not whitespace-normalised, so a newline survives verbatim.
+    """
+    return html.escape(_XML_ILLEGAL.sub("", str(value)), quote=False)
+
+
 def export_graphml(store: GraphStore, output_path: Path) -> Path:
     """Export the graph as GraphML XML for Gephi/yEd/Cytoscape.
+
+    The document declares the official GraphML namespace and validates
+    against the GraphML 1.0 schema. That schema types ``node/@id`` as an
+    ``NMTOKEN``, which cannot hold the ``/`` in a qualified name, and XML
+    attribute-value normalisation would fold a newline inside a name onto a
+    space and silently merge two distinct nodes. So the identity travels in
+    a ``<data key="qualified_name">`` element and the ids are synthetic.
 
     Returns the path to the written file.
     """
@@ -66,9 +111,13 @@ def export_graphml(store: GraphStore, output_path: Path) -> Path:
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
-        '<graphml xmlns="http://graphml.graphstruct.org/graphml"',
+        f'<graphml xmlns="{GRAPHML_NS}"',
         '  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"',
-        '  xsi:schemaLocation="http://graphml.graphstruct.org/graphml">',
+        f'  xsi:schemaLocation="{GRAPHML_NS} {GRAPHML_SCHEMA}">',
+        '  <key id="qualified_name" for="node" '
+        'attr.name="qualified_name" attr.type="string"/>',
+        '  <key id="name" for="node" attr.name="name" '
+        'attr.type="string"/>',
         '  <key id="kind" for="node" attr.name="kind" '
         'attr.type="string"/>',
         '  <key id="file" for="node" attr.name="file" '
@@ -82,38 +131,55 @@ def export_graphml(store: GraphStore, output_path: Path) -> Path:
         '  <graph id="code-review-graph" edgedefault="directed">',
     ]
 
-    for n in nodes:
-        nid = html.escape(n["qualified_name"], quote=True)
-        lines.append(f'    <node id="{nid}">')
-        lines.append(f'      <data key="kind">'
-                     f'{html.escape(n.get("kind", ""))}</data>')
-        lines.append(f'      <data key="file">'
-                     f'{html.escape(n.get("file_path", ""))}</data>')
-        lang = n.get("language", "") or ""
-        lines.append(f'      <data key="language">'
-                     f'{html.escape(lang)}</data>')
+    # Qualified name -> NMTOKEN id, so edges can reference declared nodes.
+    node_ids: dict[str, str] = {}
+    for index, n in enumerate(nodes):
+        node_ids.setdefault(n["qualified_name"], f"n{index}")
+
+    for index, n in enumerate(nodes):
+        lines.append(f'    <node id="n{index}">')
+        lines.append('      <data key="qualified_name">'
+                     f'{_xml_text(n["qualified_name"])}</data>')
+        lines.append('      <data key="name">'
+                     f'{_xml_text(n.get("name", ""))}</data>')
+        lines.append('      <data key="kind">'
+                     f'{_xml_text(n.get("kind", ""))}</data>')
+        lines.append('      <data key="file">'
+                     f'{_xml_text(n.get("file_path", ""))}</data>')
+        lines.append('      <data key="language">'
+                     f'{_xml_text(n.get("language", "") or "")}</data>')
         cid = n.get("community_id")
         if cid is not None:
-            lines.append(f'      <data key="community">'
-                         f'{cid}</data>')
+            lines.append(f'      <data key="community">{int(cid)}</data>')
         lines.append('    </node>')
 
-    for i, e in enumerate(edges):
-        src = html.escape(e["source"], quote=True)
-        tgt = html.escape(e["target"], quote=True)
-        kind = html.escape(e.get("kind", ""), quote=True)
+    written_edges = 0
+    for e in edges:
+        src = node_ids.get(e["source"])
+        tgt = node_ids.get(e["target"])
+        if src is None or tgt is None:
+            # A dangling endpoint would break the schema's keyref on
+            # edge/@source and edge/@target, so drop the edge instead.
+            logger.debug(
+                "GraphML: dropping edge with an unknown endpoint (%r -> %r)",
+                e["source"], e["target"],
+            )
+            continue
         lines.append(
-            f'    <edge id="e{i}" source="{src}" target="{tgt}">'
+            f'    <edge id="e{written_edges}" source="{src}" '
+            f'target="{tgt}">'
         )
-        lines.append(f'      <data key="edge_kind">{kind}</data>')
+        lines.append('      <data key="edge_kind">'
+                     f'{_xml_text(e.get("kind", ""))}</data>')
         lines.append('    </edge>')
+        written_edges += 1
 
     lines.append('  </graph>')
     lines.append('</graphml>')
 
     output_path.write_text("\n".join(lines), encoding="utf-8")
     logger.info("GraphML exported to %s (%d nodes, %d edges)",
-                output_path, len(nodes), len(edges))
+                output_path, len(nodes), written_edges)
     return output_path
 
 
@@ -176,15 +242,20 @@ def _cypher_escape(s: str) -> str:
 
 
 def _cypher_props(d: dict) -> str:
-    """Format a dict as Cypher property map."""
+    """Format a dict as Cypher property map.
+
+    ``bool`` is tested before ``int`` because it is a subclass of ``int``:
+    the other order makes the boolean branch unreachable and emits Python's
+    ``True``/``False`` instead of Cypher's ``true``/``false``.
+    """
     parts = []
     for k, v in d.items():
         if isinstance(v, str):
             parts.append(f"{k}: '{_cypher_escape(v)}'")
-        elif isinstance(v, (int, float)):
-            parts.append(f"{k}: {v}")
         elif isinstance(v, bool):
             parts.append(f"{k}: {'true' if v else 'false'}")
+        elif isinstance(v, (int, float)):
+            parts.append(f"{k}: {v}")
     return "{" + ", ".join(parts) + "}"
 
 
@@ -255,9 +326,9 @@ def export_obsidian_vault(
             if isinstance(v, list):
                 lines.append(f"{k}:")
                 for item in v:
-                    lines.append(f"  - {item}")
+                    lines.append(f"  - {_yaml_scalar(item)}")
             elif v is not None:
-                lines.append(f"{k}: {v}")
+                lines.append(f"{k}: {_yaml_scalar(v)}")
         lines.append("---")
         lines.append(f"# {_sanitize_name(name)}")
         lines.append("")
@@ -343,6 +414,25 @@ def export_obsidian_vault(
     return output_dir
 
 
+def _yaml_scalar(value: object) -> str:
+    """Render a frontmatter value as a scalar any YAML parser will accept.
+
+    A bare scalar cannot carry ``": "``, a leading ``#``, a quote or a
+    newline, and a legal POSIX file path can contain all of them, so
+    anything that is not a number is emitted double-quoted. JSON string
+    syntax is a subset of YAML's double-quoted style, so ``json.dumps``
+    produces exactly the escaping YAML expects. ``bool`` is tested before
+    ``int`` because it is a subclass of ``int``.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def _obsidian_slug(name: str) -> str:
     """Convert a name to an Obsidian-friendly filename slug."""
     slug = re.sub(r"[^\w\s-]", "", name.lower())
@@ -359,16 +449,21 @@ def export_svg(store: GraphStore, output_path: Path) -> Path:
 
     Requires matplotlib (optional dependency).
     Returns the path to the written file.
+
+    Raises:
+        MissingOptionalDependencyError: If matplotlib is not installed.
+            Callers on a user-facing surface should print the message and
+            exit non-zero rather than let it become a traceback.
     """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-    except ImportError:
-        raise ImportError(
-            "matplotlib is required for SVG export. "
-            "Install with: pip install matplotlib"
-        )
+    except ImportError as exc:
+        raise MissingOptionalDependencyError(
+            "SVG export requires matplotlib. "
+            'Run: pip install "code-review-graph[eval]"'
+        ) from exc
 
     import networkx as nx
 
@@ -405,42 +500,49 @@ def export_svg(store: GraphStore, output_path: Path) -> Path:
         for n in nxg.nodes()
     ]
 
-    fig, ax = plt.subplots(1, 1, figsize=(16, 12))
-    pos = nx.spring_layout(
-        nxg, k=2 / (nxg.number_of_nodes() ** 0.5),
-        iterations=50, seed=42
-    )
-
-    # Limit labels to avoid clutter
-    labels = {}
-    if nxg.number_of_nodes() <= 100:
-        labels = {
-            n: nxg.nodes[n].get("label", n.split("::")[-1])
-            for n in nxg.nodes()
-        }
-
-    nx.draw_networkx_nodes(
-        nxg, pos, ax=ax, node_color=colors,
-        node_size=30, alpha=0.8
-    )
-    nx.draw_networkx_edges(
-        nxg, pos, ax=ax, alpha=0.2,
-        arrows=True, arrowsize=5
-    )
-    if labels:
-        nx.draw_networkx_labels(
-            nxg, pos, labels=labels, ax=ax,
-            font_size=6
+    # Node names are code identifiers, never TeX. With matplotlib's default
+    # ``text.parse_math`` a name carrying two '$' (legal in JavaScript, PHP,
+    # Perl, shell and in file paths) is parsed as mathtext and an unknown
+    # symbol aborts the whole export, so every label is drawn literally.
+    # ``parse_math`` is read when a Text artist is built *and* when it is
+    # rendered, so the context has to cover savefig too.
+    with matplotlib.rc_context({"text.parse_math": False}):
+        fig, ax = plt.subplots(1, 1, figsize=(16, 12))
+        pos = nx.spring_layout(
+            nxg, k=2 / (nxg.number_of_nodes() ** 0.5),
+            iterations=50, seed=42
         )
 
-    ax.set_title("Code Review Graph", fontsize=14)
-    ax.axis("off")
+        # Limit labels to avoid clutter
+        labels = {}
+        if nxg.number_of_nodes() <= 100:
+            labels = {
+                n: nxg.nodes[n].get("label", n.split("::")[-1])
+                for n in nxg.nodes()
+            }
 
-    fig.savefig(
-        str(output_path), format="svg",
-        bbox_inches="tight", dpi=150
-    )
-    plt.close(fig)
+        nx.draw_networkx_nodes(
+            nxg, pos, ax=ax, node_color=colors,
+            node_size=30, alpha=0.8
+        )
+        nx.draw_networkx_edges(
+            nxg, pos, ax=ax, alpha=0.2,
+            arrows=True, arrowsize=5
+        )
+        if labels:
+            nx.draw_networkx_labels(
+                nxg, pos, labels=labels, ax=ax,
+                font_size=6
+            )
+
+        ax.set_title("Code Review Graph", fontsize=14)
+        ax.axis("off")
+
+        fig.savefig(
+            str(output_path), format="svg",
+            bbox_inches="tight", dpi=150
+        )
+        plt.close(fig)
 
     logger.info("SVG exported to %s (%d nodes)",
                 output_path, nxg.number_of_nodes())

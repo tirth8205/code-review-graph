@@ -8,9 +8,17 @@ from typing import Any
 
 from ..embeddings import EmbeddingStore, embed_all_nodes
 from ..incremental import find_project_root, get_db_path
-from ._common import _get_store, _resolve_root, _validate_repo_root
+from ._common import (
+    _get_store,
+    _resolve_root,
+    _validate_positive_int,
+    _validate_repo_root,
+)
 
 logger = logging.getLogger(__name__)
+
+# Hard ceiling for a single wiki page in one MCP response (~20k tokens).
+_MAX_WIKI_CHARS = 80000
 
 # ---------------------------------------------------------------------------
 # Tool 7: embed_graph
@@ -51,7 +59,8 @@ def embed_graph(
                   supplied.
 
     Returns:
-        Number of nodes embedded and total embedding count.
+        Number of nodes embedded and total embedding count. The summary reports
+        semantic search as unavailable when no embeddings exist.
     """
     store, root = _get_store(repo_root)
     try:
@@ -83,13 +92,18 @@ def embed_graph(
 
             newly_embedded = embed_all_nodes(store, emb_store)
             total = emb_store.count()
+            search_status = (
+                "Semantic search is now active."
+                if total > 0
+                else "No embeddings are available for semantic search."
+            )
 
             return {
                 "status": "ok",
                 "summary": (
                     f"Embedded {newly_embedded} new node(s). "
                     f"Total embeddings: {total}. "
-                    "Semantic search is now active."
+                    f"{search_status}"
                 ),
                 "newly_embedded": newly_embedded,
                 "total_embeddings": total,
@@ -249,6 +263,7 @@ def generate_wiki_func(
 def get_wiki_page_func(
     community_name: str,
     repo_root: str | None = None,
+    max_chars: int = 20000,
 ) -> dict[str, Any]:
     """Retrieve a specific wiki page by community name.
 
@@ -258,12 +273,18 @@ def get_wiki_page_func(
     Args:
         community_name: Community name to look up (slugified for filename).
         repo_root: Repository root path. Auto-detected if omitted.
+        max_chars: Maximum characters of page content to return (default
+            20000, capped at 80000). A wiki page grows with its community,
+            so a 3000-member community produces a page no context window
+            wants in one call. ``total_chars`` reports the real length.
 
     Returns:
-        Page content or not_found status.
+        Page content or not_found status, with ``truncated`` when cut.
     """
     from ..incremental import get_data_dir
     from ..wiki import get_wiki_page
+
+    _validate_positive_int(max_chars, "max_chars")
 
     root = _resolve_root(repo_root)
     wiki_dir = get_data_dir(root) / "wiki"
@@ -273,10 +294,16 @@ def get_wiki_page_func(
             "status": "not_found",
             "summary": f"No wiki page found for '{community_name}'.",
         }
+    total_chars = len(content)
+    limit = min(max_chars, _MAX_WIKI_CHARS)
+    truncated = total_chars > limit
     return {
         "status": "ok",
         "summary": (
-            f"Wiki page for '{community_name}' ({len(content)} chars)"
+            f"Wiki page for '{community_name}' ({total_chars} chars)"
+            + (f", showing first {limit}" if truncated else "")
         ),
-        "content": content,
+        "content": content[:limit],
+        "total_chars": total_chars,
+        "truncated": truncated,
     }

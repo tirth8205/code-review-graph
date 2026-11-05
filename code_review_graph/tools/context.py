@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 import sqlite3
 import subprocess
-from pathlib import Path
 from typing import Any
 
-from ..incremental import get_db_path
+from ..errors import ChangeDiscoveryError
+from ..incremental import discover_review_changes, get_db_path, resolve_review_base
 from ..parser import normalize_file_path
 from ._common import _get_store, _resolve_root, compact_response, graph_provenance
 
@@ -23,27 +23,6 @@ def _not_ready(reason: str, summary: str) -> dict[str, Any]:
         "summary": summary,
         "next_tool_suggestions": ["build_or_update_graph"],
     }
-
-
-def _has_git_changes(root: Path, base: str) -> bool:
-    """Quick check for uncommitted or diffed changes."""
-    try:
-        result = subprocess.run(
-            ["git", "diff", "--name-only", base, "--"],
-            capture_output=True, stdin=subprocess.DEVNULL, text=True,
-            cwd=str(root), timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return True
-        # Also check staged/unstaged
-        result2 = subprocess.run(
-            ["git", "status", "--porcelain"],
-            capture_output=True, stdin=subprocess.DEVNULL, text=True,
-            cwd=str(root), timeout=10,
-        )
-        return bool(result2.stdout.strip())
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
 
 
 def get_minimal_context(
@@ -99,30 +78,52 @@ def get_minimal_context(
         risk_score = 0.0
         top_affected: list[str] = []
         test_gap_count = 0
-        if changed_files or _has_git_changes(root, base):
+        churn_status = "off"
+        discovery_failed = ""
+        # CLAUDE.md tells agents to call this tool first, so its git work is
+        # the first thing a slow repository blocks on -- and it used to run
+        # resolve_review_base (2 x 30s) + two hardcoded 10s probes +
+        # get_changed_files (30s) before answering anything. One
+        # discover_review_changes call replaces all five subprocesses with
+        # three on the short discovery budget, which is the whole point of
+        # #262: this is the entry point, so it cannot be the exception.
+        try:
+            if changed_files:
+                files: list[str] | None = changed_files
+                base = resolve_review_base(root, base)
+            else:
+                files, base = discover_review_changes(root, base)
+        except ChangeDiscoveryError as exc:
+            # Never silently "no changes": that is the answer an agent acts
+            # on. Say the lookup failed and carry on with the other sections.
+            discovery_failed = str(exc)
+            logger.warning("Change discovery failed in get_minimal_context: %s", exc)
+            files = None
+        if files:
             try:
                 from ..changes import analyze_changes
-                from ..incremental import get_changed_files as _get_changed
 
-                files = changed_files
-                if not files:
-                    files = _get_changed(root, base)
-                if files:
-                    abs_files = [normalize_file_path(root / f) for f in files]
-                    analysis = analyze_changes(
-                        store, abs_files, repo_root=str(root), base=base,
-                    )
-                    risk_score = analysis.get("risk_score", 0.0)
-                    risk = (
-                        "high" if risk_score > 0.7
-                        else "medium" if risk_score > 0.4
-                        else "low"
-                    )
-                    top_affected = [
-                        f.get("name", "")
-                        for f in analysis.get("changed_functions", [])[:5]
-                    ]
-                    test_gap_count = len(analysis.get("test_gaps", []))
+                abs_files = [normalize_file_path(root / f) for f in files]
+                analysis = analyze_changes(
+                    store, abs_files, repo_root=str(root), base=base,
+                    # Same reason as detect_changes: without this the
+                    # change-frequency term is pinned at zero for every
+                    # agent-driven review. The git log behind it is
+                    # memoised per commit, bounded, and fails soft.
+                    include_churn=True,
+                )
+                risk_score = analysis.get("risk_score", 0.0)
+                churn_status = analysis.get("churn_status", "off")
+                risk = (
+                    "high" if risk_score > 0.7
+                    else "medium" if risk_score > 0.4
+                    else "low"
+                )
+                top_affected = [
+                    f.get("name", "")
+                    for f in analysis.get("changed_functions", [])[:5]
+                ]
+                test_gap_count = len(analysis.get("test_gaps", []))
             except (
                 ImportError, OSError, ValueError,
                 sqlite3.Error, subprocess.SubprocessError,
@@ -176,6 +177,18 @@ def get_minimal_context(
             summary_parts.append(f"Risk: {risk} ({risk_score:.2f}).")
         if test_gap_count:
             summary_parts.append(f"{test_gap_count} test gaps.")
+        if discovery_failed:
+            # Same contract as the churn note below: a degraded run must not
+            # read like a healthy one.
+            summary_parts.append(f"Degraded: {discovery_failed}")
+        if churn_status == "unavailable":
+            # The score above is missing a term worth up to 0.15. Saying so
+            # costs a handful of tokens; not saying so makes a degraded run
+            # indistinguishable from a healthy one.
+            summary_parts.append(
+                "Degraded: change-frequency risk unavailable (git history "
+                "too slow); risk excludes churn."
+            )
 
         return compact_response(
             summary=" ".join(summary_parts),

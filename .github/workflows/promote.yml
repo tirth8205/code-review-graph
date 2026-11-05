@@ -1,0 +1,84 @@
+# Opens a promotion pull request between the long-lived branches.
+# The maintainer still reviews and merges it by hand; this only saves the
+# clicking. Promotions are merged with a merge commit so contributor
+# authorship on every commit survives. See CONTRIBUTING.md "Branching and
+# promotion".
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: "Which promotion to open"
+        type: choice
+        required: true
+        options:
+          - staging -> testing
+          - testing -> main
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Resolve branches
+        id: refs
+        env:
+          STEP: ${{ inputs.step }}
+        run: |
+          case "$STEP" in
+            "staging -> testing") echo "head=staging" >> "$GITHUB_OUTPUT"; echo "base=testing" >> "$GITHUB_OUTPUT" ;;
+            "testing -> main")    echo "head=testing" >> "$GITHUB_OUTPUT"; echo "base=main" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown step: $STEP"; exit 1 ;;
+          esac
+      - name: Build PR body from the commits being promoted
+        id: body
+        env:
+          HEAD: ${{ steps.refs.outputs.head }}
+          BASE: ${{ steps.refs.outputs.base }}
+        run: |
+          {
+            echo "## Promote \`$HEAD\` -> \`$BASE\`"
+            echo
+            echo "Merge with a **merge commit** (not squash) so every author stays on their commits."
+            echo
+            echo "### Included"
+            echo
+            git log -n 200 --no-merges --format='- %h %s (%an)' "origin/$BASE..origin/$HEAD"
+            echo
+            echo "### Pull requests referenced"
+            echo
+            git log --format='%s' "origin/$BASE..origin/$HEAD" | grep -oE '#[0-9]+' | sort -u | sed 's/^/- /' || true
+          } > "$RUNNER_TEMP/body.md"
+          echo "count=$(git rev-list --count "origin/$BASE..origin/$HEAD")" >> "$GITHUB_OUTPUT"
+      - name: Open or update the promotion PR
+        if: steps.body.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD: ${{ steps.refs.outputs.head }}
+          BASE: ${{ steps.refs.outputs.base }}
+        run: |
+          existing=$(gh pr list --base "$BASE" --head "$HEAD" --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body-file "$RUNNER_TEMP/body.md"
+            echo "Updated PR #$existing"
+          else
+            gh pr create --base "$BASE" --head "$HEAD" \
+              --title "Promote $HEAD -> $BASE" \
+              --body-file "$RUNNER_TEMP/body.md" \
+              --label promotion
+            echo "Opened promotion PR"
+          fi
+      - name: Nothing to promote
+        if: steps.body.outputs.count == '0'
+        env:
+          HEAD: ${{ steps.refs.outputs.head }}
+          BASE: ${{ steps.refs.outputs.base }}
+        run: echo "::notice::$HEAD has no commits that $BASE lacks; no PR opened."

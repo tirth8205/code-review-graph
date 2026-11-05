@@ -387,6 +387,16 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         _write(root / generated_slug / "notes.txt", "keep\n")
         _write(root / "user-skill" / "SKILL.md", "keep\n")
 
+    # What install actually writes since #909: the workflows bundled in the
+    # distribution, in a repository that has no top-level skills/ of its own.
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+    _write(fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt", "keep\n")
+
+    # What releases before #909 wrote: a copy of the target project's own
+    # top-level skills/ directory. Those copies must still be removable.
     _write(fake_repo / "skills" / "project-skill" / "SKILL.md", "source\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md", "copy\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt", "keep\n")
@@ -398,9 +408,33 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         assert not (root / generated_slug / "SKILL.md").exists()
         assert (root / generated_slug / "notes.txt").exists()
         assert (root / "user-skill" / "SKILL.md").exists()
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
+    assert (fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt").exists()
     assert not (fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md").exists()
     assert (fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt").exists()
     assert (fake_repo / ".qoder" / "skills" / "user-skill" / "SKILL.md").exists()
+
+
+def test_qoder_skills_are_removed_without_a_repository_skills_directory(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """The shape a real user repository has: install's own bundled workflows.
+
+    Deriving the list from ``<repo>/skills`` removed none of them, because a
+    normal project has no such directory (#909).
+    """
+    assert not (fake_repo / "skills").exists()
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
 
 
 def test_instruction_inventory_and_git_hook_are_surgical(
@@ -455,6 +489,139 @@ def test_uninstall_cleans_current_and_legacy_copilot_instruction_paths(
     assert report.errors == []
     for path in paths:
         assert path.read_text(encoding="utf-8") == "# User notes\n"
+
+
+def _legacy_claude_section() -> str:
+    """The longest recorded pre-guardrails CLAUDE.md-shaped block."""
+    return next(
+        block
+        for block in skills.LEGACY_INSTRUCTION_SECTIONS
+        if not block.startswith("---\n")
+    )
+
+
+def test_uninstall_removes_a_section_written_by_an_older_release(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """Removal used to match only the running version's text, so a block from
+    any earlier release survived an explicit uninstall (#314)."""
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + _legacy_claude_section())
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert path.read_text(encoding="utf-8") == "user instructions\n"
+    assert report.skipped_paths == []
+
+
+def test_uninstall_removes_the_current_section_including_its_end_marker(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + skills._CLAUDE_MD_SECTION)
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    remaining = path.read_text(encoding="utf-8")
+    assert remaining == "user instructions\n"
+    assert skills._CLAUDE_MD_SECTION_END_MARKER not in remaining
+
+
+def test_uninstall_leaves_a_hand_edited_section_alone_and_reports_it(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    path = fake_repo / "CLAUDE.md"
+    content = "user prefix\n\n" + _legacy_claude_section().replace(
+        "### Key Tools", "### Key Tools (our notes)"
+    )
+    _write(path, content)
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert path.read_text(encoding="utf-8") == content
+    assert any(str(path) in item and "left unchanged" in item for item in report.skipped_paths)
+
+
+def test_uninstall_keeps_user_content_on_both_sides_of_the_block(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    head = "# House rules\n\nNever force push.\n\n"
+    tail = "\n## Deploy notes\n\nRun the migration first.\n"
+    path = fake_repo / "CLAUDE.md"
+    _write(path, head + _legacy_claude_section() + tail)
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    remaining = path.read_text(encoding="utf-8")
+    assert remaining == (
+        "# House rules\n\nNever force push.\n\n## Deploy notes\n\nRun the migration first.\n"
+    )
+    assert skills._CLAUDE_MD_SECTION_MARKER not in remaining
+    # One blank line where the block was, not a pileup left by the removal.
+    assert "\n\n\n" not in remaining
+
+
+def test_uninstall_clears_every_duplicate_stale_block(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """Repeat installs used to stack blocks (#558); removal must clear them all."""
+    older = [
+        block
+        for block in skills.LEGACY_INSTRUCTION_SECTIONS
+        if not block.startswith("---\n")
+    ]
+    path = fake_repo / "CLAUDE.md"
+    _write(path, "user instructions\n\n" + older[0] + "\n" + older[1] + "\n" + older[0])
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    assert path.read_text(encoding="utf-8") == "user instructions\n"
+
+
+def test_install_then_uninstall_restores_the_file_byte_for_byte(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    original = "# House rules\n\nNever force push.\n"
+    path = fake_repo / "CLAUDE.md"
+    _write(path, original)
+
+    skills.inject_claude_md(fake_repo)
+    assert path.read_text(encoding="utf-8") != original
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_uninstall_removes_older_sections_from_every_instruction_path(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    older_claude = _legacy_claude_section()
+    older_copilot = next(
+        block for block in skills.LEGACY_INSTRUCTION_SECTIONS if block.startswith("---\n")
+    )
+    relatives = ["CLAUDE.md", *skills._PLATFORM_INSTRUCTION_FILES]
+    for relative in relatives:
+        custom = relative in skills._PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+        _write(
+            fake_repo / relative,
+            "user instructions\n\n" + (older_copilot if custom else older_claude),
+        )
+
+    report = uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert report.errors == []
+    for relative in relatives:
+        assert (fake_repo / relative).read_text(encoding="utf-8") == "user instructions\n"
 
 
 def test_modified_instruction_section_is_not_guessed_or_truncated(
