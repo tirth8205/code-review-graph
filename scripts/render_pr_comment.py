@@ -580,7 +580,7 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(_artifact_text(body))
         else:
             try:
-                Path(args.output).write_text(_artifact_text(body), encoding="utf-8")
+                Path(args.output).write_bytes(_artifact_text(body).encode("utf-8"))
             except OSError as exc:
                 logger.error("Cannot write output file %s: %s", args.output, exc)
                 return 2
