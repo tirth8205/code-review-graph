@@ -1,6 +1,6 @@
 """MCP tool definitions for the Code Review Graph server.
 
-Exposes 27 tools:
+Exposes 30 tools (each registered in main.py with a ``_tool`` suffix):
 1. build_or_update_graph  - full or incremental build
 2. get_impact_radius      - blast radius from changed files
 3. query_graph            - predefined graph queries
@@ -22,13 +22,15 @@ Exposes 27 tools:
 19. generate_wiki         - generate markdown wiki from community structure
 20. get_wiki_page         - retrieve a specific wiki page
 21. list_repos            - list registered repositories
-22. cross_repo_search     - search across all registered repositories
+22. cross_repo_search     - search registered repositories, all or a named subset
 23. get_hub_nodes         - find most connected nodes (architectural hotspots)
 24. get_bridge_nodes      - find architectural chokepoints (betweenness centrality)
 25. get_knowledge_gaps    - identify structural weaknesses
 26. get_surprising_connections - find unexpected architectural coupling
 27. get_suggested_questions - auto-generated review questions from graph analysis
 28. traverse_graph        - BFS/DFS traversal from best-matching node
+29. run_postprocess       - flows, communities and FTS for an existing graph
+30. get_minimal_context   - compact task-scoped entry point (call this first)
 """
 
 from __future__ import annotations

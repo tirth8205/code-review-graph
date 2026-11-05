@@ -12,26 +12,33 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 from code_review_graph.changes import parse_git_diff_ranges
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _commit_object_exists,
     collect_all_files,
+    discover_review_changes,
     full_build,
     get_all_tracked_files,
     get_changed_files,
     get_staged_and_unstaged,
     incremental_update,
     resolve_incremental_base,
+    resolve_review_base,
 )
+from code_review_graph.tools._common import graph_provenance
 from code_review_graph.tools.build import build_or_update_graph
+from code_review_graph.tools.context import get_minimal_context
 from code_review_graph.wiki import get_wiki_page
 
 
@@ -151,6 +158,108 @@ def test_get_staged_and_unstaged_expands_new_untracked_directories(
     ]
 
 
+def test_a_wholly_new_directory_reaches_every_review_tool(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """Against real git: the case the scoped walk silently deleted.
+
+    ``--untracked-files=normal`` is cheaper -- it does not stat below an
+    untracked directory -- but git then reports that directory as one ``new/``
+    record with no files in it. Discovery would have handed review tools an
+    empty list and ``status: ok``. This test is the reason the walk stays at
+    ``all``: a repository whose only change is a brand-new package must not
+    review as a clean tree.
+    """
+    _git_ok(git_repo_with_unicode_path, "commit", "--allow-empty", "-m", "empty")
+    nested = git_repo_with_unicode_path / "new" / "nested.py"
+    nested.parent.mkdir()
+    nested.write_text("value = 1\n", encoding="utf-8")
+
+    # git itself collapses it; the fix is not to consume that collapsed view.
+    collapsed = _git(
+        git_repo_with_unicode_path,
+        "status", "--porcelain", "--untracked-files=normal",
+    ).stdout
+    assert "new/\n" in collapsed and "nested.py" not in collapsed
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+    assert files == ["new/nested.py"]
+
+
+def test_a_new_package_is_visible_to_every_review_tool(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """The regression, checked where a user would actually meet it.
+
+    A repository whose only change is an uncommitted new package, reviewed
+    through the four MCP tools against real git. Checking
+    ``get_staged_and_unstaged`` alone was not enough: the drop that erased
+    these files lived one layer below the tools, and every tool's own test
+    passed while every tool returned nothing.
+    """
+    from code_review_graph.incremental import full_build, get_db_path
+    from code_review_graph.tools.query import get_impact_radius
+    from code_review_graph.tools.review import (
+        detect_changes_func,
+        get_affected_flows_func,
+        get_review_context,
+    )
+
+    repo = git_repo_with_unicode_path
+    store = GraphStore(get_db_path(repo))
+    try:
+        full_build(repo, store)
+    finally:
+        store.close()
+    # An empty commit makes `git diff HEAD~1` empty, which is the branch that
+    # sends discovery to the working-tree walk.
+    _git_ok(repo, "commit", "--allow-empty", "-m", "empty")
+    (repo / "newfeature").mkdir()
+    (repo / "newfeature" / "__init__.py").write_text("", encoding="utf-8")
+    (repo / "newfeature" / "api.py").write_text(
+        "def handler():\n    return 1\n", encoding="utf-8",
+    )
+
+    expected = {"newfeature/__init__.py", "newfeature/api.py"}
+    assert expected <= set(discover_review_changes(repo, "HEAD~1")[0])
+
+    for func in (detect_changes_func, get_review_context, get_impact_radius,
+                 get_affected_flows_func):
+        result = func(repo_root=str(repo))
+        assert result["status"] == "ok", func.__name__
+        summary = result.get("summary", "")
+        assert "No changes detected" not in summary, func.__name__
+        assert "No changed files detected" not in summary, func.__name__
+
+
+def test_a_new_file_in_a_tracked_directory_reaches_discovery(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """The commonest "I added a file" shape, end to end."""
+    _git_ok(git_repo_with_unicode_path, "commit", "--allow-empty", "-m", "empty")
+    (git_repo_with_unicode_path / "brand_new_module.py").write_text(
+        "value = 1\n", encoding="utf-8",
+    )
+
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+    assert files == ["brand_new_module.py"]
+
+
+def test_discovery_reports_a_timeout_rather_than_a_clean_tree(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    """A zero budget is the cheapest way to exhaust one deterministically.
+
+    Whatever the budget is, running out of it must never look like the
+    all-clear a review gate acts on (#262).
+    """
+    with pytest.raises(ChangeDiscoveryError) as excinfo:
+        with patch.dict(os.environ, {"CRG_DISCOVERY_TIMEOUT": "0"}):
+            discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+
+    assert "timed out" in str(excinfo.value)
+
+
 def test_get_staged_and_unstaged_uses_rename_destination(
     git_repo_with_unicode_path: Path,
 ) -> None:
@@ -210,6 +319,57 @@ def test_parse_git_diff_ranges_real_git(git_repo: Path) -> None:
     for start, end in ranges["hello.py"]:
         assert start >= 1
         assert end >= start
+
+
+def test_review_base_excludes_commits_unique_to_base_branch(tmp_path: Path) -> None:
+    """A branch review should compare from the common ancestor, not base tip."""
+    repo = _init_repo(tmp_path)
+
+    _git_ok(repo, "checkout", "-b", "feature")
+    _commit_file(repo, "feature_only")
+
+    _git_ok(repo, "checkout", "main")
+    _commit_file(repo, "base_only")
+    base_tip = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    _git_ok(repo, "update-ref", "refs/remotes/origin/main", base_tip)
+    _git_ok(repo, "tag", "base-release")
+    _git_ok(repo, "checkout", "feature")
+
+    # A two-dot diff against the current base tip wrongly attributes both
+    # sides of the divergence to the feature branch.
+    assert set(get_changed_files(repo, "main")) == {
+        "base_only.py",
+        "feature_only.py",
+    }
+
+    review_base = resolve_review_base(repo, "main")
+    assert review_base == _git_ok(repo, "merge-base", "main", "HEAD").stdout.strip()
+    assert resolve_review_base(repo, "origin/main") == review_base
+    assert get_changed_files(repo, review_base) == ["feature_only.py"]
+    assert set(parse_git_diff_ranges(str(repo), review_base)) == {"feature_only.py"}
+
+    # A caller can still request an exact two-tip comparison with a commit ID.
+    assert resolve_review_base(repo, base_tip) == base_tip
+    assert resolve_review_base(repo, "base-release") == "base-release"
+    assert resolve_review_base(repo, "HEAD~1") == "HEAD~1"
+
+
+def test_review_base_falls_back_when_merge_base_is_unavailable(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shallow or incomplete history must retain the caller's original base."""
+    real_run = subprocess.run
+
+    def fail_merge_base(*args, **kwargs):
+        command = args[0]
+        if command[:2] == ["git", "merge-base"]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="no ancestor")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr("code_review_graph.incremental.subprocess.run", fail_merge_base)
+
+    branch = _git_ok(git_repo, "branch", "--show-current").stdout.strip()
+    assert resolve_review_base(git_repo, branch) == branch
 
 
 # ------------------------------------------------------------------
@@ -441,6 +601,177 @@ def _commit_file(repo: Path, name: str) -> None:
     (repo / f"{name}.py").write_text(f"def {name}():\n    return 1\n")
     _git_ok(repo, "add", ".")
     _git_ok(repo, "commit", "-m", name)
+
+
+def _graph_structure_snapshot(store: GraphStore) -> tuple[frozenset, frozenset]:
+    """Return graph structure without timestamps or build metadata."""
+    nodes = frozenset(
+        (
+            node.kind,
+            node.qualified_name,
+            node.file_path,
+            node.line_start,
+            node.line_end,
+            node.language,
+        )
+        for node in store.get_all_nodes(exclude_files=False)
+    )
+    edges = frozenset(
+        (
+            edge.kind,
+            edge.source_qualified,
+            edge.target_qualified,
+            edge.file_path,
+            edge.line,
+        )
+        for edge in store.get_all_edges()
+    )
+    return nodes, edges
+
+
+def test_automatic_update_after_empty_commit_refreshes_freshness(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    commit_a = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    graph_path = repo / ".code-review-graph" / "graph.db"
+
+    with GraphStore(graph_path) as store:
+        structure_at_a = _graph_structure_snapshot(store)
+        assert store.get_metadata("git_head_sha") == commit_a
+
+    _git_ok(repo, "commit", "--allow-empty", "-m", "empty commit")
+    commit_b = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    assert commit_b != commit_a
+
+    result = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        base=None,
+        postprocess="none",
+    )
+    assert result["build_type"] == "incremental"
+    assert result["files_updated"] == 0
+
+    with GraphStore(graph_path) as store:
+        structure_at_b = _graph_structure_snapshot(store)
+        stored_sha = store.get_metadata("git_head_sha")
+    provenance = graph_provenance(str(repo))
+    context = get_minimal_context(repo_root=str(repo))
+
+    assert structure_at_b == structure_at_a
+    assert (
+        stored_sha,
+        provenance and provenance.get("head_matches_build"),
+        context["status"],
+        context.get("reason"),
+    ) == (commit_b, True, "ok", None)
+
+
+def test_automatic_update_after_unsupported_file_commit_refreshes_freshness(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    unindexed = repo / "notes.crg-unsupported"
+    unindexed.write_text("initial notes\n")
+    _git_ok(repo, "add", unindexed.name)
+    _git_ok(repo, "commit", "-m", "add unsupported notes")
+    commit_a = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    graph_path = repo / ".code-review-graph" / "graph.db"
+
+    with GraphStore(graph_path) as store:
+        structure_at_a = _graph_structure_snapshot(store)
+
+    unindexed.write_text("updated notes\n")
+    _git_ok(repo, "add", unindexed.name)
+    _git_ok(repo, "commit", "-m", "update unsupported notes")
+    commit_b = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    assert get_changed_files(repo, commit_a) == [unindexed.name]
+
+    result = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        base=None,
+        postprocess="none",
+    )
+    assert result["changed_files"] == [unindexed.name]
+    assert result["files_updated"] == 0
+
+    with GraphStore(graph_path) as store:
+        structure_at_b = _graph_structure_snapshot(store)
+        stored_sha = store.get_metadata("git_head_sha")
+    provenance = graph_provenance(str(repo))
+
+    assert structure_at_b == structure_at_a
+    assert (
+        stored_sha,
+        provenance and provenance.get("head_matches_build"),
+    ) == (commit_b, True)
+
+
+def test_explicit_changed_files_update_records_head_when_files_stored(
+    tmp_path: Path,
+) -> None:
+    repo = _init_repo(tmp_path)
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+
+    (repo / "a.py").write_text("def alpha():\n    return 2\n")
+    _git_ok(repo, "add", "a.py")
+    _git_ok(repo, "commit", "-m", "change alpha")
+    commit_b = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+
+    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+        result = incremental_update(repo, store, changed_files=["a.py"])
+        stored_sha = store.get_metadata("git_head_sha")
+
+    # Watch batches pass explicit files; once they store the change the graph
+    # matches HEAD and must say so, or every query carries a stale caveat.
+    assert result["files_updated"] == 1
+    assert stored_sha == commit_b
+
+
+def test_failed_automatic_update_does_not_claim_graph_is_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _init_repo(tmp_path)
+    commit_a = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+
+    (repo / "a.py").write_text("def alpha():\n    return 2\n")
+    _git_ok(repo, "add", "a.py")
+    _git_ok(repo, "commit", "-m", "change alpha")
+    commit_b = _git_ok(repo, "rev-parse", "HEAD").stdout.strip()
+
+    def fail_parse(*_args, **_kwargs):
+        raise RuntimeError("forced parse failure")
+
+    monkeypatch.setattr(
+        "code_review_graph.incremental.CodeParser.parse_bytes",
+        fail_parse,
+    )
+    result = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        base=None,
+        postprocess="none",
+    )
+
+    with GraphStore(repo / ".code-review-graph" / "graph.db") as store:
+        stored_sha = store.get_metadata("git_head_sha")
+
+    # The failure is visible in status, errors and summary, but the anchor
+    # still advances: freezing it would re-diff the same range on every later
+    # update and never recover on its own.
+    assert result["status"] == "partial"
+    assert result["files_updated"] == 0
+    assert result["errors"] == [{"file": "a.py", "error": "forced parse failure"}]
+    assert stored_sha == commit_b
+    assert stored_sha != commit_a
+    assert "a.py" in result["summary"]
+    assert "up to date" not in result["summary"].lower()
 
 
 def test_commit_object_exists(tmp_path: Path) -> None:

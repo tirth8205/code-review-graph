@@ -1,5 +1,9 @@
 # Pull Request
 
+<!-- Base branch: feature and fix PRs target `staging` (the default). Do not open PRs
+     against `testing` or `main`; those only receive promotion PRs from the maintainer.
+     See CONTRIBUTING.md "Branching and promotion". -->
+
 ## Linked issue
 
 <!-- Link the issue this PR addresses, e.g. "Closes #123".

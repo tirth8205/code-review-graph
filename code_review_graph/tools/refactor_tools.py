@@ -124,7 +124,7 @@ def refactor_func(
                 "truncated": truncated,
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 
@@ -149,7 +149,7 @@ def refactor_func(
                 "truncated": truncated,
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 
@@ -170,7 +170,7 @@ def refactor_func(
                 "truncated": truncated,
             }
             result["_hints"] = generate_hints(
-                "refactor", result, get_session()
+                "refactor_tool", result, get_session()
             )
             return result
 

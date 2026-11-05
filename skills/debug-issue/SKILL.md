@@ -5,24 +5,19 @@ description: Systematically debug issues using graph-powered code navigation
 
 ## Debug Issue
 
-Use the knowledge graph to systematically trace and debug issues.
+Trace a bug through the knowledge graph before reading source.
 
 ### Steps
 
-1. Use `semantic_search_nodes_tool` to find code related to the issue.
-2. Use `query_graph_tool` with `callers_of` and `callees_of` to trace call chains.
-3. Use `get_flow_tool` to see full execution paths through suspected areas.
-4. Run `detect_changes_tool` to check if recent changes caused the issue.
-5. Use `get_impact_radius_tool` on suspected files to see what else is affected.
-
-### Tips
-
-- Check both callers and callees to understand the full context.
-- Look at affected flows to find the entry point that triggers the bug.
-- Recent changes are the most common source of new issues.
+1. Call `semantic_search_nodes_tool` to find code related to the issue.
+2. Call `query_graph_tool` with `callers_of` and `callees_of` to trace the call chain in both directions.
+3. Call `get_flow_tool` for the execution path that reaches the suspect code. Its entry point is where the bug is triggered.
+4. Call `detect_changes_tool` to check whether a recent change caused the issue.
+5. Call `get_impact_radius_tool` on the suspect files to see what a fix would affect.
 
 ## Token Efficiency Rules
-- Start with `get_minimal_context_tool(task="<your task>")` before other graph tools.
-- Use `detail_level="minimal"` on all calls. Only escalate to "standard" when minimal is insufficient.
-- Target: complete any review/debug/refactor task in ≤5 tool calls and ≤800 total output tokens.
+- Call `get_minimal_context_tool(task="<your task>")` before any other graph tool.
+- Pass `detail_level="minimal"` wherever a tool accepts it. Use "standard" only when minimal is not enough.
+- Prefer a targeted `query_graph_tool` call over a broad listing call.
+- Budget: about five tool calls and 800 tokens of graph output per task.
 - Read the implementation and its tests before changing code. The graph narrows scope; it does not replace the source.

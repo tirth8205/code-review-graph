@@ -43,11 +43,16 @@ import fnmatch
 import json
 import logging
 import os
+import sqlite3
 from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Iterable, TypedDict
+
+from .errors import CodeReviewGraphError, is_lock_error
+from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
+from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
 
 logger = logging.getLogger(__name__)
 
@@ -677,9 +682,216 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+def _warn_failed_files(result: dict) -> None:
+    """Report files that failed to parse; their previous graph rows are kept."""
+    failed = result.get("errors") or []
+    if not failed:
+        return
+    names = ", ".join(str(item.get("file", "?")) for item in failed[:5])
+    extra = f" (+{len(failed) - 5} more)" if len(failed) > 5 else ""
+    print(
+        f"Warning: {len(failed)} file(s) failed to parse and were not updated: "
+        f"{names}{extra}",
+        file=sys.stderr,
+    )
+
+
+def _open_graph_store(db_path: Path, command: str):
+    """Open the graph store, recovering from an unusable database file.
+
+    A restored CI cache can hold a truncated or half-written ``graph.db``,
+    and it can just as easily hold a valid SQLite file whose tables are the
+    wrong shape. SQLite refuses either one and the command used to die with a
+    traceback, which is why ``action.yml``'s ``update || build`` fallback
+    could not recover: the full build failed for exactly the same reason.
+    ``build`` rewrites the graph from scratch, so there the bad file is
+    discarded and the build proceeds.
+
+    Every other command re-raises, and ``main`` prints the one actionable
+    line the error already carries. That is the whole difference between the
+    two paths, and it is worth stating why the reporting is not duplicated
+    here: a second message would compete with the first, and one of them
+    would drift.
+
+    ``build`` discards only what ``CorruptGraphDatabaseError`` names, and
+    that class is deliberately narrow. A contended database, a read-only
+    checkout, a foreign SQLite file and a graph from a newer release all
+    reach ``main`` as themselves, because deleting any of those would destroy
+    a graph, or data, that is not broken.
+    """
+    from .graph import CorruptGraphDatabaseError, GraphStore, discard_corrupt_database
+
+    try:
+        return GraphStore(db_path)
+    except CorruptGraphDatabaseError as exc:
+        if command != "build":
+            raise
+        logger.warning(
+            "Graph database at %s is unusable (%s); discarding it and "
+            "building from scratch.",
+            db_path, exc.reason,
+        )
+        discard_corrupt_database(db_path)
+        return GraphStore(db_path)
+
+
 def main() -> None:
-    """Main CLI entry point."""
-    _configure_utf8_stdio()
+    """Main CLI entry point.
+
+    Two families of failure are reported here rather than raised, because
+    both of them are things the tool understands about itself.
+
+    Everything the tool can explain is raised as a
+    :class:`~code_review_graph.errors.CodeReviewGraphError` (a corrupt or
+    foreign graph, a data directory it may not write to, a VCS it could not
+    run) and printed in the house style the rest of the CLI already uses:
+    one ``Error: ...`` line on stderr, exit 1, no traceback to decode.
+
+    One of those is reported here only because nothing could be done about
+    it earlier: an unreadable graph reaches ``build`` as a rebuild (see
+    ``_open_graph_store``) and only every other command as a line.
+
+    A contended graph is separate, and stays separate: it is reported, not
+    raised, and never described as damage. The choice is deliberate:
+    ``build`` and ``update`` are run from pre-commit hooks and editor hooks
+    where blocking indefinitely would look like a hang, and retrying past
+    SQLite's five-second wait would only lengthen a hang whose real cause is
+    another process that has not finished. Failing immediately is also the
+    recoverable outcome — the VCS anchor is written only by a build that ran
+    to completion, so nothing marks the half-written graph as current and the
+    next run rebuilds it.
+
+    Anything else really is a bug and keeps its traceback.
+    """
+    try:
+        _dispatch()
+    except CodeReviewGraphError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except sqlite3.OperationalError as exc:
+        if not is_lock_error(exc):
+            raise
+        print(
+            f"Error: another process is updating this graph ({exc}).\n"
+            "Nothing was written, and no freshness anchor was recorded, so the "
+            "graph is unchanged.\n"
+            "Wait for the other process (a watcher, a daemon, or another "
+            "code-review-graph run) to finish and try again.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+
+
+# Subparsers that _dispatch() needs after parsing, to print a subcommand's help
+# or raise a subcommand-scoped usage error. Populated by build_parser().
+_SUBCOMMANDS: dict[str, argparse.ArgumentParser] = {}
+
+
+def _is_seeded(args: argparse.Namespace) -> bool:
+    """True when the visualize invocation asks for a neighbourhood view."""
+    return bool(
+        getattr(args, "seed_symbol", None)
+        or getattr(args, "seed_file", None)
+        or getattr(args, "seed_changed", False)
+        or getattr(args, "seed_flow", None)
+        or getattr(args, "path_from", None)
+        or getattr(args, "path_to", None)
+    )
+
+
+def _check_visualize_flags(args: argparse.Namespace, fmt: str) -> None:
+    """Reject visualize flag combinations that cannot mean anything.
+
+    Every one of these used to be a silent no-op, which is the worst
+    outcome: the command succeeds, the flag is ignored, and the user
+    believes it took effect.
+    """
+    error = _SUBCOMMANDS["visualize"].error
+    seeded = _is_seeded(args)
+    tuning = [
+        name for name in ("depth", "render_depth", "max_nodes")
+        if getattr(args, name, None) is not None
+    ]
+    if getattr(args, "seed_changed_base", None) is not None and not getattr(
+        args, "seed_changed", False
+    ):
+        error("--seed-changed-base requires --seed-changed")
+    if fmt != "html":
+        if seeded:
+            error(
+                f"the seed flags build an interactive page and have no "
+                f"effect on --format {fmt}; drop the seed or use "
+                "--format html"
+            )
+        if tuning:
+            flag = "--" + tuning[0].replace("_", "-")
+            error(f"{flag} has no effect on --format {fmt}")
+        if getattr(args, "sidecar", False):
+            error(f"--sidecar has no effect on --format {fmt}")
+    if tuning and not seeded:
+        flag = "--" + tuning[0].replace("_", "-")
+        error(
+            f"{flag} only applies to a seeded view; add --seed-symbol, "
+            "--seed-file, --seed-changed, --seed-flow or "
+            "--path-from/--path-to"
+        )
+    if seeded and (getattr(args, "mode", "auto") or "auto") not in (
+        "auto", "full"
+    ):
+        error(
+            f"--mode {args.mode} aggregates the graph into bubbles, which is "
+            "the opposite of a seeded neighbourhood; use --mode full or drop "
+            "the seed"
+        )
+
+
+def _print_seed_budget(report: dict) -> None:
+    """Say what ``--max-nodes`` cost, so a trimmed view is never silent."""
+    if not report:
+        return
+    dropped = report.get("seeds_dropped", 0)
+    if dropped:
+        kept = report.get("seeds", 0)
+        requested = report.get("seeds_requested", kept + dropped)
+        print(
+            f"  --max-nodes {report.get('max_nodes')} kept the {kept} "
+            f"best-connected of {requested} seed nodes; {dropped} seeds and "
+            "every context hop were dropped"
+        )
+    elif report.get("truncated"):
+        print(
+            f"  --max-nodes {report.get('max_nodes')} trimmed the outer hops; "
+            f"every seed kept, {report.get('node_count')} nodes shipped"
+        )
+
+
+def _describe_visualization(
+    args: argparse.Namespace, vis_mode: str, depth: int
+) -> str:
+    """One-line description of what the generated page shows."""
+    if getattr(args, "path_from", None):
+        return f"path {args.path_from} -> {args.path_to}, depth {depth}"
+    seeds: list[str] = []
+    seeds.extend(getattr(args, "seed_symbol", None) or [])
+    seeds.extend(getattr(args, "seed_file", None) or [])
+    if getattr(args, "seed_changed", False):
+        seeds.append("changed files")
+    if getattr(args, "seed_flow", None):
+        seeds.append(f"flow {args.seed_flow}")
+    if seeds:
+        shown = ", ".join(seeds[:3])
+        if len(seeds) > 3:
+            shown += f", +{len(seeds) - 3} more"
+        return f"neighbourhood of {shown}, depth {depth}"
+    return vis_mode
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser.
+
+    Split out of :func:`_dispatch` so tests can assert on the flag surface
+    without executing a command.
+    """
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
@@ -979,6 +1191,90 @@ def main() -> None:
         action="store_true",
         help="Start a local HTTP server to view the visualization (localhost:8765)",
     )
+    vis_group = vis_cmd.add_argument_group(
+        "neighbourhood view",
+        "Draw a neighbourhood instead of the whole repository. Seeded views "
+        "carry only the nodes within --depth hops of the seed; everything "
+        "else is left out of the payload, not dimmed.",
+    )
+    vis_group.add_argument(
+        "--seed-symbol",
+        action="append",
+        default=None,
+        metavar="SYMBOL",
+        help="Seed from a symbol (qualified name, 'file.py::name', or a bare "
+             "name). Repeatable.",
+    )
+    vis_group.add_argument(
+        "--seed-file",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="Seed from a file and its symbols; glob patterns allowed. "
+             "Repeatable.",
+    )
+    vis_group.add_argument(
+        "--seed-changed",
+        action="store_true",
+        help="Seed from the files changed against --seed-changed-base",
+    )
+    vis_group.add_argument(
+        "--seed-changed-base",
+        default=None,
+        metavar="REF",
+        help="Git ref --seed-changed diffs against (default: HEAD~1)",
+    )
+    vis_group.add_argument(
+        "--seed-flow",
+        default=None,
+        metavar="FLOW",
+        help="Seed from an execution flow (name or id); see 'flows'",
+    )
+    vis_group.add_argument(
+        "--path-from",
+        default=None,
+        metavar="SYMBOL",
+        help="Start symbol of a shortest-path query",
+    )
+    vis_group.add_argument(
+        "--path-to",
+        default=None,
+        metavar="SYMBOL",
+        help="End symbol of a shortest-path query; the path through CALLS, "
+             "IMPORTS_FROM and INHERITS is highlighted",
+    )
+    vis_group.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        metavar="K",
+        help=f"Hops of context to include around the seed "
+             f"(default: {NB_DEFAULT_DEPTH})",
+    )
+    vis_group.add_argument(
+        "--render-depth",
+        type=int,
+        default=None,
+        metavar="K",
+        help="Hops drawn before expanding on click (default: 1)",
+    )
+    vis_group.add_argument(
+        "--max-nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Hard cap on payload nodes. The outermost hop is trimmed "
+             f"first; once the outer hops are gone the seed set is trimmed "
+             f"too, so the cap always holds "
+             f"(default: {NB_DEFAULT_MAX_NODES})",
+    )
+    vis_group.add_argument(
+        "--sidecar",
+        action="store_true",
+        help="Write the payload to graph.data.js next to the page instead of "
+             "inlining it. Off by default: the default output is one "
+             "self-contained file",
+    )
     vis_cmd.add_argument(
         "--format",
         choices=["html", "json", "graphml", "cypher", "obsidian", "svg"],
@@ -1028,7 +1324,7 @@ def main() -> None:
         default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
         "agent_baseline, flow_completeness, search_quality, build_performance, "
-        "multi_hop_retrieval)",
+        "multi_hop_retrieval, incremental_fidelity)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
@@ -1063,7 +1359,11 @@ def main() -> None:
         help="Analyze change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
-    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument(
+        "--base",
+        default="HEAD~1",
+        help="Git diff base (branch refs use their merge base with HEAD; default: HEAD~1)",
+    )
     detect_cmd.add_argument(
         "--brief",
         action="store_true",
@@ -1351,6 +1651,19 @@ def main() -> None:
         help="Repository path or alias to remove",
     )
 
+    _SUBCOMMANDS.update({
+        "refactor": refactor_cmd,
+        "serve": serve_cmd,
+        "daemon": daemon_cmd,
+        "visualize": vis_cmd,
+    })
+    return ap
+
+
+def _dispatch() -> None:
+    """Parse arguments and run the requested subcommand."""
+    _configure_utf8_stdio()
+    ap = build_parser()
     args = ap.parse_args()
 
     if args.version:
@@ -1368,7 +1681,12 @@ def main() -> None:
         and args.mode == "rename"
         and (not args.old_name or not args.new_name)
     ):
-        refactor_cmd.error("rename requires --old-name and --new-name")
+        _SUBCOMMANDS["refactor"].error("rename requires --old-name and --new-name")
+
+    if args.command == "visualize":
+        # Before the graph is opened: a nonsense flag pair is a usage error,
+        # not something the user should have to build a graph to discover.
+        _check_visualize_flags(args, getattr(args, "format", "html") or "html")
 
     if args.command == "enrich":
         from .enrich import run_hook
@@ -1413,9 +1731,9 @@ def main() -> None:
         auto_watch = getattr(args, "auto_watch", False)
         if args.command == "serve":
             if args.port is not None and not args.http:
-                serve_cmd.error("--port requires --http")
+                _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
-                serve_cmd.error("--host requires --http")
+                _SUBCOMMANDS["serve"].error("--host requires --http")
             if args.http:
                 host = args.host if args.host is not None else "127.0.0.1"
                 port = args.port if args.port is not None else 5555
@@ -1435,7 +1753,7 @@ def main() -> None:
 
     if args.command == "daemon":
         if not args.daemon_command:
-            daemon_cmd.print_help()
+            _SUBCOMMANDS["daemon"].print_help()
             return
         from .daemon_cli import (
             _handle_add,
@@ -1604,8 +1922,8 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    from .graph import GraphStore
     from .incremental import (
+        assert_graph_serves_root,
         find_project_root,
         find_repo_root,
         get_db_path,
@@ -1616,7 +1934,7 @@ def main() -> None:
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
         db_path = get_db_path(repo_root)
-        store = GraphStore(db_path)
+        store = _open_graph_store(db_path, args.command)
         try:
             from .tools.build import run_postprocess
 
@@ -1635,6 +1953,16 @@ def main() -> None:
             if result.get("fts_indexed"):
                 parts.append(f"{result['fts_indexed']} FTS entries")
             print(f"Post-processing: {', '.join(parts) or 'done'}")
+            if result.get("build_incomplete"):
+                # Post-processing rebuilt derived data for the nodes that are
+                # stored, which is not the same as a repaired graph: the build
+                # that stored them never finished, so files are still missing.
+                print(
+                    "Build state: INCOMPLETE - the last build stopped before "
+                    "every file was stored, so files are still missing from "
+                    "the graph. Post-processing cannot add them. Run "
+                    "'code-review-graph build' to rebuild."
+                )
         finally:
             store.close()
         return
@@ -1699,7 +2027,7 @@ def main() -> None:
     if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command in _read_only_db_cmds:
+    if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
@@ -1726,7 +2054,17 @@ def main() -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
-    store = GraphStore(db_path)
+    store = _open_graph_store(db_path, args.command)
+
+    try:
+        # A graph.db copied or cached from another checkout answers every
+        # question with that repository's symbols and absolute paths. The
+        # write side has refused that since #909; the read side used to
+        # accept it in silence.
+        assert_graph_serves_root(repo_root, store)
+    except BaseException:
+        store.close()
+        raise
 
     try:
         if args.command == "dead-code":
@@ -1806,6 +2144,9 @@ def main() -> None:
                 sys.exit(1)
             finally:
                 logging.disable(previous_disable)
+            if result.get("status") == "error":
+                print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+                sys.exit(1)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
             if not args.quiet:
@@ -1826,6 +2167,7 @@ def main() -> None:
                         f"{nodes} nodes, {edges} edges"
                         f" (postprocess={pp})"
                     )
+            _warn_failed_files(result)
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.
@@ -1838,17 +2180,15 @@ def main() -> None:
                     estimate_file_tokens,
                     format_context_savings_panel,
                 )
-                from .incremental import (
-                    get_changed_files,
-                    get_staged_and_unstaged,
-                )
+                from .incremental import discover_review_changes
 
                 # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept).
-                brief_base = result.get("base_resolved") or "HEAD~1"
-                changed = get_changed_files(repo_root, brief_base)
-                if not changed:
-                    changed = get_staged_and_unstaged(repo_root)
+                # None by default now, which get_changed_files cannot accept),
+                # then apply the same merge-base rule as detect-changes so a
+                # branch ref scopes the summary to this branch's own commits.
+                changed, brief_base = discover_review_changes(
+                    repo_root, result.get("base_resolved") or "HEAD~1"
+                )
                 if changed:
                     impact = analyze_changes(
                         store,
@@ -1885,7 +2225,12 @@ def main() -> None:
                         print(panel)
 
         elif args.command == "status":
+            from .build_state import BUILD_IN_PROGRESS, read_build_state
+            from .tools.build import build_was_interrupted
+
             stats = store.get_stats()
+            interrupted = build_was_interrupted(store)
+            files_missing = read_build_state(store) == BUILD_IN_PROGRESS
             stored_branch = store.get_metadata("git_branch")
             stored_sha = store.get_metadata("git_head_sha")
             from .incremental import _git_branch_info, detect_vcs
@@ -1912,6 +2257,7 @@ def main() -> None:
                     "current_sha": current_sha,
                     "svn_branch": stored_svn_branch,
                     "svn_revision": stored_rev,
+                    "build_incomplete": interrupted,
                 }))
             elif not args.quiet:
                 print(f"Nodes: {stats.total_nodes}")
@@ -1919,6 +2265,23 @@ def main() -> None:
                 print(f"Files: {stats.files_count}")
                 print(f"Languages: {', '.join(stats.languages)}")
                 print(f"Last updated: {stats.last_updated or 'never'}")
+                if interrupted and files_missing:
+                    # Nothing derived can put back a file that was never
+                    # parsed, so this one names the repair that works.
+                    print(
+                        "Build state: INCOMPLETE - the last build stopped "
+                        "before every file was stored, so files are missing "
+                        "from the graph. Run 'code-review-graph build' to "
+                        "rebuild it."
+                    )
+                elif interrupted:
+                    # The nodes can all be present and the graph still be a
+                    # half-built one: search and flows are derived afterwards.
+                    print(
+                        "Build state: INCOMPLETE - the last build stopped before "
+                        "post-processing finished, so search and flows may be "
+                        "missing. Run 'code-review-graph update' to repair it."
+                    )
                 if stored_branch:
                     print(f"Built on branch: {stored_branch}")
                 if stored_sha:
@@ -2026,18 +2389,68 @@ def main() -> None:
                 export_obsidian_vault(store, out)
                 print(f"Obsidian vault exported: {out}")
             elif fmt == "svg":
-                from .exports import export_svg
+                from .exports import MissingOptionalDependencyError, export_svg
 
                 out = data_dir / "graph.svg"
-                export_svg(store, out)
+                try:
+                    export_svg(store, out)
+                except MissingOptionalDependencyError as exc:
+                    # A missing optional dependency is a user-fixable setup
+                    # problem, not a crash: one line, no traceback, exit 1.
+                    print(f"Error: {exc}", file=sys.stderr)
+                    sys.exit(1)
                 print(f"SVG exported: {out}")
             else:
+                from .neighbourhood import SeedResolutionError
                 from .visualization import generate_html
 
                 html_path = data_dir / "graph.html"
                 vis_mode = getattr(args, "mode", "auto") or "auto"
-                generate_html(store, html_path, mode=vis_mode)
-                print(f"Visualization ({vis_mode}): {html_path}")
+                depth = getattr(args, "depth", None)
+                depth = NB_DEFAULT_DEPTH if depth is None else depth
+                max_nodes = getattr(args, "max_nodes", None)
+                max_nodes = (
+                    NB_DEFAULT_MAX_NODES if max_nodes is None else max_nodes
+                )
+                seed_files = list(getattr(args, "seed_file", None) or [])
+                if getattr(args, "seed_changed", False):
+                    from .incremental import get_changed_files
+
+                    base = args.seed_changed_base or "HEAD~1"
+                    changed = get_changed_files(repo_root, base=base)
+                    if not changed:
+                        print(
+                            f"No changed files against {base}; "
+                            "nothing to seed.",
+                            file=sys.stderr,
+                        )
+                        return
+                    seed_files.extend(changed)
+                seed_report: dict = {}
+                try:
+                    generate_html(
+                        store,
+                        html_path,
+                        mode=vis_mode,
+                        seed_symbols=getattr(args, "seed_symbol", None),
+                        seed_files=seed_files or None,
+                        seed_flow=getattr(args, "seed_flow", None),
+                        path_from=getattr(args, "path_from", None),
+                        path_to=getattr(args, "path_to", None),
+                        depth=depth,
+                        render_depth=getattr(args, "render_depth", None),
+                        max_nodes=max_nodes,
+                        report=seed_report,
+                        sidecar=getattr(args, "sidecar", False),
+                    )
+                except (SeedResolutionError, ValueError) as exc:
+                    print(f"visualize: {exc}", file=sys.stderr)
+                    sys.exit(2)
+                label = _describe_visualization(args, vis_mode, depth)
+                print(f"Visualization ({label}): {html_path}")
+                _print_seed_budget(seed_report)
+                if getattr(args, "sidecar", False):
+                    print(f"Payload sidecar: {html_path.parent / 'graph.data.js'}")
                 if getattr(args, "serve", False):
                     import functools
                     import http.server
@@ -2084,12 +2497,16 @@ def main() -> None:
                 attach_context_savings,
                 estimate_file_tokens,
             )
-            from .incremental import get_changed_files, get_staged_and_unstaged
+            from .incremental import discover_review_changes
 
-            base = args.base
-            changed = get_changed_files(repo_root, base)
-            if not changed:
-                changed = get_staged_and_unstaged(repo_root)
+            # discover_review_changes runs the same three steps on the
+            # short discovery budget, with require_vcs throughout: this
+            # command's exit code is a review gate, so "I could not look"
+            # must never render as "there is nothing to review" — a CI job
+            # keyed on exit 0 would wave through a pull request nobody read.
+            # ChangeDiscoveryError reaches main() and becomes one
+            # `Error: ...` line and exit 1.
+            changed, base = discover_review_changes(repo_root, args.base)
 
             if not changed:
                 print("No changes detected.")
@@ -2100,6 +2517,7 @@ def main() -> None:
                     repo_root=str(repo_root),
                     base=base,
                     include_churn=getattr(args, "churn", False),
+                    require_vcs=True,
                 )
                 original_tokens = estimate_file_tokens(repo_root, changed)
                 attach_context_savings(

@@ -147,6 +147,10 @@ jobs:
             exit 1
           fi
 
+          # Unlike action.yml, this workflow's token is not configurable: it
+          # is always secrets.GITHUB_TOKEN, whose comments are authored by
+          # github-actions[bot]. The login is therefore known exactly here,
+          # and must stay pinned rather than widened to any bot author.
           comment_id=$(gh api \
             "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/comments" \
             --paginate \
