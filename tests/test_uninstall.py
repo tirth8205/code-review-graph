@@ -387,6 +387,16 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         _write(root / generated_slug / "notes.txt", "keep\n")
         _write(root / "user-skill" / "SKILL.md", "keep\n")
 
+    # What install actually writes since #909: the workflows bundled in the
+    # distribution, in a repository that has no top-level skills/ of its own.
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+    _write(fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt", "keep\n")
+
+    # What releases before #909 wrote: a copy of the target project's own
+    # top-level skills/ directory. Those copies must still be removable.
     _write(fake_repo / "skills" / "project-skill" / "SKILL.md", "source\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md", "copy\n")
     _write(fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt", "keep\n")
@@ -398,9 +408,33 @@ def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
         assert not (root / generated_slug / "SKILL.md").exists()
         assert (root / generated_slug / "notes.txt").exists()
         assert (root / "user-skill" / "SKILL.md").exists()
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
+    assert (fake_repo / ".qoder" / "skills" / bundled[0] / "notes.txt").exists()
     assert not (fake_repo / ".qoder" / "skills" / "project-skill" / "SKILL.md").exists()
     assert (fake_repo / ".qoder" / "skills" / "project-skill" / "notes.txt").exists()
     assert (fake_repo / ".qoder" / "skills" / "user-skill" / "SKILL.md").exists()
+
+
+def test_qoder_skills_are_removed_without_a_repository_skills_directory(
+    fake_repo: Path,
+    fake_home: Path,
+) -> None:
+    """The shape a real user repository has: install's own bundled workflows.
+
+    Deriving the list from ``<repo>/skills`` removed none of them, because a
+    normal project has no such directory (#909).
+    """
+    assert not (fake_repo / "skills").exists()
+    bundled = skills.bundled_skill_names()
+    assert bundled, "no bundled skills found to exercise the Qoder path"
+    for name in bundled:
+        _write(fake_repo / ".qoder" / "skills" / name / "SKILL.md", "bundled\n")
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    for name in bundled:
+        assert not (fake_repo / ".qoder" / "skills" / name / "SKILL.md").exists()
 
 
 def test_instruction_inventory_and_git_hook_are_surgical(

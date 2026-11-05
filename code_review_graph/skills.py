@@ -20,7 +20,13 @@ import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Moved to importlib.resources.abc in 3.11 and removed from importlib.abc
+    # in 3.14. ``from __future__ import annotations`` keeps this out of the
+    # runtime, so neither spelling has to be imported where it is deprecated.
+    from importlib.resources.abc import Traversable
 
 from . import jsonc
 from ._legacy_instructions import LEGACY_INSTRUCTION_SECTIONS
@@ -2767,6 +2773,55 @@ def install_cursor_hooks() -> Path:
     return hooks_json_path
 
 
+def bundled_skills_dir() -> Traversable | None:
+    """Return the directory holding this release's bundled Qoder workflows.
+
+    Wheels carry them at ``code_review_graph/_bundled_skills`` (force-included
+    from the repository's top-level ``skills/``). Editable installs and source
+    checkouts have no such resource, so the same files are read from beside the
+    package. Returns ``None`` when neither exists.
+
+    A :class:`~importlib.abc.Traversable`, not a :class:`~pathlib.Path`, so a
+    package imported from a zip keeps working; both callers only iterate it and
+    read text from it.
+
+    Install and uninstall must agree on this answer: the installer writes one
+    ``.qoder/skills/<name>/SKILL.md`` per entry here, and uninstall has no other
+    way to know which of a user's ``.qoder`` skills are ours.
+    """
+    candidate = resources.files("code_review_graph").joinpath("_bundled_skills")
+    if candidate.is_dir():
+        return candidate
+    # Editable installs keep the same files beside the source package. Never
+    # treat the target project's unrelated skills as CRG's bundled workflows.
+    fallback = Path(__file__).resolve().parent.parent / "skills"
+    if fallback.is_dir():
+        return fallback
+    return None
+
+
+def bundled_skill_names() -> tuple[str, ...]:
+    """Return the names of the bundled workflows, sorted, or ``()`` if absent.
+
+    This is the list ``uninstall`` deletes from ``.qoder/skills``. It must stay
+    the same answer :func:`install_qoder_skills` acts on; deriving it from the
+    target project's own ``skills/`` directory instead removed nothing, because
+    a normal repository has no such directory (#909).
+    """
+    source = bundled_skills_dir()
+    if source is None:
+        return ()
+    try:
+        entries = sorted(source.iterdir(), key=lambda entry: entry.name)
+    except OSError:
+        return ()
+    return tuple(
+        entry.name
+        for entry in entries
+        if entry.is_dir() and entry.joinpath("SKILL.md").is_file()
+    )
+
+
 def install_qoder_skills(repo_root: Path) -> Path | None:
     """Install skills to Qoder's project-level skills directory.
 
@@ -2784,12 +2839,8 @@ def install_qoder_skills(repo_root: Path) -> Path | None:
     qoder_skills_dir = repo_root / ".qoder" / "skills"
     qoder_skills_dir.mkdir(parents=True, exist_ok=True)
 
-    source_skills_dir = resources.files("code_review_graph").joinpath("_bundled_skills")
-    if not source_skills_dir.is_dir():
-        # Editable installs keep the same files beside the source package. Never
-        # treat the target project's unrelated skills as CRG's bundled workflows.
-        source_skills_dir = Path(__file__).resolve().parent.parent / "skills"
-    if not source_skills_dir.is_dir():
+    source_skills_dir = bundled_skills_dir()
+    if source_skills_dir is None:
         logger.warning("Bundled code-review-graph skills are unavailable.")
         return None
 
