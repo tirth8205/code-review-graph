@@ -2778,6 +2778,28 @@ class TestElixirParsing:
         assert any(node.kind == "Function" and node.name == "helper" for node in nodes)
         assert [edge.target.rsplit("::", 1)[-1] for edge in guarded_calls] == ["Example.helper"]
 
+    def test_short_form_walks_every_keyword_clause_and_dynamic_callee(self, tmp_path):
+        path = tmp_path / "short_form_clauses.ex"
+        source = (
+            b"defmodule Example do\n"
+            b"  def clauses(x), do: helper(x), rescue: (e -> other(e))\n"
+            b"  def dynamic(x), do: unquote(f)(helper(x))\n"
+            b"  def helper(x), do: x\n"
+            b"  def other(x), do: x\n"
+            b"end\n"
+        )
+
+        _, edges = self.parser.parse_bytes(path, source)
+
+        calls = {
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        }
+        assert ("Example.clauses", "Example.helper") in calls
+        assert ("Example.clauses", "Example.other") in calls
+        assert ("Example.dynamic", "Example.helper") in calls
+
     @pytest.mark.parametrize(
         "name, declaration",
         [

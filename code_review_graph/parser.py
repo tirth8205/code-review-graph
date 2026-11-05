@@ -8207,32 +8207,12 @@ class CodeParser:
                     _depth=_depth + 1,
                 )
             else:
-                short_body = None
-                for keywords in arguments.children:
-                    if keywords.type != "keywords":
-                        continue
-                    for pair in keywords.named_children:
-                        if pair.type != "pair":
-                            continue
-                        key = pair.child_by_field_name("key")
-                        if (
-                            key is None
-                            or key.text.strip().rstrip(b":") != b"do"
-                        ):
-                            continue
-                        short_body = pair.child_by_field_name("value")
-                        break
-                    break
-                if short_body is not None:
-                    if short_body.type == "call":
-                        self._extract_elixir_constructs(
-                            short_body, source, language, file_path, nodes, edges,
-                            enclosing_class, fn_name,
-                            import_map, defined_names, _depth + 1,
-                        )
-                    else:
+                # Short form ``def f(x), do: g(x)``: the body is a keyword
+                # argument of the ``def`` call rather than a do_block.
+                for sub in arguments.children:
+                    if sub.type == "keywords":
                         self._extract_from_tree(
-                            short_body, source, language, file_path, nodes, edges,
+                            sub, source, language, file_path, nodes, edges,
                             enclosing_class=enclosing_class,
                             enclosing_func=fn_name,
                             import_map=import_map, defined_names=defined_names,
