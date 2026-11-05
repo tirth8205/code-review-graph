@@ -507,7 +507,15 @@ def test_submodule_of_a_package_installed_by_a_shim(repo, tmp_path):
     assert _call_targets(store, caller) == {f"{child}::helper"}
 
 
-def test_symlink_outside_the_repository_is_never_read(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "caller",
+    [
+        "from pkg import linked\n",
+        "from pkg import linked\n\n\ndef go():\n    linked.f()\n",
+    ],
+    ids=["import", "module-receiver-call"],
+)
+def test_symlink_outside_the_repository_is_never_read(tmp_path, monkeypatch, caller):
     outside = _write(
         tmp_path / "elsewhere", "linked.py",
         "import importlib\nimport sys\n\n"
@@ -520,7 +528,7 @@ def test_symlink_outside_the_repository_is_never_read(tmp_path, monkeypatch):
         (root / "pkg/linked.py").symlink_to(outside)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
-    _write(root, "caller.py", "from pkg import linked\n")
+    _write(root, "caller.py", caller)
 
     reads: list[Path] = []
     original_read_bytes = Path.read_bytes

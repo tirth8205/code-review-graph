@@ -17054,7 +17054,18 @@ class CodeParser:
         cached = self._python_reexport_cache.get(cache_key)
         if cached is not None:
             return cached
-        origin = self._get_python_star_exports(module_file).get(symbol_name)
+        # A repository path can be a symlink to a file elsewhere; only a file
+        # that really lives inside the repository is read.
+        try:
+            real_path: Optional[Path] = Path(module_file).resolve()
+        except (OSError, ValueError):
+            real_path = None
+        origin = (
+            self._get_python_star_exports(module_file).get(symbol_name)
+            if real_path is not None
+            and self._path_is_within(real_path, self._import_repo_boundary(module_file))
+            else None
+        )
         result = origin if origin and origin != module_file else module_file
         if len(self._python_reexport_cache) >= self._MODULE_CACHE_MAX:
             self._python_reexport_cache.clear()
