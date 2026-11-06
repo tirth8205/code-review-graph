@@ -241,6 +241,15 @@ doing. That is expected when a commit hook, an editor save hook and an agent
 tool hook all fire at once: one run writes, the others report the overlap and
 exit `75` (`EX_TEMPFAIL`).
 
+- `forget` and `embed` take the same lock and exit `75` the same way, but nothing
+  else does their work, so the message says so: run them again, or pass `--wait`.
+  `forget --dry-run` writes nothing and takes no lock.
+- `watch` takes the lock for each write and lets go between them, so a running
+  watcher does not stop a build. If another writer holds the lock, the watcher
+  keeps its changes and tries again a second later, and it can still be stopped
+  while it waits. A `build` or `update` that lands in one of those writes exits
+  `75` as usual.
+
 - The message names the PID that owns the write, so a live holder is
   distinguishable from a leftover lock file. The lock is
   `<data dir>/write.lock` (by default `.code-review-graph/write.lock`), and the
@@ -258,9 +267,10 @@ exit `75` (`EX_TEMPFAIL`).
   it.
 - External writers that do not acquire this lock themselves can use
   `flock -n .code-review-graph/write.lock external-writer` to exclude CRG
-  builds while they work. Invoke `code-review-graph build`, `update` and
-  `postprocess` directly. Wrapping those commands in `flock` makes them
-  contend with the wrapper's lock and exit `75`; adding `--wait` deadlocks.
+  builds while they work. Invoke `code-review-graph build`, `update`,
+  `postprocess`, `forget` and `embed` directly. Wrapping those commands in
+  `flock` makes them contend with the wrapper's lock and exit `75`; adding
+  `--wait` deadlocks.
 - A filesystem that does not support `flock` is not reported as another writer.
   The run logs a warning and goes ahead without the lock, so overlapping runs
   are not skipped there.

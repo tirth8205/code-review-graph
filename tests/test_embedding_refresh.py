@@ -186,6 +186,7 @@ class TestEmbeddingNodeEnumeration:
         graph.commit()
         db_path = graph.db_path
         graph.close()
+        (tmp_path / ".code-review-graph").mkdir(exist_ok=True)
         provider = _StubProvider()
         with (
             patch("code_review_graph.embeddings.get_provider", return_value=provider),
