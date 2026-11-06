@@ -257,6 +257,7 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_qualified ON nodes(qualified_name);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_qualified);
@@ -2772,6 +2773,14 @@ class GraphStore:
         where = " AND ".join(conditions)
         sql = f"SELECT COUNT(*) FROM nodes WHERE {where}"  # nosec B608
         return int(self._conn.execute(sql, params).fetchone()[0])
+
+    def get_nodes_by_name(self, name: str) -> list[GraphNode]:
+        """Return every node with exactly this name, by qualified name."""
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE name = ? ORDER BY qualified_name",
+            (name,),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
 
     # --- Impact / Graph traversal ---
 

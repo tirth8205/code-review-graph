@@ -592,7 +592,7 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             ambiguous = await _call(
                 session,
                 "query_graph_tool",
-                {"pattern": "callers_of", "target": "helper_0_0_0"},
+                {"pattern": "callers_of", "target": "helper_0_0"},
             )
             assert ambiguous["status"] == "ambiguous", ambiguous
             assert ambiguous["candidates"], ambiguous

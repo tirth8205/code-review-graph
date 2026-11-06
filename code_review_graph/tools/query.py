@@ -32,7 +32,7 @@ from ..incremental import (
     discover_review_changes,
     get_db_path,
 )
-from ..parser import normalize_file_path
+from ..parser import is_test_file, normalize_file_path
 from ..search import hybrid_search
 from ..uncertainty import (
     empty_impact_confidence,
@@ -112,6 +112,7 @@ _QUERY_PATTERNS = {
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _MAX_DOTTED_TARGET_CANDIDATES = 100
+_MAX_BARE_TARGET_CANDIDATES = 20
 
 #: Patterns whose rows describe one edge, so a call site can be attached and
 #: the answer can be split by how certain that edge's target attribution is.
@@ -152,18 +153,21 @@ def _interleave_call_sites(
     ``max_results`` window and hide every other caller. Emitting the first
     call site of each node, then the second of each, keeps the truncated
     prefix as wide as the un-truncated answer while still reporting repeats.
-    Ordering within a round is first-seen, so the result stays deterministic.
+    Within a round, calls bound to a real node come before guesses, or a few
+    bare ``len`` calls would fill the window and hide the real callee. The rest
+    of the order is first-seen, so the result stays deterministic.
     """
     seen_order: dict[str, int] = {}
     occurrence: dict[str, int] = {}
-    keyed: list[tuple[int, int, int, dict[str, Any], GraphEdge]] = []
+    keyed: list[tuple[int, bool, int, int, dict[str, Any], GraphEdge]] = []
     for index, (key, result, edge) in enumerate(sites):
         seen_order.setdefault(key, len(seen_order))
         round_index = occurrence.get(key, 0)
         occurrence[key] = round_index + 1
-        keyed.append((round_index, seen_order[key], index, result, edge))
-    keyed.sort(key=lambda item: item[:3])
-    return [(result, edge) for _, _, _, result, edge in keyed]
+        is_guess = result.get("target_resolution") == RESOLUTION_UNRESOLVED
+        keyed.append((round_index, is_guess, seen_order[key], index, result, edge))
+    keyed.sort(key=lambda item: item[:4])
+    return [(result, edge) for _, _, _, _, result, edge in keyed]
 
 
 def _looks_like_java_method_fqn(target: str) -> bool:
@@ -224,8 +228,43 @@ def _namespaced_ruby_candidates(store: GraphStore, target: str) -> list[GraphNod
     ]
 
 
+def _exact_name_candidates(
+    store: GraphStore, root: Path, target: str,
+) -> tuple[list[GraphNode], int]:
+    """Return the nodes a bare *target* names exactly, and the tests set aside.
+
+    The full-text index tokenises, so ``hybrid_search`` also hits every
+    ``test_hybrid_search_*``. A name written in full means that name. A test or
+    test helper with the same name gives way to the real symbol; when only test
+    symbols have the name, they are the answer.
+    """
+    exact = store.get_nodes_by_name(target)
+    real = [
+        candidate
+        for candidate in exact
+        if not candidate.is_test and not is_test_file(candidate.file_path, root)
+    ]
+    if real:
+        return real, len(exact) - len(real)
+    return exact, 0
+
+
+def _selectable_qualified_name(node: GraphNode, root: Path) -> str:
+    """Return a qualified name that still selects *node* when sent back.
+
+    A long checkout path can push a name past the cut ``_sanitize_name`` makes,
+    and a cut name selects nothing. ``query_graph`` also reads a name relative
+    to the repo root, which is much shorter.
+    """
+    qualified = node.qualified_name
+    prefix = f"{normalize_file_path(root)}/"
+    if len(qualified) > _SANITIZED_NAME_MAX and qualified.startswith(prefix):
+        qualified = qualified[len(prefix):]
+    return _sanitize_name(qualified)
+
+
 def _rank_disambiguation_candidates(
-    candidates: list[GraphNode], target: str,
+    candidates: list[GraphNode], target: str, root: Path,
 ) -> list[dict[str, Any]]:
     """Return deterministic, sanitized candidates ordered by match quality."""
     target_lower = target.lower()
@@ -241,7 +280,13 @@ def _rank_disambiguation_candidates(
             rank = 3
         return rank, node.qualified_name
 
-    return [node_to_dict(node) for node in sorted(candidates, key=score)]
+    return [
+        {
+            **node_to_dict(node),
+            "qualified_name": _selectable_qualified_name(node, root),
+        }
+        for node in sorted(candidates, key=score)
+    ]
 
 
 def get_impact_radius(
@@ -599,6 +644,7 @@ def query_graph(
         # Resolve target - try as-is, then as absolute path, then search.
         # file_summary targets are paths, so skip broad node search.
         node = None
+        same_name_tests = 0
         raw_config_target = pattern == "consumers_of" and "::" not in target
         if pattern != "file_summary" and not raw_config_target:
             node = store.get_node(target)
@@ -606,6 +652,7 @@ def query_graph(
                 abs_target = normalize_file_path(root / target)
                 node = store.get_node(abs_target)
             if not node:
+                exact_candidates: list[GraphNode] = []
                 qualified_tail_candidates = []
                 if "." in target:
                     # Nested type paths are exact indexed tails but also look
@@ -636,7 +683,12 @@ def query_graph(
                     # on the class and method, so it is still safe.
                     candidates = _namespaced_ruby_candidates(store, target)
                 else:
-                    candidates = store.search_nodes(target, limit=20)
+                    exact_candidates, same_name_tests = _exact_name_candidates(
+                        store, root, target,
+                    )
+                    candidates = exact_candidates or store.search_nodes(
+                        target, limit=_MAX_BARE_TARGET_CANDIDATES,
+                    )
                 if pattern == "inheritors_of" and "::" not in target:
                     exact_type_candidates = [
                         candidate
@@ -660,9 +712,39 @@ def query_graph(
                         candidate_count = store.count_nodes_by_qualified_tail(target)
                     elif java_candidates is not None:
                         candidate_count = len(candidates)
+                    elif exact_candidates:
+                        candidate_count = len(candidates)
+                        candidates = candidates[:_MAX_BARE_TARGET_CANDIDATES]
                     else:
                         candidate_count = store.count_search_nodes(target)
-                    ranked = _rank_disambiguation_candidates(candidates, target)
+                    ranked = _rank_disambiguation_candidates(candidates, target, root)
+                    if minimal:
+                        # Names only, once: the agent needs one of these to
+                        # re-run the query, not a full row for each.
+                        shortlist = [
+                            {key: row[key] for key in ("qualified_name", "kind")}
+                            for row in ranked[:response_limit]
+                        ]
+                        truncated = candidate_count > len(shortlist)
+                        return {
+                            "status": "ambiguous",
+                            "summary": (
+                                f"'{target}' matches {candidate_count} node(s). "
+                                "Re-run with a qualified_name from candidates."
+                            ),
+                            "candidates": shortlist,
+                            "candidate_count": candidate_count,
+                            "candidates_truncated": truncated,
+                            "hint": (
+                                "Use a qualified_name from candidates as the "
+                                "target parameter."
+                                + (
+                                    " detail_level='standard' lists more."
+                                    if truncated
+                                    else ""
+                                )
+                            ),
+                        }
                     return {
                         "status": "ambiguous",
                         "summary": (
@@ -1118,6 +1200,8 @@ def query_graph(
             )
         if results_omitted:
             summary += f" — showing {len(results)}, {results_omitted} omitted"
+        if same_name_tests:
+            summary += f" — skipped {same_name_tests} same-named test symbol(s)"
 
         # A zero here is the dangerous direction: agents read it as "none
         # exist" and either conclude wrongly or fall back to grepping the

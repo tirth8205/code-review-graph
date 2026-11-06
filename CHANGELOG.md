@@ -88,6 +88,16 @@
 
 ### Fixed
 
+- `query_graph_tool` no longer answers "ambiguous" when a full name has one
+  real symbol. The name search splits on underscores, so `hybrid_search` also
+  matched every `test_hybrid_search_*` and came back with 34 candidates and no
+  answer, at about 5,200 tokens even with `detail_level="minimal"`. A full name
+  now means that name: a test or test helper with the same name gives way to the
+  real symbol, and the summary says how many it skipped. Two real symbols with
+  the name are still ambiguous. The same query now costs about 450 tokens and
+  answers it. An ambiguous answer at `minimal` is five short rows sent once.
+- `callees_of` lists calls bound to a real node before bare-name guesses, so a
+  few `len` calls can no longer fill the window and hide the real callee.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

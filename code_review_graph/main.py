@@ -471,7 +471,9 @@ async def query_graph_tool(
 
     Args:
         pattern: Query pattern name (see above).
-        target: Node name, qualified name, or file path to query.
+        target: Node name, qualified name, or file path to query. A full name
+            that one non-test symbol has resolves to it; otherwise the answer
+            is "ambiguous" and lists qualified names to choose from.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for compact summary. Default: standard.
         max_results: Maximum results to return. Default: 100.
