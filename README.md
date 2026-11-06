@@ -77,6 +77,14 @@ code-review-graph install --platform codebuddy
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
 
+For Codex, the installer also places a global `code-review-graph` Skill under
+`$CODEX_HOME/skills/code-review-graph/` (default:
+`~/.codex/skills/code-review-graph/`). It prefers CRG MCP tools and falls back
+to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
+stale graph never triggers an implicit build or update. WSL and Windows Codex
+runtimes have separate `CODEX_HOME` directories and tool inventories, so
+install and refresh the runtime that will execute the task.
+
 `uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact.
 
 ```bash

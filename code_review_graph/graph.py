@@ -40,6 +40,7 @@ from .constants import (
     MAX_IMPACT_DEPTH,
     MAX_IMPACT_NODES,
     env_int,
+    read_only_requested,
 )
 from .errors import GraphStoreError, is_lock_error
 from .migrations import (
@@ -691,32 +692,72 @@ def discard_corrupt_database(db_path: str | Path) -> bool:
 class GraphStore:
     """SQLite-backed code knowledge graph."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        read_only: bool | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
+        self.read_only = read_only_requested() if read_only is None else read_only
         conn: sqlite3.Connection | None = None
         try:
-            # Inside the try on purpose: an unwritable data directory raises
-            # here, and it is one of the failures this constructor explains.
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(
-                str(self.db_path), timeout=30, check_same_thread=False,
-                isolation_level=None,  # Disable implicit transactions (#135)
-            )
+            if self.read_only:
+                if not self.db_path.is_file():
+                    raise GraphStoreError(
+                        f"No graph found at {self.db_path}. "
+                        "Run `code-review-graph build` first."
+                    )
+                conn = sqlite3.connect(
+                    self._read_only_uri(),
+                    uri=True,
+                    timeout=30,
+                    check_same_thread=False,
+                    isolation_level=None,
+                )
+            else:
+                # Inside the try on purpose: an unwritable data directory
+                # raises here, and it is one of the failures this constructor
+                # explains.
+                self.db_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(
+                    str(self.db_path), timeout=30, check_same_thread=False,
+                    isolation_level=None,  # Disable implicit transactions (#135)
+                )
             conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
+            if not self.read_only:
+                conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=5000")
             _assert_usable_database(conn, self.db_path)
-            self._conn = conn
-            self._init_schema()
-            # Ensure schema_version is set, then run pending migrations
-            if get_schema_version(self._conn) < 1:
-                # Fresh DB — metadata table just created by _init_schema
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO metadata (key, value) "
-                    "VALUES ('schema_version', '1')"
+            if self.read_only and conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'nodes'"
+            ).fetchone() is None:
+                raise GraphStoreError(
+                    f"No graph found at {self.db_path}. "
+                    "Run `code-review-graph build` first."
                 )
-                self._conn.commit()
-            run_migrations(self._conn)
+            if self.read_only and get_schema_version(conn) < LATEST_VERSION:
+                # Migrations write, so queries would hit tables and columns
+                # this old graph does not have yet.
+                raise GraphStoreError(
+                    f"The graph at {self.db_path} is schema "
+                    f"v{get_schema_version(conn)}, this build needs "
+                    f"v{LATEST_VERSION}, and a read-only open cannot upgrade it. "
+                    "Run `code-review-graph update` first."
+                )
+            self._conn = conn
+            if not self.read_only:
+                self._init_schema()
+                # Ensure schema_version is set, then run pending migrations
+                if get_schema_version(self._conn) < 1:
+                    # Fresh DB — metadata table just created by _init_schema
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO metadata (key, value) "
+                        "VALUES ('schema_version', '1')"
+                    )
+                    self._conn.commit()
+                run_migrations(self._conn)
         except (sqlite3.Error, OSError, GraphStoreError) as exc:
             # A corrupt file, a foreign SQLite file, or a data directory this
             # process cannot write to used to escape as a raw traceback from
@@ -773,6 +814,19 @@ class GraphStore:
         # Identifies the read transaction currently open on this connection,
         # so a reader cannot roll back a transaction a writer took from it.
         self._active_read_txn: object | None = None
+
+    def _read_only_uri(self) -> str:
+        """Open SQLite without creating or updating any database sidecar."""
+        sidecars = tuple(
+            self.db_path.with_name(self.db_path.name + suffix)
+            for suffix in ("-wal", "-shm")
+        )
+        # A checkpointed WAL database has no sidecars. ``immutable`` lets
+        # SQLite read it without creating ``-shm`` on a read-only filesystem.
+        query = "mode=ro" if any(path.exists() for path in sidecars) else (
+            "mode=ro&immutable=1"
+        )
+        return f"{self.db_path.resolve().as_uri()}?{query}"
 
     def __enter__(self) -> "GraphStore":
         return self

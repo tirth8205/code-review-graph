@@ -64,6 +64,9 @@
   below, so a run today gives different numbers until it is redone. The
   per-repo CSVs are in `evaluate/results/`; the 2026-05-25 `impact_accuracy`
   CSVs are removed, as the 2026-08-02 captures replace them.
+### Added
+
+- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
 
 ### Changed
 
