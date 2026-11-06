@@ -8,6 +8,7 @@ so every query carried a stale-graph caveat.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +80,183 @@ def test_update_after_failed_file_stays_incremental(repo, monkeypatch):
     result = build_or_update_graph(full_rebuild=False, repo_root=str(repo), postprocess="none")
     assert result["build_type"] == "incremental"
     assert result["changed_files"] == ["c.py"]
+
+
+def test_noop_update_repairs_fts_drift_without_rebuilding(repo):
+    from code_review_graph.build_state import BUILD_COMPLETE, BUILD_STATE_KEY
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+    with GraphStore(get_db_path(repo)) as store:
+        anchor = store.get_metadata("git_head_sha")
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+
+    _commit(repo, "a.py", "def a():\n    return 11\n\ndef gammaHelper():\n    return a()\n")
+    with GraphStore(get_db_path(repo)) as store:
+        changed = incremental_update(repo, store, base=anchor)
+        assert changed["files_updated"] == 1
+        # Simulate a graph written by the previous release, which kept the
+        # complete marker even though post-processing was skipped.
+        store.set_metadata(BUILD_STATE_KEY, BUILD_COMPLETE)
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] > 0
+
+    repaired = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="minimal"
+    )
+    assert repaired["status"] == "ok"
+    assert repaired["build_type"] == "incremental"
+    assert repaired["files_updated"] == 0
+    assert repaired["fts_rebuilt"] is False
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts_docsize d "
+            "LEFT JOIN nodes n ON n.id = d.id "
+            "WHERE n.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts f "
+            "JOIN nodes n ON n.id = f.rowid "
+            "WHERE nodes_fts MATCH ?",
+            ("gammaHelper",),
+        ).fetchone()[0] == 1
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+
+
+def test_skip_postprocess_marks_pending_and_noop_update_repairs_fts(repo):
+    from code_review_graph.build_state import BUILD_COMPLETE, BUILD_STATE_KEY, POSTPROCESS_PENDING
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+    _commit(repo, "a.py", "def a():\n    return 11\n\ndef gammaHelper():\n    return a()\n")
+
+    skipped = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="none"
+    )
+    assert skipped["build_type"] == "incremental"
+    assert skipped["files_updated"] == 1
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == POSTPROCESS_PENDING
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] > 0
+
+    repaired = build_or_update_graph(
+        repo_root=str(repo), full_rebuild=False, postprocess="minimal"
+    )
+    assert repaired["status"] == "ok"
+    assert repaired["build_type"] == "incremental"
+    assert repaired["files_updated"] == 0
+    assert repaired["postprocess_level"] == "minimal"
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_COMPLETE
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes n "
+            "LEFT JOIN nodes_fts_docsize d ON d.id = n.id "
+            "WHERE d.id IS NULL"
+        ).fetchone()[0] == 0
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts f "
+            "JOIN nodes n ON n.id = f.rowid "
+            "WHERE nodes_fts MATCH ?",
+            ("gammaHelper",),
+        ).fetchone()[0] == 1
+
+
+def test_pending_changed_file_update_rebuilds_all_derived_data(repo):
+    for i in range(24):
+        (repo / f"mod{i}.py").write_text(
+            f"def f{i}(x):\n"
+            f"    return x + {i}\n"
+            f"\n"
+            f"class C{i}:\n"
+            f"    def m{i}(self):\n"
+            f"        return f{i}(1)\n"
+        )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add derived-data fixture")
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    with GraphStore(get_db_path(repo)) as store:
+        assert store._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0] == 0
+        assert store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0] == 0
+
+    _commit(
+        repo,
+        "mod0.py",
+        "def f0(x):\n    return x + 100\n\n"
+        "class C0:\n    def m0(self):\n        return f0(1)\n",
+    )
+    updated = build_or_update_graph(full_rebuild=False, repo_root=str(repo))
+    assert updated["build_type"] == "incremental"
+    assert updated["files_updated"] == 1
+    with GraphStore(get_db_path(repo)) as store:
+        repaired_counts = (
+            store._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0],
+            store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0],
+        )
+
+    rebuilt = build_or_update_graph(full_rebuild=True, repo_root=str(repo))
+    assert rebuilt["build_type"] == "full"
+    with GraphStore(get_db_path(repo)) as store:
+        full_counts = (
+            store._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0],
+            store._conn.execute("SELECT COUNT(*) FROM communities").fetchone()[0],
+        )
+    assert repaired_counts == full_counts
+    assert all(count > 0 for count in full_counts)
+
+
+def test_partial_skip_postprocess_update_keeps_pending_state(repo, monkeypatch):
+    from code_review_graph.build_state import BUILD_STATE_KEY, POSTPROCESS_PENDING
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+    (repo / "a.py").write_text(
+        "def a():\n    return newName()\n\n"
+        "def newName():\n    return 3\n"
+    )
+    (repo / "b.py").write_text("def b():\n    return 22\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "change files before skipped postprocess")
+    _fail_parsing(monkeypatch, "b.py")
+
+    updated = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), postprocess="none"
+    )
+
+    assert updated["files_updated"] == 1
+    assert [error["file"] for error in updated["errors"]] == ["b.py"]
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == POSTPROCESS_PENDING
+        assert store._conn.execute(
+            "SELECT COUNT(*) FROM nodes_fts WHERE nodes_fts MATCH ?", ("newName",)
+        ).fetchone()[0] == 0
+
+
+def test_status_json_marks_postprocess_pending_as_incomplete(repo, monkeypatch, capsys):
+    from code_review_graph import cli
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["code-review-graph", "status", "--repo", str(repo), "--json"],
+    )
+
+    cli.main()
+
+    status = json.loads(capsys.readouterr().out)
+    assert status["build_incomplete"] is True
 
 
 def test_watch_batch_after_commit_records_head(repo):
@@ -164,3 +342,77 @@ def test_cli_update_warns_about_failed_files(repo, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "Incremental: 1 files updated" in captured.out
     assert "bad.py" in captured.err
+
+
+def test_healthy_noop_update_leaves_resolved_edges_alone(repo, monkeypatch):
+    """A no-op update on a complete graph only checks FTS (review of #1105).
+
+    Hooks run ``update`` after every edit, and the resolvers end in an UPDATE of
+    every CALLS and REFERENCES edge under the write lock.
+    """
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("a healthy no-op update must not run the resolvers")
+
+    for name in ("resolve_bare_call_targets", "refresh_target_resolution"):
+        monkeypatch.setattr(GraphStore, name, must_not_run)
+
+    result = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), postprocess="minimal",
+    )
+
+    assert result["status"] == "ok"
+    assert result["files_updated"] == 0
+    assert result["fts_rebuilt"] is False
+
+
+def test_pending_noop_update_still_refreshes_embeddings(repo, monkeypatch):
+    """The run that left the marker may have changed nodes (review of #1105)."""
+    from code_review_graph import embeddings
+    from code_review_graph.embeddings import REFRESH_SKIPPED_WARNING
+
+    build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="none")
+    calls = []
+
+    def fake_refresh(store, provider, model):
+        calls.append((provider, model))
+        return None
+
+    monkeypatch.setattr(embeddings, "refresh_embeddings", fake_refresh)
+
+    result = build_or_update_graph(
+        full_rebuild=False,
+        repo_root=str(repo),
+        postprocess="minimal",
+        embedding_provider="local",
+        embedding_model="test-model",
+    )
+
+    assert result["files_updated"] == 0
+    assert result["repaired_interrupted_build"] is True
+    assert calls == [("local", "test-model")]
+    assert result["warnings"].count(REFRESH_SKIPPED_WARNING) == 1
+
+
+def test_build_stopped_in_language_resolvers_is_rebuilt(repo, monkeypatch):
+    """Post-processing cannot redo these resolvers (review of #1105)."""
+    from code_review_graph import incremental
+    from code_review_graph.build_state import BUILD_IN_PROGRESS, BUILD_STATE_KEY
+
+    def stopped(_store):
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(incremental, "_run_python_resolver", stopped)
+        with pytest.raises(KeyboardInterrupt):
+            build_or_update_graph(full_rebuild=True, repo_root=str(repo), postprocess="minimal")
+
+    with GraphStore(get_db_path(repo)) as store:
+        assert store.get_metadata(BUILD_STATE_KEY) == BUILD_IN_PROGRESS
+
+    repaired = build_or_update_graph(
+        full_rebuild=False, repo_root=str(repo), postprocess="minimal",
+    )
+    assert repaired["build_type"] == "full"
+    assert repaired["repaired_interrupted_build"] is True

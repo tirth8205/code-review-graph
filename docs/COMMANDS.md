@@ -138,7 +138,7 @@ repo_root: str | None
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test
+kind: str | None     # File, Class, Function, Type, Test, YamlPath
 limit: int = 20
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
@@ -164,7 +164,7 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count
-kind: str | None                   # File, Class, Function, or Test
+kind: str | None                   # File, Class, Function, Test, or YamlPath
 file_path_pattern: str | None      # File path substring
 limit: int = 50
 repo_root: str | None
@@ -290,12 +290,12 @@ detail_level: str = "standard"
 max_results: int = 25        # Changed functions, test gaps, changed files (max 100)
 max_flows: int = 20          # Affected flows embedded (max 200)
 ```
-Main tool for code review. Maps changed files to affected functions, flows,
-communities and test coverage gaps, and returns risk scores and review
-priorities. Embedded flows carry per-flow metadata only; use
-`get_affected_flows_tool` for step detail. `changed_functions_total`,
-`test_gaps_total` and `affected_flows_total` report the untruncated counts.
-Responses may include estimated `context_savings` metadata.
+Main tool for code review. Maps changed files to affected functions, YAML paths,
+flows, communities and test coverage gaps, returning `changed_yaml_paths` separately
+from function risk/test-gap scoring, plus risk scores and review priorities.
+Embedded flows carry per-flow metadata only; use `get_affected_flows_tool` for
+step detail. `changed_functions_total`, `test_gaps_total` and `affected_flows_total`
+report the untruncated counts. Responses may include estimated `context_savings` metadata.
 
 #### `refactor_tool`
 ```
@@ -409,7 +409,7 @@ Run `code-review-graph <command> --help` for the full option list.
 # Setup
 code-review-graph install           # Configure detected AI coding platforms (alias: init)
 code-review-graph install --dry-run # Preview without writing files
-code-review-graph install --platform codex  # Configure one platform
+code-review-graph install --platform codex  # Configure Codex MCP, hooks, and global Skill
 code-review-graph uninstall                 # Remove CRG configs, hooks, skills, and data
 code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph data and others)
 
@@ -421,6 +421,7 @@ code-review-graph update                       # Incremental update from the las
 code-review-graph update --base origin/main    # Custom base ref
 code-review-graph update --brief               # Update graph, then show the risk panel
 code-review-graph update --brief --verify      # ...and cross-check against tiktoken
+code-review-graph update --wait                # Wait for a running build to finish, then update
 code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
 code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
@@ -505,8 +506,22 @@ code-review-graph eval                         # Run evaluation benchmarks
 code-review-graph serve                        # Start MCP server (stdio)
 code-review-graph serve --http                 # Streamable HTTP on 127.0.0.1:5555 (--host, --port)
 code-review-graph serve --tools query_graph_tool,detect_changes_tool  # Tool allowlist (or CRG_TOOLS)
-code-review-graph mcp                          # Alias for serve; accepts only --repo and --auto-watch
+code-review-graph serve --multi-worktree --repo /path/to/repo  # One stdio session, one child per linked worktree
+code-review-graph mcp                          # Alias for serve; accepts --repo, --auto-watch and --multi-worktree
 ```
+
+`--multi-worktree` is an opt-in stdio mode for parallel reviews. The server
+starts one regular `serve --repo <root>` child lazily for the primary checkout
+and each linked worktree requested through `repo_root`. Only paths reported by
+`git worktree list` for the same Git common directory are accepted. Each child
+uses its worktree's normal `.code-review-graph/graph.db` or its per-repository
+Registry `data_dir`, so graphs from different commits cannot be mixed.
+
+The mode rejects a process-wide `CRG_DATA_DIR`, because that would force all
+worktrees into one database. Configure external storage with a separate,
+non-overlapping Registry `data_dir` entry per worktree instead; the router
+rejects two worktrees that resolve to the same graph database. `--multi-worktree`
+is stdio only and cannot be combined with `--http`.
 
 Notes:
 
@@ -562,6 +577,9 @@ Notes:
 - `install` appends a Git `pre-commit` hook that prints a risk summary before
   each commit. The hook skips linked worktrees unless `CRG_HOOK_WORKTREES=1`
   is set, so a worktree does not build a second graph for another branch.
+- `install` also appends `post-checkout`, `post-merge` and `post-rewrite` Git
+  hooks that run `update` after a branch switch, a merge and a rebase, with
+  the same worktree rule.
 - For an empty or incomplete graph, run `code-review-graph build`. See
   docs/TROUBLESHOOTING.md, "Empty or incomplete graph".
 

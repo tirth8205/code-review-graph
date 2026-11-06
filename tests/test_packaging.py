@@ -506,8 +506,14 @@ def test_no_package_module_reads_a_hook_template(sdist_names: list[str]) -> None
     assert "hooks/hooks.json" in sdist_names
     assert "hooks/session-start.sh" in sdist_names
     shipped = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    assert set(shipped) == {"SessionStart", "PostToolUse"}, (
-        f"shipped hook template declares unexpected events: {sorted(shipped)}"
+    # Claude Code only loads a plugin hooks file whose event map sits under a
+    # top-level "hooks" key; a bare event map fails with "hooks.json must have
+    # `hooks` (the hook matchers) or `modules` (hooks modules), or both".
+    assert set(shipped) == {"hooks"}, (
+        f"shipped hook template must wrap its events in 'hooks': {sorted(shipped)}"
+    )
+    assert set(shipped["hooks"]) == {"SessionStart", "PostToolUse"}, (
+        f"shipped hook template declares unexpected events: {sorted(shipped['hooks'])}"
     )
 
 
@@ -1130,3 +1136,47 @@ def test_install_command_works_from_the_installed_wheel(
     assert bundled == expected, (
         f"Qoder install copied {bundled} but the checkout ships {expected}"
     )
+
+
+def test_codex_wheel_install_excludes_pip_bytecode(
+    wheel_env: InstalledEnv, tmp_path: Path,
+) -> None:
+    """pip compiles package assets; those caches must not become managed skill files."""
+    project = tmp_path / "target"
+    project.mkdir()
+    _run(["git", "init", "--quiet", str(project)])
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    codex_home = tmp_path / "codex-home"
+    child = _clean_env(
+        CRG_HOME=str(tmp_path / "crg-home"), HOME=str(fake_home), CODEX_HOME=str(codex_home),
+    )
+    probe = (
+        "import json; from code_review_graph.codex_skill import bundled_skill_dir; "
+        "root = bundled_skill_dir(); "
+        "print(json.dumps({'root': str(root), "
+        "'caches': [str(p) for p in root.rglob('*.pyc')]}))"
+    )
+    source = json.loads(_run(
+        [str(wheel_env.python), "-c", probe], cwd=project, env=child,
+    ).stdout)
+    assert Path(source["root"]).is_relative_to(wheel_env.root)
+    assert not Path(source["root"]).is_relative_to(REPO_ROOT)
+    assert source["caches"], "pip did not compile the bundled Python script"
+
+    out = _run(
+        [str(wheel_env.script), "install", "--platform", "codex", "-y"],
+        cwd=project,
+        env=child,
+    ).stdout
+
+    assert "Installed Codex skill in" in out, out
+    destination = codex_home / "skills" / "code-review-graph"
+    manifest = json.loads(
+        (destination / ".code-review-graph-managed.json").read_text(encoding="utf-8")
+    )
+    expected = {"SKILL.md", "agents/openai.yaml", "scripts/crg_readonly.py"}
+    assert set(manifest["files"]) == expected
+    assert {
+        p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()
+    } == expected | {".code-review-graph-managed.json"}

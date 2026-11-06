@@ -36,6 +36,7 @@ from code_review_graph.incremental import (
     _load_ignore_patterns,
     _plan_watch_paths,
     _should_ignore,
+    _sync_watch_tree,
     _WatchSupervisor,
     clear_nested_ignore_cache,
     incremental_update,
@@ -214,6 +215,29 @@ class TestIgnoreAwareScheduling:
 
         assert plan == [(tmp_path, True)]
 
+    def test_startup_budget_fallback_is_degraded(self, tmp_path):
+        for index in range(10):
+            (tmp_path / f"pkg{index}").mkdir()
+        for index in range(6):
+            (tmp_path / "node_modules" / f"dep{index}").mkdir(parents=True)
+
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer,
+            tmp_path,
+            _load_ignore_patterns(tmp_path),
+            health_path=None,
+            max_schedules=3,
+        )
+        supervisor.schedule_initial(MagicMock())
+
+        assert supervisor.degraded is True
+        supervisor._health_path = tmp_path / "health.json"
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is True
+        assert watcher_status(True, {**health, "stalled": False}) == "partial"
+
     def test_nested_module_output_is_ignored_and_never_watched(self, tmp_path):
         """`moduleA/target/` is build output when `moduleA/pom.xml` says so."""
         _maven_repo(tmp_path)
@@ -314,6 +338,103 @@ class TestNewDirectoryAdoption:
         assert (str(created), True) in observer.scheduled
         assert (str(created), True) not in before
 
+    def test_failed_adoption_is_not_reported_as_adopted(self, tmp_path):
+        """An OS registration failure is lost coverage, not a successful adoption."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        before = list(supervisor.watched_paths)
+        created = tmp_path / "services"
+        created.mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            adopted, _ = supervisor.sync_watches()
+
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert adopted == []
+        assert supervisor.watched_paths == before
+        assert supervisor.degraded is True
+        assert health["degraded"] is True
+        assert health["failed_paths"] == [str(created)]
+
+    def test_refused_directory_is_indexed_once_then_on_recovery(self, tmp_path):
+        """Each tick retries the watch, but must not re-read the tree each time."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        created = tmp_path / "services"
+        created.mkdir()
+        handler = MagicMock()
+        handler.ignore_patterns = supervisor._ignore_patterns
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            _sync_watch_tree(supervisor, handler)
+            _sync_watch_tree(supervisor, handler)
+            _sync_watch_tree(supervisor, handler)
+        refused_events = [call.args[0] for call in handler.dispatch.call_args_list]
+        assert [(e.event_type, e.src_path) for e in refused_events] == [
+            ("created", str(created)),
+        ]
+        assert supervisor.degraded is True
+
+        handler.dispatch.reset_mock()
+        _sync_watch_tree(supervisor, handler)
+        recovered_events = [call.args[0] for call in handler.dispatch.call_args_list]
+        assert [(e.event_type, e.src_path) for e in recovered_events] == [
+            ("created", str(created)),
+        ]
+        assert str(created) in supervisor.watched_paths
+        assert supervisor.degraded is False
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is False
+        assert health["failed_paths"] == []
+
+    def test_refused_directory_that_vanishes_leaves_the_health_record(self, tmp_path):
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        created = tmp_path / "short_lived"
+        created.mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            supervisor.sync_watches()
+            assert supervisor.unwatched_paths == [str(created)]
+            created.rmdir()
+            supervisor.sync_watches()
+
+        supervisor.report_health(observer_alive=True, force=True)
+        health = json.loads((tmp_path / "health.json").read_text(encoding="utf-8"))
+        assert health["degraded"] is False
+        assert health["failed_paths"] == []
+
+    def test_refused_directories_do_not_defeat_the_health_rate_limit(self, tmp_path):
+        """Churn in the refused list alone must not rewrite the health file."""
+        supervisor, _ = self._supervisor(tmp_path)
+        supervisor._health_path = tmp_path / "health.json"
+        (tmp_path / "stays_refused").mkdir()
+
+        with patch.object(
+            FakeObserver, "schedule", side_effect=OSError("No space left on device")
+        ):
+            supervisor.sync_watches()
+            supervisor.report_health(observer_alive=True, force=True)
+            with patch("code_review_graph.incremental.os.replace") as replace:
+                for index in range(20):
+                    churned = tmp_path / f"build{index}"
+                    churned.mkdir()
+                    supervisor.sync_watches()
+                    supervisor.report_health(observer_alive=True)
+                    churned.rmdir()
+                    supervisor.sync_watches()
+                    supervisor.report_health(observer_alive=True)
+
+        replace.assert_not_called()
+
     def test_recreated_directory_is_watched_again(self, tmp_path):
         """`rm -rf src && mkdir src` must not leave src unwatched forever."""
         supervisor, observer = self._supervisor(tmp_path)
@@ -338,6 +459,67 @@ class TestNewDirectoryAdoption:
 
         assert adopted == []
         assert not any(path == str(created) for path, _ in observer.scheduled)
+
+    def test_new_large_ignored_tree_replaces_recursive_root_watch(self, tmp_path):
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+        assert observer.scheduled == [(str(tmp_path), True)]
+
+        created = tmp_path / "node_modules"
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir(parents=True)
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert str(tmp_path) in observer.unscheduled
+        assert (str(tmp_path), False) in observer.scheduled
+        assert not any("node_modules" in path for path, _ in observer.scheduled)
+
+    def test_ignored_tree_growth_replans_recursive_root(self, tmp_path):
+        created = tmp_path / "node_modules"
+        created.mkdir()
+        observer = FakeObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+        assert observer.scheduled == [(str(tmp_path), True)]
+
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir()
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert (str(tmp_path), False) in observer.scheduled
+        assert not any("node_modules" in path for path, _ in observer.scheduled)
+
+    def test_failed_replan_keeps_the_existing_recursive_watch(self, tmp_path):
+        class FailingReplacementObserver(FakeObserver):
+            def schedule(self, handler, path, *, recursive=False, event_filter=None):
+                if path == str(tmp_path) and not recursive:
+                    raise OSError("watch limit")
+                return super().schedule(
+                    handler, path, recursive=recursive, event_filter=event_filter
+                )
+
+        observer = FailingReplacementObserver()
+        supervisor = _WatchSupervisor(
+            observer, tmp_path, _load_ignore_patterns(tmp_path), health_path=None
+        )
+        supervisor.schedule_initial(MagicMock())
+
+        created = tmp_path / "node_modules"
+        for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+            (created / f"pkg{index}").mkdir(parents=True)
+        supervisor.request_replan()
+        supervisor.sync_watches()
+
+        assert observer.unscheduled == []
+        assert supervisor.watched_paths == [str(tmp_path)]
+        assert observer.scheduled == [(str(tmp_path), True)]
 
     def test_directory_inside_a_recursive_watch_is_not_rescheduled(self, tmp_path):
         """watchdog already covers those; a second watch would be waste."""
@@ -973,9 +1155,196 @@ class TestWatchLoop:
             ):
                 watch(repo, store)
             assert store.get_all_files() == ["/somewhere/else/mod.py"], "nothing was deleted"
+            # Refused before any watcher exists: an observer started first
+            # could queue a batch that writes to the refused graph.
             observer.assert_not_called()
         finally:
             store.close()
+
+    def test_event_queued_during_startup_cannot_write_to_a_refused_graph(
+        self, tmp_path, monkeypatch,
+    ):
+        """A foreign graph is refused before anything can queue a write to it.
+
+        From the Copilot review of PR #1108.  The observer starts before startup
+        reconciliation, and an event it captures becomes a batch that waits on
+        the processing lock startup holds.  If the root check runs only inside
+        that reconciliation, startup refuses the graph and releases the lock,
+        and the waiting batch then runs ``incremental_update`` with
+        ``reconcile_stale=False`` (which skips the root check) against the graph
+        that was just refused.
+
+        Every step is recorded by instrumentation as it happens; the barriers
+        are events with bounded waits, never sleeps.
+        """
+        from watchdog.events import FileModifiedEvent
+
+        from code_review_graph import incremental
+
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        for root, name in ((repo, "app"), (other, "lib")):
+            (root / "src").mkdir(parents=True)
+            (root / "src" / f"{name}.py").write_text(
+                f"def {name}_fn():\n    return 1\n", encoding="utf-8",
+            )
+        db_path = tmp_path / "foreign.db"
+        with GraphStore(db_path) as builder:
+            assert incremental.full_build(other, builder)["errors"] == []
+
+        trace: list[str] = []
+        writes: list[str] = []
+        trace_lock = threading.Lock()
+
+        def record(step: str) -> None:
+            with trace_lock:
+                trace.append(step)
+
+        class RecordingStore(GraphStore):
+            """The foreign graph; any write to it after the build is recorded."""
+
+            def _attempt(self, method: str) -> None:
+                with trace_lock:
+                    if not writes:
+                        trace.append("batch_write_attempted")
+                    writes.append(method)
+
+            def store_file_nodes_edges(self, *args, **kwargs):
+                self._attempt("store_file_nodes_edges")
+                return super().store_file_nodes_edges(*args, **kwargs)
+
+            def remove_files_permanently(self, *args, **kwargs):
+                self._attempt("remove_files_permanently")
+                return super().remove_files_permanently(*args, **kwargs)
+
+            def set_metadata(self, *args, **kwargs):
+                self._attempt("set_metadata")
+                return super().set_metadata(*args, **kwargs)
+
+        store = RecordingStore(db_path)
+        baseline_files = sorted(store.get_all_files())
+        baseline_nodes = sorted(
+            row[0] for row in store._conn.execute("SELECT qualified_name FROM nodes")
+        )
+        baseline_updated = store.get_metadata("last_updated")
+        assert baseline_files and all(other.as_posix() in path for path in baseline_files)
+
+        batch_waiting = threading.Event()
+        debouncers: list[threading.Thread] = []
+        observers: list[FakeObserver] = []
+
+        class ImmediateDebouncer(incremental._WatchDebouncer):
+            """No quiet interval, and a record of the batch reaching the lock."""
+
+            def __init__(self, interval, callback):
+                def batch(events):
+                    # Startup holds the processing lock from before the
+                    # observer starts, so this batch now waits on it.
+                    record("batch_waiting")
+                    batch_waiting.set()
+                    callback(events)
+
+                super().__init__(0, batch)
+                debouncers.append(self)
+
+        class ReleaseRecordingLock:
+            def __init__(self, lock) -> None:
+                self._lock = lock
+
+            def __enter__(self):
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, *exc_info) -> None:
+                # Recorded while still held, so a batch let in by the release
+                # cannot appear in the trace ahead of it.
+                record("startup_lock_released")
+                self._lock.release()
+
+        class InstrumentedHandler:
+            def __init__(self, inner) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def serialized(self):
+                return ReleaseRecordingLock(self._inner.serialized())
+
+        class EventOnStartObserver(FakeObserver):
+            """Delivers one source edit the moment it starts, as inotify would."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                observers.append(self)
+
+            def start(self) -> None:
+                super().start()
+                record("observer_started")
+                edited = repo / "src" / "app.py"
+                edited.write_text("def app_fn():\n    return 2\n", encoding="utf-8")
+                self.handler.dispatch(FileModifiedEvent(str(edited)))
+                record("event_delivered")
+                if not batch_waiting.wait(timeout=10):
+                    record("batch_never_reached_the_lock")
+
+        real_assert = incremental._assert_graph_matches_root
+
+        def recording_assert(root, graph):
+            try:
+                real_assert(root, graph)
+            except RuntimeError:
+                record("root_validation_failed")
+                raise
+
+        real_create_handler = incremental._create_watch_handler
+        monkeypatch.setattr(incremental, "_WatchDebouncer", ImmediateDebouncer)
+        monkeypatch.setattr(incremental, "_assert_graph_matches_root", recording_assert)
+        monkeypatch.setattr(
+            incremental,
+            "_create_watch_handler",
+            lambda *a, **kw: InstrumentedHandler(real_create_handler(*a, **kw)),
+        )
+        monkeypatch.setattr("watchdog.observers.Observer", EventOnStartObserver)
+
+        outcome: dict = {}
+
+        def run() -> None:
+            try:
+                incremental.watch(repo, store)
+            except BaseException as exc:  # noqa: BLE001 - the test inspects it
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run, name="crg-foreign-root-watch", daemon=True)
+        try:
+            worker.start()
+            worker.join(timeout=30)
+        finally:
+            batch_waiting.set()
+            for owner in (worker, *debouncers):
+                owner.join(timeout=30)
+            alive = [t.name for t in (worker, *debouncers) if t.is_alive()]
+            if alive:
+                # Closing a connection under a live writer can crash the
+                # interpreter, so the store is left open and the test fails.
+                pytest.fail(f"still running, so the store was left open: {alive}")
+            files_after = sorted(store.get_all_files())
+            nodes_after = sorted(
+                row[0] for row in store._conn.execute("SELECT qualified_name FROM nodes")
+            )
+            updated_after = store.get_metadata("last_updated")
+            store.close()
+
+        error = outcome.get("error")
+        assert isinstance(error, RuntimeError), outcome
+        assert "different repository root" in str(error)
+        assert not writes, f"the refused graph was written to: writes={writes}, trace={trace}"
+        assert trace == ["root_validation_failed"], trace
+        assert not observers, "an observer was constructed for a refused graph"
+        assert not debouncers, "a debouncer was created for a refused graph"
+        assert files_after == baseline_files
+        assert nodes_after == baseline_nodes
+        assert updated_after == baseline_updated
 
     def test_repair_reconciles_files_deleted_during_the_outage(self, tmp_path):
         """A repaired watch must re-read the directory in both directions.
@@ -1131,6 +1500,120 @@ class TestRealObserver:
                 return True
             time.sleep(interval)
         return False
+
+    def _polling_watch_survives_failed_replan(
+        self,
+        tmp_path,
+        *,
+        start_ignored: bool,
+        failed_path: Path,
+        failed_recursive: bool,
+        retry: bool = False,
+    ) -> None:
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers.polling import PollingObserver
+
+        source = tmp_path / "src" / "deep" / "a.py"
+        source.parent.mkdir(parents=True)
+        source.write_text("value = 1\n", encoding="utf-8")
+        ignored = tmp_path / "node_modules"
+        if start_ignored:
+            for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+                (ignored / f"pkg{index}").mkdir(parents=True)
+
+        delivered = threading.Event()
+
+        class Handler(FileSystemEventHandler):
+            def on_modified(self, event):
+                if not event.is_directory and event.src_path == str(source):
+                    delivered.set()
+
+        observer = PollingObserver(timeout=0.05)
+        supervisor = _WatchSupervisor(
+            observer,
+            tmp_path,
+            _load_ignore_patterns(tmp_path),
+            health_path=None,
+        )
+        supervisor.schedule_initial(Handler())
+        original_schedule = observer.schedule
+        failed = {"once": True}
+
+        def schedule(handler, path, recursive=False, event_filter=None):
+            if (
+                failed["once"]
+                and path == str(failed_path)
+                and recursive == failed_recursive
+            ):
+                failed["once"] = False
+                raise OSError("watch limit")
+            return original_schedule(
+                handler, path, recursive=recursive, event_filter=event_filter
+            )
+
+        observer.schedule = schedule
+        observer.start()
+        try:
+            if start_ignored:
+                shutil.rmtree(ignored)
+            else:
+                for index in range(_WATCH_SPLIT_MIN_DIRS + 1):
+                    (ignored / f"pkg{index}").mkdir(parents=True)
+            supervisor.request_replan()
+            supervisor.sync_watches()
+            if start_ignored:
+                assert str(source.parents[1]) in supervisor.watched_paths
+            else:
+                assert supervisor.watched_paths == [str(tmp_path)]
+            if retry:
+                supervisor.request_replan()
+                supervisor.sync_watches()
+
+            source.write_text("value = 2\n", encoding="utf-8")
+            assert self._wait_for(delivered.is_set), (
+                f"edit under {source.parent} was not delivered after failed replan"
+            )
+        finally:
+            observer.stop()
+            observer.join()
+
+    def test_polling_observer_keeps_recursive_root_after_failed_split(self, tmp_path):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=False,
+            failed_path=tmp_path / "src",
+            failed_recursive=True,
+        )
+
+    def test_polling_observer_keeps_coverage_while_split_replan_retries(
+        self, tmp_path
+    ):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=False,
+            failed_path=tmp_path / "src",
+            failed_recursive=True,
+            retry=True,
+        )
+
+    def test_polling_observer_keeps_source_watch_after_failed_restore(self, tmp_path):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=True,
+            failed_path=tmp_path,
+            failed_recursive=True,
+        )
+
+    def test_polling_observer_keeps_coverage_while_restore_replan_retries(
+        self, tmp_path
+    ):
+        self._polling_watch_survives_failed_replan(
+            tmp_path,
+            start_ignored=True,
+            failed_path=tmp_path,
+            failed_recursive=True,
+            retry=True,
+        )
 
     def test_new_top_level_directory_is_indexed(self, tmp_path):
         repo = tmp_path / "repo"
@@ -1506,6 +1989,8 @@ class TestUnstattablePaths:
             handler = _create_watch_handler(tmp_path, store, None)
             handler.process([FileModifiedEvent(self._overlong(tmp_path))])
             handler.raise_if_failed()
+
+            assert store.get_all_files() == []
         finally:
             store.close()
 
