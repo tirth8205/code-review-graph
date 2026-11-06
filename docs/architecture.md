@@ -132,8 +132,7 @@ Python-side traversal instead.
 
 One SQLite database, `.code-review-graph/graph.db`, in WAL mode so readers are not blocked
 during updates. Tables: `nodes`, `edges`, `metadata`, `flows`, `flow_memberships`,
-`communities`, `nodes_fts` (FTS5), `nodes_fts_state`, `community_summaries`,
-`flow_snapshots`, `risk_index`, and
+`communities`, `nodes_fts` (FTS5), `nodes_fts_state`, and
 `embeddings` (created by `EmbeddingStore` in the same file). Columns, indexes and the
 migration history are in [schema.md](schema.md).
 

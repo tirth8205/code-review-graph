@@ -257,9 +257,6 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
-CREATE INDEX IF NOT EXISTS idx_nodes_qualified ON nodes(qualified_name);
-CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_qualified);
-CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_qualified);
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target_qualified, kind);
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source_qualified, kind);
@@ -1287,8 +1284,11 @@ class GraphStore:
 
     def iter_edges_by_source(self, qualified_name: str) -> Iterator[GraphEdge]:
         """Yield outgoing edges without first materializing the complete set."""
+        # ORDER BY: the index lists rows by kind first, and a capped answer or a
+        # traversal would then depend on which index SQLite happened to use.
         rows = self._conn.execute(
-            "SELECT * FROM edges WHERE source_qualified = ?", (qualified_name,)
+            "SELECT * FROM edges WHERE source_qualified = ? ORDER BY id",
+            (qualified_name,),
         )
         for row in rows:
             yield self._row_to_edge(row)
@@ -1299,7 +1299,8 @@ class GraphStore:
     def iter_edges_by_target(self, qualified_name: str) -> Iterator[GraphEdge]:
         """Yield incoming edges without first materializing the complete set."""
         rows = self._conn.execute(
-            "SELECT * FROM edges WHERE target_qualified = ?", (qualified_name,)
+            "SELECT * FROM edges WHERE target_qualified = ? ORDER BY id",
+            (qualified_name,),
         )
         for row in rows:
             yield self._row_to_edge(row)
@@ -3797,7 +3798,8 @@ class GraphStore:
             batch = qns[i:i + batch_size]
             placeholders = ",".join("?" for _ in batch)
             rows = self._conn.execute(  # nosec B608
-                f"SELECT * FROM edges WHERE source_qualified IN ({placeholders})",
+                f"SELECT * FROM edges WHERE source_qualified IN ({placeholders}) "
+                "ORDER BY source_qualified, id",
                 batch,
             ).fetchall()
             for r in rows:
