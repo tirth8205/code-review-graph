@@ -46,7 +46,9 @@ code-review-graph detect-changes --brief
 that run `code-review-graph update --quiet` after a branch checkout, a merge
 and a rebase. With a hook manager, add that command to the same three hooks;
 run it from `post-checkout` only when its third argument is `1`, and from
-`post-rewrite` only when its first argument is `rebase`.
+`post-rewrite` only when its first argument is `rebase`. The same applies to an
+existing hook written in a language other than shell: `install` leaves it
+unchanged and logs a warning, so call the command from it yourself.
 
 The hook skips linked worktrees, so a commit there cannot silently build a
 second graph for another branch. It finds the git dir with

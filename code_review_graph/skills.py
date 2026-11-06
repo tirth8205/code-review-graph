@@ -1753,7 +1753,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #
 # - post-checkout, on branch checkouts only, and not while a rebase is in
 #   progress: a rebase checks out the new base before replaying local commits,
-#   so updating there would drop the user's own changes from the graph.
+#   so updating there would drop the user's own changes from the graph. When
+#   nothing is left to replay, Git never runs post-rewrite, so that checkout
+#   is the final tree and post-checkout updates after all.
 # - post-merge, after a merge or a merge-mode ``git pull``.
 # - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
 #   fires it, but ``pre-commit`` already updated the graph for that commit.
@@ -1784,13 +1786,16 @@ def _git_sync_hook_block(hook_name: str) -> str:
     condition = _GIT_SYNC_HOOK_CONDITIONS[hook_name]
     rebase_guard = ""
     if hook_name == "post-checkout":
-        # post-rewrite updates the graph once the rebase has finished. It never
-        # runs when no commit was rewritten, as with no local commits or when
-        # every one is already upstream. Git then leaves the todo list empty and
-        # this checkout is the final tree, so it has to update here instead.
+        # post-rewrite updates the graph once the rebase has replayed local
+        # commits. Git skips post-rewrite when nothing is left to replay (no
+        # local commits, or all already upstream), so this checkout is then
+        # the final tree. The todo list is written before this checkout runs.
         rebase_guard = """\
-    elif [ -s "$crg_hook_git_dir/rebase-merge/git-rebase-todo" ] \\
-        || [ -d "$crg_hook_git_dir/rebase-apply" ]; then
+    elif [ -d "$crg_hook_git_dir/rebase-merge" ] && grep -Eq \\
+            '^[[:space:]]*(p|pick|r|reword|e|edit|s|squash|f|fixup|m|merge)[[:space:]]' \\
+            "$crg_hook_git_dir/rebase-merge/git-rebase-todo" 2>/dev/null; then
+        :
+    elif [ -d "$crg_hook_git_dir/rebase-apply" ]; then
         :
 """
     body = f"""\
@@ -1813,24 +1818,27 @@ fi
     )
 
 
-_POSIX_SHELLS = frozenset({"sh", "bash", "dash", "ash", "ksh", "zsh"})
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
 
 
-def _hook_runs_in_shell(text: str) -> bool:
-    """Return whether a hook is a shell script, so shell lines can be appended.
+def _is_shell_hook(text: str) -> bool:
+    """Return whether a shell block can be appended to this hook script.
 
-    Git runs a hook with no shebang under ``sh``.
+    Git runs a hook with no shebang through ``/bin/sh``, so that counts as
+    shell. Otherwise the interpreter named by the shebang decides, looking
+    through ``/usr/bin/env`` and its options.
     """
-    first_line = text.split("\n", 1)[0].strip()
-    if not first_line.startswith("#!"):
+    if not text.startswith("#!"):
         return True
-    words = first_line[2:].split()
-    if words and words[0].rsplit("/", 1)[-1] == "env":
-        # Past env's own options and any NAME=value settings: "env -S bash -e".
-        words = [word for word in words[1:] if not word.startswith("-") and "=" not in word]
-    else:
-        words = words[:1]
-    return bool(words) and words[0].rsplit("/", 1)[-1] in _POSIX_SHELLS
+    parts = text[2:].split("\n", 1)[0].split()
+    if not parts:
+        return True
+    if Path(parts[0]).name == "env":
+        # Past env's own options and any NAME=value settings.
+        parts = [part for part in parts[1:] if not part.startswith("-") and "=" not in part]
+        if not parts:
+            return False
+    return Path(parts[0]).name in _SHELL_INTERPRETERS
 
 
 def install_git_sync_hooks(repo_root: Path) -> list[Path]:
@@ -1840,9 +1848,9 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
     :func:`install_git_hook`, and resolves the hooks directory the same way.
     Each block is appended to an existing hook, never overwriting it, and a
     block written by an earlier release is replaced in place. A hook whose
-    markers are unbalanced was edited by hand and is left alone, as is a hook
-    that is not a shell script. A failed update never fails the git command
-    that triggered it.
+    markers are unbalanced was edited by hand and is left alone, and so is a
+    hook written in a language other than shell. A failed
+    update never fails the git command that triggered it.
     """
     hooks_dir = _git_hooks_dir(repo_root)
     if hooks_dir is None:
@@ -1858,16 +1866,17 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                 existing = hook_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 existing = None
-            if existing is None or not _hook_runs_in_shell(existing):
-                # Shell lines would break a hook in any other language, so the
-                # user's own commands would stop running too.
+            if existing is None or not _is_shell_hook(existing):
                 logger.warning(
                     "%s is not a shell script; leaving it alone. Call "
-                    "`code-review-graph update --quiet` from it to keep the graph in sync.",
+                    "'code-review-graph update --quiet' from it to keep the graph in sync.",
                     hook_path,
                 )
                 continue
-            if _GIT_SYNC_HOOK_BEGIN_MARKER in existing or _GIT_SYNC_HOOK_END_MARKER in existing:
+            if (
+                _GIT_SYNC_HOOK_BEGIN_MARKER in existing
+                or _GIT_SYNC_HOOK_END_MARKER in existing
+            ):
                 span = _git_hook_block_span(
                     existing, 0, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
                 )

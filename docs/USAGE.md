@@ -63,9 +63,10 @@ The same `install` also appends `post-checkout`, `post-merge` and
 rebase, including `git pull` in either mode, so the graph follows the checked
 out code between commits. A file checkout and `commit --amend` do not trigger
 an update, and the checkout a rebase makes before replaying local commits is
-skipped in favour of a single update when the rebase finishes. They share the
-pre-commit hook's worktree rule and `--no-hooks` switch. An existing hook that
-is not a shell script is left alone, with a warning.
+skipped in favour of a single update when the rebase finishes; a rebase with
+nothing left to replay updates at that checkout instead. They share the
+pre-commit hook's worktree rule and `--no-hooks` switch. An existing hook
+written in another language, such as Python, is left unchanged with a warning.
 
 ## Core Workflow
 
