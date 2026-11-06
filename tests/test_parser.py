@@ -1868,6 +1868,31 @@ class Plain:
         # Total: exactly 5 live edges
         assert len(calls) == 5
 
+    def test_rust_dead_guard_if_false_omits_dead_edges(self):
+        """CALLS edges inside ``if false`` blocks in Rust are never emitted.
+
+        Rust's if is an ``if_expression`` and its false literal is a
+        ``boolean_literal``, neither of which the Go/TS walk matches, so
+        without a Rust case every such call is kept. The else branch and
+        ``if true`` stay live.
+        """
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        calls = [e for e in edges if e.kind == "CALLS"]
+
+        def hits(name):
+            return [e for e in calls if e.target.split("::")[-1] == name]
+
+        assert len(hits("live_helper")) == 1
+        assert hits("dead_false_call") == []
+        assert hits("dead_in_consequence") == []
+        assert len(hits("live_in_else")) == 1
+        assert len(hits("live_final_else")) == 1
+        assert len(hits("some_condition")) == 1
+        assert len(hits("live_in_if_true")) == 1
+        assert len(calls) == 5
+
     def test_dead_guard_covers_declarations_nested_in_dead_branch(self):
         """A function or class declared inside a dead branch is never
         evaluated, so calls in its body are dead. This matches what the
@@ -2156,6 +2181,155 @@ class TestDeadGuardHelpers:
         call = self._find_call(root, b"g")
         assert _is_in_static_dead_guard(call) is False
 
+    # --- _is_in_rust_dead_guard ---
+
+    def test_rust_if_false_dead(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if false { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_else_branch_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false { a(); } else { b(); } }"
+        )
+        call_b = self._find_call(root, b"b")
+        assert _is_in_rust_dead_guard(call_b) is False
+
+    def test_rust_if_true_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if true { g(); } }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_no_guard_live(self):
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { g(); }")
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_compound_condition_live(self):
+        """Only a literal ``false`` is dead: ``false && false`` is left alone."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { if false && false { g(); } }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_value_position_if_false_dead(self):
+        """A ``let`` binding's ``if`` is the same node shape as a statement."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"fn f() { let x = if false { g() } else { 1 }; }"
+        )
+        call = self._find_call(root, b"g")
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_impl_inside_if_false_keeps_method_calls(self):
+        """A method declared inside ``if false`` still runs when it is called.
+
+        Rust impl blocks are non-local: an ``impl`` written inside a branch
+        still applies to the type, so ``S::run()`` outside the branch reaches
+        the method. The guard around the declaration says nothing about calls
+        in the body, and dropping them reports live targets as dead code.
+        """
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust",
+            b"struct S;\n"
+            b"fn main() {\n"
+            b"    if false {\n"
+            b"        impl S { fn run() { live(); } }\n"
+            b"    }\n"
+            b"    S::run();\n"
+            b"}\n",
+        )
+        call = self._find_call(root, b"live")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_impl_associated_const_kept(self):
+        """An impl const is non-local too: its initialiser is reachable.
+
+        There is no ``function_item`` between the call and the guard here, so
+        a boundary placed on the function would still drop this live edge.
+        """
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust",
+            b"struct S;\n"
+            b"fn main() {\n"
+            b"    if false { impl S { const X: i32 = g(); } }\n"
+            b"    let _ = S::X;\n"
+            b"}\n",
+        )
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is False
+
+    def test_rust_block_scoped_item_under_guard_stays_dead(self):
+        """A local fn, mod or trait in a dead branch stays unreachable."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        cases = {
+            "local fn": b"fn f() { if false { fn inner() { g(); } } }",
+            "mod": b"fn f() { if false { mod m { fn n() { g(); } } } }",
+            "trait": b"fn f() { if false { trait T { fn d() { g(); } } } }",
+        }
+        for label, source in cases.items():
+            root, _ = self._parse("rust", source)
+            call = self._find_call(root, b"g")
+            assert call is not None, label
+            assert _is_in_rust_dead_guard(call) is True, label
+
+    def test_rust_parenthesized_false_dead(self):
+        """``if (false)`` is the same branch with the literal parenthesised."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse("rust", b"fn f() { if (false) { g(); } }")
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_guard_inside_method_body_still_dead(self):
+        """Ending the walk at a function boundary keeps the guards inside it."""
+        from code_review_graph.parser import _is_in_rust_dead_guard
+
+        root, _ = self._parse(
+            "rust", b"impl S { fn run() { if false { g(); } } }"
+        )
+        call = self._find_call(root, b"g")
+        assert call is not None
+        assert _is_in_rust_dead_guard(call) is True
+
+    def test_rust_dead_guard_keeps_impl_method_edges(self):
+        """``parse_file`` emits the callee of a method declared under a guard.
+
+        Both edges matter: the method is called from outside the dead branch,
+        which is why its body is live rather than merely present.
+        """
+        self.parser = CodeParser()
+        _nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard_impl.rs",
+        )
+        pairs = {
+            (e.source.split("::")[-1], e.target.split("::")[-1])
+            for e in edges
+            if e.kind == "CALLS"
+        }
+        assert ("main", "S.run") in pairs
+        assert ("S.run", "live_helper") in pairs
+
     # --- _extract_calls integration ---
 
     def test_extract_calls_skips_dead_go(self):
@@ -2191,6 +2365,19 @@ class TestDeadGuardHelpers:
         dead = [
             e for e in edges
             if e.kind == "CALLS" and e.target.split("::")[-1] == "dead_in_if0"
+        ]
+        assert dead == []
+
+    def test_extract_calls_skips_dead_rust(self):
+        """_extract_calls returns True (skip) for a dead Rust call."""
+        self.parser = CodeParser()
+        nodes, edges = self.parser.parse_file(
+            FIXTURES / "sample_dead_guard.rs",
+        )
+        dead = [
+            e for e in edges
+            if e.kind == "CALLS"
+            and e.target.split("::")[-1] == "dead_false_call"
         ]
         assert dead == []
 

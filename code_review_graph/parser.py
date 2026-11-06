@@ -407,6 +407,8 @@ def _python_unreachable_call_positions(
 # walking the tree-sitter ancestor chain of a call node:
 #
 #   * Go / TypeScript / JavaScript:  ``if false { ... }`` / ``if (0) { ... }``
+#   * Rust:                          ``if false { ... }`` (an if_expression,
+#                                    whose false is a boolean_literal)
 #   * C / C++:                       ``#if 0`` / ``#elif 0`` preprocessor blocks
 #
 # Only the consequence (true branch) is dead; ``else`` / ``#else`` / ``#elif``
@@ -504,6 +506,47 @@ def _is_in_static_dead_guard(node) -> bool:
             return True
         child = parent
         parent = parent.parent
+    return False
+
+
+def _is_in_rust_dead_guard(node) -> bool:
+    """Return True if *node* sits in the consequence of a Rust ``if false``.
+
+    Rust's if is an ``if_expression`` and its false is a ``boolean_literal``.
+    Both are shared with Kotlin and Scala, where ``if (false)`` is kept, so
+    this walk is only called for Rust. The else branch and ``if true`` stay
+    live, and only a literal ``false`` counts: ``false && false`` does not.
+
+    The walk ends at an ``impl_item``. Rust impl blocks are non-local: one
+    written inside a branch still applies to the type, so its methods and
+    associated consts are reached from outside that branch, and their callees
+    are live. Inheriting the guard from the declaration dropped those edges and
+    reported real targets as dead code, which is worse than keeping a call that
+    never runs. Everything else the branch encloses stays dead: a local ``fn``,
+    ``mod`` or ``trait`` is scoped to the block, so a call in its body is
+    unreachable. Guards written inside a body are still found, because the
+    walk reaches them before the item boundary.
+    """
+    cursor = node.parent
+    while cursor is not None:
+        if cursor.type == "impl_item":
+            return False
+        if cursor.type == "if_expression":
+            condition = cursor.child_by_field_name("condition")
+            consequence = cursor.child_by_field_name("consequence")
+            while condition is not None and condition.type == "parenthesized_expression":
+                condition = next(
+                    (child for child in condition.children if child.is_named), None
+                )
+            if (
+                condition is not None
+                and consequence is not None
+                and condition.type == "boolean_literal"
+                and condition.text == b"false"
+                and _node_is_in_child(node, consequence)
+            ):
+                return True
+        cursor = cursor.parent
     return False
 
 
@@ -14413,6 +14456,11 @@ class CodeParser:
 
         # Non-Python languages: tree-sitter dead-guard walk (Go/TS/JS
         # ``if false``, C/C++ ``#if 0``).  ``ast`` above cannot reach them.
+        # Rust is separate: its if is an if_expression and its false is a
+        # boolean_literal, and both shapes are shared with Kotlin and Scala,
+        # whose if (false) stays live.
+        if language == "rust" and _is_in_rust_dead_guard(child):
+            return True
         if language != "python" and _is_in_static_dead_guard(child):
             return True
 
