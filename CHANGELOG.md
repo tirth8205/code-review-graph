@@ -10,6 +10,25 @@
   NestJS monorepo whose services import `src/...`, 1,849 import edges stayed
   bare strings, `importers_of` for one service found 14 of its 35 importers,
   and calls on its injected services fell back to name matching.
+- Imports of sibling packages in npm, yarn and pnpm workspaces resolve to the
+  package's source files (#1030). A specifier such as `@acme/shared` or
+  `@acme/sdk/browser` names a package-manager link, not a
+  `compilerOptions.paths` alias, so it was stored bare and `importers_of`,
+  the impact radius and `references_to` stopped at every package boundary.
+  Calls through a package's barrel file now reach the defining file as well.
+  The new `WorkspaceResolver` finds the nearest `pnpm-workspace.yaml` or
+  `package.json` with `workspaces` inside the repository, maps each member's
+  `name` to its directory, and reads `exports` (subpaths, conditions,
+  fallback arrays and `*` patterns, with Node's key priority; a `null` entry
+  or an unlisted subpath stays unresolved), then `source`, `module`, `main`, `types` and
+  `typings`. A target under `dist/`, `build/`, `out/` or `lib/` is tried
+  under `src/` with source extensions first, because compiled output is
+  normally absent from a checkout. tsconfig `paths` still win when both
+  apply. Because a wrong edge is worse than a missing one, an unscoped name
+  resolves only when the importing package declares it as a dependency, Node
+  builtin names such as `events` never resolve to a workspace member, a name
+  two members share resolves to neither, probes are case-exact on every
+  platform, and a target the build would not index keeps the bare specifier.
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing
