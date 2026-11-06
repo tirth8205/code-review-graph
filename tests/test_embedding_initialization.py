@@ -238,13 +238,13 @@ def test_windows_server_still_prewarms_before_mcp_run(monkeypatch, tmp_path):
     policy = object()
     monkeypatch.delenv("CRG_TOOLS", raising=False)
     monkeypatch.setattr(crg_main, "_default_repo_root", None)
-    monkeypatch.setattr(crg_main.sys, "platform", "win32")
     monkeypatch.setattr(
         crg_main.asyncio,
         "WindowsSelectorEventLoopPolicy",
         lambda: policy,
         raising=False,
     )
+    monkeypatch.setattr(crg_main.sys, "platform", "win32")
     monkeypatch.setattr(
         crg_main.asyncio,
         "set_event_loop_policy",

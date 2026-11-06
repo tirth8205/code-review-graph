@@ -969,8 +969,8 @@ def detect_changes_func(
     """Detect changes and produce risk-scored review guidance.
 
     [REVIEW] Primary tool for code review.  Maps git diffs to affected
-    functions, flows, communities, and test coverage gaps.  Returns
-    priority-ordered review guidance with risk scores.
+    functions, YAML paths, flows, communities, and test coverage gaps.
+    Returns priority-ordered review guidance with risk scores.
 
     Args:
         base: Git ref to diff against (default: HEAD~1).
@@ -982,9 +982,10 @@ def detect_changes_func(
         repo_root: Repository root path.  Auto-detected if omitted.
         detail_level: Output detail level.  "standard" returns full analysis;
             "minimal" returns only summary, risk_score, changed_file_count,
-            test_gap_count, and top 3 review priorities (text only).
+            changed_yaml_path_count, test_gap_count, and the top three code
+            review priorities (text only).
             Default: "standard".
-        max_results: Maximum changed functions and test gaps to return
+        max_results: Maximum changed functions, YAML paths and test gaps to return
             (default 25, capped at 200). ``changed_functions_total`` and
             ``test_gaps_total`` report the untruncated counts.
         max_flows: Maximum affected flows to embed (default 20, capped at
@@ -992,8 +993,8 @@ def detect_changes_func(
             get_affected_flows_tool for step detail. See #849.
 
     Returns:
-        Risk-scored analysis with changed functions, affected flows,
-        test gaps, and review priorities, plus ``truncated``.
+        Risk-scored analysis with changed functions, YAML paths, affected
+        flows, test gaps, and review priorities, plus ``truncated``.
     """
     _validate_positive_int(max_results, "max_results")
     _validate_positive_int(max_flows, "max_flows")
@@ -1018,6 +1019,7 @@ def detect_changes_func(
                 "summary": "No changed files detected.",
                 "risk_score": 0.0,
                 "changed_functions": [],
+                "changed_yaml_paths": [],
                 "affected_flows": [],
                 "test_gaps": [],
                 "review_priorities": [],
@@ -1092,6 +1094,7 @@ def detect_changes_func(
                 "summary": analysis.get("summary", ""),
                 "risk_score": analysis.get("risk_score", 0.0),
                 "changed_file_count": len(changed_files),
+                "changed_yaml_path_count": len(analysis.get("changed_yaml_paths", [])),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
                 "review_priorities": top_priorities,
                 # Minimal mode still has to say when the score it reports is
@@ -1114,12 +1117,20 @@ def detect_changes_func(
             files, files_total, files_cut = _bounded(
                 changed_files, max_results, _MAX_REVIEW_FILES,
             )
-            any_cut = funcs_cut or gaps_cut or flows_cut or files_cut
+            yaml_paths, yaml_paths_total, yaml_paths_cut = _bounded(
+                analysis.get("changed_yaml_paths", []),
+                max_results, _MAX_CHANGED_FUNCTIONS,
+            )
+            any_cut = (
+                funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or bool(analysis.get("yaml_paths_truncated"))
+            )
             summary = analysis.get("summary", "")
             if any_cut:
                 summary += (
                     "\n  - Response bounded: "
                     f"{len(funcs)} of {funcs_total} changed function(s), "
+                    f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
                     f"{len(gaps)} of {gaps_total} test gap(s), "
                     f"{len(flows)} of {flows_total} flow(s) shown"
                 )
@@ -1131,6 +1142,8 @@ def detect_changes_func(
                 "changed_file_count": files_total,
                 "changed_functions": funcs,
                 "changed_functions_total": funcs_total,
+                "changed_yaml_paths": yaml_paths,
+                "changed_yaml_paths_total": yaml_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),

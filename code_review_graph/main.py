@@ -542,7 +542,7 @@ async def semantic_search_nodes_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, or Test.
+        kind: Optional filter: File, Class, Function, Type, Test, or YamlPath.
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used
@@ -675,7 +675,7 @@ async def find_large_functions_tool(
 
     Args:
         min_lines: Minimum line count to flag. Default: 50.
-        kind: Optional filter: Function, Class, File, or Test.
+        kind: Optional filter: Function, Class, File, Test, or YamlPath.
         file_path_pattern: Filter by file path substring (e.g. "components/").
         limit: Maximum results. Default: 50.
         repo_root: Repository root path. Auto-detected if omitted.
@@ -926,8 +926,9 @@ async def detect_changes_tool(
     """Detect changes and produce risk-scored, priority-ordered review guidance.
 
     Primary tool for code review. Maps git diffs to affected functions,
-    flows, communities, and test coverage gaps. Returns risk scores and
-    prioritized review items. Replaces get_review_context for change-aware reviews.
+    YAML paths, flows, communities, and test coverage gaps. Returns risk
+    scores and prioritized review items. Replaces get_review_context for
+    change-aware reviews.
 
     Offloaded via ``_offload`` — runs `git diff` subprocesses and BFS
     traversals that can take several seconds on large repos, and honours
@@ -941,7 +942,7 @@ async def detect_changes_tool(
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" for full output, "minimal" for
             token-efficient summary. Default: standard.
-        max_results: Maximum changed functions, test gaps, and changed files
+        max_results: Maximum changed functions, YAML paths, test gaps, and changed files
             to return; the matching *_total fields report the full counts.
             Default: 25.
         max_flows: Maximum affected flows to embed. Embedded flows carry
@@ -1312,7 +1313,7 @@ async def cross_repo_search_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, or Test.
+        kind: Optional filter: File, Class, Function, Type, Test, or YamlPath.
         limit: Maximum results per repo. Default: 20.
         max_results: Maximum merged results across searched repos; total
             reports the untruncated merged count. Default: 50.
