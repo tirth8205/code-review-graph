@@ -219,7 +219,9 @@ jobs:
 >
 > `code-review-graph` の行はスナップショットであり、現在の計測値ではありません。`84bde354` 以降リポジトリは大きくなっており、コーパスもグラフも今日ではかなり大きくなっています。
 
-コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。結果は `evaluate/results/<repo>_agent_baseline_<date>.csv` に書かれます。正式な計測結果はまだ公開していません。
+コーパス全体のベースラインは、実際のエージェントが払うことのない上限です。エージェントは識別子を grep して、いちばん合致するファイルを読みます。`agent_baseline` の評価ベンチマークはその場合を測ります（純 Python でコーパスを grep し、一致数の多い上位 3 ファイルを取り、グラフ照会のコストとトークン数を比較）。結果は `evaluate/results/<repo>_agent_baseline_<date>.csv` に書かれます。この現実的なベースラインに対する中央値は、6 リポジトリ 18 問で **6.65x** です（平均 14.8x、範囲 4.2x〜72.6x）。2026-09-22 の計測は、検索とこのベースラインがテストファイルの順位を下げるようになる前のものです。計測し直すまで、`code-review-graph eval --benchmark agent_baseline --embed` の結果はこの数字と一致しません。完全な表は `docs/REPRODUCING.md` の「Canonical capture, 2026-09-22」にあります。
+
+この比はリポジトリの規模に追随します。グラフの応答は一定のまま（今回計測したすべてのリポジトリで 2,432〜4,021 トークン）である一方、grep のベースラインはコーパスとともに増えるためです。express では 4.5x、fastapi では 52x でした。どちらの数字も**検索**のコスト、つまり答えを見つけるのに必要なトークンを測っています。グラフが示したファイルをエージェントがそのうえで開くなら、グラフの分は置き換えではなく上乗せになります。`semantic_search_nodes_tool(include_source=True)` は位置とともにコードを返すのでその必要がなくなりますが、この経路を端から端まで計測することは今後の課題です。
 
 正式な `token_efficiency` ベンチマークは別の状況を測ります。コミットの変更ファイルの中身だけに対して `get_review_context()` の JSON 全体を比較するもので、応答には影響範囲のエッジとソース断片が入るため、小さなコミットでは比率が 1 を下回ります。2 つのベンチマークは別の問いに答えています。[`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what) を参照してください。
 
@@ -525,6 +527,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | ローカルのベクトル埋め込みの既定モデル | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1` にするとクラウド埋め込みの送信警告を抑制 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True` を要する HuggingFace モデルを許可 | `0` |
+| `CRG_VECTOR_CACHE` | `1` にすると、デコード済みの埋め込みベクトルをセマンティック検索の合間もメモリに保持し、クエリごとに SQLite からすべて読み直さない。代わりに RAM（キャッシュするインデックスごとに ベクトル数 × 次元数 × 4 バイト）と、キャッシュ対象のデータベースごとにプロセス終了まで開いたままの読み取り接続 1 本を使う。Windows では開いている間 `graph.db` を削除・置換できない | - |
 | `CRG_MAX_IMPACT_NODES` | 影響分析に含める最大ノード数 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 影響範囲分析の探索の深さ | `2` |
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |

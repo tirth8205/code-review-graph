@@ -164,9 +164,10 @@ def _opencode_config_path(repo_root: Path) -> Path:
 PLATFORMS: dict[str, dict[str, Any]] = {
     "codex": {
         "name": "Codex",
-        "config_path": lambda root: Path.home() / ".codex" / "config.toml",
+        "config_path": lambda root: _codex_home() / "config.toml",
         "key": "mcp_servers",
-        "detect": lambda: (Path.home() / ".codex").exists(),
+        "detect": lambda: bool(os.environ.get("CODEX_HOME", "").strip())
+        or _codex_home().exists(),
         "format": "toml",
         "needs_type": True,
     },
@@ -297,6 +298,14 @@ PLATFORMS: dict[str, dict[str, Any]] = {
         "needs_type": True,
     },
 }
+
+
+def _codex_home() -> Path:
+    """Return Codex's active state directory, honoring ``CODEX_HOME``."""
+
+    from .codex_skill import codex_home
+
+    return codex_home()
 
 
 def _in_poetry_project() -> bool:
@@ -1454,8 +1463,16 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _codex_hook_command(subcommand: str) -> str:
+    """Forward the event JSON to a payload-scoped subcommand when the CLI exists."""
+    return (
+        "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+        f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+    )
+
+
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
-    """Generate native Codex hooks configuration for ~/.codex/hooks.json."""
+    """Generate native Codex hooks configuration for the active Codex home."""
     return {
         "hooks": {
             "PostToolUse": [
@@ -1464,12 +1481,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph update --skip-flows"
-                                " || true"
-                            ),
+                            "command": _codex_hook_command("hook-update"),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1482,12 +1494,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph status"
-                                " || echo 'Not a git repo, skipping'"
-                            ),
+                            "command": _codex_hook_command("hook-status"),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
                         },
@@ -1572,7 +1579,11 @@ def _known_git_hook_blocks() -> tuple[str, ...]:
     return tuple(sorted(set(_LEGACY_GIT_HOOK_BLOCKS), key=len, reverse=True))
 
 
-def _git_hook_markers_balanced(text: str) -> bool:
+def _git_hook_markers_balanced(
+    text: str,
+    begin_marker: str = _GIT_HOOK_BEGIN_MARKER,
+    end_marker: str = _GIT_HOOK_END_MARKER,
+) -> bool:
     """Return whether every begin marker in ``text`` has its own end marker.
 
     A begin marker with no end marker after it, or a second begin marker
@@ -1580,37 +1591,42 @@ def _git_hook_markers_balanced(text: str) -> bool:
     is then no trustworthy boundary, so callers must refuse rather than guess
     where the block stops.
     """
-    begins = text.count(_GIT_HOOK_BEGIN_MARKER)
-    if begins != text.count(_GIT_HOOK_END_MARKER):
+    begins = text.count(begin_marker)
+    if begins != text.count(end_marker):
         return False
     cursor = 0
     for _ in range(begins):
-        begin = text.find(_GIT_HOOK_BEGIN_MARKER, cursor)
-        closing = text.find(_GIT_HOOK_END_MARKER, begin)
+        begin = text.find(begin_marker, cursor)
+        closing = text.find(end_marker, begin)
         if closing < 0:
             return False
-        nested = text.find(_GIT_HOOK_BEGIN_MARKER, begin + len(_GIT_HOOK_BEGIN_MARKER))
+        nested = text.find(begin_marker, begin + len(begin_marker))
         if 0 <= nested < closing:
             return False
-        cursor = closing + len(_GIT_HOOK_END_MARKER)
+        cursor = closing + len(end_marker)
     return True
 
 
-def _git_hook_block_span(text: str, start: int = 0) -> tuple[int, int] | None:
+def _git_hook_block_span(
+    text: str,
+    start: int = 0,
+    begin_marker: str = _GIT_HOOK_BEGIN_MARKER,
+    end_marker: str = _GIT_HOOK_END_MARKER,
+) -> tuple[int, int] | None:
     """Return ``(begin, end)`` offsets of one marked block, or None.
 
     ``end`` is just past the block's trailing newline, so slicing the span out
     leaves no blank line behind.
     """
-    begin = text.find(_GIT_HOOK_BEGIN_MARKER, start)
+    begin = text.find(begin_marker, start)
     if begin < 0:
         return None
-    closing = text.find(_GIT_HOOK_END_MARKER, begin)
+    closing = text.find(end_marker, begin)
     if closing < 0:
         # Someone deleted the closing marker; guessing where the block stops is
         # how user content gets eaten, so refuse.
         return None
-    end = closing + len(_GIT_HOOK_END_MARKER)
+    end = closing + len(end_marker)
     if end < len(text) and text[end] == "\n":
         end += 1
     return begin, end
@@ -1637,6 +1653,39 @@ def _upgrade_git_hook_block(existing: str) -> str | None:
     return None
 
 
+def _git_hooks_dir(repo_root: Path) -> Path | None:
+    """Return the directory git runs hooks from, or None when there is none.
+
+    Resolved via ``git rev-parse --git-path hooks`` so linked worktrees,
+    submodules and ``core.hooksPath`` are honoured, with the legacy
+    ``.git/hooks`` lookup as the fallback when git itself is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--git-path", "hooks"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(repo_root),
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Output is relative to repo_root (".git/hooks", a core.hooksPath
+            # value such as ".husky") or absolute (linked worktrees).
+            return repo_root / result.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
+
+    git_dir = repo_root / ".git"
+    if not git_dir.is_dir():
+        logger.warning(
+            "No git hooks directory found at %s — skipping git hook install.", repo_root
+        )
+        return None
+    return git_dir / "hooks"
+
+
 def install_git_hook(repo_root: Path) -> Path | None:
     """Install a git pre-commit hook that prints a risk summary before each commit.
 
@@ -1659,38 +1708,26 @@ def install_git_hook(repo_root: Path) -> Path | None:
     Detection relies only on ``git rev-parse --absolute-git-dir`` (Git 2.13),
     not on newer options.
     """
-    hooks_dir: Path | None = None
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--git-path", "hooks"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            cwd=str(repo_root),
-            timeout=10,
-            stdin=subprocess.DEVNULL,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            # Output is relative to repo_root (".git/hooks", a core.hooksPath
-            # value such as ".husky") or absolute (linked worktrees).
-            hooks_dir = repo_root / result.stdout.strip()
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("git unavailable (%s); falling back to .git/hooks resolution.", exc)
-
+    hooks_dir = _git_hooks_dir(repo_root)
     if hooks_dir is None:
-        git_dir = repo_root / ".git"
-        if not git_dir.is_dir():
-            logger.warning(
-                "No git hooks directory found at %s — skipping git hook install.", repo_root
-            )
-            return None
-        hooks_dir = git_dir / "hooks"
+        return None
 
     hook_path = hooks_dir / "pre-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)
 
     if hook_path.exists():
-        existing = hook_path.read_text(encoding="utf-8")
+        try:
+            existing = hook_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            existing = None
+        # A shell block appended to a Python or Node hook breaks every commit.
+        if existing is None or not _is_shell_hook(existing):
+            logger.warning(
+                "%s is not a shell script; leaving it alone. Call "
+                "'code-review-graph detect-changes --brief' from it to get the risk summary.",
+                hook_path,
+            )
+            return hook_path
         if _GIT_HOOK_BEGIN_MARKER in existing and not _git_hook_markers_balanced(existing):
             logger.warning(
                 "%s has a code-review-graph begin marker with no matching end "
@@ -1722,6 +1759,165 @@ def install_git_hook(repo_root: Path) -> Path | None:
     hook_path.chmod(0o755)
     logger.info("Wrote git pre-commit hook: %s", hook_path)
     return hook_path
+
+
+# --- Git sync hooks ---------------------------------------------------------
+#
+# ``pre-commit`` only refreshes the graph right before a commit. The working
+# tree also changes on a branch checkout and on a merge or rebase (including
+# ``git pull`` in either mode), none of which runs ``pre-commit``. These hooks
+# run ``update`` once after each of those, when the working tree has reached
+# its final state:
+#
+# - post-checkout, on branch checkouts only, and not while a rebase is in
+#   progress: a rebase checks out the new base before replaying local commits,
+#   so updating there would drop the user's own changes from the graph. When
+#   nothing is left to replay, Git never runs post-rewrite, so that checkout
+#   is the final tree and post-checkout updates after all.
+# - post-merge, after a merge or a merge-mode ``git pull``.
+# - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
+#   fires it, but ``pre-commit`` already updated the graph for that commit.
+#
+# They share the pre-commit block's rules: explicit begin/end markers, appended
+# to an existing hook rather than overwriting it, and skipped in linked
+# worktrees unless ``CRG_HOOK_WORKTREES=1``.
+
+_GIT_SYNC_HOOK_BEGIN_MARKER = "# >>> code-review-graph sync hook >>>"
+_GIT_SYNC_HOOK_END_MARKER = "# <<< code-review-graph sync hook <<<"
+_GIT_SYNC_HOOK_NOTE = (
+    "# Installed by code-review-graph. Keeps the graph in sync after checkout, merge and rebase."
+)
+_GIT_SYNC_HOOK_NAMES = ("post-checkout", "post-merge", "post-rewrite")
+
+# Extra shell conditions per hook, checked before anything else runs.
+_GIT_SYNC_HOOK_CONDITIONS = {
+    # $3 is 1 for a branch checkout and 0 for a file checkout.
+    "post-checkout": '[ "$3" = "1" ] && ',
+    "post-merge": "",
+    # $1 names the command that rewrote commits: "rebase" or "amend".
+    "post-rewrite": '[ "$1" = "rebase" ] && ',
+}
+
+
+def _git_sync_hook_block(hook_name: str) -> str:
+    """Return the marked block that ``hook_name`` runs to update the graph."""
+    condition = _GIT_SYNC_HOOK_CONDITIONS[hook_name]
+    rebase_guard = ""
+    if hook_name == "post-checkout":
+        # post-rewrite updates the graph once the rebase has replayed local
+        # commits. Git skips post-rewrite when nothing is left to replay (no
+        # local commits, or all already upstream), so this checkout is then
+        # the final tree. The todo list is written before this checkout runs.
+        rebase_guard = """\
+    elif [ -d "$crg_hook_git_dir/rebase-merge" ] && grep -Eq \\
+            '^[[:space:]]*(p|pick|r|reword|e|edit|s|squash|f|fixup|m|merge)[[:space:]]' \\
+            "$crg_hook_git_dir/rebase-merge/git-rebase-todo" 2>/dev/null; then
+        :
+    elif [ -d "$crg_hook_git_dir/rebase-apply" ]; then
+        :
+"""
+    body = f"""\
+if {condition}command -v code-review-graph >/dev/null 2>&1; then
+    crg_hook_git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || crg_hook_git_dir=""
+    crg_hook_root=$(git rev-parse --show-toplevel 2>/dev/null) || crg_hook_root=""
+    if [ -z "$crg_hook_git_dir" ] || [ -z "$crg_hook_root" ]; then
+        echo "code-review-graph: skipping graph sync; cannot determine the Git worktree." >&2
+    elif [ -f "$crg_hook_git_dir/commondir" ] && [ "$CRG_HOOK_WORKTREES" != "1" ]; then
+        echo "code-review-graph: skipping graph sync in a linked worktree;" \\
+            "set CRG_HOOK_WORKTREES=1 to keep a graph for this worktree too." >&2
+{rebase_guard}    else
+        code-review-graph update --quiet --repo "$crg_hook_root" || true
+    fi
+fi
+"""
+    return (
+        f"{_GIT_SYNC_HOOK_BEGIN_MARKER}\n{_GIT_SYNC_HOOK_NOTE}\n"
+        f"{body}{_GIT_SYNC_HOOK_END_MARKER}\n"
+    )
+
+
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
+
+
+def _is_shell_hook(text: str) -> bool:
+    """Return whether a shell block can be appended to this hook script.
+
+    Git runs a hook with no shebang through ``/bin/sh``, so that counts as
+    shell. Otherwise the interpreter named by the shebang decides, looking
+    through ``/usr/bin/env`` and its options.
+    """
+    if not text.startswith("#!"):
+        return True
+    parts = text[2:].split("\n", 1)[0].split()
+    if not parts:
+        return True
+    if Path(parts[0]).name == "env":
+        # Past env's own options and any NAME=value settings.
+        parts = [part for part in parts[1:] if not part.startswith("-") and "=" not in part]
+        if not parts:
+            return False
+    return Path(parts[0]).name in _SHELL_INTERPRETERS
+
+
+def install_git_sync_hooks(repo_root: Path) -> list[Path]:
+    """Install post-checkout, post-merge and post-rewrite hooks that run ``update``.
+
+    Called automatically by ``code-review-graph install`` next to
+    :func:`install_git_hook`, and resolves the hooks directory the same way.
+    Each block is appended to an existing hook, never overwriting it, and a
+    block written by an earlier release is replaced in place. A hook whose
+    markers are unbalanced was edited by hand and is left alone, and so is a
+    hook written in a language other than shell. A failed
+    update never fails the git command that triggered it.
+    """
+    hooks_dir = _git_hooks_dir(repo_root)
+    if hooks_dir is None:
+        return []
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    for name in _GIT_SYNC_HOOK_NAMES:
+        hook_path = hooks_dir / name
+        block = _git_sync_hook_block(name)
+        if hook_path.exists():
+            try:
+                existing = hook_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                existing = None
+            if existing is None or not _is_shell_hook(existing):
+                logger.warning(
+                    "%s is not a shell script; leaving it alone. Call "
+                    "'code-review-graph update --quiet' from it to keep the graph in sync.",
+                    hook_path,
+                )
+                continue
+            if (
+                _GIT_SYNC_HOOK_BEGIN_MARKER in existing
+                or _GIT_SYNC_HOOK_END_MARKER in existing
+            ):
+                span = _git_hook_block_span(
+                    existing, 0, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
+                )
+                if span is None or not _git_hook_markers_balanced(
+                    existing, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
+                ):
+                    logger.warning(
+                        "%s has unbalanced code-review-graph markers; leaving it alone.",
+                        hook_path,
+                    )
+                    continue
+                begin, end = span
+                updated = existing[:begin] + block + existing[end:]
+                if updated != existing:
+                    hook_path.write_text(updated, encoding="utf-8")
+            else:
+                hook_path.write_text(existing.rstrip("\n") + "\n" + block, encoding="utf-8")
+        else:
+            hook_path.write_text(_GIT_HOOK_SHEBANG + block, encoding="utf-8")
+        hook_path.chmod(0o755)
+        logger.info("Wrote git %s hook: %s", name, hook_path)
+        written.append(hook_path)
+    return written
 
 
 # --- Hook ownership --------------------------------------------------------
@@ -1767,14 +1963,18 @@ def _hook_body_pattern() -> str:
 # The CLI one-liners every release has written, as one anchored pattern. Each
 # optional piece is a prelude some release added around the body.
 _GENERATED_HOOK_COMMAND_RE = re.compile(
-    r"\A"
+    r"\A(?:"
     r"(?:cat\s*>\s*/dev/null\s*\|\|\s*true;\s*)?"
     r"(?:command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*\|\|\s*exit\s+0;\s*)?"
     r"(?:git\s+rev-parse\s+--git-dir\s*>/dev/null\s+2>&1\s*&&\s*)?"
     r"code-review-graph\s+(?:" + _hook_body_pattern() + r")"
     r"(?:\s+--repo\s+(?:\"[^\"]*\"|'[^']*'|[^\s\"'|&;<>]+))?"
     r"(?:\s*\|\|\s*(?:true|echo\s+'Not a git repo, skipping'))?"
-    r"\Z"
+    # The Codex hook that forwards the event JSON to a payload-scoped subcommand.
+    r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
+    r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
+    r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
+    r")\Z"
 )
 
 # Loose spellings that merely *mention* this project. Used only to tell the
@@ -2067,13 +2267,13 @@ def install_codebuddy_hooks(repo_root: Path) -> Path:
 
 
 def install_codex_hooks(repo_root: Path) -> Path:
-    """Write native Codex hooks config to ~/.codex/hooks.json.
+    """Write native Codex hooks config to the active Codex home.
 
     Merges code-review-graph hook entries into any existing hooks.json,
     preserving user-defined hook entries and other top-level settings.
     A backup of the original file is created before modifications.
     """
-    codex_dir = Path.home() / ".codex"
+    codex_dir = _codex_home()
     codex_dir.mkdir(parents=True, exist_ok=True)
     hooks_path = codex_dir / "hooks.json"
 
@@ -2110,6 +2310,14 @@ def install_codex_hooks(repo_root: Path) -> Path:
     return hooks_path
 
 
+def install_codex_skill() -> Path | None:
+    """Install the bundled global Codex skill in the active Codex home."""
+
+    from .codex_skill import install_codex_skill as _install
+
+    return _install()
+
+
 _CLAUDE_MD_SECTION_MARKER = "<!-- code-review-graph MCP tools -->"
 
 # Closes the managed block so reinstall can replace it without guessing where it
@@ -2124,12 +2332,12 @@ gives you structural context (callers, dependents, test coverage) that file sear
 
 _INSTRUCTION_GUARDRAILS = """### Verify in the source
 
-- Narrow scope with the graph, then read the source. Do not change code from graph output alone.
-- For any non-trivial change, read the implementation and the relevant tests before concluding.
+- Answer from `include_source=True, expand_neighbors=True`; read a file only if truncated.
+- Do not change code from graph output alone: for any non-trivial change,
+  read the implementation and the relevant tests before concluding.
 - Verify the exact source when touching behavior, database logic, migrations, retries, fallbacks,
   recovery, or compatibility code.
-- When the graph and the source disagree, the source wins. The graph may be stale or may not
-  model that relationship.
+- When the graph and the source disagree, the source wins. The graph may be stale.
 - An empty graph result can mean "not indexed" or "not statically visible", not "does not exist"."""
 
 _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
@@ -2139,7 +2347,7 @@ _CLAUDE_MD_SECTION = f"""{_CLAUDE_MD_SECTION_MARKER}
 
 ### When to use graph tools FIRST
 
-- **Exploring code**: `semantic_search_nodes_tool` or `query_graph_tool` instead of Grep
+- **Exploring code**: `semantic_search_nodes_tool(include_source=True, expand_neighbors=True)`
 - **Understanding impact**: `get_impact_radius_tool` instead of manually tracing imports
 - **Code review**: `detect_changes_tool` + `get_review_context_tool` instead of reading entire files
 - **Finding relationships**: `query_graph_tool` with callers_of/callees_of/imports_of/tests_for
@@ -2876,23 +3084,151 @@ def install_hermes_skills(repo_root: Path) -> Path:
 # --- OpenCode plugin ---
 
 
-def _opencode_plugin_content() -> str:
-    """Return TypeScript source for the OpenCode user-level plugin.
+def _detect_opencode_major_version() -> int | None:
+    """Return the installed OpenCode major version, when it can be detected."""
+    executable = shutil.which("opencode")
+    if executable is None:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    output = f"{result.stdout}\n{result.stderr}".strip()
+    # Accept SemVer suffixes: 1.19.4-beta.1 is still major 1, and misreading it
+    # as "unknown" would write the 2.x template for a 1.x host.
+    match = re.search(r"(?:^|\s)v?(\d+)\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.+-]*)?(?:\s|$)", output)
+    return int(match.group(1)) if match else None
 
-    The plugin hooks into three OpenCode events to mirror the Claude Code
-    hook behaviors:
 
-    1. ``file.edited`` — runs ``code-review-graph update --skip-flows``
-    2. ``session.created`` — runs ``code-review-graph status``
-    3. ``tool.execute.before`` — when the tool is a shell command starting
-       with ``git commit``, runs ``code-review-graph detect-changes --brief``
-
-    All handlers use try/catch so errors never break the editor session.
-    The plugin uses Bun's ``$`` shell API (provided by OpenCode's plugin
-    context) for subprocess execution.
-    """
+def _opencode_v1_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode 1.x user-level plugin."""
     return """\
 import type { Plugin } from "@opencode-ai/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
+
+/**
+ * code-review-graph plugin for OpenCode 1.x.
+ *
+ * Keeps the knowledge graph up-to-date and surfaces status
+ * information automatically during coding sessions.
+ *
+ * Installed by: code-review-graph install --platform opencode
+ */
+
+const execFileAsync = promisify(execFile)
+
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
+  } catch {
+    return ""
+  }
+}
+
+// One update at a time, per plugin instance. A second run started while one is
+// going reads its in-progress marker as a crashed build and does a full rebuild.
+// Edits that land during a run share a single follow-up run.
+function makeUpdater(cwd: string): () => Promise<void> {
+  let running = false
+  let pending = false
+  return async () => {
+    if (running) {
+      pending = true
+      return
+    }
+    running = true
+    try {
+      do {
+        pending = false
+        await runQuiet(["update", "--skip-flows"], cwd, 60_000)
+      } while (pending)
+    } finally {
+      running = false
+    }
+  }
+}
+
+const CodeReviewGraphPlugin: Plugin = async ({ directory, worktree }) => {
+  // Prefer the worktree root. OpenCode reports "/" as the worktree outside Git,
+  // so SVN and graph-only projects must use `directory`. The CRG CLI discovers
+  // the repository root when that is a subdirectory.
+  const baseDir = worktree && worktree !== "/" ? worktree : directory
+  const requestUpdate = makeUpdater(baseDir)
+
+  return {
+    event: async ({ event }) => {
+      if (event.type === "file.edited") {
+        await requestUpdate()
+      }
+
+      if (event.type === "session.created") {
+        const output = await runQuiet(["status"], baseDir, 15_000)
+        if (output) {
+          console.log("[code-review-graph]", output)
+        }
+      }
+    },
+
+    "tool.execute.before": async (input, output) => {
+      const command = output?.args?.command
+      if (
+        input.tool === "bash" &&
+        typeof command === "string" &&
+        /^git\\s+commit/i.test(command)
+      ) {
+        const text = await runQuiet(["detect-changes", "--brief"], baseDir, 30_000)
+        if (text) {
+          console.log("[code-review-graph] Pre-commit analysis:\\n" + text)
+        }
+      }
+    },
+  }
+}
+
+export default CodeReviewGraphPlugin
+"""
+
+
+def _opencode_v2_plugin_content() -> str:
+    """Return TypeScript source for the OpenCode user-level plugin.
+
+    The plugin exports an OpenCode 2.x (V2) definition object with an ``id``
+    and a ``setup`` function because the V2 loader rejects any other
+    default-export shape with ``SchemaError(Expected object at ["default"])``.
+    The plugin package is imported only for types so older 2.x hosts do not
+    need to resolve it at runtime. ``setup`` mirrors the Claude Code hook behaviors:
+
+    1. successful ``edit``/``write``/``patch`` tool calls (there is no V2
+       ``file.edited`` hook) — runs ``code-review-graph update --skip-flows``
+    2. ``session.created`` events via ``ctx.event.subscribe`` — runs
+       ``code-review-graph status``
+    3. ``ctx.tool.hook("execute.before")`` — when the tool is a shell
+       command starting with ``git commit``, runs ``code-review-graph
+       detect-changes --brief``
+
+    All handlers use try/catch (or a swallowing helper) so errors never
+    break the editor session. Subprocesses run via ``node:child_process``
+    ``execFile`` with argv arrays — never by interpolating a command string
+    into Bun's ``$`` template, which would escape it into one executable
+    name.
+    """
+    return """\
+import type { Plugin } from "@opencode/plugin"
+import { execFile } from "node:child_process"
+import { promisify } from "node:util"
 
 /**
  * code-review-graph plugin for OpenCode.
@@ -2903,62 +3239,111 @@ import type { Plugin } from "@opencode-ai/plugin"
  * Installed by: code-review-graph install --platform opencode
  */
 
-// Helper: run a shell command quietly, swallowing errors.
-async function run($: any, cmd: string): Promise<string> {
+const execFileAsync = promisify(execFile)
+
+// Run code-review-graph quietly, swallowing errors. Never blocks the session.
+async function runQuiet(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   try {
-    const result = await $`${cmd}`.quiet()
-    return result.stdout?.toString().trim() ?? ""
+    const { stdout } = await execFileAsync("code-review-graph", args, {
+      cwd,
+      timeout: timeoutMs,
+    })
+    return String(stdout ?? "").trim()
   } catch {
     return ""
   }
 }
 
-export default (app: any) => {
-  // 1. Auto-update graph after file edits
-  app.on("file.edited", async ({ $ }: { $: any }) => {
-    try {
-      await $`code-review-graph update --skip-flows`.quiet()
-    } catch {
-      // Swallow — graph may not be built yet for this project.
+// One update at a time, per plugin instance. A second run started while one is
+// going reads its in-progress marker as a crashed build and does a full rebuild.
+// Edits that land during a run share a single follow-up run.
+function makeUpdater(cwd: string): () => Promise<void> {
+  let running = false
+  let pending = false
+  return async () => {
+    if (running) {
+      pending = true
+      return
     }
-  })
-
-  // 2. Show graph status when a new session starts
-  app.on("session.created", async ({ $ }: { $: any }) => {
+    running = true
     try {
-      const result = await $`code-review-graph status`.quiet()
-      const output = result.stdout?.toString().trim()
-      if (output) {
-        console.log("[code-review-graph]", output)
+      do {
+        pending = false
+        await runQuiet(["update", "--skip-flows"], cwd, 60_000)
+      } while (pending)
+    } finally {
+      running = false
+    }
+  }
+}
+
+export default {
+  id: "code-review-graph",
+  async setup(ctx) {
+    const baseDir = ctx.location.directory
+    const controller = new AbortController()
+    const requestUpdate = makeUpdater(baseDir)
+
+    // Show graph status when a new session starts.
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (event.type !== "session.created") continue
+          // Only handle sessions for this plugin instance's location.
+          const sessionDir = event.location?.directory
+          if (sessionDir !== undefined && sessionDir !== baseDir) continue
+          const output = await runQuiet(["status"], sessionDir ?? baseDir, 15_000)
+          if (output) {
+            console.log("[code-review-graph]", output)
+          }
+        }
+      } catch {
+        // Aborted on unload — ignore.
       }
-    } catch {
-      // Swallow — not every project has a graph.
-    }
-  })
+    })()
 
-  // 3. Detect changes before git commit commands
-  app.on("tool.execute.before", async (ctx: any) => {
-    try {
-      const input = ctx?.input ?? ctx?.params ?? {}
-      const cmd =
-        input.command ?? input.cmd ?? input.content ?? ""
-      if (typeof cmd === "string" && /^git\\s+commit/i.test(cmd)) {
-        const result =
-          await ctx.$`code-review-graph detect-changes --brief`.quiet()
-        const output = result.stdout?.toString().trim()
+    // Auto-update graph after file edits. V2 has no `file.edited` hook,
+    // so trigger off successful edit/write/patch tool calls instead.
+    await ctx.tool.hook("execute.after", async (event) => {
+      if (event.status !== "completed") return
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "edit" && tool !== "write" && tool !== "patch") return
+      void requestUpdate()
+    })
+
+    // Detect changes before git commit commands.
+    await ctx.tool.hook("execute.before", async (event) => {
+      const tool = String(event.tool ?? "").toLowerCase()
+      if (tool !== "bash" && tool !== "shell" && tool !== "execute") return
+      const input = (event.input ?? {}) as Record<string, unknown>
+      const cmd = input.command ?? input.cmd ?? input.content ?? ""
+      if (typeof cmd !== "string" || !/^git\\s+commit/i.test(cmd)) return
+      try {
+        const output = await runQuiet(["detect-changes", "--brief"], baseDir, 30_000)
         if (output) {
           console.log("[code-review-graph] Pre-commit analysis:\\n" + output)
         }
+      } catch {
+        // Swallow — never block a commit.
       }
-    } catch {
-      // Swallow — never block a commit.
-    }
-  })
-}
+    })
+
+    return () => controller.abort()
+  },
+} satisfies Parameters<typeof Plugin.define>[0]
 """
 
 
-def install_opencode_plugin() -> Path:
+def _opencode_plugin_content(major_version: int = 2) -> str:
+    """Return the plugin template for an OpenCode major version."""
+    if major_version == 1:
+        return _opencode_v1_plugin_content()
+    if major_version >= 2:
+        return _opencode_v2_plugin_content()
+    raise ValueError(f"Unsupported OpenCode major version: {major_version}")
+
+
+def install_opencode_plugin(opencode_major: int | None = None) -> Path:
     """Install the OpenCode user-level plugin for code-review-graph.
 
     Writes ``~/.config/opencode/plugins/crg-plugin.ts``.  Creates the
@@ -2968,11 +3353,23 @@ def install_opencode_plugin() -> Path:
     Returns:
         Path to the plugin file that was written.
     """
+    if opencode_major is None:
+        opencode_major = _detect_opencode_major_version()
+    if opencode_major is None:
+        # OpenCode may be installed outside PATH while the user is preparing
+        # configuration for a later install. Prefer the current major rather
+        # than silently emitting the legacy 1.x shape in that case.
+        opencode_major = 2
+        logger.warning(
+            "Could not detect the installed OpenCode version; "
+            "defaulting to the OpenCode 2.x plugin template"
+        )
+
     plugins_dir = Path.home() / ".config" / "opencode" / "plugins"
     plugin_path = plugins_dir / "crg-plugin.ts"
 
     plugins_dir.mkdir(parents=True, exist_ok=True)
-    plugin_path.write_text(_opencode_plugin_content(), encoding="utf-8")
-    logger.info("Wrote OpenCode plugin: %s", plugin_path)
+    plugin_path.write_text(_opencode_plugin_content(opencode_major), encoding="utf-8")
+    logger.info("Wrote OpenCode %s.x plugin: %s", opencode_major, plugin_path)
 
     return plugin_path

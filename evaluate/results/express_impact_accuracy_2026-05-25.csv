@@ -1,3 +1,0 @@
-repo,commit,predicted_files,actual_files,true_positives,precision,recall,f1
-express,925a1dff1e42f1b393c977b8b77757fcf633e09f,2,1,1,0.5,1.0,0.667
-express,b4ab7d65d7724d9309b6faaaf82ad492da2a6d35,2,1,1,0.5,1.0,0.667

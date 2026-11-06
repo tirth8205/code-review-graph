@@ -9,6 +9,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+READ_ONLY_ENV = "CRG_READ_ONLY"
+
+
+def read_only_requested() -> bool:
+    """Return whether this process must avoid writes to graph state."""
+    return os.environ.get(READ_ONLY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Numeric environment overrides (#912)
 # ---------------------------------------------------------------------------
