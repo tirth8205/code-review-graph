@@ -88,6 +88,13 @@
 
 ### Fixed
 
+- A multi-clause Elixir function is now one node that spans all its clauses. The
+  graph keeps one node per name, so the last clause used to overwrite the others:
+  a change to an earlier clause found no function at all. `parse_bytes` now merges
+  them, from the first clause's first line to the last clause's last line, and
+  keeps the first clause's parameters. Clauses of different arities share the
+  node too, as the graph has no arity in its names, so another function can sit
+  inside the span (#979).
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
