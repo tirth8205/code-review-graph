@@ -85,7 +85,7 @@ enrichment = [
 ]
 dev = [
     "mypy>=1.10,<3",
-    "pytest>=8.0,<9",
+    "pytest>=8.0,<10",
     "pytest-asyncio>=0.23,<2",
     "pytest-cov>=4.0,<8",
     "ruff>=0.3.0,<1",
