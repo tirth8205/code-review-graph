@@ -414,9 +414,11 @@ the age of the last event each watcher processed:
 - `ok`: the filesystem observer is running and publishing a heartbeat.
 - `stalled`: the process is up but its observer threads are not, so nothing is
   indexed. Check `crg-daemon logs --repo ALIAS`, then `crg-daemon restart`.
-- `partial`: the watcher ran out of watch slots and fell back to one recursive
-  watch. Still complete, but ignored trees are watched again. Raise
-  `CRG_MAX_WATCH_SCHEDULES` to get the filtering back.
+- `partial`: the watcher has reduced coverage. Its health file's `failed_paths`
+  lists directories the OS refused to watch. If that list is empty, the watcher
+  ran out of watch slots and fell back to one recursive watch: still complete,
+  but ignored trees are watched again. Raise `CRG_MAX_WATCH_SCHEDULES` to get
+  the filtering back.
 - `unknown`: the watcher has not published health yet (it just started, or it
   predates this feature).
 - `dead`: the process exited. The daemon restarts it with exponential backoff,

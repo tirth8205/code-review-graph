@@ -2732,6 +2732,7 @@ class _WatchSupervisor:
         # health file, for as long as the daemon lives.  Path -> wall-clock
         # time of the most recent refusal, newest last.
         self._unwatched: dict[str, float] = {}
+        self._refused_to_index: list[str] = []
         self._promotion_retry_at: dict[str, float] = {}
         self._last_health_write = 0.0
         self._last_health_state: tuple[bool, bool, tuple[str, ...]] | None = None
@@ -2881,10 +2882,22 @@ class _WatchSupervisor:
                         previous_patterns,
                     )
                 )
+                refused_before = candidate in self._unwatched
                 if self._adopt_directory(candidate, required=newly_included):
                     adopted.append(candidate)
+                elif candidate in self._unwatched and not refused_before:
+                    self._refused_to_index.append(candidate)
         self._prune_unwatched()
         return adopted, vanished
+
+    def take_refused_to_index(self) -> list[str]:
+        """Directories newly refused a watch, whose files still need indexing.
+
+        Each is returned once. The watch is retried every tick, and re-reading
+        the tree on every retry would pass for live events in watcher health.
+        """
+        paths, self._refused_to_index = self._refused_to_index, []
+        return paths
 
     def _note_unwatched(self, key: str) -> None:
         """Record a directory the OS refused, newest last, and bound the record."""
@@ -2941,6 +2954,10 @@ class _WatchSupervisor:
             self._schedule(path, recursive=recursive)
             if required and str(path) not in self._watches:
                 raise RuntimeError(f"Cannot watch newly included directory: {path}")
+        if candidate not in self._watches:
+            # Refused, and recorded in _unwatched. The next tick tries again,
+            # so this is not an adoption yet.
+            return False
         logger.info("Watching new directory %s (%d watch(es))", relative, len(plan))
         return True
 
@@ -3159,6 +3176,7 @@ class _WatchSupervisor:
             "watched_paths": len(self._watches),
             "dead_threads": list(dead_threads),
             "degraded": self.degraded,
+            "failed_paths": self.unwatched_paths,
             "phase": phase,
         }
         try:
@@ -3458,7 +3476,7 @@ def _sync_watch_tree(supervisor: _WatchSupervisor, handler: Any) -> None:
     from watchdog.events import DirCreatedEvent, DirDeletedEvent
 
     adopted, vanished = supervisor.sync_watches(ignore_patterns=handler.ignore_patterns)
-    for path in adopted:
+    for path in [*adopted, *supervisor.take_refused_to_index()]:
         handler.dispatch(DirCreatedEvent(path))
     for path in vanished:
         handler.dispatch(DirDeletedEvent(path))

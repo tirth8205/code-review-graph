@@ -1852,10 +1852,9 @@ class TestWatcherUnderStress:
         supervisor._observer = _ExhaustedObserver()
         adopted = supervisor._adopt_directory(str(new_dir))
 
-        # Adoption still succeeds, because the directory's current contents
-        # must be indexed either way; what it no longer does is hide that the
-        # watch behind it was refused.
-        assert adopted is True
+        # Not an adoption: the watch was refused, and that must not be hidden.
+        # sync_watches still queues the current contents for indexing, once.
+        assert adopted is False
         assert str(new_dir) not in supervisor.watched_paths
         assert supervisor.degraded is True
         assert str(new_dir) in supervisor.unwatched_paths
