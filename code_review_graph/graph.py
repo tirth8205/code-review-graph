@@ -2473,7 +2473,12 @@ class GraphStore:
             bare_name = edge_extra.get(raw_key, edge[endpoint])
             if not isinstance(bare_name, str):
                 continue
-            candidates = node_lookup.get(bare_name, [])
+            # ``Shop::Cart.new`` runs ``Shop::Cart#initialize``.
+            receiver_constant = edge_extra.get("receiver_constant") is True
+            lookup_name = (
+                "initialize" if receiver_constant and bare_name == "new" else bare_name
+            )
+            candidates = node_lookup.get(lookup_name, [])
             if "receiver_binding" in edge_extra:
                 candidates = self._receiver_backed_candidates(
                     candidates, edge_extra, parent_lookup,
@@ -2497,6 +2502,9 @@ class GraphStore:
                 or candidate_file in imported_files
                 or candidate_file == receiver_file
                 or candidate_file == receiver_class_file
+                # A Ruby constant path names its class wherever it is defined,
+                # and the receiver check above already held the candidate to it.
+                or receiver_constant
             ]
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [
@@ -3705,6 +3713,16 @@ class GraphStore:
                 "WHERE e.kind = 'CALLS' "
                 "AND (n.kind IS NULL OR n.kind != 'File')"
             ).fetchall()
+        return {r["target_qualified"] for r in rows}
+
+    def get_call_targets_outside_tests(self) -> set[str]:
+        """Return CALLS targets with a caller that is neither test code nor a File."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT e.target_qualified FROM edges e "
+            "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+            "WHERE e.kind = 'CALLS' "
+            "AND (n.kind IS NULL OR (n.kind != 'File' AND n.is_test = 0))"
+        ).fetchall()
         return {r["target_qualified"] for r in rows}
 
     def get_communities_list(

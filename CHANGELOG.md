@@ -88,6 +88,24 @@
 
 ### Fixed
 
+- `tests_for` finds Java and Ruby tests. On spring-petclinic, production symbols
+  with a test went from 5 to 61, and on sidekiq from 198 to 443. Run a full
+  `build` to pick this up.
+  - Java: a test in `src/test/java` can now reach `src/main/java`, for an import
+    and for a class in its own package, which needs no import. `this.field.x()`
+    and `var x = new Cart()` now give the type too.
+  - Ruby: `it "..." do`, `describe`, `before`, `let` and `test "..." do` are test
+    nodes in test files. A call is matched to a method only when the file says
+    what class it is made on: a constant, a constructor, `described_class`, or a
+    name assigned from one of those.
+  - A call in a test on something of unknown type no longer matches a method by
+    name alone, in either language. An inherited method is not linked yet, so
+    `owner.setId()` does not count for `BaseEntity.setId`.
+  - By name, `CartTests`, `CartTest`, `CartIT` and `CartSpec` now count for the
+    class `Cart`. Free text in a test's title no longer counts, so
+    `it "tests json output"` is not a test of `json`.
+  - A Ruby or Java method called only by its tests stays a flow entry point, as
+    it was when those calls did not bind.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
