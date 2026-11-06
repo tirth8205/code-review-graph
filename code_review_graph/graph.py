@@ -1917,9 +1917,13 @@ class GraphStore:
             class_name = edge_extra.get("receiver_class")
             if not isinstance(class_name, str) or not class_name:
                 return []
+            class_file = edge_extra.get("receiver_class_file")
+            if class_file is not None and not isinstance(class_file, str):
+                return []
             return [
                 candidate for candidate in candidates
                 if parent_lookup.get(candidate[0]) == class_name
+                and (not class_file or candidate[1] == class_file)
             ]
         return []
 
@@ -2468,12 +2472,14 @@ class GraphStore:
                 if edge_extra.get("receiver_binding") == "module"
                 else None
             )
+            receiver_class_file = edge_extra.get("receiver_class_file")
             supported = [
                 qualified
                 for qualified, candidate_file in candidates
                 if candidate_file == context_file
                 or candidate_file in imported_files
                 or candidate_file == receiver_file
+                or candidate_file == receiver_class_file
             ]
             ambiguous_files = ambiguous_import_targets.get(context_file, set())
             ambiguity_supported = [
