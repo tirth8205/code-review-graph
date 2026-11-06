@@ -589,6 +589,15 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert importers["status"] == "ok", importers
             assert importers["result_count"] >= 1, importers["summary"]
 
+            route = await _call(
+                session,
+                "query_graph_tool",
+                {"pattern": "path_to", "target": qualified, "to": "helper_0_0_0"},
+            )
+            assert route["status"] == "ok", route
+            assert route["result_count"] >= 1, route["summary"]
+            assert route["weakest_hop"]["certainty"] == route["certainty"], route
+
             ambiguous = await _call(
                 session,
                 "query_graph_tool",
@@ -598,7 +607,10 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert ambiguous["candidates"], ambiguous
             walk.verify(
                 "query_graph_tool",
-                ["file_summary", "callers_of", "callees_of", "importers_of", "ambiguous"],
+                [
+                    "file_summary", "callers_of", "callees_of", "importers_of", "path_to",
+                    "ambiguous",
+                ],
             )
 
             # --- 7. review context ----------------------------------------
