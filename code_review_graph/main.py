@@ -1186,8 +1186,9 @@ async def get_knowledge_gaps_tool(
     """Identify structural weaknesses in the codebase graph.
 
     Finds isolated nodes (disconnected), thin communities (< 3 members),
-    untested hotspots (high-degree nodes without test coverage), and
-    single-file communities.
+    untested hotspots (high-degree nodes without test coverage), single-file
+    communities, and import cycles (files that import each other; load_time
+    says whether a loop can fail as the files load).
 
     Args:
         repo_root: Repository root path. Auto-detected if omitted.

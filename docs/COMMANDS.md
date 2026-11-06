@@ -263,7 +263,17 @@ repo_root: str | None
 max_per_category: int = 15       # Entries per gap category (max 50)
 detail_level: str = "standard"   # "minimal" drops file paths
 ```
-`summary` maps each category to its untruncated count.
+`summary` maps each category to its untruncated count. The categories are
+`isolated_nodes`, `thin_communities`, `untested_hotspots`,
+`single_file_communities` and `import_cycles`.
+
+An `import_cycles` row is one group of files that import each other: `size` is
+how many files, `name` and `cycle` spell out one loop with its import lines, and
+`load_time` says whether that loop can fail as the files load. `false` means every
+loop has an import inside a function. Imports that never run are left out:
+`if TYPE_CHECKING:` in Python and `import type` in TypeScript. Only imports that
+name a file are followed, so Go packages and C# namespaces are not. Graphs built
+before this release need `code-review-graph build` to tell these imports apart.
 
 #### `get_surprising_connections_tool`
 ```

@@ -825,7 +825,7 @@ async def test_every_registered_tool_returns_real_content(unbuilt: Fixture) -> N
             assert gaps["status"] == "ok", gaps
             assert set(gaps["gaps"]) >= {
                 "isolated_nodes", "thin_communities",
-                "untested_hotspots", "single_file_communities",
+                "untested_hotspots", "single_file_communities", "import_cycles",
             }, gaps["gaps"].keys()
             assert gaps["total_gaps"] >= 1, gaps
             walk.verify("get_knowledge_gaps_tool", ["status", "gap-categories", "total_gaps"])

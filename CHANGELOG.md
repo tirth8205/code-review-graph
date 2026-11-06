@@ -4,6 +4,12 @@
 
 ### Added
 
+- `get_knowledge_gaps_tool` now reports `import_cycles`: groups of files that
+  import each other, with one loop written out and its import lines. `load_time`
+  says whether the loop can fail as the files load; `false` means every loop has
+  an import inside a function. To tell these apart, import edges now record
+  `extra.import_context`: `type_only`, `deferred` or `parent_package`. Run
+  `code-review-graph build` once to get it on an existing graph. Part of #434.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
@@ -88,6 +94,12 @@
 
 ### Fixed
 
+- A file inside a Python package no longer answers an absolute standard library
+  import. `import json` and `import typing` in Flask's own files were linked to
+  `flask/json/__init__.py` and `flask/typing.py`, which made a false dependency
+  and a false import cycle. Python 3 does not look in a package's own folder, so
+  those imports now stay external. A `typing.py` beside a script, or at the top
+  of a `src/` folder, can still answer them.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

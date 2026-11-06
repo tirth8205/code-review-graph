@@ -336,3 +336,18 @@ IMPORT_SCOPE_PACKAGE = "package"
 IMPORT_SCOPE_TREE = "tree"
 
 IMPORT_SCOPES = (IMPORT_SCOPE_PACKAGE, IMPORT_SCOPE_TREE)
+
+#: ``edges.extra`` key on an ``IMPORTS_FROM`` edge whose import does not run as
+#: the importing file loads. No key means it does. Graphs built before this key
+#: existed have none, so they read every import as a load-time one until rebuilt.
+IMPORT_CONTEXT_KEY = "import_context"
+
+#: Never runs: ``if TYPE_CHECKING:`` in Python, ``import type`` in TypeScript.
+IMPORT_CONTEXT_TYPE_ONLY = "type_only"
+
+#: Runs late: inside a function, or a JavaScript dynamic ``import()``.
+IMPORT_CONTEXT_DEFERRED = "deferred"
+
+#: Python ``from . import sibling``: the edge to the package is only the route to
+#: the sibling, and a file's own package is already loaded before the file is.
+IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"
