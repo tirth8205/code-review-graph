@@ -30,7 +30,7 @@ Scope (see issue #592 — Option 1, regex-based approximation):
   that class — that is ``@within()`` semantics, a different pointcut
   designator, and conflating the two produced widespread false positives
   on common class-level stereotype annotations (see PR #916 review).
-* ``execution(...)`` pointcuts are converted into a regex applied to the
+* ``execution(...)`` pointcuts are matched segment by segment against the
   full ``package.ClassName.methodName`` portion of a candidate — the
   return-type pattern and parameter pattern (``(..)``) are discarded, but
   the declaring-type pattern (package included) is matched in full against
@@ -40,7 +40,9 @@ Scope (see issue #592 — Option 1, regex-based approximation):
   name.  A candidate in Java's default (unnamed) package has no
   ``java_package`` and is matched using the bare ``ClassName.methodName``,
   so a pointcut that names a package never matches a default-package class.
-  This is still a regex approximation of full AspectJ semantics (no
+  A declaring type of exactly ``*`` (``execution(* *.*(..))``) means any
+  type in any package, as in AspectJ.
+  This is still an approximation of full AspectJ semantics (no
   supertype/interface expansion, no ``+`` subtype matching) and can produce
   false positives/negatives on those axes — see issue #592 — but no longer
   discards package selectivity: two same-named classes in different
@@ -53,6 +55,19 @@ Scope (see issue #592 — Option 1, regex-based approximation):
   is not recognized by either pointcut-kind matcher below, so it is
   skipped too — just by falling through unparsed rather than via an
   explicit compound-operator check.
+* Constructors (``extra["java_constructor"]``) and methods of ``@Aspect``
+  classes are never targets: Spring AOP intercepts neither, since it
+  proxies method calls on beans and does not auto-proxy aspects.
+* Advice whose pointcut is not one complete string literal (a constant, or
+  literals joined with ``+``) is skipped rather than partially resolved.
+* Annotations are compared by simple name, so a fully qualified method or
+  advice annotation (``@com.acme.Audited``, ``@org.aspectj.lang.annotation.Before``)
+  matches. A fully qualified *class-level* ``@org.aspectj.lang.annotation.Aspect``
+  is still not recognized: aspects are found through
+  ``extra["spring_annotations"]``, which ``_get_java_annotations`` in
+  ``parser.py`` fills with simple-name annotations only. Changing that would
+  alter Spring stereotype detection as a whole, so it is left for a separate
+  change.
 * ``within(Type+)``, ``args()``/``target()``/``this()``, and named pointcut
   references that cross an ``@Aspect`` class boundary are out of scope for
   this pass (see the narrower AOP ``LanguageGap`` note in
@@ -108,6 +123,11 @@ _COMPOUND_OPERATORS = ("&&", "||")
 _NAMED_POINTCUT_REF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\(\s*\)\s*$")
 _ANNOTATION_POINTCUT = re.compile(r"^\s*@annotation\s*\((.+)\)\s*$", re.DOTALL)
 _EXECUTION_POINTCUT = re.compile(r"^\s*execution\s*\((.*)\)\s*$", re.DOTALL)
+# A pointcut that opens with a designator, whitespace allowed before "(" as
+# both matchers above allow it.
+_DESIGNATOR_PREFIX = re.compile(
+    r"^\s*(?:execution|@annotation|within|args|target|this)\s*\("
+)
 
 _DERIVED_FLAG = "aop_resolved"
 
@@ -120,59 +140,89 @@ def _extract_annotation_string_arg(deco_text: str) -> Optional[str]:
     "ex")`` / ``value = "expr"``). Returns ``None`` when no string literal
     argument can be found.
     """
-    named = re.search(r'(?:pointcut|value)\s*=\s*"((?:[^"\\]|\\.)*)"', deco_text)
-    if named:
-        return named.group(1)
-    any_string = re.search(r'"((?:[^"\\]|\\.)*)"', deco_text)
-    if any_string:
-        return any_string.group(1)
-    return None
+    match = re.search(r'(?:pointcut|value)\s*=\s*"((?:[^"\\]|\\.)*)"', deco_text)
+    if not match:
+        match = re.search(r'"((?:[^"\\]|\\.)*)"', deco_text)
+    if not match:
+        return None
+    # A literal joined to anything with "+" is a constant expression this
+    # pass cannot evaluate; resolving only one piece of it could drop an
+    # "&&" and advise the wrong methods, so give up instead.
+    if deco_text[: match.start()].rstrip().endswith("+") or deco_text[
+        match.end():
+    ].lstrip().startswith("+"):
+        return None
+    return match.group(1)
 
 
 def _annotation_head(deco_text: str) -> str:
-    """Return the annotation name from a raw decorator string, dropping args."""
-    return deco_text.split("(", 1)[0].strip()
+    """Return the simple annotation name from a raw decorator string.
+
+    Arguments and any package qualifier are dropped, so ``com.acme.Audited``
+    and ``Audited`` compare equal.
+    """
+    head = deco_text.split("(", 1)[0].strip().lstrip("@").strip()
+    return head.rsplit(".", 1)[-1].strip()
 
 
-def _aspectj_pattern_to_regex(pattern: str) -> str:
-    """Convert one AspectJ-style dotted wildcard pattern into a regex fragment.
+class _DottedPattern:
+    """An AspectJ-style dotted wildcard pattern, matched one segment at a time.
 
     Rules (approximate — see module docstring for the scope this is applied
     within):
 
-    * ``..`` means "any number of intervening path segments" →
-      ``\\.(?:[^.]+\\.)*`` — whole dot-delimited segments only, never a bare
-      ``.*``: repeated ``.*`` fragments backtrack catastrophically, and the
-      pointcut text comes from the repository being indexed
-    * a lone ``.`` is a literal separator → escaped ``\\.``
-    * ``*`` within a segment means "anything but a dot" → ``[^.]*``
+    * ``..`` means "any number of intervening whole segments", zero included
+    * a lone ``.`` separates two segments
+    * ``*`` within a segment means "any characters but a dot"
     * every other character is matched literally
+
+    The pattern text comes from the repository being indexed, so it is never
+    turned into one regex for the whole name: stacked ``..`` gaps made that
+    backtrack exponentially. Each segment is a small regex of its own, and
+    the gaps are handled by tracking which subject positions are reachable,
+    which is linear in pattern length times subject length.
     """
-    out: list[str] = []
-    i = 0
-    n = len(pattern)
-    while i < n:
-        ch = pattern[i]
-        if ch == "." and i + 1 < n and pattern[i + 1] == ".":
-            out.append(r"\.(?:[^.]+\.)*")
-            i += 2
-        elif ch == ".":
-            out.append(r"\.")
-            i += 1
-        elif ch == "*":
-            out.append("[^.]*")
-            i += 1
-        else:
-            out.append(re.escape(ch))
-            i += 1
-    return "".join(out)
+
+    _GAP = None
+
+    def __init__(self, pattern: str, any_package_prefix: bool = False) -> None:
+        items: list[Optional[re.Pattern[str]]] = []
+        if any_package_prefix:
+            items.append(self._GAP)
+        for index, run in enumerate(pattern.split("..")):
+            if index:
+                items.append(self._GAP)
+            for segment in run.split("."):
+                if segment:
+                    items.append(re.compile(
+                        "".join("[^.]*" if ch == "*" else re.escape(ch) for ch in segment)
+                    ))
+        self._items = items
+
+    def match(self, subject: str) -> bool:
+        segments = subject.split(".")
+        if "" in segments:
+            return False
+        reachable = {0}
+        for item in self._items:
+            if item is self._GAP:
+                reachable = set(range(min(reachable), len(segments) + 1))
+            else:
+                reachable = {
+                    position + 1
+                    for position in reachable
+                    if position < len(segments) and item.fullmatch(segments[position])
+                }
+            if not reachable:
+                return False
+        return len(segments) in reachable
 
 
-def _parse_execution_expression(expr: str) -> Optional[tuple[str, bool]]:
-    """Reduce an ``execution(...)`` pointcut expression to a (regex, needs_class) pair.
+def _parse_execution_expression(expr: str) -> Optional[tuple[_DottedPattern, bool]]:
+    """Reduce an ``execution(...)`` pointcut expression to a (pattern, needs_class) pair.
 
     ``needs_class`` is True when the expression's method-pattern token
-    included a declaring-type segment (e.g. ``com.foo.*.*``), so the regex
+    included a declaring-type segment (e.g. ``com.foo.*.*``), so the pattern
     must be matched against the candidate's full ``package.ClassName.methodName``
     (see ``resolve_aop_advice``); it is False for a method-name-only pattern
     (e.g. ``*get*Index``), matched against the bare method name.  The full
@@ -199,8 +249,13 @@ def _parse_execution_expression(expr: str) -> Optional[tuple[str, bool]]:
         return None
 
     needs_class = "." in method_class_pattern
-    regex_str = "^" + _aspectj_pattern_to_regex(method_class_pattern) + "$"
-    return regex_str, needs_class
+    # A declaring type of exactly "*" means any type, in any package, so
+    # only the bare "*.method" shape gets a free package prefix. A pattern
+    # that names a package keeps matching that package exactly.
+    universal_type = method_class_pattern.split(".")[0] == "*" and (
+        method_class_pattern.count(".") == 1
+    )
+    return _DottedPattern(method_class_pattern, universal_type), needs_class
 
 
 def _resolve_pointcut_expr(
@@ -228,9 +283,7 @@ def _resolve_pointcut_expr(
             return None
         return resolved
 
-    if "." in expr and "(" in expr and not expr.lstrip().startswith(
-        ("execution(", "@annotation(", "within(", "args(", "target(", "this("),
-    ):
+    if "." in expr and "(" in expr and not _DESIGNATOR_PREFIX.match(expr):
         # Looks like a dotted "Other.pointcut()" cross-aspect reference.
         return None
 
@@ -311,6 +364,9 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
             "stale_calls_removed": len(stale_ids),
         }
 
+    # Spring AOP does not proxy aspects, so their methods are never targets;
+    # they stay in methods_by_class_file for advice and pointcut discovery.
+    aspect_keys = {(aspect["name"], aspect["file_path"]) for aspect in aspect_classes}
     all_methods: list[dict] = []
     methods_by_class_file: dict[tuple[str, str], list[dict]] = {}
     for row in conn.execute(
@@ -329,7 +385,9 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
                 (row["parent_name"], row["file_path"]), "",
             ),
         }
-        all_methods.append(entry)
+        key = (row["parent_name"], row["file_path"])
+        if key not in aspect_keys and not extra.get("java_constructor"):
+            all_methods.append(entry)
         methods_by_class_file.setdefault(
             (row["parent_name"], row["file_path"]), [],
         ).append(entry)
@@ -384,12 +442,8 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
                 parsed = _parse_execution_expression(expr)
                 if not parsed:
                     continue
-                regex_str, needs_class = parsed
+                pattern, needs_class = parsed
                 pointcut_kind = "execution"
-                try:
-                    pattern = re.compile(regex_str)
-                except re.error:
-                    continue
                 targets = []
                 for candidate in all_methods:
                     if needs_class:

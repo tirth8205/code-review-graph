@@ -723,16 +723,20 @@ _PATHOLOGICAL_SCRIPT = textwrap.dedent("""\
     from code_review_graph.parser import CodeParser
 
     root = Path(sys.argv[1])
-    source = '''package com.example.deeply.nested.pkg.service.impl;
+    package = "com." + ".".join("segment%d" % i for i in range(30))
+    pointcut = "execution(* com" + "..*" * 14 + ".zz(..))"
+    source = '''package %s;
 
     @Aspect
     public class Evil {
-        @Before("execution(* com..*..*..*..*..*..*.zz(..))")
+        @Before("%s")
         public void advice() {}
+    }
 
+    class Target {
         public void someReasonablyNamedBusinessMethod() {}
     }
-    '''
+    ''' % (package, pointcut)
     path = root / "Evil.java"
     nodes, edges = CodeParser().parse_bytes(path, source.encode())
     store = GraphStore(root / "graph.db")
@@ -745,7 +749,7 @@ _PATHOLOGICAL_SCRIPT = textwrap.dedent("""\
 def test_pathological_double_dot_pointcut_resolves_in_bounded_time(tmp_path: Path) -> None:
     """Pointcut text comes from the repository being indexed (including a
     fork's pull request in the GitHub Action). Repeated ``..*`` segments must
-    not turn the translated regex into catastrophic backtracking that stalls
+    not turn matching into catastrophic backtracking that stalls
     ``build``/``update``. Run in a child process so a regression fails this
     test instead of hanging the suite."""
     package_root = str(Path(code_review_graph.__file__).resolve().parent.parent)
@@ -760,8 +764,8 @@ def test_pathological_double_dot_pointcut_resolves_in_bounded_time(tmp_path: Pat
         )
     except subprocess.TimeoutExpired:
         pytest.fail(
-            "resolve_aop_advice did not finish within 30s on one method and the "
-            "pointcut execution(* com..*..*..*..*..*..*.zz(..))"
+            "resolve_aop_advice did not finish within 30s on one method in a "
+            "31-segment package and a pointcut with fourteen '..*' gaps"
         )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip().splitlines()[-1] == "0"
