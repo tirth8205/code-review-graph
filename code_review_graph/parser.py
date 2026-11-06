@@ -8171,7 +8171,25 @@ class CodeParser:
         first child is the function's identifier and whose children
         (past the parens) are the parameters.
         """
+        def function_head(node):
+            if node.type != "binary_operator":
+                return node
+            operator = next(
+                (child for child in node.children
+                 if child.text.decode("utf-8", errors="replace") == "when"),
+                None,
+            )
+            if operator is None:
+                return None
+            left = node.child_by_field_name("left")
+            if left is None:
+                return None
+            return function_head(left)
+
         for child in arguments.children:
+            child = function_head(child)
+            if child is None:
+                continue
             if child.type == "call":
                 name: Optional[str] = None
                 for sub in child.children:
@@ -8306,6 +8324,18 @@ class CodeParser:
                     import_map=import_map, defined_names=defined_names,
                     _depth=_depth + 1,
                 )
+            else:
+                # Short form ``def f(x), do: g(x)``: the body is a keyword
+                # argument of the ``def`` call rather than a do_block.
+                for sub in arguments.children:
+                    if sub.type == "keywords":
+                        self._extract_from_tree(
+                            sub, source, language, file_path, nodes, edges,
+                            enclosing_class=enclosing_class,
+                            enclosing_func=fn_name,
+                            import_map=import_map, defined_names=defined_names,
+                            _depth=_depth + 1,
+                        )
             return True
 
         # ---- alias / import / require / use ----------------------------
