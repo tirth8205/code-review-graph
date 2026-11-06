@@ -1572,6 +1572,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start filesystem watch in a daemon thread while MCP server runs",
     )
     serve_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help=(
+            "Use one stdio MCP session with one child server per linked Git "
+            "worktree; requires explicit repo_root for non-primary worktrees"
+        ),
+    )
+    serve_cmd.add_argument(
         "--tools", default=None,
         help=(
             "Comma-separated list of tool names to expose "
@@ -1605,6 +1613,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--auto-watch",
         action="store_true",
         help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
+    mcp_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help="Use one stdio MCP session with one child server per linked Git worktree",
     )
 
     # daemon
@@ -1763,14 +1776,38 @@ def _dispatch() -> None:
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
 
     if args.command in ("serve", "mcp"):
-        from .main import main as serve_main
-
         auto_watch = getattr(args, "auto_watch", False)
+        multi_worktree = getattr(args, "multi_worktree", False)
         if args.command == "serve":
             if args.port is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
                 _SUBCOMMANDS["serve"].error("--host requires --http")
+        if multi_worktree:
+            if args.command == "serve" and args.http:
+                _SUBCOMMANDS["serve"].error(
+                    "--multi-worktree is only supported for stdio"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                _SUBCOMMANDS[args.command].error(
+                    "--multi-worktree cannot be combined with CRG_DATA_DIR; "
+                    "use per-repository Registry data_dir entries instead"
+                )
+            from .multi_worktree import MultiWorktreeError, run_multi_worktree_server
+
+            try:
+                run_multi_worktree_server(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    tools=getattr(args, "tools", None),
+                )
+            except MultiWorktreeError as exc:
+                _SUBCOMMANDS[args.command].error(str(exc))
+            return
+
+        from .main import main as serve_main
+
+        if args.command == "serve":
             if args.http:
                 host = args.host if args.host is not None else "127.0.0.1"
                 port = args.port if args.port is not None else 5555
