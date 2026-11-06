@@ -1556,7 +1556,7 @@ class TestDaemonCLI:
 
 
 class TestStopClearsWatcherHealth:
-    """A watcher killed outright cannot clear its own health file. See: #925
+    """A watcher killed outright cannot clear its own health file. See: #925, #1160
 
     That is every watcher on Windows, where ``crg-daemon stop`` ends the daemon
     with ``TerminateProcess`` and the Job Object takes the children with it, so
