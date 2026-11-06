@@ -1,4 +1,4 @@
-"""``.cjs`` and ``.kts`` files are source code like their siblings. See: #1117
+"""``.cjs`` and ``.kts`` files are source code like their siblings. See: #1117, #1158
 
 ``.mjs`` and ``.kt`` were in the extension map and these two were not, so every
 build skipped CommonJS modules and Kotlin scripts and reported the repository
