@@ -209,3 +209,31 @@ def test_rewrite_dry_run_touches_nothing(repo, hook, new_text):
     assert hook.read_text() == "#!/bin/sh\nold\n"
     assert report.total_actions == 1
     assert all("would " in entry for entry in report.edited_paths + report.removed_paths)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "echo no shebang\n",
+        "#!/bin/sh\n",
+        "#!/bin/bash -e\n",
+        "#! /usr/bin/env zsh\n",
+        "#!/usr/bin/env -S bash -e\n",
+    ],
+)
+def test_is_shell_hook_accepts_shell_scripts(text):
+    assert skills._is_shell_hook(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "#!/usr/bin/env python3\n",
+        "#!/usr/bin/python\n",
+        "#!/usr/bin/env node\n",
+        "#!/usr/bin/env\n",
+    ],
+)
+def test_is_shell_hook_rejects_other_interpreters(text):
+    assert not skills._is_shell_hook(text)

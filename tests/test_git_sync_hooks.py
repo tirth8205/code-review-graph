@@ -117,6 +117,30 @@ def test_rebase_pull_updates_once_after_local_commits_are_replayed(tmp_path, mon
     assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
 
 
+def test_rebase_with_no_local_commits_updates_once(tmp_path, monkeypatch):
+    """A rebase with nothing to replay never runs post-rewrite.
+
+    Its checkout of the new base is the final tree, so post-checkout updates.
+    """
+    upstream, clone, log = sync_repo(tmp_path, monkeypatch)
+    commit_file(upstream, "probe.txt")
+    git(clone, "fetch")
+    git(clone, "rebase", "origin/main")
+    assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
+
+
+def test_rebase_whose_local_commits_are_already_upstream_updates_once(
+    tmp_path, monkeypatch
+):
+    upstream, clone, log = sync_repo(tmp_path, monkeypatch)
+    commit_file(upstream, "local.txt", "same\n")
+    commit_file(upstream, "probe.txt")
+    commit_file(clone, "local.txt", "same\n")
+    git(clone, "fetch")
+    git(clone, "rebase", "origin/main")
+    assert calls(log) == [f"update --quiet --repo {clone} probe=present"]
+
+
 def test_amend_does_not_update(tmp_path, monkeypatch):
     _upstream, clone, log = sync_repo(tmp_path, monkeypatch)
     commit_file(clone, "local.txt")
@@ -218,3 +242,34 @@ def test_uninstall_leaves_unbalanced_block_unchanged(tmp_path, monkeypatch):
     uninstall._remove_git_sync_hooks(clone, report, dry_run=False)
     assert hook.read_text() == broken
     assert any("post-checkout" in path for path in report.skipped_paths)
+
+
+def test_non_shell_hook_is_left_alone_and_still_runs(tmp_path, monkeypatch):
+    upstream, clone, _log = sync_repo(tmp_path, monkeypatch)
+    hook = clone / ".git" / "hooks" / "post-merge"
+    marker = tmp_path / "python-hook.log"
+    monkeypatch.setenv("USER_HOOK_LOG", str(marker))
+    script = (
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "with open(os.environ['USER_HOOK_LOG'], 'a') as f:\n"
+        "    f.write('python\\n')\n"
+    )
+    hook.write_text(script)
+    hook.chmod(0o755)
+    install_git_sync_hooks(clone)
+    assert hook.read_text() == script
+
+    commit_file(upstream, "probe.txt")
+    result = git(clone, "pull")
+    assert marker.read_text().splitlines() == ["python"]
+    assert "error" not in result.stderr.lower()
+
+
+def test_orphan_end_marker_is_left_alone(tmp_path, monkeypatch):
+    _upstream, clone, _log = sync_repo(tmp_path, monkeypatch)
+    hook = clone / ".git" / "hooks" / "post-merge"
+    broken = f"#!/bin/sh\necho mine\n{skills._GIT_SYNC_HOOK_END_MARKER}\n"
+    hook.write_text(broken)
+    install_git_sync_hooks(clone)
+    assert hook.read_text() == broken

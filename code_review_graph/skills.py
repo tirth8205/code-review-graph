@@ -1753,7 +1753,9 @@ def install_git_hook(repo_root: Path) -> Path | None:
 #
 # - post-checkout, on branch checkouts only, and not while a rebase is in
 #   progress: a rebase checks out the new base before replaying local commits,
-#   so updating there would drop the user's own changes from the graph.
+#   so updating there would drop the user's own changes from the graph. When
+#   nothing is left to replay, Git never runs post-rewrite, so that checkout
+#   is the final tree and post-checkout updates after all.
 # - post-merge, after a merge or a merge-mode ``git pull``.
 # - post-rewrite, after a rebase has replayed every commit. ``--amend`` also
 #   fires it, but ``pre-commit`` already updated the graph for that commit.
@@ -1784,9 +1786,16 @@ def _git_sync_hook_block(hook_name: str) -> str:
     condition = _GIT_SYNC_HOOK_CONDITIONS[hook_name]
     rebase_guard = ""
     if hook_name == "post-checkout":
-        # post-rewrite updates the graph once the rebase has finished.
+        # post-rewrite updates the graph once the rebase has replayed local
+        # commits. Git skips post-rewrite when nothing is left to replay (no
+        # local commits, or all already upstream), so this checkout is then
+        # the final tree. The todo list is written before this checkout runs.
         rebase_guard = """\
-    elif [ -d "$crg_hook_git_dir/rebase-merge" ] || [ -d "$crg_hook_git_dir/rebase-apply" ]; then
+    elif [ -d "$crg_hook_git_dir/rebase-merge" ] && grep -Eq \\
+            '^[[:space:]]*(p|pick|r|reword|e|edit|s|squash|f|fixup|m|merge)[[:space:]]' \\
+            "$crg_hook_git_dir/rebase-merge/git-rebase-todo" 2>/dev/null; then
+        :
+    elif [ -d "$crg_hook_git_dir/rebase-apply" ]; then
         :
 """
     body = f"""\
@@ -1809,6 +1818,28 @@ fi
     )
 
 
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "ash"})
+
+
+def _is_shell_hook(text: str) -> bool:
+    """Return whether a shell block can be appended to this hook script.
+
+    Git runs a hook with no shebang through ``/bin/sh``, so that counts as
+    shell. Otherwise the interpreter named by the shebang decides, looking
+    through ``/usr/bin/env`` and its options.
+    """
+    if not text.startswith("#!"):
+        return True
+    parts = text[2:].split("\n", 1)[0].split()
+    if not parts:
+        return True
+    if Path(parts[0]).name == "env":
+        parts = [part for part in parts[1:] if not part.startswith("-")]
+        if not parts:
+            return False
+    return Path(parts[0]).name in _SHELL_INTERPRETERS
+
+
 def install_git_sync_hooks(repo_root: Path) -> list[Path]:
     """Install post-checkout, post-merge and post-rewrite hooks that run ``update``.
 
@@ -1816,7 +1847,8 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
     :func:`install_git_hook`, and resolves the hooks directory the same way.
     Each block is appended to an existing hook, never overwriting it, and a
     block written by an earlier release is replaced in place. A hook whose
-    markers are unbalanced was edited by hand and is left alone. A failed
+    markers are unbalanced was edited by hand and is left alone, and so is a
+    hook written in a language other than shell. A failed
     update never fails the git command that triggered it.
     """
     hooks_dir = _git_hooks_dir(repo_root)
@@ -1830,7 +1862,17 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
         block = _git_sync_hook_block(name)
         if hook_path.exists():
             existing = hook_path.read_text(encoding="utf-8")
-            if _GIT_SYNC_HOOK_BEGIN_MARKER in existing:
+            if not _is_shell_hook(existing):
+                logger.warning(
+                    "%s is not a shell script; leaving it alone. Call "
+                    "'code-review-graph update --quiet' from it to keep the graph in sync.",
+                    hook_path,
+                )
+                continue
+            if (
+                _GIT_SYNC_HOOK_BEGIN_MARKER in existing
+                or _GIT_SYNC_HOOK_END_MARKER in existing
+            ):
                 span = _git_hook_block_span(
                     existing, 0, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
                 )
@@ -1838,8 +1880,7 @@ def install_git_sync_hooks(repo_root: Path) -> list[Path]:
                     existing, _GIT_SYNC_HOOK_BEGIN_MARKER, _GIT_SYNC_HOOK_END_MARKER
                 ):
                     logger.warning(
-                        "%s has a code-review-graph begin marker with no matching end "
-                        "marker; leaving it alone.",
+                        "%s has unbalanced code-review-graph markers; leaving it alone.",
                         hook_path,
                     )
                     continue
