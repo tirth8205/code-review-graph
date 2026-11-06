@@ -133,14 +133,10 @@ Three long-lived branches, one direction: feature PR → `staging` (default) →
 Open every PR against `staging`. Never push to or open PRs against `testing` or `main`; those only
 receive promotion PRs, always merged with a merge commit.
 
-`staging` → `testing` is automatic: `.github/workflows/auto-promote.yml` runs once a day and merges
-the promotion PR when `staging` is ahead, every required check is green, and the promotion gate has
-not failed on `testing`. The decision lives in `scripts/auto_promote.py`. It merges only a PR it
-opened itself — same repository, correctly aimed, labelled `auto-promotion`, pinned to the commit
-whose checks were read — so a promotion PR you open by hand is left alone. It needs Settings →
-Actions → General → Workflow permissions → *Allow GitHub Actions to create and approve pull
-requests*. **Promotion to `main` is never automatic** — the maintainer opens and merges that PR by
-hand. Full rules in CONTRIBUTING.md "Branching and promotion".
+**No promotion is automatic.** A person reviews and merges every `staging` → `testing` and
+`testing` → `main` PR by hand, however green the checks are; no workflow may merge a PR, and
+`tests/test_promotion_is_manual.py` enforces that. Full rules in CONTRIBUTING.md "Branching and
+promotion".
 
 ## Session Completion
 
