@@ -4,6 +4,12 @@
 
 ### Added
 
+- `code-review-graph install --steering` adds an opt-in Claude Code hook that puts
+  graph context beside each search and read. `enrich` has existed for a long time,
+  but `install` never wrote the hook that runs it. It is off by default because it
+  changes what the model sees on every such call. `--no-steering` removes only
+  that hook, and `uninstall` removes it too. A failed lookup never stops the tool
+  call, and a broken graph or odd input now leaves `enrich` silent.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

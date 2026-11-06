@@ -270,6 +270,46 @@ def _match_files_to_forget(
     return sorted(matched)
 
 
+_STEERING_HELP = (
+    "Claude Code only: add (or, with --no-steering, remove) a hook that puts graph "
+    "context beside each search and read. Off unless asked for; it uses a few "
+    "hundred tokens at most on each call"
+)
+
+
+def _apply_steering_choice(
+    repo_root: Path, target: str, steering: bool, *, skip_hooks: bool, dry_run: bool,
+) -> None:
+    """Add or remove the steering hook, as ``--steering`` or ``--no-steering`` asked."""
+    from .skills import install_steering_hook
+    from .uninstall import remove_steering_hook
+
+    if not steering:
+        report = remove_steering_hook(repo_root, dry_run=dry_run)
+        for skipped in report.skipped_paths:
+            print(f"Could not remove the steering hook: {skipped}")
+        if report.errors:
+            for error in report.errors:
+                print(f"Could not remove the steering hook: {error}")
+        elif report.total_actions == 0:
+            if not report.skipped_paths:
+                print("No steering hook to remove.")
+        elif dry_run:
+            print("[dry-run] Would remove the steering hook.")
+        else:
+            print("Removed the steering hook.")
+        return
+    if skip_hooks:
+        print("Skipped the steering hook: --no-hooks was given.")
+    elif target not in ("claude", "all"):
+        print("Skipped the steering hook: it is only for Claude Code.")
+    elif dry_run:
+        print("[dry-run] Would add the steering hook to .claude/settings.json.")
+    else:
+        path = install_steering_hook(repo_root)
+        print(f"Installed the steering hook in {path}. Remove it with --no-steering.")
+
+
 def _handle_init(args: argparse.Namespace) -> None:
     """Set up MCP config for detected AI coding platforms."""
     from .incremental import ensure_repo_gitignore_excludes_crg, find_repo_root
@@ -302,7 +342,15 @@ def _handle_init(args: argparse.Namespace) -> None:
         for t in instr_targets:
             print(f"  {t}")
 
+    steering = getattr(args, "steering", None)
+
     if dry_run:
+        if steering is not None:
+            print()
+            _apply_steering_choice(
+                repo_root, target, steering,
+                skip_hooks=getattr(args, "no_hooks", False), dry_run=True,
+            )
         print("\n[dry-run] Would ensure .gitignore ignores .code-review-graph/.")
         print("[dry-run] No files were modified.")
         return
@@ -440,6 +488,11 @@ def _handle_init(args: argparse.Namespace) -> None:
             print(f"Installed git pre-commit hook in {git_hook}")
         for sync_hook in install_git_sync_hooks(repo_root):
             print(f"Installed git {sync_hook.name} hook in {sync_hook}")
+
+    if steering is not None:
+        _apply_steering_choice(
+            repo_root, target, steering, skip_hooks=skip_hooks, dry_run=False,
+        )
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
@@ -1097,6 +1150,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip installing platform-native hooks",
     )
     install_cmd.add_argument(
+        "--steering",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=_STEERING_HELP,
+    )
+    install_cmd.add_argument(
         "--no-instructions",
         action="store_true",
         help="Skip injecting graph instructions into CLAUDE.md / AGENTS.md / etc.",
@@ -1136,6 +1195,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-hooks",
         action="store_true",
         help="Skip installing platform-native hooks",
+    )
+    init_cmd.add_argument(
+        "--steering",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=_STEERING_HELP,
     )
     init_cmd.add_argument(
         "--no-instructions",

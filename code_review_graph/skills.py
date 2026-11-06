@@ -1471,6 +1471,33 @@ def _codex_hook_command(subcommand: str) -> str:
     )
 
 
+def generate_steering_hooks_config() -> dict[str, Any]:
+    """Generate the opt-in Claude Code hook that runs ``code-review-graph enrich``.
+
+    It adds graph context beside each search and read, which changes what the
+    model sees on every one of them, so ``install`` writes it only when asked.
+    ``|| true`` matters: exit code 2 from a PreToolUse hook stops the tool call,
+    and a failed lookup must never do that. Claude Code is the only client whose
+    hook output ``enrich`` writes.
+    """
+    return {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Grep|Glob|Bash|Read",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{_codex_hook_command('enrich')} || true",
+                            "timeout": 5,
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+
+
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate native Codex hooks configuration for the active Codex home."""
     return {
@@ -1974,6 +2001,10 @@ _GENERATED_HOOK_COMMAND_RE = re.compile(
     r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
     r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
     r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
+    # The opt-in steering hook. See generate_steering_hooks_config.
+    r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
+    r"then\s+code-review-graph\s+enrich;\s*"
+    r"else\s+cat\s*>/dev/null;\s*fi;\s*\}\s*\|\|\s*true"
     r")\Z"
 )
 
@@ -1989,6 +2020,7 @@ _GENERATED_HOOK_MATCHERS: dict[str, frozenset[str | None]] = {
     "PostToolUse": frozenset({"Edit|Write", "Edit|Write|Bash", "Write|Edit|Bash"}),
     "SessionStart": frozenset({"", None, "startup|resume"}),
     "AfterTool": frozenset({"write_file|replace"}),
+    "PreToolUse": frozenset({"Grep|Glob|Bash|Read"}),
 }
 
 
@@ -2245,6 +2277,13 @@ def install_hooks(repo_root: Path, platform: str = "claude") -> None:
     else:
         settings_dir = repo_root / ".claude"
     _merge_hooks_into_settings(settings_dir, generate_hooks_config(repo_root))
+
+
+def install_steering_hook(repo_root: Path) -> Path:
+    """Add the opt-in steering hook to the project's Claude Code settings."""
+    return _merge_hooks_into_settings(
+        repo_root / ".claude", generate_steering_hooks_config(),
+    )
 
 
 def install_codebuddy_hooks(repo_root: Path) -> Path:

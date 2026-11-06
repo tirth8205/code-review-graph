@@ -511,6 +511,19 @@ def _clean_hook_data(
     return expected, paths
 
 
+def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> UninstallReport:
+    """Remove only the opt-in steering hook from the project's Claude Code settings."""
+    report = UninstallReport()
+    _remove_hooks(
+        repo_root / ".claude" / "settings.json",
+        _commands(skills.generate_steering_hooks_config()),
+        repo_root,
+        report,
+        dry_run=dry_run,
+    )
+    return report
+
+
 def _remove_hooks(
     path: Path,
     owned_commands: set[str],
@@ -1115,6 +1128,7 @@ def _process_repo(
             _remove_file(path, repo_root, report, dry_run=dry_run)
 
     hook_commands = _commands(skills.generate_hooks_config(repo_root))
+    hook_commands.update(_commands(skills.generate_steering_hooks_config()))
     hook_commands.update(_legacy_repo_hook_commands(repo_root))
     _remove_hooks(
         repo_root / ".claude" / "settings.json",

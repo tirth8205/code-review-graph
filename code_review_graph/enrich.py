@@ -11,9 +11,12 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
+
+from .errors import GraphStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -268,9 +271,13 @@ def run_hook() -> None:
         hook_input = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
         return
+    if not isinstance(hook_input, dict):
+        return
 
     tool_name = hook_input.get("tool_name", "")
     tool_input = hook_input.get("tool_input", {})
+    if not isinstance(tool_input, dict):
+        return
     cwd = hook_input.get("cwd", os.getcwd())
 
     # Find repo root by walking up from cwd
@@ -282,17 +289,22 @@ def run_hook() -> None:
     if not db_path.exists():
         return
 
-    # Dispatch
+    # Dispatch. The tool call goes ahead either way, so a graph that cannot be
+    # read costs the extra context and nothing else.
     context = ""
-    if tool_name == "Read":
-        fp = tool_input.get("file_path", "")
-        if fp:
-            context = enrich_file_read(fp, repo_root)
-    else:
-        pattern = extract_pattern(tool_name, tool_input)
-        if not pattern or len(pattern) < 3:
-            return
-        context = enrich_search(pattern, repo_root)
+    try:
+        if tool_name == "Read":
+            fp = tool_input.get("file_path", "")
+            if fp:
+                context = enrich_file_read(fp, repo_root)
+        else:
+            pattern = extract_pattern(tool_name, tool_input)
+            if not pattern or len(pattern) < 3:
+                return
+            context = enrich_search(pattern, repo_root)
+    except (GraphStoreError, sqlite3.Error, OSError) as exc:
+        logger.warning("Could not read the graph for hook enrichment: %s", exc)
+        return
 
     if not context:
         return
