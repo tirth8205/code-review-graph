@@ -3,7 +3,7 @@
 ``query_graph`` used to send every bare target through the tokenising full-text
 index, so ``hybrid_search`` also matched each ``test_hybrid_search_*`` and came
 back "ambiguous" with thousands of tokens and no answer, even when only one
-symbol had that name.
+symbol had that name. See: #1149
 """
 
 from __future__ import annotations
