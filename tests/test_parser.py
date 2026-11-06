@@ -25,6 +25,388 @@ class TestCodeParser:
     def test_detect_language_unknown(self):
         assert self.parser.detect_language(Path("foo.txt")) is None
 
+    def test_parse_robot_and_resource_files(self, tmp_path):
+        robot = tmp_path / "sample.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    keywords.resource\n"
+            "Library     OperatingSystem\n\n"
+            "*** Test Cases ***\n"
+            "A passing test\n"
+            "    Log    hello\n"
+            "    Prepare environment\n\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Create directory    ${OUTPUT}\n",
+            encoding="utf-8",
+        )
+        resource = tmp_path / "keywords.resource"
+        resource.write_text(
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Log    ready\n",
+            encoding="utf-8",
+        )
+
+        assert self.parser.detect_language(robot) == "robot"
+        assert self.parser.detect_language(resource) == "robot"
+        nodes, edges = self.parser.parse_file(robot)
+        assert {node.name for node in nodes} >= {
+            str(robot), "A passing test", "Prepare environment",
+        }
+        assert any(node.kind == "Test" and node.name == "A passing test" for node in nodes)
+        assert any(
+            edge.kind == "IMPORTS_FROM" and edge.target == resource.as_posix()
+            for edge in edges
+        )
+        assert any(
+            edge.kind == "CALLS"
+            and edge.source.endswith("::A passing test")
+            and edge.target == f"{robot.as_posix()}::Prepare environment"
+            for edge in edges
+        )
+
+    def test_robot_keyword_matching_ignores_case_spaces_and_underscores(self, tmp_path):
+        robot = tmp_path / "keywords.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Normalize keyword names\n"
+            "    Prepare environment\n"
+            "    prepare_environment\n"
+            "    PREPARE ENVIRONMENT\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "    Log    ready\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        keyword = next(node for node in nodes if node.kind == "Function")
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        keyword_calls = [edge for edge in calls if edge.target.endswith("::Prepare environment")]
+        assert len(keyword_calls) == 3
+        assert all(edge.source.endswith("::Normalize keyword names") for edge in keyword_calls)
+        assert any(edge.target == "Log" for edge in calls)
+        assert keyword.name == "Prepare environment"
+
+    def test_robot_control_flow_and_variable_assignment(self, tmp_path):
+        robot = tmp_path / "control.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Control flow\n"
+            "    ${result}= Prepare environment\n"
+            "    ${first}    ${result}=    Prepare environment\n"
+            "    IF    ${result}\n"
+            "        FOR    ${item}    IN    one    two\n"
+            "            Prepare environment\n"
+            "        END\n"
+            "    ELSE IF    ${other}\n"
+            "        Prepare environment\n"
+            "    ELSE\n"
+            "        Prepare environment\n"
+            "    END\n"
+            "    IF wrapper\n"
+            "    TRY\n"
+            "        Prepare environment\n"
+            "    EXCEPT\n"
+            "        Prepare environment\n"
+            "    ELSE\n"
+            "        Prepare environment\n"
+            "    FINALLY\n"
+            "        Prepare environment\n"
+            "    END\n"
+            "    IF    ${flag}    Prepare environment\n"
+            "    IF    ${flag}    Prepare environment    ELSE    Prepare environment\n"
+            "*** Keywords ***\n"
+            "Prepare environment\n"
+            "IF wrapper\n"
+            "    Log    wrapper\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        calls = [edge for edge in edges if edge.kind == "CALLS"]
+        expected_keyword = f"{robot.as_posix()}::Prepare environment"
+        test_calls = [edge for edge in calls if edge.source.endswith("::Control flow")]
+        assert len(test_calls) == 13
+        assert sum(edge.target == expected_keyword for edge in test_calls) == 12
+        assert any(edge.target == f"{robot.as_posix()}::IF wrapper" for edge in test_calls)
+        assert not any(
+            edge.target
+            in {"IF", "FOR", "TRY", "END", "ELSE", "ELSE IF", "EXCEPT", "FINALLY", "${result}="}
+            for edge in calls
+        )
+
+    def test_robot_pipe_rows_define_tests_with_clean_names(self, tmp_path):
+        robot = tmp_path / "pipe.robot"
+        robot.write_text(
+            "| *** Settings *** |\n"
+            "| Resource | keywords.resource |\n"
+            "| *** Test Cases *** |\n"
+            "| Valid Login |\n"
+            "|             | Open Page |\n"
+            "|             | ${x}= | Read Value | a|b |\n"
+            "| |\n"
+            "| T2 |\n"
+            "| *** Keywords *** |\n"
+            "| Open Page |\n"
+            "|           | Log | ready |\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        names = {node.kind: [] for node in nodes}
+        for node in nodes:
+            names[node.kind].append(node.name)
+        assert names["Test"] == ["Valid Login", "T2"]
+        assert names["Function"] == ["Open Page"]
+        calls = {
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        }
+        assert calls == {
+            ("Valid Login", "Open Page"),
+            ("Valid Login", "Read Value"),
+            ("Open Page", "Log"),
+        }
+        assert any(
+            edge.kind == "IMPORTS_FROM" and edge.target.endswith("/keywords.resource")
+            for edge in edges
+        )
+
+    def _robot_calls(self, tmp_path, source: bytes) -> list[tuple[str, str]]:
+        robot = tmp_path / "suite.robot"
+        robot.write_bytes(source)
+        _, edges = self.parser.parse_file(robot)
+        return [
+            (edge.source.rsplit("::", 1)[-1], edge.target.rsplit("::", 1)[-1])
+            for edge in edges
+            if edge.kind == "CALLS"
+        ]
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            "${x}=    Kw",
+            "${x} =    Kw",
+            "${x}= Kw",
+            "${x}    Kw",
+            "${a}    ${b}    Kw",
+            "${a}    ${b}=    Kw",
+            "@{items}=    Kw",
+        ],
+    )
+    def test_robot_every_assignment_form_keeps_the_keyword(self, tmp_path, row):
+        source = f"*** Test Cases ***\nT\n    {row}\n*** Keywords ***\nKw\n".encode()
+
+        assert self._robot_calls(tmp_path, source) == [("T", "Kw")]
+
+    def test_robot_setup_teardown_and_template_are_calls(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Settings ***\n"
+            b"Suite Setup    Kw One\n"
+            b"Test Teardown    NONE\n"
+            b"Library    Collections\n"
+            b"*** Test Cases ***\n"
+            b"T\n"
+            b"    [Setup]    Kw Two\n"
+            b"    [Teardown]    NONE\n"
+            b"    [Template]    Kw Three\n"
+            b"    [Tags]    smoke\n"
+            b"*** Keywords ***\n"
+            b"K\n"
+            b"    [Teardown]    Kw Four\n"
+            b"Kw One\nKw Two\nKw Three\nKw Four\n",
+        )
+
+        assert set(calls) == {
+            ((tmp_path / "suite.robot").as_posix(), "Kw One"),
+            ("T", "Kw Two"),
+            ("T", "Kw Three"),
+            ("K", "Kw Four"),
+        }
+
+    def test_robot_a_test_mirror_comes_only_from_a_test(self, tmp_path):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\nSuite Setup    Kw\n"
+            "*** Test Cases ***\nT\n    Kw\n"
+            "*** Keywords ***\nKw\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        mirrors = [edge.target.rsplit("::", 1)[-1] for edge in edges if edge.kind == "TESTED_BY"]
+        assert mirrors == ["T"]
+
+    def test_robot_bdd_words_are_not_part_of_the_keyword(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Test Cases ***\n"
+            b"T\n"
+            b"    Given Prepare Env\n"
+            b"    when prepare_env\n"
+            b"    Then External Kw\n"
+            b"*** Keywords ***\n"
+            b"Prepare Env\n",
+        )
+
+        assert calls == [("T", "Prepare Env"), ("T", "Prepare Env"), ("T", "External Kw")]
+
+    def test_robot_control_words_are_never_calls(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Keywords ***\n"
+            b"K\n"
+            b"    FOR    ${i}    IN    a\n"
+            b"        CONTINUE\n"
+            b"        BREAK\n"
+            b"    END\n"
+            b"    WHILE\n"
+            b"        One\n"
+            b"    END\n"
+            b"    GROUP    name\n"
+            b"        Two\n"
+            b"    END\n"
+            b"    VAR    ${x}    1\n"
+            b"    IF    ${a}    RETURN\n"
+            b"    IF    ${a}    Three    ELSE IF    ${b}    Four    ELSE    Five\n"
+            b"    RETURN    1\n",
+        )
+
+        assert [target for _, target in calls] == ["One", "Two", "Three", "Four", "Five"]
+
+    def test_robot_keywords_may_be_named_like_lower_case_control_words(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"*** Test Cases ***\nT\n    End\n    If    x\n*** Keywords ***\nEnd\nIf\n",
+        )
+
+        assert [target for _, target in calls] == ["End", "If"]
+
+    @pytest.mark.parametrize(
+        ("settings", "tests", "keywords"),
+        [
+            ("*** Settings ***", "*** Test Cases ***", "*** Keywords ***"),
+            ("*** Setting ***", "*** Test Case ***", "*** Keyword ***"),
+            ("* Settings *", "* Test Cases *", "* Keywords *"),
+            ("*** settings ***", "*** test cases ***", "*** keywords ***"),
+        ],
+    )
+    def test_robot_section_header_spellings(self, tmp_path, settings, tests, keywords):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            f"{settings}\nLibrary    X\n{tests}\nT\n    Kw\n{keywords}\nKw\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+
+        assert {(node.kind, node.name) for node in nodes if node.kind != "File"} == {
+            ("Test", "T"), ("Function", "Kw"),
+        }
+        assert any(edge.kind == "IMPORTS_FROM" and edge.target == "X" for edge in edges)
+
+    def test_robot_bom_and_crlf_do_not_hide_the_first_section(self, tmp_path):
+        calls = self._robot_calls(
+            tmp_path,
+            b"\xef\xbb\xbf*** Test Cases ***\r\nT\r\n    Kw\r\n*** Keywords ***\r\nKw\r\n",
+        )
+
+        assert calls == [("T", "Kw")]
+
+    def test_robot_continuation_row_at_column_zero_is_not_a_definition(self, tmp_path):
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Test Cases ***\nT\n    Kw    a\n...    b\n*** Keywords ***\nKw\n",
+            encoding="utf-8",
+        )
+
+        nodes, _ = self.parser.parse_file(robot)
+
+        assert [node.name for node in nodes if node.kind == "Test"] == ["T"]
+
+    def test_robot_resource_paths(self, tmp_path):
+        folder = tmp_path / "sub"
+        folder.mkdir()
+        robot = folder / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    ../shared/a.resource\n"
+            "Resource    ${CURDIR}/b.resource\n"
+            "Resource    ${ROOT}/c.resource\n",
+            encoding="utf-8",
+        )
+
+        _, edges = self.parser.parse_file(robot)
+
+        assert [edge.target for edge in edges if edge.kind == "IMPORTS_FROM"] == [
+            (tmp_path / "shared" / "a.resource").as_posix(),
+            (folder / "b.resource").as_posix(),
+            "${ROOT}/c.resource",
+        ]
+
+    def test_robot_test_and_keyword_with_same_name_coexist(self, tmp_path):
+        robot = tmp_path / "shared.robot"
+        robot.write_text(
+            "*** Test Cases ***\n"
+            "Shared\n"
+            "    Log    Test case\n"
+            "*** Keywords ***\n"
+            "Shared\n"
+            "    Log    Keyword\n",
+            encoding="utf-8",
+        )
+
+        nodes, edges = self.parser.parse_file(robot)
+        with GraphStore(tmp_path / "graph.db") as store:
+            for node in nodes:
+                store.upsert_node(node)
+            for edge in edges:
+                store.upsert_edge(edge)
+            store.commit()
+            persisted = store.get_nodes_by_file(robot.as_posix())
+            contains = list(store.iter_edges_by_source(robot.as_posix()))
+
+        shared = [node for node in persisted if node.name == "Shared"]
+        assert {node.kind for node in shared} == {"Test", "Function"}
+        assert len({node.qualified_name for node in shared}) == 2
+        assert {node.line_start for node in shared} == {2, 5}
+        assert {edge.target_qualified for edge in contains if edge.kind == "CONTAINS"} == {
+            node.qualified_name for node in shared
+        }
+
+    def test_robot_resource_import_is_found_by_importers_query(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".code-review-graph").mkdir()
+        robot = tmp_path / "suite.robot"
+        robot.write_text(
+            "*** Settings ***\n"
+            "Resource    keywords.resource\n"
+            "*** Test Cases ***\n"
+            "A test\n"
+            "    Log    hello\n",
+            encoding="utf-8",
+        )
+        resource = tmp_path / "keywords.resource"
+        resource.write_text("*** Keywords ***\nA keyword\n    Log    ready\n", encoding="utf-8")
+
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            built = full_build(tmp_path, store)
+            assert built["errors"] == []
+
+        result = query_graph("importers_of", str(resource), repo_root=str(tmp_path))
+        assert result.get("status") == "ok"
+        assert any(item["file"] == robot.as_posix() for item in result.get("results", []))
+
     # --- Shebang detection for extension-less Unix scripts (#237) ---
 
     def _write_shebang_file(self, tmp_path: Path, name: str, content: str) -> Path:
