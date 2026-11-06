@@ -23,7 +23,7 @@ from collections import deque
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, Union
 
-from .flows import _has_framework_decorator, _matches_entry_name
+from .flows import _has_framework_decorator, _has_override_decorator, _matches_entry_name
 from .graph import GraphNode, GraphStore, _compatible_edge_languages, _sanitize_name
 from .parser import _STORYBOOK_FILE_RE, CodeParser, normalize_file_path
 from .parser import is_test_file as _is_test_file
@@ -1865,7 +1865,7 @@ def _is_entry_point(node: Any) -> bool:
     framework decorators -- the indicators that a function is *intentionally*
     an entry point rather than simply unreferenced dead code.
     """
-    if _has_framework_decorator(node):
+    if _has_framework_decorator(node) or _has_override_decorator(node):
         return True
     if _matches_entry_name(node):
         return True

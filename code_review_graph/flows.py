@@ -45,6 +45,15 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\baction\b", re.IGNORECASE),
     # Testing
     re.compile(r"pytest\.(fixture|mark)"),
+    # JUnit / TestNG methods are invoked by the runner. The parser keeps an
+    # annotation's package and arguments, so both are allowed around the name.
+    re.compile(
+        r"^(?:[\w.]+\.)?(?:Test|TestFactory|TestTemplate|ParameterizedTest|RepeatedTest"
+        r"|BeforeEach|AfterEach|BeforeAll|AfterAll|Before|After|BeforeClass|AfterClass"
+        r"|BeforeMethod|AfterMethod|BeforeSuite|AfterSuite|BeforeTest|AfterTest"
+        r"|BeforeGroups|AfterGroups|DataProvider)(?:\s*\(.*)?$",
+        re.DOTALL,
+    ),
     re.compile(r"(override_settings|modify_settings)", re.IGNORECASE),
     # SQLAlchemy / event systems
     re.compile(r"(event\.)?listens_for", re.IGNORECASE),
@@ -59,8 +68,6 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"(Subscribe|Mutation|Query|Resolver)", re.IGNORECASE),
     # Express / Koa / Hono route handlers
     re.compile(r"(app|router)\.(get|post|put|delete|patch|use|all)\b"),
-    # Android lifecycle
-    re.compile(r"@(Override|OnLifecycleEvent|Composable)", re.IGNORECASE),
     # Kotlin coroutines / Android ViewModel
     re.compile(r"(HiltViewModel|AndroidEntryPoint|Inject)", re.IGNORECASE),
     # AI/agent frameworks (pydantic-ai, langchain, etc.)
@@ -71,6 +78,12 @@ _FRAMEWORK_DECORATOR_PATTERNS: list[re.Pattern[str]] = [
     # Generic route decorator (Flask blueprints: @bp.route, @auth_bp.route, etc.)
     re.compile(r"\w+\.route\b", re.IGNORECASE),
 ]
+
+# An override implements a supertype contract, so its caller is that contract:
+# a supertype-typed reference, a framework, or the runtime for Object.hashCode and
+# friends. The base is often outside the graph, so no hierarchy walk can rescue it.
+# That stops it being dead, but it is no flow root: one with callers is mid-flow.
+_OVERRIDE_DECORATOR = re.compile(r"^(?:java\.lang\.)?Override$")
 
 # Name patterns that indicate conventional entry points.
 _ENTRY_NAME_PATTERNS: list[re.Pattern[str]] = [
@@ -140,6 +153,16 @@ def _has_framework_decorator(node: GraphNode) -> bool:
             if pat.search(dec):
                 return True
     return False
+
+
+def _has_override_decorator(node: GraphNode) -> bool:
+    """Return True if *node* carries Java's ``@Override``."""
+    decorators = node.extra.get("decorators")
+    if not decorators:
+        return False
+    if isinstance(decorators, str):
+        decorators = [decorators]
+    return any(_OVERRIDE_DECORATOR.search(dec) for dec in decorators)
 
 
 def _matches_entry_name(node: GraphNode) -> bool:

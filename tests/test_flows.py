@@ -13,7 +13,7 @@ from code_review_graph.flows import (
     trace_flows,
 )
 from code_review_graph.graph import GraphStore
-from code_review_graph.parser import EdgeInfo, NodeInfo
+from code_review_graph.parser import CodeParser, EdgeInfo, NodeInfo
 
 
 class TestFlows:
@@ -171,6 +171,89 @@ class TestFlows:
         eps = detect_entry_points(self.store)
         ep_names = {ep.name for ep in eps}
         assert "query_health" in ep_names
+
+    def test_called_override_is_not_a_flow_root(self):
+        """``@Override`` stops a method reading as dead, not as mid-flow.
+
+        Only dead-code needs it. As a flow root, every called override would add
+        a sub-path of a flow that already exists and push real roots out of the list.
+        """
+        self._add_func("entry_func")
+        self._add_func(
+            "hashCode",
+            parent="Widget",
+            language="java",
+            extra={"decorators": ["Override"]},
+        )
+        self._add_call("app.py::entry_func", "app.py::Widget.hashCode")
+
+        eps = detect_entry_points(self.store)
+        assert "hashCode" not in {ep.name for ep in eps}
+
+    def test_detect_entry_points_junit_lifecycle(self):
+        """JUnit lifecycle methods are invoked by the runner, never explicitly.
+
+        Each one is given a caller, for the same reason as above.
+        """
+        self._add_func("entry_func")
+        for name, annotation in (
+            ("setUp", "BeforeEach"),
+            ("tearDown", "AfterEach"),
+            ("initAll", "BeforeAll"),
+            ("cleanAll", "AfterAll"),
+        ):
+            self._add_func(
+                name,
+                parent="Harness",
+                language="java",
+                extra={"decorators": [annotation]},
+            )
+            self._add_call("app.py::entry_func", f"app.py::Harness.{name}")
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"setUp", "tearDown", "initAll", "cleanAll"} <= eps
+
+    def test_detect_entry_points_parsed_junit_annotations(self):
+        """Forms read from real Java, which keep their package and arguments."""
+        source = (
+            b"package demo;\n"
+            b"class Cases {\n"
+            b"  @Test void plain() {}\n"
+            b"  @Test(expected = IllegalStateException.class) void withArgs() {}\n"
+            b"  @org.junit.jupiter.api.BeforeEach void qualified() {}\n"
+            b"  @BeforeMethod void testNg() {}\n"
+            b'  @DataProvider(name = "rows") Object[][] rows() { return null; }\n'
+            b"  @TestHelper void lookalike() {}\n"
+            b"  void caller() {\n"
+            b"    plain(); withArgs(); qualified(); testNg(); rows(); lookalike();\n"
+            b"  }\n"
+            b"}\n"
+        )
+        nodes, edges = CodeParser().parse_bytes(Path("Cases.java"), source)
+        for node in nodes:
+            self.store.upsert_node(node)
+        for edge in edges:
+            self.store.upsert_edge(edge)
+        self.store.commit()
+
+        kinds = {n.name: n.kind for n in nodes}
+        # The parser takes a bare @Test for a test, so it never reaches the pattern.
+        assert kinds["plain"] == "Test"
+        assert kinds["withArgs"] == "Function"
+
+        eps = {ep.name for ep in detect_entry_points(self.store)}
+        assert {"withArgs", "qualified", "testNg", "rows"} <= eps
+        assert "plain" not in eps
+        assert "lookalike" not in eps
+
+    def test_override_pattern_is_anchored(self):
+        """``^Override$`` must not match a decorator that merely contains it."""
+        self._add_func("entry_func")
+        self._add_func("helper", extra={"decorators": ["Overridable"]})
+        self._add_call("app.py::entry_func", "app.py::helper")
+
+        eps = detect_entry_points(self.store)
+        assert "helper" not in {ep.name for ep in eps}
 
     def test_detect_entry_points_alembic(self):
         """upgrade/downgrade functions are entry points."""
