@@ -4725,6 +4725,214 @@ class TestPLSQLHelpers:
         assert len(members) == n
         assert elapsed < 5, f"block-end search took {elapsed:.2f}s for {n} members — looks quadratic"
 
+    @staticmethod
+    def _parse_plsql(source: str, name: str = "x.sql"):
+        return CodeParser().parse_bytes(Path(name), source.encode())
+
+    @staticmethod
+    def _call_targets(edges) -> set[str]:
+        return {e.target for e in edges if e.kind == "CALLS"}
+
+    def test_call_names_keep_unicode_letters(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n  café_proc(1);\n  café(2);\nEND p;\n"
+        )
+
+        assert self._call_targets(edges) == {"café_proc", "café"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "CREATE FUNCTION f RETURN NUMBER IS BEGIN RETURN g(1); END f;\n",
+            "CREATE OR REPLACE FUNCTION s.f(p NUMBER(10, 2)) RETURN NUMBER AS\n"
+            "BEGIN RETURN g(p); END;\n",
+            "CREATE PROCEDURE f IS BEGIN g(1); END f;\n",
+            "CREATE PROCEDURE f\n  (a NUMBER)\nIS\nBEGIN g(a); END;\n",
+            "CREATE OR REPLACE PROCEDURE f(a NUMBER)  AS\n  n NUMBER;\nBEGIN g(a); END;\n",
+        ],
+    )
+    def test_oracle_subprogram_syntax_is_a_dialect_signal(self, source):
+        # None of these holds a VARCHAR2 or a %TYPE: the routine's own shape has
+        # to be enough, or a plain Oracle function has no node at all.
+        nodes, edges = self._parse_plsql(source)
+
+        assert [n.name for n in nodes if n.kind == "Function"] == ["f"]
+        assert self._call_targets(edges) == {"g"}
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "CREATE PROCEDURE p AS BEGIN SELECT 1 END\n",  # T-SQL
+            "CREATE PROCEDURE analysis @x INT AS SELECT 1\n",  # name ends in IS
+            "CREATE PROCEDURE thesis (@x INT) AS SELECT 1\n",
+            "CREATE FUNCTION f(@x INT) RETURNS INT AS BEGIN RETURN @x END\n",
+            "CREATE FUNCTION f(@x INT) RETURNS @t TABLE (a INT) AS\n"
+            "BEGIN INSERT @t VALUES (1) RETURN END\n",
+            "CREATE FUNCTION f(x INT) RETURNS INT DETERMINISTIC BEGIN RETURN x; END\n",  # MySQL
+            "CREATE FUNCTION myreturn (x INT) RETURNS INT BEGIN RETURN x; END\n",
+            "CREATE OR REPLACE PROCEDURE p() AS $$ BEGIN g(1); END; $$ LANGUAGE plpgsql;\n",
+            "CREATE OR REPLACE PROCEDURE p()  AS\n  $body$ BEGIN g(1); END; $body$\n"
+            "LANGUAGE plpgsql;\n",
+            "CREATE OR REPLACE PROCEDURE p() AS 'g(1)' LANGUAGE sql;\n",
+            "CREATE OR REPLACE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN g(1); END; $$;\n",
+        ],
+    )
+    def test_other_dialects_are_not_read_as_oracle_subprograms(self, source):
+        assert not CodeParser._is_plsql_dialect(Path("x.sql"), source)
+
+    def test_q_string_default_does_not_run_the_member_signature_on(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE m(x VARCHAR2 DEFAULT q'[text]') IS BEGIN g(1); END m;\n"
+            "  PROCEDURE n(y NUMBER) IS BEGIN h(1); END n;\n"
+            "END k;\n"
+        )
+
+        identities = {n.name: n.identity_name for n in nodes if n.kind == "Function"}
+        assert identities["n"] == "n(y NUMBER)"
+        assert identities["m"].startswith("m(x VARCHAR2 DEFAULT q'")
+        assert identities["m"].endswith("')")
+        assert "BEGIN" not in identities["m"]
+        assert self._call_targets(edges) == {"g", "h"}
+
+    @pytest.mark.parametrize("name", ["run$", "calc#", "run$v2"])
+    def test_named_end_after_an_identifier_ending_in_dollar_or_hash(self, name):
+        _, edges = self._parse_plsql(
+            f"CREATE PROCEDURE {name} IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  BEGIN\n    a(1);\n  END;\n"
+            "  b(2);\n"
+            f"END {name};\n"
+        )
+
+        assert self._call_targets(edges) == {"a", "b"}
+
+    def test_bare_outer_end_keeps_every_package_member(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE a IS\n"
+            "    v VARCHAR2(1) := CASE WHEN 1 = 1 THEN 'x' END;\n"
+            "  BEGIN\n"
+            "    IF v IS NULL THEN x(1); END IF;\n"
+            "    FOR i IN 1 .. 2 LOOP x2(i); END LOOP;\n"
+            "    CASE v WHEN 'x' THEN x3(1); END CASE;\n"
+            "    $IF 1 = 1 $THEN x4(1); $END\n"
+            "  END;\n"
+            "  PROCEDURE b IS BEGIN y(1); END;\n"
+            "  FUNCTION c RETURN NUMBER IS BEGIN RETURN z(1); END c;\n"
+            "END;\n"
+            "/\n"
+            "CREATE TABLE t (id NUMBER);\n"
+        )
+
+        body = next(n for n in nodes if n.extra.get("sql_kind") == "package_body")
+        assert (body.line_start, body.line_end) == (1, 12)
+        assert {n.name for n in nodes if n.kind == "Function"} == {"a", "b", "c"}
+        assert {"x", "x2", "x3", "x4", "y", "z"} == self._call_targets(edges)
+
+    def test_package_initialisation_section_with_bare_end(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PACKAGE BODY k AS\n"
+            "  PROCEDURE a IS BEGIN x(1); END;\n"
+            "BEGIN\n"
+            "  setup(1);\n"
+            "END;\n"
+            "/\n"
+            "CREATE TABLE t (id NUMBER);\n"
+        )
+
+        body = next(n for n in nodes if n.extra.get("sql_kind") == "package_body")
+        assert (body.line_start, body.line_end) == (1, 5)
+        assert {n.name for n in nodes if n.kind == "Function"} == {"a"}
+
+    def test_bare_end_counts_nested_blocks_and_case_expressions(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  BEGIN\n    a(1);\n  END;\n"
+            "  v := CASE WHEN 1 = 1 THEN 'x' END;\n"
+            "  b(2);\n"
+            "END;\n"
+            "CREATE PROCEDURE q IS BEGIN c(3); END;\n"
+        )
+
+        sources = {
+            e.target: e.source.rsplit("::", 1)[-1] for e in edges if e.kind == "CALLS"
+        }
+        assert sources == {"a": "p", "b": "p", "c": "q"}
+
+    def test_named_local_procedure_does_not_end_a_bare_ended_parent(self):
+        nodes, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS\n"
+            "  v VARCHAR2(1);\n"
+            "  PROCEDURE inner_step IS BEGIN a(1); END inner_step;\n"
+            "BEGIN\n"
+            "  b(2);\n"
+            "END;\n"
+        )
+
+        assert self._call_targets(edges) == {"a", "b"}
+        parent = next(n for n in nodes if n.name == "p")
+        assert parent.line_end == 6
+
+    def test_qualified_call_named_like_a_builtin_is_kept(self):
+        _, edges = self._parse_plsql(
+            "CREATE PROCEDURE p IS v VARCHAR2(1); n NUMBER;\n"
+            "BEGIN\n"
+            "  text_utils.replace(v);\n"
+            "  math_pkg.round(n);\n"
+            "  v := replace(v, 'a', 'b');\n"
+            "  n := round(n);\n"
+            "  n := sys.nvl(n, 0);\n"
+            "  n := standard.round(n);\n"
+            "  n := l_tab.count();\n"
+            "  l_tab.trim(1);\n"
+            "  dbms_output.put_line(v);\n"
+            "END p;\n"
+        )
+
+        calls = {
+            (e.extra.get("receiver"), e.target) for e in edges if e.kind == "CALLS"
+        }
+        assert calls == {("text_utils", "replace"), ("math_pkg", "round")}
+
+    def test_call_lines_follow_the_source(self):
+        _, edges = self._parse_plsql(
+            "-- a comment\n"
+            "CREATE PROCEDURE p IS v VARCHAR2(1);\n"
+            "BEGIN\n"
+            "  a(1);\n"
+            "  a(2);\n"
+            "\n"
+            "  b(\n"
+            "    c(3)\n"
+            "  );\n"
+            "END p;\n"
+            "CREATE PROCEDURE q IS BEGIN\n"
+            "  d(1);\n"
+            "END q;\n"
+        )
+
+        lines = {e.target: e.line for e in edges if e.kind == "CALLS"}
+        assert lines == {"a": 4, "b": 7, "c": 8, "d": 12}
+
+    def test_many_distinct_calls_do_not_recount_the_file(self):
+        # Timed on the call pass alone: tree-sitter's error recovery on PL/SQL is
+        # slower still at this size, on any branch.
+        import time
+
+        calls = "".join(f"  call_{i}(1);\n" for i in range(64000))
+        source = f"CREATE PROCEDURE big IS v VARCHAR2(1);\nBEGIN\n{calls}END big;\n"
+        edges = []
+
+        started = time.perf_counter()
+        CodeParser()._extract_plsql_calls(source, 0, len(source), "x::big", "x", edges)
+
+        assert time.perf_counter() - started < 5
+        assert len(edges) == 64000
+        assert edges[-1].line == 64002
+
 
 class TestZigParsing:
     def setup_method(self):

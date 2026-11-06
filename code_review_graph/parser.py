@@ -5019,7 +5019,7 @@ class CodeParser:
     # another identifier character (so `.owner(` in `foo.owner(` still
     # matches, but the `owner` in `xowner(` does not).
     _PLSQL_CALL_RE = re.compile(
-        r"(?<![A-Za-z0-9_$#])([A-Za-z_][A-Za-z0-9_$#]*(?:\.[A-Za-z_][A-Za-z0-9_$#]*){0,2})\s*\(",
+        rf"(?<![\w$#])({_PLSQL_IDENT}(?:\.{_PLSQL_IDENT}){{0,2}})\s*\(",
     )
     # PL/SQL control-flow keywords and common scalar type names that also
     # precede `(` (e.g. `v_x VARCHAR2(50);` or `WHILE (cond)`) but are not
@@ -5055,6 +5055,11 @@ class CodeParser:
     # Built-in Oracle package namespaces (DBMS_*, UTL_*) — calls into these
     # are noise for impact analysis, not user code.
     _PLSQL_BUILTIN_PACKAGE_PREFIXES = ("dbms_", "utl_")
+    # A builtin's name is the builtin only when bare or under these packages:
+    # `text_utils.replace(` names user code. `l_tab.count()` and `l_tab.trim(1)`
+    # are collection methods, so those two stay out however they are qualified.
+    _PLSQL_BUILTIN_RECEIVERS = frozenset({"", "sys", "standard"})
+    _PLSQL_COLLECTION_METHODS = frozenset({"count", "trim"})
 
     # Fixed lookback window (chars) for the INSERT INTO check in
     # _extract_plsql_calls. Comfortably covers "INTO" plus a few lines of
@@ -5072,10 +5077,22 @@ class CodeParser:
     # types, VARCHAR2/PLS_INTEGER/etc. scalar types, DBMS_OUTPUT, packages,
     # and `:NEW.`/`:OLD.` trigger correlation names (T-SQL uses
     # `inserted`/`deleted`; MySQL uses unprefixed `NEW.`/`OLD.`).
+    #
+    # A subprogram's own shape counts too, since a plain routine may hold none
+    # of those: `FUNCTION f RETURN` (others write `RETURNS`) and `PROCEDURE p IS`.
+    # `PROCEDURE p AS` is also T-SQL, and with `OR REPLACE` also Postgres, whose
+    # body is then a dollar-quoted or quoted string.
+    _PLSQL_ROUTINE = (
+        rf"{_PLSQL_IDENT}(?:\.{_PLSQL_IDENT})*(?![\w$#])"
+        r"\s*(?:\((?:[^();]|\([^()]*\))*\)\s*)?"
+    )
     _ORACLE_SIGNAL_RE = re.compile(
         r"%TYPE\b|%ROWTYPE\b|\bVARCHAR2\b|\bPLS_INTEGER\b|\bBINARY_INTEGER\b|"
         r"\bSYS_REFCURSOR\b|\bDBMS_OUTPUT\b|:(?:NEW|OLD)\.|"
-        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\b",
+        r"\bCREATE\s+(?:OR\s+REPLACE\s+)?PACKAGE\b|"
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+{_PLSQL_ROUTINE}RETURN\b|"
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\s+{_PLSQL_ROUTINE}IS\b|"
+        rf"\bCREATE\s+OR\s+REPLACE\s+PROCEDURE\s+{_PLSQL_ROUTINE}AS\s+[^\s$']",
         re.IGNORECASE,
     )
 
@@ -5139,7 +5156,9 @@ class CodeParser:
             c = text[i]
             if q_close is not None:
                 if text[i:i + len(q_close)] == q_close:
-                    out.append(" " * len(q_close))
+                    # Keep the apostrophe, like a plain string: the opener kept
+                    # one, and the signature scan pairs them up.
+                    out.append(" " * (len(q_close) - 1) + "'")
                     i += len(q_close)
                     q_close = None
                 else:
@@ -5206,7 +5225,14 @@ class CodeParser:
     )
 
     _PLSQL_NAMED_END_RE = re.compile(rf"\bEND\b\s*({_PLSQL_IDENT})\s*;", re.IGNORECASE)
-    _PLSQL_BARE_END_RE = re.compile(r"\bEND\b\s*;", re.IGNORECASE)
+    # The lookaround keeps `$END` (conditional compilation) and `end_date` out.
+    _PLSQL_BLOCK_WORD_RE = re.compile(
+        r"(?<![\w$#])(?:(?P<open>BEGIN|CASE)|(?P<skip>END\s+(?:IF|LOOP))|END(?:\s+CASE)?)"
+        r"(?![\w$#])",
+        re.IGNORECASE,
+    )
+
+    _PLSQL_IS_AS_RE = re.compile(r"(?:IS|AS)\b", re.IGNORECASE)
 
     @staticmethod
     def _plsql_is_forward_decl(text: str, start: int) -> bool:
@@ -5254,8 +5280,7 @@ class CodeParser:
                 if c.isalpha() and (
                     i == start or not (text[i - 1].isalnum() or text[i - 1] == "_")
                 ):
-                    m = re.match(r"(IS|AS)\b", text[i:], re.IGNORECASE)
-                    if m:
+                    if CodeParser._PLSQL_IS_AS_RE.match(text, i):
                         return False
             i += 1
         return True
@@ -5571,7 +5596,7 @@ class CodeParser:
             line = clean_text[: m.start()].count("\n") + 1
             body_qualified = f"{file_path_str}::{body_identity}"
             body_start = m.end()
-            body_end = self._plsql_block_end(clean_text, body_start, pkg_name)
+            body_end = self._plsql_block_end(clean_text, body_start, pkg_name, package=True)
             nodes.append(NodeInfo(
                 kind="Class",
                 name=pkg_name,
@@ -5797,6 +5822,7 @@ class CodeParser:
         name: str,
         limit: int | None = None,
         named_ends: dict[str, list[int]] | None = None,
+        package: bool = False,
     ) -> int:
         """Return the index just past the terminating ``;`` of a named
         PL/SQL block beginning at ``start``.
@@ -5804,10 +5830,8 @@ class CodeParser:
         Prefers a name-qualified ``END <name>;`` — the Oracle style-guide
         convention — since that reliably identifies the *outer* block even
         when nested ``BEGIN ... EXCEPTION ... END;`` blocks inside it use a
-        bare, unnamed ``END;``. Falls back to the first bare ``END;`` if no
-        named terminator exists (this can under-shoot for unnamed bodies
-        with nested blocks — an inherent limitation of regex-based PL/SQL
-        parsing, since no PL/SQL grammar is available).
+        bare, unnamed ``END;``. Falls back to counting blocks if no named
+        terminator exists; see :meth:`_plsql_bare_end`.
 
         ``limit`` bounds how far either search can look (defaults to the
         next top-level ``CREATE`` statement after ``start``, or end of
@@ -5839,12 +5863,43 @@ class CodeParser:
                 return ends[at]
         else:
             named = re.compile(
-                rf"\bEND\b\s*{re.escape(name)}\b\s*;", re.IGNORECASE,
+                rf"\bEND\b\s*{re.escape(name)}(?![\w$#])\s*;", re.IGNORECASE,
             ).search(text, start, limit)
             if named:
                 return named.end()
-        bare = CodeParser._PLSQL_BARE_END_RE.search(text, start, limit)
-        return bare.end() if bare else limit
+        return CodeParser._plsql_bare_end(text, start, limit, package)
+
+    @staticmethod
+    def _plsql_bare_end(text: str, start: int, limit: int, package: bool) -> int:
+        """Find the end of a block with no ``END <name>;``, counting nested blocks.
+
+        A package body holds whole subprograms, so its end is the ``END`` with no
+        block open. A subprogram ends at the bare ``END;`` closing its outermost
+        block; a named ``END`` that closes everything belongs to a local
+        subprogram. A local subprogram with a bare ``END;`` still under-shoots:
+        telling it apart needs a real PL/SQL grammar, and none is available.
+
+        A package's initialisation section opens a block whose ``END`` is also
+        the package's, so the last ``END`` seen stands in when none is left over.
+        """
+        open_blocks: list[str] = []
+        last_end = limit
+        for m in CodeParser._PLSQL_BLOCK_WORD_RE.finditer(text, start, limit):
+            if m.group("open"):
+                open_blocks.append(m.group("open").upper())
+                continue
+            if m.group("skip"):
+                continue
+            semicolon = text.find(";", m.end(), limit)
+            end = m.end() if semicolon == -1 else semicolon + 1
+            if not open_blocks:
+                return end
+            closed = open_blocks.pop()
+            is_bare = not text[m.end():end - 1].strip()
+            if not open_blocks and closed == "BEGIN" and is_bare and not package:
+                return end
+            last_end = end
+        return last_end
 
     def _extract_plsql_calls(
         self,
@@ -5868,15 +5923,22 @@ class CodeParser:
         """
         body_text = text[body_start:body_end]
         seen: set[str] = set()
+        line = text.count("\n", 0, body_start) + 1
+        counted_to = 0
         for m in self._PLSQL_CALL_RE.finditer(body_text):
             target = m.group(1)
             first = target.split(".", 1)[0]
-            last = target.rsplit(".", 1)[-1]
+            receiver, _, last = target.rpartition(".")
             if last.lower() in self._PLSQL_CALL_KEYWORDS:
                 continue
             if last.upper() in _SQL_KEYWORDS:
                 continue
-            if last.lower() in self._PLSQL_BUILTIN_FUNCS:
+            if (
+                receiver.lower() in self._PLSQL_BUILTIN_RECEIVERS
+                and last.lower() in self._PLSQL_BUILTIN_FUNCS
+            ):
+                continue
+            if receiver and last.lower() in self._PLSQL_COLLECTION_METHODS:
                 continue
             if first.lower().startswith(self._PLSQL_BUILTIN_PACKAGE_PREFIXES):
                 continue
@@ -5894,12 +5956,13 @@ class CodeParser:
             if target in seen:
                 continue
             seen.add(target)
-            line = text[: body_start + m.start()].count("\n") + 1
+            # Counted forward: recounting the prefix per call is quadratic.
+            line += body_text.count("\n", counted_to, m.start())
+            counted_to = m.start()
             # `pkg.proc(` is stored under `proc`, as other languages store
             # `obj.method()`. Members are keyed `pkg$body.proc(params)`, so the
             # dotted spelling can never resolve: the member would look uncalled
             # to `callers_of` and `dead-code`.
-            receiver = target.rpartition(".")[0]
             edges.append(EdgeInfo(
                 kind="CALLS",
                 source=caller_qualified,
