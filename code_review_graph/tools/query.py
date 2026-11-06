@@ -183,6 +183,24 @@ def _java_fqn_candidates(store: GraphStore, target: str) -> list[GraphNode] | No
     return matches
 
 
+def _namespaced_ruby_candidates(store: GraphStore, target: str) -> list[GraphNode]:
+    """Resolve ``Class.method`` to a Ruby method whose class sits in a namespace.
+
+    Ruby symbols carry the whole namespace (``Billing.Base.audit``), so the exact
+    qualified-tail lookup misses the short form people actually type.
+    """
+    method_name = target.rsplit(".", 1)[-1]
+    return [
+        candidate
+        for candidate in store.search_nodes(
+            method_name, limit=_MAX_DOTTED_TARGET_CANDIDATES,
+        )
+        if candidate.language.lower() == "ruby"
+        and candidate.name == method_name
+        and candidate.qualified_name.endswith(f".{target}")
+    ]
+
+
 def _rank_disambiguation_candidates(
     candidates: list[GraphNode], target: str,
 ) -> list[dict[str, Any]]:
@@ -589,8 +607,10 @@ def query_graph(
                     # are Java-FQN-shaped and have no Java candidates.
                     candidates = qualified_tail_candidates
                 elif java_candidates is not None:
-                    # Java-shaped with no safe match: do not fall back.
-                    candidates = []
+                    # Java-shaped with no safe match: do not fall back to a
+                    # fuzzy search. A namespaced Ruby method is an exact match
+                    # on the class and method, so it is still safe.
+                    candidates = _namespaced_ruby_candidates(store, target)
                 else:
                     candidates = store.search_nodes(target, limit=20)
                 if pattern == "inheritors_of" and "::" not in target:
