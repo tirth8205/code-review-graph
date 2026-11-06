@@ -18,13 +18,15 @@ from ..build_state import (
     read_build_state,
 )
 from ..incremental import (
+    _prepare_db_path,
     full_build,
+    get_db_path,
     incremental_update,
     resolve_incremental_base,
 )
 from ..locking import WriteLock, write_lock_path
 from ..parser import normalize_file_path
-from ._common import _get_store
+from ._common import _get_store, _resolve_root
 
 logger = logging.getLogger(__name__)
 
@@ -615,6 +617,7 @@ def build_or_update_graph(
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
     wait_for_lock: bool = False,
+    recover_corrupt: bool = False,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -655,23 +658,25 @@ def build_or_update_graph(
             already covers; a human running ``build``/``update`` by hand
             usually wants the wait.
 
+        recover_corrupt: Discard an unusable graph before an explicit full rebuild.
+            Used by the CLI build command; ignored for incremental updates.
+
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors. A run
         that stood down because another build held the lock returns
         ``status: contended``, ``skipped: True`` and ``holder_pid``.
     """
-    store, root = _get_store(repo_root)
-    # The lock is taken before the first parse and before any post-processing:
-    # a duplicate run used to pay for a whole parse plus its own process pool
-    # before it discovered another writer was already ahead of it.
-    # :mod:`code_review_graph.locking` explains why the store, not the path, is
-    # what names the lock: the file must be the one for the database this call
-    # is actually about to write.
-    lock, contended = _lock_or_skip(store.db_path, wait_for_lock)
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
+    lock, contended = _lock_or_skip(db_path, wait_for_lock)
     if contended is not None:
-        store.close()
         return contended
+    store = None
     try:
+        _prepare_db_path(root, db_path)
+        store, root = _get_store(
+            str(root), db_path=db_path, recover_corrupt=full_rebuild and recover_corrupt
+        )
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
@@ -822,8 +827,11 @@ def build_or_update_graph(
         build_result["repaired_interrupted_build"] = interrupted
         return build_result
     finally:
-        store.close()
-        lock.release()
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            lock.release()
 
 
 def _lock_or_skip(
@@ -905,15 +913,18 @@ def run_postprocess(
         Summary of what was computed, or ``status: contended`` when another
         writer held the lock.
     """
-    store, _root = _get_store(repo_root)
-    lock, contended = _lock_or_skip(store.db_path, wait_for_lock)
+    root = _resolve_root(repo_root)
+    db_path = get_db_path(root, read_only=True)
+    lock, contended = _lock_or_skip(db_path, wait_for_lock)
     if contended is not None:
-        store.close()
         return contended
+    store = None
     result: dict[str, Any] = {"status": "ok"}
     warnings: list[str] = []
 
     try:
+        _prepare_db_path(root, db_path)
+        store, _root = _get_store(str(root), db_path=db_path)
         # Read before anything runs: the stages below rebuild derived data
         # from whatever nodes are stored, and none of them can put back a file
         # the interrupted build never parsed.
@@ -1059,5 +1070,8 @@ def run_postprocess(
             result["warnings"] = warnings
         return result
     finally:
-        store.close()
-        lock.release()
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            lock.release()
