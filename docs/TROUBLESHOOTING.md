@@ -218,9 +218,9 @@ exit `75` (`EX_TEMPFAIL`).
   builds while they work. Invoke `code-review-graph build`, `update` and
   `postprocess` directly. Wrapping those commands in `flock` makes them
   contend with the wrapper's lock and exit `75`; adding `--wait` deadlocks.
-- Locking errors other than contention (for example, a filesystem that does
-  not support `flock`) are raised as errors, not reported as another writer.
-  `--wait` does not repair unsupported filesystem locking.
+- A filesystem that does not support `flock` is not reported as another writer.
+  The run logs a warning and goes ahead without the lock, so overlapping runs
+  are not skipped there.
 
 ## Large repositories
 

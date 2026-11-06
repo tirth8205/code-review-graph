@@ -15,7 +15,9 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX flock")
 
 
 @pytest.mark.parametrize("blocking", [False, True])
-@pytest.mark.parametrize("error", [errno.EAGAIN, errno.EACCES, errno.ENOSYS, errno.EOPNOTSUPP])
+@pytest.mark.parametrize(
+    "error", [errno.EAGAIN, errno.EACCES, errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP],
+)
 def test_only_lock_contention_is_reported_as_a_skip(tmp_path, monkeypatch, error, blocking):
     import fcntl
 
@@ -28,9 +30,9 @@ def test_only_lock_contention_is_reported_as_a_skip(tmp_path, monkeypatch, error
         if error in (errno.EAGAIN, errno.EACCES):
             assert lock.acquire(blocking=blocking) is False
         else:
-            with pytest.raises(OSError) as caught:
-                lock.acquire(blocking=blocking)
-            assert caught.value.errno == error
+            # No flock support: run without the lock, as with a lock file that
+            # cannot be opened. It must not stop the build.
+            assert lock.acquire(blocking=blocking) is True
     assert not lock.held
     # A failed acquisition must leave the instance reusable.
     assert lock.acquire()
@@ -108,3 +110,17 @@ def test_initialization_failure_releases_the_write_lock(tmp_path, call):
     probe = WriteLock(db)
     assert probe.acquire(), "failed initialization left the lock held"
     probe.release()
+
+
+@pytest.mark.parametrize("command", ["build", "update", "postprocess"])
+def test_writers_still_accept_a_plain_directory(tmp_path, monkeypatch, capsys, command):
+    """They reach tool validation first now, so they must set up the marker it wants."""
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    (repo / "app.py").write_text("def app():\n    return 1\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["crg", command, "--repo", str(repo)])
+
+    cli.main()
+
+    assert (repo / ".code-review-graph" / "graph.db").exists()
+    assert (repo / ".code-review-graph" / "write.lock").exists()

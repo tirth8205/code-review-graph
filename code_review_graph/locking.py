@@ -34,7 +34,8 @@ Properties this relies on, all of them deliberate:
   wait (a human running ``build``/``update`` by hand) ask for it.
 * **Kernel-released.** ``flock`` drops the lock when the holder dies, including
   on ``SIGKILL`` where no cleanup code of ours runs, so a crashed build never
-  wedges a repository.
+  wedges a repository. A forked child would keep it alive, so children close
+  their copy straight away.
 * **``flock``, not ``lockf``.** flock locks belong to the open file
   description, so a probe from a second descriptor cannot silently drop a lock
   this process already holds.
@@ -163,17 +164,20 @@ class WriteLock:
             return True
         self._handle = handle
         _open_locks.add(self)
+        acquired = False
         try:
             acquired = _flock(handle, blocking)
-        except BaseException:
-            self._handle = None
-            _open_locks.discard(self)
-            handle.close()
-            raise
+        except OSError as exc:
+            # No lock support is not a competing writer, and it must not fail
+            # the build either. Degrade like a lock file that cannot be opened.
+            logger.warning("Cannot lock %s: %s", self.path, exc)
+            return True
+        finally:
+            if not acquired:
+                self._handle = None
+                _open_locks.discard(self)
+                handle.close()
         if not acquired:
-            self._handle = None
-            _open_locks.discard(self)
-            handle.close()
             return False
         self._record_holder(handle)
         return True

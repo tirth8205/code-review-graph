@@ -726,18 +726,25 @@ def _open_graph_store(db_path: Path, command: str):
     return open_store(db_path, command)
 
 
+def _ensure_project_marker(repo_root: Path) -> None:
+    """Let a plain directory pass tool validation, without opening graph.db.
+
+    ``build``, ``update`` and ``postprocess`` all accept one, and each now
+    reaches the tools before anything has created the data directory.
+    """
+    if repo_root.is_dir() and not any(
+        (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
+    ):
+        from .incremental import _create_data_dir
+        _create_data_dir(repo_root / ".code-review-graph")
+
+
 def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
     """Run writers before the generic CLI store initialization."""
     from .incremental import assert_graph_serves_root, get_db_path
 
+    _ensure_project_marker(repo_root)
     if args.command == "build":
-        # A CLI build also accepts plain directories. Establish the project
-        # marker used by tool validation, without opening/migrating graph.db.
-        if repo_root.is_dir() and not any(
-            (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
-        ):
-            from .incremental import _create_data_dir
-            _create_data_dir(repo_root / ".code-review-graph")
         pp = (
             "none"
             if getattr(args, "skip_postprocess", False)
@@ -2113,6 +2120,7 @@ def _dispatch() -> None:
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
+        _ensure_project_marker(repo_root)
         from .tools.build import run_postprocess
 
         result = run_postprocess(
