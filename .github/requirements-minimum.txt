@@ -1,0 +1,11 @@
+# Exact direct-dependency floors declared by pyproject.toml. CI installs this
+# set with the package and dev tools to prove that the declared lower bounds
+# remain compatible instead of merely hoping older releases still work.
+mcp==1.29.0
+fastmcp==3.2.4
+tree-sitter==0.26.0
+tree-sitter-language-pack==0.13.0
+pyyaml==6.0
+networkx==3.2
+watchdog==4.0.0
+tomli==2.0.0; python_version < "3.11"
