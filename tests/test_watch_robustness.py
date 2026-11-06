@@ -973,11 +973,196 @@ class TestWatchLoop:
             ):
                 watch(repo, store)
             assert store.get_all_files() == ["/somewhere/else/mod.py"], "nothing was deleted"
-            # Refused before an observer exists, so no event can queue a batch
-            # against the wrong graph (PR #1108).
+            # Refused before any watcher exists: an observer started first
+            # could queue a batch that writes to the refused graph.
             observer.assert_not_called()
         finally:
             store.close()
+
+    def test_event_queued_during_startup_cannot_write_to_a_refused_graph(
+        self, tmp_path, monkeypatch,
+    ):
+        """A foreign graph is refused before anything can queue a write to it.
+
+        From the Copilot review of PR #1108.  The observer starts before startup
+        reconciliation, and an event it captures becomes a batch that waits on
+        the processing lock startup holds.  If the root check runs only inside
+        that reconciliation, startup refuses the graph and releases the lock,
+        and the waiting batch then runs ``incremental_update`` with
+        ``reconcile_stale=False`` (which skips the root check) against the graph
+        that was just refused.
+
+        Every step is recorded by instrumentation as it happens; the barriers
+        are events with bounded waits, never sleeps.
+        """
+        from watchdog.events import FileModifiedEvent
+
+        from code_review_graph import incremental
+
+        repo = tmp_path / "repo"
+        other = tmp_path / "other"
+        for root, name in ((repo, "app"), (other, "lib")):
+            (root / "src").mkdir(parents=True)
+            (root / "src" / f"{name}.py").write_text(
+                f"def {name}_fn():\n    return 1\n", encoding="utf-8",
+            )
+        db_path = tmp_path / "foreign.db"
+        with GraphStore(db_path) as builder:
+            assert incremental.full_build(other, builder)["errors"] == []
+
+        trace: list[str] = []
+        writes: list[str] = []
+        trace_lock = threading.Lock()
+
+        def record(step: str) -> None:
+            with trace_lock:
+                trace.append(step)
+
+        class RecordingStore(GraphStore):
+            """The foreign graph; any write to it after the build is recorded."""
+
+            def _attempt(self, method: str) -> None:
+                with trace_lock:
+                    if not writes:
+                        trace.append("batch_write_attempted")
+                    writes.append(method)
+
+            def store_file_nodes_edges(self, *args, **kwargs):
+                self._attempt("store_file_nodes_edges")
+                return super().store_file_nodes_edges(*args, **kwargs)
+
+            def remove_files_permanently(self, *args, **kwargs):
+                self._attempt("remove_files_permanently")
+                return super().remove_files_permanently(*args, **kwargs)
+
+            def set_metadata(self, *args, **kwargs):
+                self._attempt("set_metadata")
+                return super().set_metadata(*args, **kwargs)
+
+        store = RecordingStore(db_path)
+        baseline_files = sorted(store.get_all_files())
+        baseline_nodes = sorted(
+            row[0] for row in store._conn.execute("SELECT qualified_name FROM nodes")
+        )
+        baseline_updated = store.get_metadata("last_updated")
+        assert baseline_files and all(str(other) in path for path in baseline_files)
+
+        batch_waiting = threading.Event()
+        debouncers: list[threading.Thread] = []
+        observers: list[FakeObserver] = []
+
+        class ImmediateDebouncer(incremental._WatchDebouncer):
+            """No quiet interval, and a record of the batch reaching the lock."""
+
+            def __init__(self, interval, callback):
+                def batch(events):
+                    # Startup holds the processing lock from before the
+                    # observer starts, so this batch now waits on it.
+                    record("batch_waiting")
+                    batch_waiting.set()
+                    callback(events)
+
+                super().__init__(0, batch)
+                debouncers.append(self)
+
+        class ReleaseRecordingLock:
+            def __init__(self, lock) -> None:
+                self._lock = lock
+
+            def __enter__(self):
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, *exc_info) -> None:
+                # Recorded while still held, so a batch let in by the release
+                # cannot appear in the trace ahead of it.
+                record("startup_lock_released")
+                self._lock.release()
+
+        class InstrumentedHandler:
+            def __init__(self, inner) -> None:
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def serialized(self):
+                return ReleaseRecordingLock(self._inner.serialized())
+
+        class EventOnStartObserver(FakeObserver):
+            """Delivers one source edit the moment it starts, as inotify would."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                observers.append(self)
+
+            def start(self) -> None:
+                super().start()
+                record("observer_started")
+                edited = repo / "src" / "app.py"
+                edited.write_text("def app_fn():\n    return 2\n", encoding="utf-8")
+                self.handler.dispatch(FileModifiedEvent(str(edited)))
+                record("event_delivered")
+                if not batch_waiting.wait(timeout=10):
+                    record("batch_never_reached_the_lock")
+
+        real_assert = incremental._assert_graph_matches_root
+
+        def recording_assert(root, graph):
+            try:
+                real_assert(root, graph)
+            except RuntimeError:
+                record("root_validation_failed")
+                raise
+
+        real_create_handler = incremental._create_watch_handler
+        monkeypatch.setattr(incremental, "_WatchDebouncer", ImmediateDebouncer)
+        monkeypatch.setattr(incremental, "_assert_graph_matches_root", recording_assert)
+        monkeypatch.setattr(
+            incremental,
+            "_create_watch_handler",
+            lambda *a, **kw: InstrumentedHandler(real_create_handler(*a, **kw)),
+        )
+        monkeypatch.setattr("watchdog.observers.Observer", EventOnStartObserver)
+
+        outcome: dict = {}
+
+        def run() -> None:
+            try:
+                incremental.watch(repo, store)
+            except BaseException as exc:  # noqa: BLE001 - the test inspects it
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=run, name="crg-foreign-root-watch", daemon=True)
+        try:
+            worker.start()
+            worker.join(timeout=30)
+        finally:
+            batch_waiting.set()
+            for owner in (worker, *debouncers):
+                owner.join(timeout=30)
+            alive = [t.name for t in (worker, *debouncers) if t.is_alive()]
+            if alive:
+                # Closing a connection under a live writer can crash the
+                # interpreter, so the store is left open and the test fails.
+                pytest.fail(f"still running, so the store was left open: {alive}")
+            files_after = sorted(store.get_all_files())
+            nodes_after = sorted(
+                row[0] for row in store._conn.execute("SELECT qualified_name FROM nodes")
+            )
+            updated_after = store.get_metadata("last_updated")
+            store.close()
+
+        error = outcome.get("error")
+        assert isinstance(error, RuntimeError), outcome
+        assert "different repository root" in str(error)
+        assert not writes, f"the refused graph was written to: writes={writes}, trace={trace}"
+        assert trace == ["root_validation_failed"], trace
+        assert not observers, "an observer was constructed for a refused graph"
+        assert not debouncers, "a debouncer was created for a refused graph"
+        assert files_after == baseline_files
+        assert nodes_after == baseline_nodes
+        assert updated_after == baseline_updated
 
     def test_repair_reconciles_files_deleted_during_the_outage(self, tmp_path):
         """A repaired watch must re-read the directory in both directions.

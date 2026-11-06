@@ -3284,6 +3284,12 @@ def watch(
     # comparison below — stored file paths, watch keys, event paths — assumes
     # they are all spelled the same way.
     repo_root = _canonical_repo_root(repo_root)
+    # Refuse a graph built for another root before anything can queue a write
+    # to it.  Startup reconciliation checks this too, but only once the
+    # observer below is running: a batch captured meanwhile waits on the
+    # processing lock, and batches skip the check (reconcile_stale=False), so
+    # it would write to the refused graph as soon as startup let go.
+    _assert_graph_matches_root(repo_root, store)
     supervisor = _WatchSupervisor(
         None,
         repo_root,
