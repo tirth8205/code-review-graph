@@ -150,7 +150,9 @@ The image includes Git and defaults to a non-root user.
 No graph is generated during image construction.
 
 These examples use macOS/Linux shell syntax. On macOS, start your
-Docker-compatible engine or Podman machine before running them.
+Docker-compatible engine or Podman machine before running them. On a host with
+SELinux on, such as Fedora, add `:z` to the mount (`"$PWD:/workspace:z"`), or
+the container is refused access to the repository.
 
 ## How It Works
 

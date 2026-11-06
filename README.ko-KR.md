@@ -144,6 +144,7 @@ podman run --rm \
 
 이 예제들은 macOS/Linux 셸 문법을 사용합니다.
 macOS에서는 실행하기 전에 Docker 호환 엔진 또는 Podman 가상 머신을 시작하세요.
+Fedora처럼 SELinux가 켜진 호스트에서는 마운트에 `:z`를 추가하세요(`"$PWD:/workspace:z"`). 그렇지 않으면 컨테이너가 저장소에 접근할 수 없습니다.
 
 ## 동작 방식
 

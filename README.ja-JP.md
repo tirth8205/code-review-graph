@@ -143,6 +143,7 @@ podman run --rm \
 
 これらの例は macOS/Linux のシェル構文を使用しています。
 macOS では、実行前に Docker 互換エンジンまたは Podman 仮想マシンを起動してください。
+Fedora など SELinux が有効なホストでは、マウントに `:z` を追加してください（`"$PWD:/workspace:z"`）。追加しないと、コンテナはリポジトリにアクセスできません。
 
 ## 仕組み
 

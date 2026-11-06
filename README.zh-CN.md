@@ -141,6 +141,7 @@ podman run --rm \
 
 这些示例使用 macOS/Linux shell 语法。在 macOS 上，
 运行前请启动兼容 Docker 的容器引擎或 Podman 虚拟机。
+在启用 SELinux 的主机（如 Fedora）上，请在挂载中加上 `:z`（`"$PWD:/workspace:z"`），否则容器无法访问仓库。
 
 ## 工作原理
 
