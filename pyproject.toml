@@ -29,7 +29,7 @@ dependencies = [
     # fastmcp >=3.2.4 is required for Message-based prompts and includes the
     # CVE-2025-62800/62801/66416 fixes; <4 prevents the next major release
     # from breaking the server the way fastmcp 3.0 did. See: #488
-    "fastmcp>=3.2.4,<4",
+    "fastmcp>=3.2.4,<5",
     # main.py imports anyio directly: the MCP tool offload has to use the
     # same thread limiter FastMCP dispatches sync tool bodies through, not
     # asyncio's smaller default executor. A direct import gets a direct
