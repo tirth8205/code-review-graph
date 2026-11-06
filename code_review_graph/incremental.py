@@ -3301,9 +3301,6 @@ def watch(
     # stalled for the whole build.
     supervisor.report_health(observer_alive=True, phase="initial-build", force=True)
 
-    # Refuse a graph built for another root before anything can queue a batch:
-    # batches run with reconcile_stale=False and never make this check.
-    _assert_graph_matches_root(repo_root, store)
     observer = Observer()
     supervisor.attach(observer)
     handler = _create_watch_handler(repo_root, store, on_files_updated)
