@@ -197,11 +197,9 @@ class TestWatchInteraction:
                     mock_db.return_value = MagicMock()
                     with patch("code_review_graph.incremental.watch") as mock_watch:
                         mock_watch.side_effect = RuntimeError("watcher already running")
-                        try:
+                        with pytest.raises(SystemExit) as exc_info:
                             cli.main()
-                            assert False, "Expected SystemExit"
-                        except SystemExit as exc:
-                            assert exc.code == 1
+                        assert exc_info.value.code == 1
 
 
 def test_visualize_json_uses_local_export(tmp_path, capsys):
@@ -671,15 +669,11 @@ class TestDetectChangesEndToEnd:
             timeout=30,
         )
 
-    def test_detect_changes_maps_committed_change_to_functions(
-        self, tmp_path, capsys, monkeypatch,
-    ):
-        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
-        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
-
+    def _create_repo_with_committed_change(self, tmp_path):
         repo = tmp_path / "repo"
         src = repo / "src"
         src.mkdir(parents=True)
+
         app = src / "app.py"
         app.write_text(
             "def greet(name):\n"
@@ -705,8 +699,19 @@ class TestDetectChangesEndToEnd:
             "    return 'bye ' + name\n",
             encoding="utf-8",
         )
+
         self._git(repo, "add", ".")
         self._git(repo, "commit", "-q", "-m", "change greet")
+
+        return repo
+
+    def test_detect_changes_maps_committed_change_to_functions(
+        self, tmp_path, capsys, monkeypatch,
+    ):
+        monkeypatch.delenv("CRG_DATA_DIR", raising=False)
+        monkeypatch.delenv("CRG_REPO_ROOT", raising=False)
+
+        repo = self._create_repo_with_committed_change(tmp_path)
 
         # Build the graph after the change (stores absolute native paths).
         from code_review_graph.graph import GraphStore
@@ -735,18 +740,14 @@ class TestDetectChangesEndToEnd:
         assert result["changed_functions"]
         assert savings["saved_percent"] < 100
 
-
-def test_explicit_monorepo_subproject_runs_a_real_graph_search(
-    tmp_path,
-    monkeypatch,
-    capsys,
-):
-    """The CLI must open the graph at the explicit subproject, not its parent repo."""
+def _prepare_monorepo_subproject(tmp_path, monkeypatch):
     mono = tmp_path / "mono"
     (mono / ".git").mkdir(parents=True)
+
     module = mono / "llvm"
     nested = module / "src" / "deep"
     nested.mkdir(parents=True)
+
     (module / "stream.py").write_text(
         "def raw_stream_lookup():\n    return 1\n",
         encoding="utf-8",
@@ -755,6 +756,7 @@ def test_explicit_monorepo_subproject_runs_a_real_graph_search(
     # Keep registry writes away from the developer's real home.
     state_dir = tmp_path / "state"
     monkeypatch.setenv("CRG_HOME", str(state_dir))
+
     from code_review_graph import registry as registry_module
 
     monkeypatch.setattr(
@@ -771,12 +773,25 @@ def test_explicit_monorepo_subproject_runs_a_real_graph_search(
 
     db_path = module / ".code-review-graph" / "graph.db"
     db_path.parent.mkdir(parents=True)
+
     store = GraphStore(db_path)
     try:
         full_build(module, store)
         rebuild_fts_index(store)
     finally:
         store.close()
+
+    return nested
+
+def test_explicit_monorepo_subproject_runs_a_real_graph_search(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+
+    """The CLI must open the graph at the explicit subproject, not its parent repo."""
+
+    nested = _prepare_monorepo_subproject(tmp_path, monkeypatch)
 
     argv = [
         "code-review-graph",
@@ -785,10 +800,12 @@ def test_explicit_monorepo_subproject_runs_a_real_graph_search(
         "--repo",
         str(nested),
     ]
+
     with patch.object(sys, "argv", argv):
         cli.main()
 
     result = json.loads(capsys.readouterr().out)
+
     assert result["status"] == "ok"
     assert any(row["name"] == "raw_stream_lookup" for row in result["results"])
 
@@ -822,12 +839,9 @@ class TestGraphToolExplicitRepoResolution:
         argv = ["code-review-graph", "search", "x", "--repo", str(bare)]
         with patch.object(sys, "argv", argv):
             with patch.object(cli, "_run_graph_tool_command") as mock_run:
-                try:
+                with pytest.raises(SystemExit) as exc_info:
                     cli.main()
-                    raised = False
-                except SystemExit as exc:
-                    raised = exc.code == 1
-        assert raised
+        assert exc_info.value.code == 1
         mock_run.assert_not_called()
         assert "does not look like a project root" in capsys.readouterr().err
 

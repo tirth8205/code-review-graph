@@ -1804,6 +1804,8 @@ class TestUnstattablePaths:
             handler = _create_watch_handler(tmp_path, store, None)
             handler.process([FileModifiedEvent(self._overlong(tmp_path))])
             handler.raise_if_failed()
+
+            assert store.get_all_files() == []
         finally:
             store.close()
 

@@ -101,9 +101,7 @@ def test_availability_import_and_model_load_do_not_overlap(monkeypatch):
     assert True in results
     assert model in results
 
-
-def test_concurrent_first_model_calls_wait_construct_once_and_share(monkeypatch):
-    """The losing caller waits and receives the first caller's model."""
+def _prepare_concurrent_model_constructor():
     first_constructor_entered = threading.Event()
     release_constructor = threading.Event()
     duplicate_constructor = threading.Event()
@@ -124,6 +122,30 @@ def test_concurrent_first_model_calls_wait_construct_once_and_share(monkeypatch)
         model = object()
         constructed_models.append(model)
         return model
+
+    def get_constructor_calls():
+        return constructor_calls
+
+    return (
+        construct,
+        first_constructor_entered,
+        release_constructor,
+        duplicate_constructor,
+        constructed_models,
+        get_constructor_calls,
+    )
+
+
+def test_concurrent_first_model_calls_wait_construct_once_and_share(monkeypatch):
+    """The losing caller waits and receives the first caller's model."""
+    (
+        construct,
+        first_constructor_entered,
+        release_constructor,
+        duplicate_constructor,
+        constructed_models,
+        get_constructor_calls,
+    ) = _prepare_concurrent_model_constructor()
 
     monkeypatch.setitem(
         sys.modules,
@@ -148,7 +170,7 @@ def test_concurrent_first_model_calls_wait_construct_once_and_share(monkeypatch)
     assert not second_thread.is_alive()
     assert errors == []
     assert duplicate_seen is False
-    assert constructor_calls == 1
+    assert get_constructor_calls() == 1
     assert len(constructed_models) == 1
     assert results == [constructed_models[0], constructed_models[0]]
     assert embeddings._MODEL_CACHE["test-model"] is constructed_models[0]

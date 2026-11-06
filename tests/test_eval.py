@@ -287,75 +287,13 @@ def test_generate_full_report():
 def test_runner_with_mock_repo():
     """Create a tiny git repo with 2 Python files, run benchmarks, verify output."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        repo_path = Path(tmpdir) / "mock_repo"
-        repo_path.mkdir()
-
-        # Init git repo
-        subprocess.run(
-            ["git", "init"], cwd=str(repo_path), capture_output=True
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(repo_path), capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        # Create two Python files
-        (repo_path / "main.py").write_text(
-            'from helper import greet\n\ndef main():\n    greet("world")\n',
-            encoding="utf-8",
-        )
-        (repo_path / "helper.py").write_text(
-            'def greet(name):\n    print(f"Hello {name}")\n',
-            encoding="utf-8",
-        )
-
-        subprocess.run(
-            ["git", "add", "."], cwd=str(repo_path), capture_output=True
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        # Second commit: modify helper.py
-        (repo_path / "helper.py").write_text(
-            'def greet(name):\n    print(f"Hi {name}!")\n',
-            encoding="utf-8",
-        )
-        subprocess.run(
-            ["git", "add", "."], cwd=str(repo_path), capture_output=True
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "update greeting"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        # Build graph
-        from code_review_graph.graph import GraphStore
-        from code_review_graph.incremental import full_build, get_db_path
-
-        db_path = get_db_path(repo_path)
-        store = GraphStore(db_path)
-        full_build(repo_path, store)
-
-        config = {
-            "name": "mock",
-            "language": "python",
-            "test_commits": [
-                {"sha": "HEAD", "description": "update greeting"},
-            ],
-            "entry_points": ["main.py::main"],
-            "search_queries": [
-                {"query": "greet", "expected": "helper.py::greet"},
-            ],
-        }
+        repo_path = _make_repo(tmpdir)
+        store = _build_store(repo_path)
+        config = _mock_config()
 
         # Run token_efficiency
         from code_review_graph.eval.benchmarks import token_efficiency
+
         te_results = token_efficiency.run(repo_path, store, config)
         assert len(te_results) >= 1
         assert "naive_tokens" in te_results[0]
@@ -363,6 +301,7 @@ def test_runner_with_mock_repo():
 
         # Run impact_accuracy
         from code_review_graph.eval.benchmarks import impact_accuracy
+
         ia_results = impact_accuracy.run(repo_path, store, config)
         assert len(ia_results) >= 1
         assert "precision" in ia_results[0]
@@ -370,19 +309,20 @@ def test_runner_with_mock_repo():
 
         # Run search_quality
         from code_review_graph.eval.benchmarks import search_quality
+
         sq_results = search_quality.run(repo_path, store, config)
         assert len(sq_results) == 1
         assert "reciprocal_rank" in sq_results[0]
 
         # Run build_performance
         from code_review_graph.eval.benchmarks import build_performance
+
         bp_results = build_performance.run(repo_path, store, config)
         assert len(bp_results) == 1
         assert "node_count" in bp_results[0]
         assert bp_results[0]["node_count"] > 0
 
         store.close()
-
 
 # --- Token benchmark tests ---
 
@@ -424,68 +364,16 @@ def test_estimate_tokens_non_serializable():
     tokens = estimate_tokens({"path": Path("/tmp/test")})
     assert tokens > 0
 
-
 def test_benchmark_review_workflow():
     """benchmark_review_workflow completes and returns expected structure."""
     from code_review_graph.eval.token_benchmark import benchmark_review_workflow
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        repo_path = Path(tmpdir) / "bench_repo"
-        repo_path.mkdir()
+        repo_path = _make_repo(tmpdir, repo_name="bench_repo")
 
-        # Init git repo with two commits
-        subprocess.run(
-            ["git", "init"], cwd=str(repo_path), capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=str(repo_path), capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        (repo_path / "main.py").write_text(
-            'from helper import greet\n\ndef main():\n    greet("world")\n',
-            encoding="utf-8",
-        )
-        (repo_path / "helper.py").write_text(
-            'def greet(name):\n    print(f"Hello {name}")\n',
-            encoding="utf-8",
-        )
-
-        subprocess.run(
-            ["git", "add", "."], cwd=str(repo_path), capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "initial"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        # Second commit
-        (repo_path / "helper.py").write_text(
-            'def greet(name):\n    print(f"Hi {name}!")\n',
-            encoding="utf-8",
-        )
-        subprocess.run(
-            ["git", "add", "."], cwd=str(repo_path), capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "update greeting"],
-            cwd=str(repo_path), capture_output=True,
-        )
-
-        # Build graph
-        from code_review_graph.graph import GraphStore
-        from code_review_graph.incremental import full_build, get_db_path
-
-        db_path = get_db_path(repo_path)
-        store = GraphStore(db_path)
-        full_build(repo_path, store)
+        store = _build_store(repo_path)
         store.close()
 
-        # Run the review benchmark
         result = benchmark_review_workflow(
             repo_root=str(repo_path), base="HEAD~1",
         )
@@ -577,9 +465,9 @@ def _git(repo_path, *args):
     subprocess.run(["git", *args], cwd=str(repo_path), capture_output=True)
 
 
-def _make_repo(tmpdir, two_file_commit=False):
+def _make_repo(tmpdir, two_file_commit=False, repo_name="mock_repo"):
     """Tiny git repo: initial commit, then a second commit touching 1 or 2 files."""
-    repo_path = Path(tmpdir) / "mock_repo"
+    repo_path = Path(tmpdir) / repo_name
     repo_path.mkdir()
     _git(repo_path, "init")
     _git(repo_path, "config", "user.email", "test@test.com")
