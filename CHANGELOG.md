@@ -2,6 +2,88 @@
 
 ## [Unreleased]
 
+### Added
+
+- Python modules that replace themselves in `sys.modules` are followed to the
+  module they install. A compatibility shim such as
+  `sys.modules[__name__] = importlib.import_module("app.services.billing")`
+  hands importers `app/services/billing.py`, but the graph stopped at the shim:
+  `import billing` targeted the shim file, `billing.charge(...)` and the
+  `TESTED_BY` edge from a test calling it stayed unresolved because `charge`
+  is not defined in the shim, and `from billing import charge` named a node
+  that does not exist. The import edge, module-receiver calls and
+  `from shim import name` now resolve to the real module, through chains of
+  shims and through re-exports to the defining file. Only the literal,
+  module-level form is followed; a computed or relative module name, a swap
+  inside a block, or a target outside the repository leaves the file as the
+  module. Because importers now depend on the real module, editing only the
+  shim does not re-parse them on `update`; run `build` after re-pointing a
+  shim.
+- `semantic_search_nodes_tool` can return the code with the hits.
+  `include_source=True` attaches each hit's source lines, and
+  `expand_neighbors=True` also attaches the direct callers and callees of the
+  top hits with their source. `max_source_lines` caps each snippet, one
+  line budget caps the whole response, cut-off snippets are marked
+  `source_truncated`, and a stored path that resolves outside the repository
+  is never read. Source is not attached when `detail_level="minimal"`. Without this an agent got names and line numbers and opened
+  the same files by hand, so the search cost tokens on top of the reads
+  instead of replacing them.
+- The README and `docs/REPRODUCING.md` publish the first canonical
+  `agent_baseline` capture (2026-09-22): against a grep-and-read-top-3-files
+  baseline, the graph answer is a median 6.65x smaller across 18 questions on
+  6 repositories (range 4.2x to 72.6x). It predates the test-file ranking
+  below, so a run today gives different numbers until it is redone. The
+  per-repo CSVs are in `evaluate/results/`; the 2026-05-25 `impact_accuracy`
+  CSVs are removed, as the 2026-08-02 captures replace them.
+- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
+- `install` also writes `post-checkout`, `post-merge` and `post-rewrite` git
+  hooks that run `update`, so the graph follows a branch switch, a merge or a
+  `git pull` (merge or rebase mode) instead of waiting for the next commit.
+  `post-checkout` runs on branch checkouts only and skips the checkout a
+  rebase makes before replaying local commits; `post-rewrite` updates once the
+  rebase has finished and ignores `--amend`, which `pre-commit` already covers.
+  A rebase with nothing to replay never runs `post-rewrite`, so it updates at
+  that checkout. An existing hook in a language other than shell is left alone.
+  Each block is marked, appended to an existing hook, skipped in linked
+  worktrees unless `CRG_HOOK_WORKTREES=1`, and removed by `uninstall`.
+  `--no-hooks` skips them along with `pre-commit`.
+- Oracle PL/SQL files get structural parsing: packages, procedures, functions and the calls between them (#785).
+- Robot Framework `.robot` and `.resource` files are indexed (#967, #963).
+- Static Laravel routes produce `Endpoint` nodes and `HANDLES` edges at parse time (#1072, part of #851).
+- Spring AOP advice reaches its targets through `@annotation` and `execution` pointcuts (#916, #592).
+- `serve` has an opt-in mode for parallel graph access across Git worktrees (#1063).
+- Read-only MCP tools carry `readOnlyHint`, so clients can skip the approval prompt (#1124, #1123).
+- The troubleshooting guide explains the local-checkout workaround for Zed SSH projects (#1130).
+
+### Changed
+
+- Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
+  paths and value types, never values. `detect_changes` reports them as
+  `changed_yaml_paths`, bounded by `max_results`. `pnpm-lock.yaml` is ignored at
+  any depth.
+- Search ranks test code below production code unless the query asks about
+  tests (`kind="Test"`, or a word such as "test", "spec", "fixture" or
+  "mock"). A two-line test stub that names a symbol used to score as well as
+  the implementation and could outrank it.
+- The installed instruction block tells agents to answer from
+  `include_source=True, expand_neighbors=True` and open a file only when a
+  snippet is cut off. It still says not to change code from graph output
+  alone. Earlier blocks stay recognised for upgrade and uninstall.
+- The MCP server instructions now route by question type instead of introducing
+  the server as a code-review tool. With deferred tool loading an agent sees
+  only the tool names and these instructions, so "for code reviews" kept it on
+  Grep for callers, importers and covering tests everywhere else. The new text
+  maps each relationship question to its tool and leaves plain-text search to
+  Grep. Measured with Claude Code on one TypeScript monorepo: across 8 ordinary
+  tasks that never mention the graph (implement, review, brainstorm, plan), the
+  graph was used in 1 run before and 6 after; plain-text questions stayed on
+  Grep (0 of 4 moved). `tests/test_server_instructions.py` keeps every tool and
+  query pattern the text names registered.
+- Stored vectors are scored with numpy when it is installed, about 20 times faster, and numpy stays optional (#1090, #1089).
+- `find_dead_code` collects its edge evidence once, not once per function (#1082, #982).
+- Plain C headers skip the C++ parse through a prefilter (#876, #802).
+- The dev dependency range allows pytest 9 (#1140).
+
 ### Fixed
 
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
@@ -29,86 +111,6 @@
   builtin names such as `events` never resolve to a workspace member, a name
   two members share resolves to neither, probes are case-exact on every
   platform, and a target the build would not index keeps the bare specifier.
-### Added
-
-- Python modules that replace themselves in `sys.modules` are followed to the
-  module they install. A compatibility shim such as
-  `sys.modules[__name__] = importlib.import_module("app.services.billing")`
-  hands importers `app/services/billing.py`, but the graph stopped at the shim:
-  `import billing` targeted the shim file, `billing.charge(...)` and the
-  `TESTED_BY` edge from a test calling it stayed unresolved because `charge`
-  is not defined in the shim, and `from billing import charge` named a node
-  that does not exist. The import edge, module-receiver calls and
-  `from shim import name` now resolve to the real module, through chains of
-  shims and through re-exports to the defining file. Only the literal,
-  module-level form is followed; a computed or relative module name, a swap
-  inside a block, or a target outside the repository leaves the file as the
-  module. Because importers now depend on the real module, editing only the
-  shim does not re-parse them on `update`; run `build` after re-pointing a
-  shim.
-### Added
-
-- `semantic_search_nodes_tool` can return the code with the hits.
-  `include_source=True` attaches each hit's source lines, and
-  `expand_neighbors=True` also attaches the direct callers and callees of the
-  top hits with their source. `max_source_lines` caps each snippet, one
-  line budget caps the whole response, cut-off snippets are marked
-  `source_truncated`, and a stored path that resolves outside the repository
-  is never read. Source is not attached when `detail_level="minimal"`. Without this an agent got names and line numbers and opened
-  the same files by hand, so the search cost tokens on top of the reads
-  instead of replacing them.
-- The README and `docs/REPRODUCING.md` publish the first canonical
-  `agent_baseline` capture (2026-09-22): against a grep-and-read-top-3-files
-  baseline, the graph answer is a median 6.65x smaller across 18 questions on
-  6 repositories (range 4.2x to 72.6x). It predates the test-file ranking
-  below, so a run today gives different numbers until it is redone. The
-  per-repo CSVs are in `evaluate/results/`; the 2026-05-25 `impact_accuracy`
-  CSVs are removed, as the 2026-08-02 captures replace them.
-### Added
-
-- Codex installs a global CRG skill with MCP-first guidance and a read-only CLI fallback (#841).
-### Added
-
-- `install` also writes `post-checkout`, `post-merge` and `post-rewrite` git
-  hooks that run `update`, so the graph follows a branch switch, a merge or a
-  `git pull` (merge or rebase mode) instead of waiting for the next commit.
-  `post-checkout` runs on branch checkouts only and skips the checkout a
-  rebase makes before replaying local commits; `post-rewrite` updates once the
-  rebase has finished and ignores `--amend`, which `pre-commit` already covers.
-  A rebase with nothing to replay never runs `post-rewrite`, so it updates at
-  that checkout. An existing hook in a language other than shell is left alone.
-  Each block is marked, appended to an existing hook, skipped in linked
-  worktrees unless `CRG_HOOK_WORKTREES=1`, and removed by `uninstall`.
-  `--no-hooks` skips them along with `pre-commit`.
-
-### Changed
-
-- Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
-  paths and value types, never values. `detect_changes` reports them as
-  `changed_yaml_paths`, bounded by `max_results`. `pnpm-lock.yaml` is ignored at
-  any depth.
-- Search ranks test code below production code unless the query asks about
-  tests (`kind="Test"`, or a word such as "test", "spec", "fixture" or
-  "mock"). A two-line test stub that names a symbol used to score as well as
-  the implementation and could outrank it.
-- The installed instruction block tells agents to answer from
-  `include_source=True, expand_neighbors=True` and open a file only when a
-  snippet is cut off. It still says not to change code from graph output
-  alone. Earlier blocks stay recognised for upgrade and uninstall.
-
-- The MCP server instructions now route by question type instead of introducing
-  the server as a code-review tool. With deferred tool loading an agent sees
-  only the tool names and these instructions, so "for code reviews" kept it on
-  Grep for callers, importers and covering tests everywhere else. The new text
-  maps each relationship question to its tool and leaves plain-text search to
-  Grep. Measured with Claude Code on one TypeScript monorepo: across 8 ordinary
-  tasks that never mention the graph (implement, review, brainstorm, plan), the
-  graph was used in 1 run before and 6 after; plain-text questions stayed on
-  Grep (0 of 4 moved). `tests/test_server_instructions.py` keeps every tool and
-  query pattern the text names registered.
-
-### Fixed
-
 - The Claude Code plugin's hooks load again. `hooks/hooks.json` held a bare
   event map, which current Claude Code rejects with "hooks.json must have
   `hooks` (the hook matchers) or `modules` (hooks modules), or both", so the
@@ -252,6 +254,30 @@
   directory above it) anchors where the link sits, and a `..` in its
   `baseUrl` or `paths` climbs from there; `"baseUrl": null` in an extending
   config unsets the inherited `baseUrl`.
+- Python `@property` reads produce edges, so `callers_of` and `find_dead_code` see them (#1065, #1060).
+- Python and Ruby classes that share a leaf name in one file no longer overwrite each other's methods (#1087, #999).
+- Terraform provider aliases keep distinct nodes, and references reach the right one (#1083, #985).
+- PowerShell functions, classes, methods and calls are extracted again (#1079, #1067).
+- Elixir `def` with a `when` guard is indexed and short-form bodies are walked (#980, part of #979).
+- JavaScript and TypeScript generator functions are `Function` nodes that own their calls (#1131).
+- Components wrapped in `forwardRef`, `memo` and similar calls are `Function` nodes (#972, #971).
+- TypeScript abstract classes are indexed, with nodes for their abstract methods (#1033, #1031).
+- Compact Ruby `class Foo::Bar` declarations emit `Class` nodes with stable identity. This moves the schema to version 14 (#933, #932).
+- Calls inside Rust `if false` blocks are left out of the graph (#1132).
+- `@Override` methods and JUnit lifecycle methods count as entry points in dead-code analysis (#1035, #1034).
+- Spring calls on a concrete injected type stay on that type instead of moving to its only subclass (#1075, #1074).
+- `tests_for` and the test-gap report name tests reached through spec helpers (#1128, #1109).
+- `get_impact_radius` and `get_review_context` report unknown risk when a requested path is not in the graph (#1084, #983).
+- The real-absence claim is withdrawn while untracked source exists (#987).
+- Review guidance applies the lifecycle test-gap exemption (#871, #865).
+- A registered data directory that has gone missing no longer strands a local graph (#1080, #1057).
+- Untracked files reach `build` and `update` (#1094, #998).
+- A no-op `update` repairs stale FTS left by `--skip-postprocess` (#1105, #1104).
+- MCP auto-watch runs post-processing after updates (#1108, #1103) and stops and joins its watcher before closing the store (#1127, #1121).
+- Partial graphs recover once and then stay incremental (#881, #803).
+- Renames through re-exports match a full build, and importers keep their flows and communities (#1062).
+- Watch mode does not report a refused directory as adopted (#910, #907) and does not watch ignored trees created after startup (#973, #908).
+- Windows daemon logs accept Unicode and tolerate vanished PIDs (#1129, #866), and a Job Object ends watchers when the daemon dies (#958, part of #925).
 
 ## [2.3.9] - 2026-09-18
 
