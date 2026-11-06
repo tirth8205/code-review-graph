@@ -106,6 +106,13 @@ The persisted `extra` JSON is the internal source of truth. Query and change-ana
 
 `CONTAINS` connects files and nested paths. Alias nodes use `REFERENCES` with canonical qualified endpoints. Generic YAML `File` responses use the same `yaml` object for document, duplicate-key, unsupported-key, truncation, and `values_indexed: false` metadata.
 
+### DocSection
+A `div`, `section` or `article` with an `id` in an HTML page (`.html`, `.htm`). Its name is the
+anchor, such as `#cover`, and its lines are the element's. `extra` holds `html_id`, `html_tag`,
+`html_id_occurrences` (a page can repeat an id; the first element is the one kept) and, when the
+block has one, its first heading under `docstring`. Search finds a section by its anchor and that
+heading. The body text is not indexed. `CONTAINS` connects the file to each section.
+
 ## Edge Types
 
 Every edge has `source_qualified`, `target_qualified`, `file_path` (where the relationship

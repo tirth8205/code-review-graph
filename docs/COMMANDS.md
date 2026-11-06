@@ -138,7 +138,7 @@ repo_root: str | None
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
-kind: str | None     # File, Class, Function, Type, Test, YamlPath
+kind: str | None     # File, Class, Function, Type, Test, YamlPath, DocSection
 limit: int = 20
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
@@ -164,7 +164,7 @@ repo_root: str | None
 #### `find_large_functions_tool`
 ```
 min_lines: int = 50                # Minimum line count
-kind: str | None                   # File, Class, Function, Test, or YamlPath
+kind: str | None                   # File, Class, Function, Test, YamlPath, or DocSection
 file_path_pattern: str | None      # File path substring
 limit: int = 50
 repo_root: str | None
