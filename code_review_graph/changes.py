@@ -625,7 +625,9 @@ def compute_risk_score(
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(node.qualified_name)
+    transitive_tests = store.get_transitive_tests(
+        node.qualified_name, include_helper_routes=False,
+    )
     test_count = len(transitive_tests)
     score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
