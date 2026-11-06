@@ -79,6 +79,10 @@ def _make_executor(max_workers: int):
 
 logger = logging.getLogger(__name__)
 
+# How many files a complete graph of this repository holds. Parseable files can
+# yield no rows (generic YAML), so the inventory alone cannot say a graph is
+# partial. Zero means nothing has confirmed it yet.
+VERIFIED_FILE_COUNT_KEY = "verified_file_count"
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
@@ -1967,6 +1971,10 @@ def full_build(
 
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
+    store.set_metadata("intentionally_incomplete", "0")
+    store.set_metadata(
+        VERIFIED_FILE_COUNT_KEY, "0" if errors else str(len(store.get_all_files()))
+    )
     _store_cpp_identity_pending(store, cpp_errors)
     # Post-processing cannot redo these, so they run while the marker still
     # says in progress: a process killed here gets a full rebuild.

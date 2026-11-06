@@ -19,7 +19,11 @@ from ..build_state import (
     read_build_state,
 )
 from ..incremental import (
+    VERIFIED_FILE_COUNT_KEY,
+    collect_all_files,
+    detect_vcs,
     full_build,
+    get_all_tracked_files,
     incremental_update,
     resolve_incremental_base,
 )
@@ -28,6 +32,70 @@ from ..parser import normalize_file_path
 from ._common import _get_store
 
 logger = logging.getLogger(__name__)
+
+_PARTIAL_GRAPH_MIN_FILES = 8
+_PARTIAL_GRAPH_MAX_COVERAGE = 0.25
+_PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE = 0.50
+
+
+def _should_rebuild_partial_graph(
+    repo_root: Path,
+    store: Any,
+    recurse_submodules: bool | None = None,
+) -> bool:
+    """Detect a non-empty graph that represents only a small slice of a repo."""
+    if store.get_metadata("intentionally_incomplete") == "1":
+        return False
+
+    represented_paths = {
+        normalize_file_path(path) for path in store.get_all_files()
+    }
+    # A graph that still holds what a complete graph held is not partial, even
+    # if most parseable files yield no rows. This needs no inventory at all.
+    try:
+        verified = int(store.get_metadata(VERIFIED_FILE_COUNT_KEY) or 0)
+    except ValueError:
+        verified = 0
+    if verified and len(represented_paths) > verified * _PARTIAL_GRAPH_MAX_COVERAGE:
+        return False
+    # Listing an SVN working copy asks the server, which no update should wait
+    # for. The poisoned graphs this recovers came from Git diffs.
+    if detect_vcs(repo_root) == "svn":
+        return False
+
+    tracked_files = get_all_tracked_files(repo_root, recurse_submodules)
+    if tracked_files:
+        # Keep the common path cheap: a graph already representing at least
+        # half of all tracked files cannot be severely partial. Below that,
+        # documentation- or asset-heavy repositories still need the precise
+        # parseable inventory below before forcing an expensive rebuild.
+        # Untracked files are indexed too, but say nothing about tracked ones.
+        tracked_paths = {
+            normalize_file_path(repo_root / relative) for relative in tracked_files
+        }
+        if (
+            len(represented_paths & tracked_paths) >= len(tracked_files)
+            * _PARTIAL_GRAPH_SUSPECT_TRACKED_COVERAGE
+        ):
+            return False
+        if len(tracked_files) < _PARTIAL_GRAPH_MIN_FILES:
+            return False
+
+    expected_files = collect_all_files(repo_root, recurse_submodules)
+    if len(expected_files) < _PARTIAL_GRAPH_MIN_FILES:
+        return False
+
+    expected_paths = {
+        normalize_file_path(repo_root / relative)
+        for relative in expected_files
+    }
+    represented_count = len(expected_paths & represented_paths)
+    if represented_count <= len(expected_paths) * _PARTIAL_GRAPH_MAX_COVERAGE:
+        return True
+    # Checked and fine: later updates need not repeat the inventory.
+    store.set_metadata(VERIFIED_FILE_COUNT_KEY, str(len(represented_paths)))
+    return False
+
 
 # The build-state vocabulary is imported above rather than defined here:
 # ``full_build`` has to advance it as soon as the last file is stored, and it
@@ -689,6 +757,7 @@ def build_or_update_graph(
         store.close()
         return contended
     try:
+        recovery_reason: str | None = None
         if not full_rebuild and not store.has_nodes():
             full_rebuild = True
 
@@ -712,6 +781,13 @@ def build_or_update_graph(
             if base_resolved is None:
                 full_rebuild = True
 
+        if (
+            not full_rebuild
+            and _should_rebuild_partial_graph(root, store, recurse_submodules)
+        ):
+            full_rebuild = True
+            recovery_reason = "partial_graph"
+
         previous_state = store.get_metadata(BUILD_STATE_KEY)
         store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
 
@@ -732,6 +808,8 @@ def build_or_update_graph(
                 "base_resolved": None,
                 "summary": summary,
             }
+            if recovery_reason is not None:
+                build_result["recovery_reason"] = recovery_reason
         else:
             try:
                 result = incremental_update(root, store, base=base_resolved)
