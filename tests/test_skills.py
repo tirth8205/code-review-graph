@@ -1956,17 +1956,19 @@ class TestInstallCursorHooks:
             crg_hooks = [h for h in entries if "crg-" in h.get("command", "")]
             assert len(crg_hooks) == 1, f"{event} has {len(crg_hooks)} crg hooks after reinstall"
 
-    def test_handles_corrupt_existing_json(self, tmp_path):
+    def test_leaves_corrupt_existing_json_alone(self, tmp_path, capsys):
+        """Overwriting it would destroy whatever the user was part way through."""
         cursor_dir = tmp_path / ".cursor"
         cursor_dir.mkdir(parents=True)
-        (cursor_dir / "hooks.json").write_text("not valid json{{{")
+        hooks_path = cursor_dir / "hooks.json"
+        hooks_path.write_text("not valid json{{{")
 
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
             result = install_cursor_hooks()
 
-        assert result.exists()
-        data = json.loads(result.read_text())
-        assert data["version"] == 1
+        assert result is None
+        assert hooks_path.read_text() == "not valid json{{{"
+        assert "unparseable JSON" in capsys.readouterr().out
 
 
 class TestKiroPlatform:

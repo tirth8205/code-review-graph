@@ -31,6 +31,7 @@ __all__ = [
     "set_member",
     "skip_value",
     "tokenize",
+    "value_has_comments",
 ]
 
 
@@ -347,6 +348,34 @@ def _render(value: Any, column: int) -> str:
     return text.replace("\n", "\n" + " " * column)
 
 
+def _past_trailing_comment(raw: str, offset: int) -> int:
+    """Return the offset past a comment on the same line as ``offset``.
+
+    A comment after a value belongs to that value, so anything inserted goes
+    after it. Without one, ``offset`` comes back unchanged.
+    """
+    cursor = offset
+    while cursor < len(raw) and raw[cursor] in " \t":
+        cursor += 1
+    if raw.startswith("//", cursor):
+        newline = raw.find("\n", cursor)
+        end = len(raw) if newline < 0 else newline
+        return end - 1 if end > cursor and raw[end - 1] == "\r" else end
+    if raw.startswith("/*", cursor):
+        close = raw.find("*/", cursor + 2)
+        if close >= 0 and "\n" not in raw[cursor:close]:
+            return close + 2
+    return offset
+
+
+def value_has_comments(raw: str, path: Sequence[str | int]) -> bool:
+    """Return whether replacing the value at ``path`` would delete a comment."""
+    tokens = tokenize(raw)
+    index = find_value(tokens, path)
+    end = skip_value(tokens, index)
+    return has_comments(raw[tokens[index].start : tokens[end - 1].end])
+
+
 def set_member(raw: str, path: Sequence[str], value: Any) -> str:
     """Return ``raw`` with ``path`` set to ``value``, comments preserved.
 
@@ -378,20 +407,32 @@ def set_member(raw: str, path: Sequence[str], value: Any) -> str:
         column = _column_of(raw, tokens[last.key_index].start)
         member_text = f"{json.dumps(key)}: {_render(value, column)}"
         if last.comma_index is not None:
-            anchor = tokens[last.comma_index].end
+            anchor = _past_trailing_comment(raw, tokens[last.comma_index].end)
             return raw[:anchor] + "\n" + " " * column + member_text + raw[anchor:]
-        anchor = tokens[last.value_end - 1].end
-        return raw[:anchor] + ",\n" + " " * column + member_text + raw[anchor:]
+        value_end = tokens[last.value_end - 1].end
+        anchor = _past_trailing_comment(raw, value_end)
+        return (
+            raw[:value_end]
+            + ","
+            + raw[value_end:anchor]
+            + "\n"
+            + " " * column
+            + member_text
+            + raw[anchor:]
+        )
 
-    # An empty object: indent one step past the line that opens it.
+    # An empty object: indent one step past the line that opens it, keeping any
+    # comment that is all the object holds so far.
     open_end = tokens[parent_index].end
     close_index = skip_value(tokens, parent_index) - 1
     close_start = tokens[close_index].start
     outer = _line_indent(raw, tokens[parent_index].start)
     column = outer + 2
     member_text = f"{json.dumps(key)}: {_render(value, column)}"
+    inner = raw[open_end:close_start]
     return (
         raw[:open_end]
+        + (inner.rstrip() if has_comments(inner) else "")
         + "\n"
         + " " * column
         + member_text

@@ -419,12 +419,14 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("codebuddy", "all"):
         try:
             codebuddy_settings = install_codebuddy_hooks(repo_root)
-            print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
+            if codebuddy_settings:
+                print(f"Installed CodeBuddy hooks in {codebuddy_settings}")
         except Exception as exc:
             logger.warning("Could not install CodeBuddy hooks: %s", exc)
     if not skip_hooks and target in ("codex", "all"):
         hooks_path = install_codex_hooks(repo_root)
-        print(f"Installed Codex hooks in {hooks_path}")
+        if hooks_path:
+            print(f"Installed Codex hooks in {hooks_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
@@ -433,8 +435,9 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
-            install_hooks(repo_root, platform=plat)
-            print(f"Installed hooks in {repo_root / f'.{plat}' / 'settings.json'}")
+            settings_path = install_hooks(repo_root, platform=plat)
+            if settings_path:
+                print(f"Installed hooks in {settings_path}")
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
@@ -445,14 +448,16 @@ def _handle_init(args: argparse.Namespace) -> None:
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
         try:
             hooks_path = install_cursor_hooks()
-            print(f"Installed Cursor hooks in {hooks_path}")
+            if hooks_path:
+                print(f"Installed Cursor hooks in {hooks_path}")
         except Exception as exc:
             logger.warning("Could not install Cursor hooks: %s", exc)
 
     if not skip_hooks and target in ("gemini-cli", "all"):
         try:
             gemini_settings = install_gemini_cli_hooks(repo_root)
-            print(f"Installed Gemini CLI hooks in {gemini_settings}")
+            if gemini_settings:
+                print(f"Installed Gemini CLI hooks in {gemini_settings}")
         except Exception as exc:
             logger.warning("Could not install Gemini CLI hooks: %s", exc)
 
