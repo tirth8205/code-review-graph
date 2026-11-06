@@ -15699,9 +15699,14 @@ class CodeParser:
                         if target.is_file():
                             return str(target.resolve())
             else:
-                # Non-relative import — try tsconfig path alias resolution
+                # Non-relative import — try tsconfig path alias resolution, but
+                # never an edge to a file the build would not index. baseUrl
+                # reaches every bare specifier, ``vendor/x`` and ``dist/x`` too.
                 resolved = self._tsconfig_resolver.resolve_alias(module, file_path)
-                if resolved:
+                if resolved and (
+                    self._repo_root is None
+                    or self._path_is_indexed(Path(resolved), self._repo_root)
+                ):
                     return resolved
 
         elif language == "dart":

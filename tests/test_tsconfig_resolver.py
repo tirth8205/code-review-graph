@@ -11,6 +11,7 @@ import pytest
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, incremental_update
+from code_review_graph.parser import CodeParser
 from code_review_graph.tools.query import query_graph
 from code_review_graph.tsconfig_resolver import TsconfigResolver
 
@@ -137,6 +138,106 @@ class TestJsconfigResolution:
             result = self.resolver.resolve_alias("@/util", str(importer))
             assert result is not None
             assert Path(result) == target.resolve()
+
+
+class TestBaseUrlResolution:
+    """Non-relative specifiers resolve against baseUrl, as tsc resolves them."""
+
+    def setup_method(self):
+        self.resolver = TsconfigResolver()
+
+    def _project(self, root: Path, compiler_options: dict) -> Path:
+        (root / "tsconfig.json").write_text(
+            json.dumps({"compilerOptions": compiler_options}), encoding="utf-8",
+        )
+        target = root / "src" / "lib" / "util.ts"
+        target.parent.mkdir(parents=True)
+        target.write_text("export const util = 1;\n", encoding="utf-8")
+        return target
+
+    def test_base_url_without_paths_resolves(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": "./"})
+        importer = tmp_path / "src" / "app.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_base_url_resolves_when_no_paths_pattern_matches(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": ".", "paths": {"@/*": ["src/*"]}})
+        importer = tmp_path / "src" / "app.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result is not None
+        assert Path(result) == target.resolve()
+
+    def test_base_url_leaves_packages_unresolved(self, tmp_path):
+        self._project(tmp_path, {"baseUrl": "./"})
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("react", str(importer)) is None
+
+    def test_no_base_url_and_no_paths_returns_none(self, tmp_path):
+        self._project(tmp_path, {"strict": True})
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("src/lib/util", str(importer)) is None
+
+    def test_matched_pattern_stops_before_base_url(self, tmp_path):
+        # tsc stops at a pattern that matched, so ``config`` is the npm package
+        # here, not the local config/index.ts.
+        self._project(tmp_path, {"baseUrl": ".", "paths": {"*": ["types/*"]}})
+        local = tmp_path / "config" / "index.ts"
+        local.parent.mkdir()
+        local.write_text("export const config = 1;\n", encoding="utf-8")
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("config", str(importer)) is None
+
+    def test_matched_pattern_with_a_missing_target_stops_before_base_url(self, tmp_path):
+        self._project(tmp_path, {"baseUrl": ".", "paths": {"src/lib/*": ["missing/*"]}})
+        importer = tmp_path / "src" / "app.ts"
+        assert self.resolver.resolve_alias("src/lib/util", str(importer)) is None
+
+    def test_empty_base_url_is_the_config_directory(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": ""})
+        importer = tmp_path / "src" / "app.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result == str(target.resolve())
+
+    def test_inherited_base_url_resolves_from_the_config_declaring_it(self, tmp_path):
+        target = self._project(tmp_path, {"baseUrl": "."})
+        (tmp_path / "tsconfig.base.json").write_text(
+            (tmp_path / "tsconfig.json").read_text(encoding="utf-8"), encoding="utf-8",
+        )
+        (tmp_path / "tsconfig.json").unlink()
+        app = tmp_path / "apps" / "api"
+        app.mkdir(parents=True)
+        (app / "tsconfig.json").write_text(
+            json.dumps({"extends": "../../tsconfig.base.json"}), encoding="utf-8",
+        )
+        importer = app / "main.ts"
+        result = self.resolver.resolve_alias("src/lib/util", str(importer))
+        assert result == str(target.resolve())
+
+    @pytest.mark.parametrize("escape", ["absolute", "dotdot"])
+    def test_specifier_cannot_leave_base_url(self, tmp_path, escape):
+        root = tmp_path / "repo"
+        root.mkdir()
+        self._project(root, {"baseUrl": "."})
+        outside = tmp_path / "other" / "secret.ts"
+        outside.parent.mkdir()
+        outside.write_text("export const secret = 1;\n", encoding="utf-8")
+        spec = str(outside) if escape == "absolute" else "src/../../other/secret"
+        importer = root / "src" / "app.ts"
+        assert self.resolver.resolve_alias(spec, str(importer)) is None
+
+    def test_specifier_into_an_ignored_directory_keeps_the_bare_edge(self, tmp_path):
+        self._project(tmp_path, {"baseUrl": "."})
+        (tmp_path / "composer.json").write_text("{}", encoding="utf-8")
+        vendored = tmp_path / "vendor" / "lib" / "x.ts"
+        vendored.parent.mkdir(parents=True)
+        vendored.write_text("export const x = 1;\n", encoding="utf-8")
+        importer = tmp_path / "src" / "app.ts"
+        importer.write_text("import { x } from 'vendor/lib/x';\n", encoding="utf-8")
+        _, edges = CodeParser(tmp_path).parse_file(importer)
+        targets = [e.target for e in edges if e.kind == "IMPORTS_FROM"]
+        assert targets == ["vendor/lib/x"]
 
 
 class TestExtendsAnchoring:

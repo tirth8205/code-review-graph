@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
+  when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
+  `baseUrl` without `paths` resolved no non-relative import at all: on a
+  NestJS monorepo whose services import `src/...`, 1,849 import edges stayed
+  bare strings, `importers_of` for one service found 14 of its 35 importers,
+  and calls on its injected services fell back to name matching.
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing
