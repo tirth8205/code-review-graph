@@ -538,7 +538,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ItemController as Items;
 Route::get('/items', [Items::class, 'index']);
 Route::post('/items', Items::class);
-Route::put('/items', 'Items@index');
+Route::put('/items', 'App\Http\Controllers\ItemController@index');
 Route::patch('/items', function () {});
 Route::delete('/items', [Items::class, 'index']);
 Route::options('/items', [Items::class, 'index']);
@@ -635,6 +635,40 @@ Route::get("items/$id", fn () => 1);
         assert [
             (n.extra["http_method"], n.extra["route"]) for n in nodes if n.kind == "Endpoint"
         ] == [("GET", "/v1/items"), ("GET", "/v2/items/{id}"), ("GET", "/v3/items")]
+
+    def test_laravel_endpoints_match_laravel_string_and_chain_semantics(self, tmp_path):
+        repo = tmp_path / "repo"
+        _write_composer(repo, {"autoload": {"psr-4": {"App\\": "app/"}}})
+        item = _write_php(repo / "app/Http/Controllers/ItemController.php")
+        other = _write_php(repo / "app/Http/Controllers/OtherController.php")
+        source = br"""<?php
+use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\ItemController;
+use App\Http\Controllers\OtherController;
+use App\Http\Controllers\ItemController as Items;
+Route::get('it\'s', 'App\\Http\\Controllers\\ItemController@index');
+Route::controller(ItemController::class)->group(function () {
+    Route::group(['controller' => OtherController::class], function () {
+        Route::get('other', 'index');
+    });
+});
+Route::get('items', [ItemController::class, 'index'])->name('i')->prefix('v1');
+Route::get('alias', 'Items@index');
+Route::group(['controller' => $controller], fn () => Route::get('a', 'index'));
+Route::get('b', [ItemController::class, 'index'])->prefix($version);
+"""
+        nodes, edges = CodeParser(repo).parse_bytes(repo / "routes/web.php", source)
+        handles = [edge.source for edge in edges if edge.kind == "HANDLES"]
+
+        assert [
+            (n.extra["http_method"], n.extra["route"]) for n in nodes if n.kind == "Endpoint"
+        ] == [("GET", "/it's"), ("GET", "/other"), ("GET", "/v1/items"), ("GET", "/alias")]
+        assert handles[:3] == [
+            f"{item.resolve().as_posix()}::ItemController.index",
+            f"{other.resolve().as_posix()}::OtherController.index",
+            f"{item.resolve().as_posix()}::ItemController.index",
+        ]
+        assert handles[3] == "Items.index"
 
     def test_laravel_endpoint_groups_skip_non_literal_options(self, tmp_path):
         source = br"""<?php
