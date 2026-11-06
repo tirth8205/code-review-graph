@@ -1138,6 +1138,16 @@ def get_changed_files(
             logger.warning("git diff failed while discovering changed files")
             return []
         changed = _decode_name_status_paths(result.stdout)
+        if not changed:
+            # An empty commit diff can coexist with tracked worktree edits
+            # restored to the base contents. Preserve those edits before
+            # merging untracked paths, which would otherwise make this list
+            # look non-empty to discover_review_changes and skip its fallback.
+            return get_staged_and_unstaged(
+                repo_root,
+                timeout=timeout,
+                require_vcs=require_vcs or strict,
+            )
         untracked = _get_untracked_files(
             repo_root,
             timeout=timeout,
@@ -1533,9 +1543,13 @@ def collect_all_files(
         # Skip paths that would exceed OS filename limits (macOS: 255 bytes
         # per component, ~1024 total; Windows: 260 total).
         try:
+            # ``os.fsdecode`` preserves undecodable POSIX filename bytes as
+            # surrogate escapes. Graph paths are stored as UTF-8, so reject
+            # those before the component-length checks call ``encode()``.
+            rel_path.encode("utf-8")
             full_path = repo_root / rel_path
-        except (OSError, ValueError):
-            logger.debug("Skipping path that cannot be constructed: %s", rel_path)
+        except (OSError, UnicodeEncodeError, ValueError):
+            logger.debug("Skipping path that cannot be represented safely")
             continue
         if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
             logger.debug("Skipping overlong path: %s", rel_path[:120])
