@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from code_review_graph.aop_resolver import (
-    _AspectjPattern,
+    _DottedPattern,
     _parse_execution_expression,
     resolve_aop_advice,
 )
@@ -795,27 +795,25 @@ def test_incremental_annotation_removal_removes_stale_aop_call(tmp_path: Path) -
         assert _aop_edges(store) == []
 
 
-class TestAspectjPattern:
+class TestDottedPattern:
     """Direct unit tests for the three documented conversion rules."""
 
     def test_literal_pattern_matches_only_itself(self) -> None:
-        pattern = _AspectjPattern("PaymentService")
+        pattern = _DottedPattern("PaymentService")
         assert pattern.match("PaymentService")
         assert not pattern.match("PaymentServiceImpl")
         assert not pattern.match("paymentservice")
 
     def test_single_star_does_not_cross_a_dot_boundary(self) -> None:
-        pattern = _AspectjPattern("*Service")
+        pattern = _DottedPattern("*Service")
         assert pattern.match("PaymentService")
         assert pattern.match("Service")
         assert not pattern.match("internal.Service")
 
     def test_double_dot_matches_whole_segments_only(self) -> None:
         # ".." means "any number of intervening path segments": zero or more
-        # whole dot-delimited segments, never arbitrary characters. A bare
-        # ".*" would also match "comXService" and backtracks catastrophically
-        # when repeated (see test_aop_resolution_edge_cases.py).
-        pattern = _AspectjPattern("com..Service")
+        # whole dot-delimited segments, never arbitrary characters.
+        pattern = _DottedPattern("com..Service")
         assert pattern.match("com.Service")
         assert pattern.match("com.foo.Service")
         assert pattern.match("com.foo.bar.Service")
@@ -824,7 +822,7 @@ class TestAspectjPattern:
         assert not pattern.match("com..Service")
 
     def test_special_regex_characters_are_escaped(self) -> None:
-        pattern = _AspectjPattern("Foo$Bar")
+        pattern = _DottedPattern("Foo$Bar")
         assert pattern.match("Foo$Bar")
         assert not pattern.match("FooXBar")
 
@@ -882,3 +880,189 @@ class TestParseExecutionExpression:
         pattern, needs_class = result
         assert needs_class is False
         assert pattern.match("anyMethodAtAll")
+
+
+def _aop_targets(store: GraphStore) -> set[str]:
+    return {row["target_qualified"].split("::", 1)[1] for row in _aop_edges(store)}
+
+
+def test_concatenated_pointcut_literal_is_skipped(tmp_path: Path) -> None:
+    """Only the first of two joined literals is visible to a regex, and that
+    piece alone drops the "&&", so the advice must not resolve at all."""
+    source = """
+package com.acme.service;
+
+@Aspect
+class AuditAspect {
+    @Before("execution(* com.acme.service.*.*(..))" + " && @annotation(com.acme.Audited)")
+    void audit() {}
+}
+
+class PaymentService {
+    void pay() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        assert resolve_aop_advice(store)["calls_created"] == 0
+    finally:
+        store.close()
+
+
+def test_fully_qualified_annotations_are_matched_by_simple_name(tmp_path: Path) -> None:
+    source = """
+package com.acme.service;
+
+@Aspect
+class AuditAspect {
+    @org.aspectj.lang.annotation.Before("@annotation(com.acme.Audited)")
+    void audit() {}
+}
+
+class PaymentService {
+    @com.acme.Audited
+    void pay() {}
+
+    void refund() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        resolve_aop_advice(store)
+        assert _aop_targets(store) == {"PaymentService.pay"}
+    finally:
+        store.close()
+
+
+def test_universal_declaring_type_matches_packaged_classes(tmp_path: Path) -> None:
+    source = """
+package com.acme.service;
+
+@Aspect
+class LoggingAspect {
+    @Before("execution(* *.pay(..))")
+    void log() {}
+}
+
+class PaymentService {
+    void pay() {}
+
+    void refund() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        resolve_aop_advice(store)
+        assert _aop_targets(store) == {"PaymentService.pay"}
+    finally:
+        store.close()
+
+
+def test_whitespace_before_designator_parenthesis_is_accepted(tmp_path: Path) -> None:
+    source = """
+package com.acme.service;
+
+@Aspect
+class SpacedAspect {
+    @Before("execution (* com.acme.service.PaymentService.pay(..))")
+    void byExecution() {}
+
+    @After("@annotation (com.acme.Audited)")
+    void byAnnotation() {}
+}
+
+class PaymentService {
+    void pay() {}
+
+    @Audited
+    void refund() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        resolve_aop_advice(store)
+        assert _aop_targets(store) == {"PaymentService.pay", "PaymentService.refund"}
+    finally:
+        store.close()
+
+
+def test_constructors_are_not_targets(tmp_path: Path) -> None:
+    source = """
+package com.acme.service;
+
+@Aspect
+class LoggingAspect {
+    @Before("execution(* com.acme.service.PaymentService.*(..))")
+    void log() {}
+}
+
+class PaymentService {
+    PaymentService() {}
+
+    void pay() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        resolve_aop_advice(store)
+        assert _aop_targets(store) == {"PaymentService.pay"}
+    finally:
+        store.close()
+
+
+def test_methods_of_aspects_are_not_targets(tmp_path: Path) -> None:
+    """Spring AOP does not proxy aspects: two catch-all advices must not
+    advise each other, and an aspect's helper and pointcut methods are not
+    targets either."""
+    source = """
+package com.acme.service;
+
+@Aspect
+class FirstAspect {
+    @Pointcut("execution(* *(..))")
+    void everything() {}
+
+    @Before("everything()")
+    void first() {}
+
+    void helper() {}
+}
+
+@Aspect
+class SecondAspect {
+    @After("execution(* *(..))")
+    void second() {}
+}
+
+class PaymentService {
+    void pay() {}
+}
+"""
+    _path, store = _build_store(tmp_path, source)
+    try:
+        resolve_aop_advice(store)
+        assert _aop_targets(store) == {"PaymentService.pay"}
+        assert len(_aop_edges(store)) == 2
+    finally:
+        store.close()
+
+
+class TestDottedPatternEdges:
+    def test_universal_type_prefix_allows_any_package(self) -> None:
+        pattern = _DottedPattern("*.*", any_package_prefix=True)
+        assert pattern.match("Service.run")
+        assert pattern.match("com.acme.Service.run")
+
+    def test_qualified_pattern_keeps_exact_package(self) -> None:
+        pattern, _ = _parse_execution_expression("execution(* com.acme.*.*(..))")
+        assert pattern.match("com.acme.Service.run")
+        assert not pattern.match("org.com.acme.Service.run")
+
+    def test_deep_gaps_finish_quickly(self) -> None:
+        import time
+
+        pattern = _DottedPattern("com" + "..*" * 40 + ".zz")
+        subject = "com." + ".".join(f"s{i}" for i in range(200))
+        started = time.perf_counter()
+        assert not pattern.match(subject)
+        assert time.perf_counter() - started < 1.0

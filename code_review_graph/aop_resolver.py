@@ -40,6 +40,8 @@ Scope (see issue #592 — Option 1, regex-based approximation):
   name.  A candidate in Java's default (unnamed) package has no
   ``java_package`` and is matched using the bare ``ClassName.methodName``,
   so a pointcut that names a package never matches a default-package class.
+  A declaring type of exactly ``*`` (``execution(* *.*(..))``) means any
+  type in any package, as in AspectJ.
   This is still an approximation of full AspectJ semantics (no
   supertype/interface expansion, no ``+`` subtype matching) and can produce
   false positives/negatives on those axes — see issue #592 — but no longer
@@ -53,6 +55,19 @@ Scope (see issue #592 — Option 1, regex-based approximation):
   is not recognized by either pointcut-kind matcher below, so it is
   skipped too — just by falling through unparsed rather than via an
   explicit compound-operator check.
+* Constructors (``extra["java_constructor"]``), test methods and methods of
+  ``@Aspect`` classes are never targets: Spring AOP proxies method calls on
+  beans, does not auto-proxy aspects, and tests run outside the proxy.
+* Advice whose pointcut is not one complete string literal (a constant, or
+  literals joined with ``+``) is skipped rather than partially resolved.
+* Annotations are compared by simple name, so a fully qualified method or
+  advice annotation (``@com.acme.Audited``, ``@org.aspectj.lang.annotation.Before``)
+  matches. A fully qualified *class-level* ``@org.aspectj.lang.annotation.Aspect``
+  is still not recognized: aspects are found through
+  ``extra["spring_annotations"]``, which ``_get_java_annotations`` in
+  ``parser.py`` fills with simple-name annotations only. Changing that would
+  alter Spring stereotype detection as a whole, so it is left for a separate
+  change.
 * ``within(Type+)``, ``args()``/``target()``/``this()``, and named pointcut
   references that cross an ``@Aspect`` class boundary are out of scope for
   this pass (see the narrower AOP ``LanguageGap`` note in
@@ -108,9 +123,10 @@ _COMPOUND_OPERATORS = ("&&", "||")
 _NAMED_POINTCUT_REF = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\(\s*\)\s*$")
 _ANNOTATION_POINTCUT = re.compile(r"^\s*@annotation\s*\((.+)\)\s*$", re.DOTALL)
 _EXECUTION_POINTCUT = re.compile(r"^\s*execution\s*\((.*)\)\s*$", re.DOTALL)
-
-_POINTCUT_DESIGNATOR = re.compile(
-    r"^\s*@?(?:execution|annotation|within|args|target|this)\s*\("
+# A pointcut that opens with a designator, whitespace allowed before "(" as
+# both matchers above allow it.
+_DESIGNATOR_PREFIX = re.compile(
+    r"^\s*(?:execution|@annotation|within|args|target|this)\s*\("
 )
 
 _DERIVED_FLAG = "aop_resolved"
@@ -125,20 +141,29 @@ def _extract_annotation_string_arg(deco_text: str) -> Optional[str]:
     argument can be found, or when literals are joined with ``+``: reading only
     the first would drop whatever the rest adds, such as a ``&&``.
     """
-    if re.search(r'"\s*\+|\+\s*"', deco_text):
+    match = re.search(r'(?:pointcut|value)\s*=\s*"((?:[^"\\]|\\.)*)"', deco_text)
+    if not match:
+        match = re.search(r'"((?:[^"\\]|\\.)*)"', deco_text)
+    if not match:
         return None
-    named = re.search(r'(?:pointcut|value)\s*=\s*"((?:[^"\\]|\\.)*)"', deco_text)
-    if named:
-        return named.group(1)
-    any_string = re.search(r'"((?:[^"\\]|\\.)*)"', deco_text)
-    if any_string:
-        return any_string.group(1)
-    return None
+    # A literal joined to anything with "+" is a constant expression this
+    # pass cannot evaluate; resolving only one piece of it could drop an
+    # "&&" and advise the wrong methods, so give up instead.
+    if deco_text[: match.start()].rstrip().endswith("+") or deco_text[
+        match.end():
+    ].lstrip().startswith("+"):
+        return None
+    return match.group(1)
 
 
 def _annotation_head(deco_text: str) -> str:
-    """Return the simple annotation name from a raw decorator, dropping args and package."""
-    return deco_text.split("(", 1)[0].strip().rsplit(".", 1)[-1]
+    """Return the simple annotation name from a raw decorator string.
+
+    Arguments and any package qualifier are dropped, so ``com.acme.Audited``
+    and ``Audited`` compare equal.
+    """
+    head = deco_text.split("(", 1)[0].strip().lstrip("@").strip()
+    return head.rsplit(".", 1)[-1].strip()
 
 
 def _glob_matches(pattern: str, text: str) -> bool:
@@ -160,46 +185,52 @@ def _glob_matches(pattern: str, text: str) -> bool:
     return not pattern[p:].strip("*")
 
 
-class _AspectjPattern:
-    """A dotted AspectJ wildcard pattern, matched one segment at a time.
+class _DottedPattern:
+    """An AspectJ-style dotted wildcard pattern, matched one segment at a time.
 
-    * ``..`` means any number of whole segments in between
-    * ``*`` within a segment means anything but a dot
-    * every other character is literal
+    Rules (approximate — see module docstring for the scope this is applied
+    within):
 
-    Pointcut text comes from the repository being indexed, and a regex over
-    repeated ``..*`` or ``*a*a`` backtracks catastrophically, so no regex is built.
-    Tracking the reachable positions keeps this polynomial on any input.
+    * ``..`` means "any number of intervening whole segments", zero included
+    * a lone ``.`` separates two segments
+    * ``*`` within a segment means "any characters but a dot"
+    * every other character is matched literally
+
+    The pattern text comes from the repository being indexed, and a regex over
+    repeated ``..*`` or ``*a*a`` backtracks catastrophically, so no regex is
+    built, not even for one segment. Tracking the reachable positions keeps
+    this polynomial on any input.
     """
 
-    def __init__(self, text: str, any_package: bool = False) -> None:
-        self.parts: list[Optional[str]] = [None] if any_package else []
-        for index, chunk in enumerate(text.split("..")):
+    def __init__(self, pattern: str, any_package_prefix: bool = False) -> None:
+        # ``None`` stands for a ``..`` gap.
+        self._parts: list[Optional[str]] = [None] if any_package_prefix else []
+        for index, run in enumerate(pattern.split("..")):
             if index:
-                self.parts.append(None)
-            if chunk:
-                self.parts.extend(chunk.split("."))
+                self._parts.append(None)
+            if run:
+                self._parts.extend(run.split("."))
 
     def match(self, subject: str) -> bool:
         segments = subject.split(".")
         if "" in segments:
             return False
         reachable = {0}
-        for part in self.parts:
+        for part in self._parts:
             if part is None:
-                reachable = (
-                    set(range(min(reachable), len(segments) + 1)) if reachable else reachable
-                )
+                reachable = set(range(min(reachable), len(segments) + 1))
             else:
                 reachable = {
                     position + 1
                     for position in reachable
                     if position < len(segments) and _glob_matches(part, segments[position])
                 }
+            if not reachable:
+                return False
         return len(segments) in reachable
 
 
-def _parse_execution_expression(expr: str) -> Optional[tuple[_AspectjPattern, bool]]:
+def _parse_execution_expression(expr: str) -> Optional[tuple[_DottedPattern, bool]]:
     """Reduce an ``execution(...)`` pointcut expression to a (pattern, needs_class) pair.
 
     ``needs_class`` is True when the expression's method-pattern token
@@ -234,9 +265,13 @@ def _parse_execution_expression(expr: str) -> Optional[tuple[_AspectjPattern, bo
         return None
 
     needs_class = "." in method_class_pattern
-    # A declaring type of just ``*`` means any type, in any package.
-    any_package = re.fullmatch(r"\*\.[^.]*", method_class_pattern) is not None
-    return _AspectjPattern(method_class_pattern, any_package), needs_class
+    # A declaring type of exactly "*" means any type, in any package, so
+    # only the bare "*.method" shape gets a free package prefix. A pattern
+    # that names a package keeps matching that package exactly.
+    universal_type = method_class_pattern.split(".")[0] == "*" and (
+        method_class_pattern.count(".") == 1
+    )
+    return _DottedPattern(method_class_pattern, universal_type), needs_class
 
 
 def _resolve_pointcut_expr(
@@ -264,7 +299,7 @@ def _resolve_pointcut_expr(
             return None
         return resolved
 
-    if "." in expr and "(" in expr and not _POINTCUT_DESIGNATOR.match(expr):
+    if "." in expr and "(" in expr and not _DESIGNATOR_PREFIX.match(expr):
         # Looks like a dotted "Other.pointcut()" cross-aspect reference.
         return None
 
@@ -348,7 +383,7 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
     # Advice is discovered in every method, but only proxied business methods can
     # be its targets. Spring does not proxy aspects, tests run outside the proxy,
     # and a constructor runs before there is an object to wrap.
-    aspect_owners = {(aspect["name"], aspect["file_path"]) for aspect in aspect_classes}
+    aspect_keys = {(aspect["name"], aspect["file_path"]) for aspect in aspect_classes}
     all_methods: list[dict] = []
     methods_by_class_file: dict[tuple[str, str], list[dict]] = {}
     for row in conn.execute(
@@ -367,10 +402,11 @@ def resolve_aop_advice(store: "GraphStore") -> dict:
                 (row["parent_name"], row["file_path"]), "",
             ),
         }
+        key = (row["parent_name"], row["file_path"])
         if (
             row["kind"] == "Function"
-            and (row["parent_name"], row["file_path"]) not in aspect_owners
-            and row["name"] != row["parent_name"].rsplit(".", 1)[-1]
+            and key not in aspect_keys
+            and not extra.get("java_constructor")
         ):
             all_methods.append(entry)
         methods_by_class_file.setdefault(

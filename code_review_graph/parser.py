@@ -12034,6 +12034,10 @@ class CodeParser:
         modifiers_str: Optional[str] = ",".join(deco_list) if deco_list else None
         if deco_list:
             method_extra["decorators"] = list(deco_list)
+        if language == "java" and child.type == "constructor_declaration":
+            # Lets consumers tell a constructor from a method; Spring AOP,
+            # for one, cannot intercept constructors.
+            method_extra["java_constructor"] = True
 
         docstring = self._get_docstring_summary(child, language)
         if docstring:

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 import code_review_graph
-from code_review_graph.aop_resolver import _AspectjPattern, resolve_aop_advice
+from code_review_graph.aop_resolver import _DottedPattern, resolve_aop_advice
 from code_review_graph.event_resolver import resolve_spring_events
 from code_review_graph.flows import detect_entry_points
 from code_review_graph.graph import GraphStore
@@ -724,16 +724,20 @@ _PATHOLOGICAL_SCRIPT = textwrap.dedent("""\
     from code_review_graph.parser import CodeParser
 
     root = Path(sys.argv[1])
-    source = '''package com.example.deeply.nested.pkg.service.impl;
+    package = "com." + ".".join("segment%d" % i for i in range(30))
+    pointcut = "execution(* com" + "..*" * 14 + ".zz(..))"
+    source = '''package %s;
 
     @Aspect
     public class Evil {
-        @Before("execution(* com..*..*..*..*..*..*.zz(..))")
+        @Before("%s")
         public void advice() {}
+    }
 
+    class Target {
         public void someReasonablyNamedBusinessMethod() {}
     }
-    '''
+    ''' % (package, pointcut)
     path = root / "Evil.java"
     nodes, edges = CodeParser().parse_bytes(path, source.encode())
     store = GraphStore(root / "graph.db")
@@ -746,7 +750,7 @@ _PATHOLOGICAL_SCRIPT = textwrap.dedent("""\
 def test_pathological_double_dot_pointcut_resolves_in_bounded_time(tmp_path: Path) -> None:
     """Pointcut text comes from the repository being indexed (including a
     fork's pull request in the GitHub Action). Repeated ``..*`` segments must
-    not turn the translated regex into catastrophic backtracking that stalls
+    not turn matching into catastrophic backtracking that stalls
     ``build``/``update``. Run in a child process so a regression fails this
     test instead of hanging the suite."""
     package_root = str(Path(code_review_graph.__file__).resolve().parent.parent)
@@ -761,8 +765,8 @@ def test_pathological_double_dot_pointcut_resolves_in_bounded_time(tmp_path: Pat
         )
     except subprocess.TimeoutExpired:
         pytest.fail(
-            "resolve_aop_advice did not finish within 30s on one method and the "
-            "pointcut execution(* com..*..*..*..*..*..*.zz(..))"
+            "resolve_aop_advice did not finish within 30s on one method in a "
+            "31-segment package and a pointcut with fourteen '..*' gaps"
         )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip().splitlines()[-1] == "0"
@@ -823,57 +827,11 @@ def test_hostile_patterns_finish_at_once(pattern: str) -> None:
         "a" * 40,
         ".".join(["a" * 40] * 3),
     ]
-    matcher = _AspectjPattern(pattern)
+    matcher = _DottedPattern(pattern)
     started = time.monotonic()
     for subject in subjects:
         assert not matcher.match(subject)
     assert time.monotonic() - started < 2.0
-
-
-def test_joined_string_literals_are_declined_not_read_in_part(tmp_path: Path) -> None:
-    argument = (
-        '"execution(* com.acme.service.*.*(..))" + " && @annotation(com.acme.Audited)"'
-    )
-    assert _advised(tmp_path, argument) == set()
-
-
-def test_fully_qualified_annotations_are_matched_by_simple_name(tmp_path: Path) -> None:
-    assert _advised(tmp_path, '"@annotation(com.acme.Audited)"') == {
-        "PaymentService.pay", "PaymentService.refund",
-    }
-
-
-def test_fully_qualified_advice_annotation_is_recognised(tmp_path: Path) -> None:
-    advised = _advised(
-        tmp_path,
-        '"execution(* com.acme.service.PaymentService.other(..))"',
-        annotation="@org.aspectj.lang.annotation.Before",
-    )
-    assert advised == {"PaymentService.other"}
-
-
-def test_universal_declaring_type_reaches_packaged_methods(tmp_path: Path) -> None:
-    assert _advised(tmp_path, '"execution(* *.*(..))"') == _ALL_BUSINESS_METHODS
-
-
-@pytest.mark.parametrize(
-    ("argument", "expected"),
-    [
-        (
-            '"execution (* com.acme.service.PaymentService.other(..))"',
-            {"PaymentService.other"},
-        ),
-        ('"@annotation (com.acme.Audited)"', {"PaymentService.pay", "PaymentService.refund"}),
-    ],
-)
-def test_space_before_the_designator_paren_is_accepted(
-    tmp_path: Path, argument: str, expected: set[str],
-) -> None:
-    assert _advised(tmp_path, argument) == expected
-
-
-def test_constructors_and_aspect_methods_are_not_targets(tmp_path: Path) -> None:
-    assert _advised(tmp_path, '"execution(* *(..))"') == _ALL_BUSINESS_METHODS
 
 
 @pytest.mark.parametrize(
