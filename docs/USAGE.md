@@ -175,6 +175,10 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+Terraform provider aliases have distinct names (`provider.aws.west`), while the default
+provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
+map values link to provider nodes; ordinary resource expressions retain resource references.
+
 When Python or Ruby classes in one file share a leaf name, their methods use the full
 enclosing class/module chain (for example, `Alpha.Same.run` and `Beta.Same.run`). Local
 calls stay in that lexical class. Unique class-leaf method names retain their existing
