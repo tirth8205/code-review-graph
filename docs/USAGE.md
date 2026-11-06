@@ -25,7 +25,7 @@ code-review-graph install --platform codebuddy
 
 | Platform | `--platform` | Config file |
 |----------|--------------|-------------|
-| Codex | `codex` | `~/.codex/config.toml` + `~/.codex/hooks.json` |
+| Codex | `codex` | `$CODEX_HOME/config.toml` + `$CODEX_HOME/hooks.json` + `$CODEX_HOME/skills/code-review-graph/` (defaults to `~/.codex`) |
 | Claude Code | `claude-code` | `.mcp.json` + `.claude/settings.json` |
 | CodeBuddy Code | `codebuddy` | `.mcp.json` + `CODEBUDDY.md` + `.codebuddy/settings.json` + `.codebuddy/skills/<name>/SKILL.md` |
 | Cursor | `cursor` | `.cursor/mcp.json` |
@@ -42,6 +42,13 @@ code-review-graph install --platform codebuddy
 | GitHub Copilot CLI | `copilot-cli` | `~/.copilot/mcp-config.json` |
 | Hermes Agent | `hermes` | `~/.hermes/config.yaml` (or `$HERMES_HOME/config.yaml`) |
 
+Using Zed over SSH? See
+[Zed troubleshooting](TROUBLESHOOTING.md#6-zed-native-agent-cannot-see-mcp-in-an-ssh-project).
+
+Codex also installs a global Skill that prefers MCP and uses a read-only CLI
+fallback when MCP is unavailable. Refresh or restart the active Codex runtime
+after installation. Windows and WSL use separate `CODEX_HOME` directories.
+
 The CodeBuddy layout follows its documentation for
 [MCP configuration](https://www.codebuddy.ai/docs/cli/mcp),
 [skills](https://www.codebuddy.ai/docs/cli/skills), and
@@ -57,6 +64,25 @@ so `core.hooksPath` setups work). The hook runs `update` and
 `detect-changes --brief` before each commit. It skips linked worktrees, so an
 implicit update does not build a second graph for another branch; set
 `CRG_HOOK_WORKTREES=1` to run it there too. `--no-hooks` skips the hook.
+
+The same `install` also appends `post-checkout`, `post-merge` and
+`post-rewrite` hooks that run `update` after a branch switch, a merge or a
+rebase, including `git pull` in either mode, so the graph follows the checked
+out code between commits. A file checkout and `commit --amend` do not trigger
+an update, and the checkout a rebase makes before replaying local commits is
+skipped in favour of a single update when the rebase finishes; a rebase with
+nothing left to replay updates at that checkout instead. They share the
+pre-commit hook's worktree rule and `--no-hooks` switch. An existing hook
+written in another language, such as Python, is left unchanged with a warning.
+
+Codex installs the CRG Skill in the active user Skill root and uses MCP first,
+with a bundled read-only CLI fallback when MCP is unavailable. The Skill checks
+graph health once per repository/task; a missing, empty, or stale graph never
+causes an implicit build or update. WSL and Windows Codex processes have
+separate `CODEX_HOME` directories and tool inventories, so install CRG in the
+runtime that will actually run the task and restart/refresh that runtime.
+Codex runs the installed hooks only after you mark them as trusted in Codex; until then the
+graph does not update on its own there.
 
 ## Core Workflow
 
@@ -114,7 +140,7 @@ code-review-graph build \
 A refresh only updates a previously embedded graph. On a graph with no embeddings yet it embeds nothing: `build`, `update` (also when it finds no changes) and `postprocess` return `embeddings_refresh_skipped: true` with a warning, and `watch` logs that warning after each update and keeps running. Run `code-review-graph embed` once to create the index. A refresh refuses to migrate vectors to a different provider, model or endpoint, removes vectors for deleted nodes, and turns provider or transport failures into build warnings.
 
 ### 7. Detect changes with risk scoring
-Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, flows, communities and test gaps.
+Ask your MCP client: "Review my recent changes with risk scoring". This calls `detect_changes_tool`, which maps the diff to affected functions, YAML paths, flows, communities and test gaps.
 
 From the shell:
 
@@ -140,7 +166,19 @@ code-review-graph register /path/to/other/repo --alias mylib
 ```
 Then use `cross_repo_search_tool` to search every registered repository, or pass `repos=["mylib"]` to search a subset.
 
+`code-review-graph repos` lists each repository's registered `data_dir`, marking
+missing directories with `[MISSING]`. If a registered directory disappears and
+the repository still has a local `.code-review-graph/graph.db`, graph commands
+warn and use normal resolution (`CRG_DATA_DIR`, then the local directory).
+Registering a fresh external directory for a repository with no local graph
+still creates that directory on the next write.
+
 ## Context Savings
+
+Impact and review-context tools return `risk: "unknown"` when none of the requested file
+paths match the graph. Their `unmatched_files` field and summary identify missing paths.
+For a mix of indexed and missing files, risk describes the indexed subset; check the
+missing paths or rebuild the graph before treating that result as complete.
 
 Review and impact responses include compact `context_savings` metadata (`estimated`, `saved_tokens`, `saved_percent`). The CLI shows the same figures as a boxed `Token Savings` panel on `detect-changes --brief` and `update --brief`, with a breakdown (Functions / Tests / Risk / Other) that sums to the graph response size. Add `--verify` to compare against OpenAI's `cl100k_base` tokenizer (needs `pip install tiktoken`). The figures are labelled estimated because they use a `chars / 4` approximation; the calibration in [REPRODUCING.md](REPRODUCING.md#calibration-table) puts the aggregate estimate within about 1% of real tokens. A small single-file change can use more context than the raw file, because the graph metadata has a fixed overhead.
 
@@ -152,7 +190,7 @@ code-review-graph eval --all
 
 ## Supported Languages
 
-The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL, Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), Vue/Svelte single-file components, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), and Perl XS files (`.xs`). Other YAML is not treated as source code.
+The parser covers Python, JavaScript, TypeScript/TSX, Go, Rust, Java, C/C++, C#, VB.NET, Ruby, Kotlin, Swift, PHP, Scala, Solidity, Dart, R, Perl, Lua/Luau, Objective-C, shell scripts, Elixir, Zig, PowerShell, Julia, ReScript, GDScript, Nix, Verilog/SystemVerilog, SQL/PL/SQL (Oracle), Terraform/OpenTofu (`.tf`; other `.hcl` files become file nodes only), Ansible YAML (playbooks, roles, tasks), value-free generic YAML structure, Vue/Svelte single-file components, Astro files (parsed with the TypeScript grammar), Jupyter and Databricks notebooks (`.ipynb` and Databricks `.py` exports), Perl XS files (`.xs`), and Robot Framework files (`.robot`, `.resource`).
 
 Extension-less scripts are detected by shebang for bash/sh/zsh/ksh/dash/ash, Python, Node, Ruby, Perl, Lua, Rscript, and PHP interpreters.
 
@@ -160,11 +198,21 @@ Languages not covered can be added through a `.code-review-graph/languages.toml`
 
 ## What Gets Indexed
 
+Terraform provider aliases have distinct names (`provider.aws.west`), while the default
+provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
+map values link to provider nodes; ordinary resource expressions retain resource references.
+
+Ruby methods use the full enclosing class/module chain (for example, `Alpha.Same.run`).
+When Python classes in one file share a leaf name, their methods use it too (`Alpha.Same.run`
+and `Beta.Same.run`), and unique Python class-leaf method names retain their existing
+identities. Local calls stay in that lexical class. Rebuild an existing graph to replace rows
+created with colliding identities.
+
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in
 dead-code reports. Normal application callers and ordinary test evidence still count.
 
-- **Nodes**: Files, Classes, Functions/Methods, Types, Tests, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
+- **Nodes**: Files, Classes, Functions/Methods, Types, Tests, YamlPaths, plus Endpoints, Schedulers and ConfigProperties where framework enrichment applies
 - **Edges**: CALLS, IMPORTS_FROM, INHERITS, IMPLEMENTS, CONTAINS, TESTED_BY, DEPENDS_ON, REFERENCES, plus framework-specific kinds (INJECTS, HANDLES, TRIGGERS, PUBLISHES, CONSUMES/PRODUCES, DEPENDS_ON_CONFIG, TEMPORAL_STUB)
 
 See [schema.md](schema.md) for details.
@@ -180,11 +228,16 @@ These paths are excluded by default. A leading `/` anchors the pattern at the re
 **/vendor/**    /storage/**    /bootstrap/cache/**    /public/build/**
 **/.bundle/**   **/.gradle/**   *.jar   **/.dart_tool/**   **/.pub-cache/**   **/cdk.out/**
 /coverage/**    **/.cache/**    /.tmp/**    /tmp/**
-*.min.js    *.min.css    *.map    *.lock    package-lock.json    yarn.lock
+*.min.js    *.min.css    *.map    *.lock    package-lock.json    pnpm-lock.yaml    **/pnpm-lock.yaml    yarn.lock
 *.db    *.sqlite    *.db-journal    *.db-wal
 ```
 
 A nested `target/`, `build/`, `.next/` or `.nuxt/` directory is also ignored when a sibling manifest (for example `pom.xml`, `build.gradle` or `next.config.js`) shows it is build output.
+
+The default `**/vendor/**` exclusion applies to Composer, Go, Ruby and Cargo projects
+identified by root manifests (`composer.json`, `go.mod`, `go.work`, `Gemfile`,
+`Rakefile`, `Cargo.toml`, or `*.gemspec`). Other repositories retain source packages named
+`vendor`; add `vendor/` to `.code-review-graphignore` to exclude them explicitly.
 
 To add patterns, create a `.code-review-graphignore` file in the repository root (same syntax as `.gitignore`):
 

@@ -219,7 +219,9 @@ jobs:
 >
 > `code-review-graph` 这一行是快照，不是当前测量值。仓库自 `84bde354` 以来有所增长，其语料和图谱今天都大得多。
 
-全语料基线是任何真实智能体都不会付出的上限；智能体会 grep 标识符并读取最匹配的文件。`agent_baseline` 评估基准测量的就是这种情况（纯 Python 对语料做 grep，按匹配数取前 3 个文件，再与图谱查询开销做 token 对比）。它写入 `evaluate/results/<repo>_agent_baseline_<date>.csv`；目前还没有发布过权威采集结果。
+全语料基线是任何真实智能体都不会付出的上限；智能体会 grep 标识符并读取最匹配的文件。`agent_baseline` 评估基准测量的就是这种情况（纯 Python 对语料做 grep，按匹配数取前 3 个文件，再与图谱查询开销做 token 对比）。它写入 `evaluate/results/<repo>_agent_baseline_<date>.csv`。在这一更贴近现实的基线下，6 个仓库 18 个问题的中位数是 **6.65x**（均值 14.8x，范围 4.2x 到 72.6x），采集于 2026-09-22，早于搜索和此基线开始降低测试文件排名，因此在重新采集之前，`code-review-graph eval --benchmark agent_baseline --embed` 会给出不同的数字。完整表格见 `docs/REPRODUCING.md` 的“Canonical capture, 2026-09-22”一节。
+
+该比值随仓库规模变化：图谱答案的体量保持稳定（本次测量的所有仓库均为 2,432 到 4,021 tokens），而 grep 基线随语料增长，因此 express 为 4.5x，fastapi 为 52x。两个数字衡量的都是**检索**成本，即定位答案所需的 token。若智能体随后仍去读取图谱指出的文件，图谱开销就是叠加而非替代；`semantic_search_nodes_tool(include_source=True)` 会连同位置一并返回代码，使其不必再读，而端到端地测量这条路径仍是待办工作。
 
 正式的 `token_efficiency` 基准测量的是另一个场景：完整的 `get_review_context()` JSON 对比一次提交中仅变更文件的内容；对于小提交，它报告的比率低于 1，因为响应里带有影响半径的边和源码片段。这两个基准回答的是不同的问题，见 [`docs/REPRODUCING.md`](docs/REPRODUCING.md#which-benchmark-measures-what)。
 
@@ -525,6 +527,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | 本地向量嵌入的默认模型 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | 设为 `1` 可抑制云端嵌入的出网警告 | - |
 | `CRG_ALLOW_REMOTE_CODE` | 允许需要 `trust_remote_code=True` 的 HuggingFace 模型 | `0` |
+| `CRG_VECTOR_CACHE` | 设为 `1` 时，在多次语义搜索之间把解码后的嵌入向量保留在内存中，不再每次查询都从 SQLite 全部重新读取。代价是内存（每个缓存的索引占 向量数 × 维度 × 4 字节），以及每个缓存的数据库在进程存续期间保持打开的一个读取连接：在 Windows 上，连接打开期间无法删除或替换 `graph.db` | - |
 | `CRG_MAX_IMPACT_NODES` | 影响分析中的最大节点数 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 影响半径分析的搜索深度 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |

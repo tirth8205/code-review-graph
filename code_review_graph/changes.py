@@ -35,6 +35,24 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "__construct", "__init__", "__destruct",
 })
 
+
+def is_test_gap_exempt(node: GraphNode) -> bool:
+    """Return whether a lifecycle node is exempt from test-gap reporting."""
+    return node.kind == "Function" and node.name in _TEST_GAP_EXEMPT_NAMES
+
+
+def _is_test_lifecycle(node: GraphNode, store: GraphStore) -> bool:
+    """Return whether *node* is a lifecycle method of real test code.
+
+    The exemption matches on a name, and production code uses these names too:
+    an untested ``__init__`` can hold real logic, so it keeps its coverage risk
+    even though it is left out of the gap list.
+    """
+    return is_test_gap_exempt(node) and (
+        node.is_test or is_test_file(node.file_path, store.get_repo_root())
+    )
+
+
 # Being reached by a tested caller buys no risk discount at all. It was worth
 # 0.03 briefly and that was wrong twice over. Evidentially: a static CALLS path
 # shows the symbol is reachable, not that any test runs it -- about 6% of the
@@ -563,6 +581,26 @@ def map_changes_to_nodes(
                 continue
             if node.line_start is None or node.line_end is None:
                 continue
+            yaml_ranges = node.extra.get("range_samples")
+            if (
+                node.kind == "YamlPath"
+                and isinstance(yaml_ranges, list)
+                and not node.extra.get("lines_truncated")
+            ):
+                overlaps = any(
+                    isinstance(sample, list)
+                    and len(sample) == 2
+                    and isinstance(sample[0], int)
+                    and isinstance(sample[1], int)
+                    and sample[0] <= end
+                    and sample[1] >= start
+                    for sample in yaml_ranges
+                    for start, end in ranges
+                )
+                if overlaps:
+                    result.append(node)
+                    seen.add(node.qualified_name)
+                continue
             # Check overlap with any changed range.
             for start, end in ranges:
                 if node.line_start <= end and node.line_end >= start:
@@ -588,7 +626,8 @@ def compute_risk_score(
     Scoring factors:
       - Flow participation: 0.05 per flow membership, capped at 0.25
       - Community crossing: 0.05 per caller from a different community, capped at 0.15
-      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges)
+      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges);
+        none for a lifecycle method in test code, which has no coverage to lack
       - Security sensitivity: 0.20 if name matches security keywords
       - Caller count: callers / 20, capped at 0.10
       - Change frequency (opt-in): commits touching the file / 10, capped
@@ -625,9 +664,12 @@ def compute_risk_score(
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(node.qualified_name)
-    test_count = len(transitive_tests)
-    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+    if not _is_test_lifecycle(node, store):
+        transitive_tests = store.get_transitive_tests(
+            node.qualified_name, include_helper_routes=False,
+        )
+        test_count = len(transitive_tests)
+        score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
@@ -752,12 +794,22 @@ def analyze_changes(
         if n.kind in ("Function", "Test", "Class")
         and not n.extra.get("verilog_kind")
     ]
+    changed_yaml_paths = [n for n in changed_nodes if n.kind == "YamlPath"]
 
     # Cap to prevent O(N*M) query explosion on large PRs.
     _max_funcs = env_int("CRG_MAX_CHANGED_FUNCS", 500)
     funcs_truncated = len(changed_funcs) > _max_funcs
     if funcs_truncated:
         changed_funcs = changed_funcs[:_max_funcs]
+
+    _max_yaml_paths = env_int("CRG_MAX_CHANGED_YAML_PATHS", 200)
+    yaml_paths_truncated = len(changed_yaml_paths) > _max_yaml_paths
+    if yaml_paths_truncated:
+        changed_yaml_paths = changed_yaml_paths[:_max_yaml_paths]
+
+    # Keep one public YAML metadata contract. ``node_to_dict`` owns
+    # sanitization and output limits for query and change analysis.
+    yaml_path_results = [node_to_dict(node) for node in changed_yaml_paths]
 
     churn_counts: dict[str, int] | None = None
     churn_status = CHURN_OFF
@@ -792,7 +844,7 @@ def analyze_changes(
     gap_candidates = [
         node for node in changed_funcs
         if not (node.is_test or is_test_file(node.file_path, gap_root))
-        and node.name not in _TEST_GAP_EXEMPT_NAMES
+        and not is_test_gap_exempt(node)
         and not node.extra.get("typescript_kind")
     ]
     # TESTED_BY edges are stored as source=production, target=test by the
@@ -894,6 +946,7 @@ def analyze_changes(
     summary_parts = [
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
+        *([f"  - {len(changed_yaml_paths)} changed YAML path(s)"] if changed_yaml_paths else []),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
         f"  - Overall risk score: {overall_risk:.2f}",
@@ -939,6 +992,11 @@ def analyze_changes(
             f"  - Warning: analysis capped at {_max_funcs} functions "
             f"(set CRG_MAX_CHANGED_FUNCS to adjust)"
         )
+    if yaml_paths_truncated:
+        summary_parts.append(
+            f"  - Warning: analysis capped at {_max_yaml_paths} YAML paths "
+            f"(set CRG_MAX_CHANGED_YAML_PATHS to adjust)"
+        )
     if ranges_unavailable:
         summary_parts.append(
             "  - Warning: line-level diff unavailable, whole files scored "
@@ -959,6 +1017,7 @@ def analyze_changes(
         "summary": "\n".join(summary_parts),
         "risk_score": overall_risk,
         "changed_functions": node_risks,
+        "changed_yaml_paths": yaml_path_results,
         "affected_flows": affected["affected_flows"],
         "test_gaps": test_gaps,
         # Counts, not just the list: every consumer bounds ``test_gaps``, and
@@ -971,6 +1030,7 @@ def analyze_changes(
         "test_gaps_indirect": indirect_count,
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
+        "yaml_paths_truncated": yaml_paths_truncated,
         "diff_ranges_unavailable": ranges_unavailable,
         "churn_status": churn_status,
     }

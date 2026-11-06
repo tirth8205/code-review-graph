@@ -258,11 +258,17 @@ def test_every_path_shaped_target_exists_on_disk(pkg):
     )
     _, edges = _parse(pkg, "pkg/consumer.py", source)
 
-    for target in _import_targets(edges):
-        if looks_like_a_path(target):
-            # Case-exact: ``Path.is_file()`` would say yes to ``Registry.py``
-            # on APFS, which is exactly how this bug stayed invisible here.
-            assert exists_case_exact(target), f"{target} does not exist"
+    path_targets = [
+        target for target in _import_targets(edges) if looks_like_a_path(target)
+    ]
+    assert path_targets
+
+    # Case-exact: ``Path.is_file()`` would say yes to ``Registry.py``
+    # on APFS, which is exactly how this bug stayed invisible here.
+    missing_targets = [
+        target for target in path_targets if not exists_case_exact(target)
+    ]
+    assert not missing_targets
 
 
 # --------------------------------------------------------------------------

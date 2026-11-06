@@ -898,11 +898,15 @@ class TestTruncationContract:
         result = asyncio.run(crg_main.detect_changes_tool(
             repo_root=repo["root"], changed_files=repo["files"],
         ))
-        for flow in result["affected_flows"]:
-            assert "steps" not in flow, (
-                "detect_changes embeds per-flow metadata only; full step "
-                "lists are what made get_affected_flows return 247k tokens"
-            )
+
+        assert result["status"] == "ok"
+
+        flows = result["affected_flows"]
+        assert flows
+        assert all("steps" not in flow for flow in flows), (
+            "detect_changes embeds per-flow metadata only; full step "
+            "lists are what made get_affected_flows return 247k tokens"
+        )
 
     def test_affected_flows_zero_still_hits_the_ceiling(self, repo):
         """``max_flows=0`` means 'no caller limit', not 'no limit'."""

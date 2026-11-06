@@ -391,17 +391,13 @@ class TestRefreshWithoutVectors:
         finally:
             graph.close()
 
-    def test_run_postprocess_reports_skip(self, tmp_path):
+    def test_run_postprocess_reports_skip(self, tmp_path, monkeypatch):
         graph = _graph_without_vectors(tmp_path, empty_table=False)
         db_path = graph.db_path
         graph.close()
-        with (
-            patch("code_review_graph.embeddings.get_provider") as get_provider,
-            patch(
-                "code_review_graph.tools.build._get_store",
-                side_effect=lambda root: (GraphStore(db_path), tmp_path),
-            ),
-        ):
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(db_path.parent))
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
             result = run_postprocess(
                 repo_root=str(tmp_path),
                 embedding_provider="local",
@@ -610,9 +606,8 @@ class TestRefreshWiring:
         finally:
             graph.close()
 
-    def test_mcp_build_and_postprocess_forward_exact_scope(self):
-        from code_review_graph import main as crg_main
-
+    @staticmethod
+    def _invoke_mcp_tools_with_embedding_scope(crg_main):
         build_tool = getattr(
             crg_main.build_or_update_graph_tool,
             "fn",
@@ -623,6 +618,7 @@ class TestRefreshWiring:
             "fn",
             crg_main.run_postprocess_tool,
         )
+
         with (
             patch.object(
                 crg_main,
@@ -654,6 +650,13 @@ class TestRefreshWiring:
                     embedding_model="test-model",
                 )
             )
+
+        return build, postprocess
+
+    def test_mcp_build_and_postprocess_forward_exact_scope(self):
+        from code_review_graph import main as crg_main
+
+        build, postprocess = self._invoke_mcp_tools_with_embedding_scope(crg_main)
 
         assert build.call_args.kwargs["embedding_provider"] == "local"
         assert build.call_args.kwargs["embedding_model"] == "test-model"
@@ -693,8 +696,10 @@ class TestRefreshWiring:
 
         build.assert_called_once_with(
             full_rebuild=True,
+            recover_corrupt=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="full",
+            wait_for_lock=False,
             embedding_provider="local",
             embedding_model="test-model",
         )

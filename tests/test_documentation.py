@@ -23,6 +23,7 @@ OPTIONAL_GROUPS = (
 USER_DOC_FILES = README_FILES + (
     "docs/COMMANDS.md",
     "docs/FAQ.md",
+    "docs/USAGE.md",
     "code_review_graph/docs/LLM-OPTIMIZED-REFERENCE.md",
     "docs/TROUBLESHOOTING.md",
 )
@@ -77,6 +78,28 @@ def test_codebuddy_install_docs_cover_project_artifacts():
         assert artifact in usage
 
 
+def test_zed_remote_setup_docs_explain_local_checkout_workaround():
+    """Keep the host/config mismatch from #828 discoverable from the platform list."""
+    troubleshooting = (ROOT / "docs/TROUBLESHOOTING.md").read_text(encoding="utf-8")
+    usage = (ROOT / "docs/USAGE.md").read_text(encoding="utf-8")
+
+    heading = "### 6. Zed native agent cannot see MCP in an SSH project"
+    assert heading in troubleshooting
+    section = troubleshooting.split(heading, 1)[1].split("\n---", 1)[0]
+    for detail in (
+        "context_servers",
+        "user-level settings",
+        "remote host",
+        "local checkout",
+        "cwd",
+        "code-review-graph install --platform zed",
+        "code-review-graph build",
+        "https://github.com/tirth8205/code-review-graph/issues/828",
+    ):
+        assert detail in section, f"Zed troubleshooting is missing {detail}"
+    assert "TROUBLESHOOTING.md#6-zed-native-agent-cannot-see-mcp-in-an-ssh-project" in usage
+
+
 def test_schema_version_is_current_everywhere_it_is_written_down():
     """The places CI's schema-sync job does not reach.
 
@@ -108,3 +131,12 @@ def test_schema_version_is_current_everywhere_it_is_written_down():
             f"{name} names cache schema segment(s) {sorted(segments)}; "
             f"expected only schema{LATEST_VERSION}"
         )
+
+def test_codex_install_docs_cover_global_skill_and_runtime_scope():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    usage = (ROOT / "docs/USAGE.md").read_text(encoding="utf-8")
+    for content in (readme, usage):
+        assert "$CODEX_HOME" in content
+        assert "skills/code-review-graph" in content
+        assert "WSL" in content or "Windows" in content
+        assert "read-only CLI" in content

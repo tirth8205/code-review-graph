@@ -20,7 +20,14 @@ import subprocess
 import sys
 import time
 
+from .stdio import configure_utf8_stdio
+
 logger = logging.getLogger(__name__)
+
+
+def _process_already_gone(error: OSError) -> bool:
+    """Windows reports a vanished PID as ERROR_INVALID_PARAMETER (87)."""
+    return isinstance(error, ProcessLookupError) or getattr(error, "winerror", None) == 87
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +128,15 @@ def _handle_stop(_args: argparse.Namespace) -> None:
     stopped = False
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        clear_pid()
-        print("Daemon stopped (process already gone).")
-        return
     except PermissionError:
         print(f"Error: Permission denied sending signal to PID {pid}.")
         sys.exit(1)
+    except OSError as exc:
+        if not _process_already_gone(exc):
+            raise
+        clear_pid()
+        print("Daemon stopped (process already gone).")
+        return
 
     try:
         # Wait up to 5 seconds for process to die.
@@ -141,7 +150,9 @@ def _handle_stop(_args: argparse.Namespace) -> None:
             force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
             try:
                 os.kill(pid, force_signal)
-            except ProcessLookupError:
+            except OSError as exc:
+                if not _process_already_gone(exc):
+                    raise
                 stopped = True
             else:
                 # Signal delivery does not prove that the process has exited.
@@ -281,12 +292,17 @@ def _handle_status(_args: argparse.Namespace) -> None:
         if degraded:
             print()
             print(
-                "  A partial watcher ran out of watch slots and fell back to one "
-                "recursive watch:"
+                "  A partial watcher is running with reduced coverage. The health "
+                "file's"
             )
             print(
-                "  still complete, but ignored trees are watched again. Raise "
-                "CRG_MAX_WATCH_SCHEDULES."
+                "  failed_paths field lists directories the OS could not register;"
+            )
+            print(
+                "  when it is empty, watch slots ran out and one recursive watch"
+            )
+            print(
+                "  replaced the filtered plan; raise CRG_MAX_WATCH_SCHEDULES then."
             )
     else:
         by_alias = {orphan["alias"]: orphan for orphan in orphans}
@@ -393,6 +409,7 @@ def _handle_remove(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the crg-daemon CLI."""
+    configure_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     ap = argparse.ArgumentParser(
