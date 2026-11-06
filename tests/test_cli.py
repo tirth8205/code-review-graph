@@ -195,8 +195,113 @@ class TestBuildUpdateCommands:
             full_rebuild=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="none",
+            zls=False,
         )
         mock_postprocess.assert_not_called()
+
+    def test_build_zls_runs_the_pass_inside_postprocess(self):
+        # ZLS has to be a stage of post-processing, not a CLI step afterwards:
+        # flows, criticality and communities are all derived from the CALLS
+        # edges that the resolver rewrites, so a pass after them leaves the
+        # derived data describing the pre-resolution graph.
+        argv = [
+            "code-review-graph",
+            "build",
+            "--zls",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_parsed": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "full",
+            "zls": {"candidates": 4, "resolved": 3, "external": 1},
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ) as mock_build:
+                        with patch(
+                            "code_review_graph.zls_resolver.enrich_zls_calls",
+                        ) as mock_enrich:
+                            cli.main()
+
+        mock_build.assert_called_once_with(
+            full_rebuild=True,
+            repo_root=str(Path("repo-root").resolve()),
+            postprocess="full",
+            zls=True,
+        )
+        mock_enrich.assert_not_called()
+
+    def test_enrich_zls_reports_the_pass_and_then_recomputes(self, capsys):
+        # A standalone `enrich-zls` has no post-processing stage to join, so
+        # the CLI has to rebuild what the rewritten CALLS edges invalidated,
+        # and it has to say what it resolved before it says what that cost.
+        argv = [
+            "code-review-graph",
+            "enrich-zls",
+            "--repo",
+            "repo-root",
+        ]
+        stats = {
+            "candidates": 4, "resolved": 3, "external": 1, "call_sites": 5,
+            "mirrors": 1,
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.zls_resolver.enrich_zls_calls",
+                        return_value=stats,
+                    ):
+                        with patch(
+                            "code_review_graph.tools.build.run_postprocess",
+                            return_value={"warnings": []},
+                        ) as mock_pp:
+                            cli.main()
+
+        out = capsys.readouterr().out
+        assert "ZLS enrichment" in out
+        assert out.index("ZLS enrichment") < out.index("Recomputed"), (
+            "announcing the recompute first reads like nothing was resolved"
+        )
+        mock_pp.assert_called_once_with(repo_root=str(Path("repo-root").resolve()))
+
+    def test_enrich_zls_without_results_recomputes_nothing(self):
+        argv = [
+            "code-review-graph",
+            "enrich-zls",
+            "--repo",
+            "repo-root",
+        ]
+        stats = {"skipped": True, "reason": "no unresolved Zig calls"}
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.zls_resolver.enrich_zls_calls",
+                        return_value=stats,
+                    ):
+                        with patch(
+                            "code_review_graph.tools.build.run_postprocess",
+                        ) as mock_pp:
+                            cli.main()
+
+        mock_pp.assert_not_called()
 
     def test_update_skip_flows_does_not_run_extra_cli_postprocess(self):
         argv = [
@@ -236,6 +341,115 @@ class TestBuildUpdateCommands:
             postprocess="minimal",
         )
         mock_postprocess.assert_not_called()
+
+    def test_update_says_when_it_discarded_earlier_zls_results(self, capsys):
+        argv = [
+            "code-review-graph",
+            "update",
+            "--skip-flows",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_updated": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "minimal",
+            "changed_files": ["src/main.zig"],
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                graph = mock_store.return_value
+                graph.get_metadata.return_value = "2026-11-01T00:00:00+00:00"
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with patch(
+                            "code_review_graph.zls_resolver.count_unresolved_zig_calls",
+                            return_value=7,
+                        ):
+                            cli.main()
+
+        out = capsys.readouterr().out
+        assert "enrich-zls" in out, (
+            "an update that re-parsed Zig files silently reverts a ZLS pass "
+            "that took minutes; the user has to be told the graph is stale"
+        )
+        assert "7" in out
+
+    def test_update_stays_quiet_when_no_zls_pass_ever_ran(self, capsys):
+        argv = [
+            "code-review-graph",
+            "update",
+            "--skip-flows",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_updated": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "minimal",
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value.get_metadata.return_value = None
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with patch(
+                            "code_review_graph.zls_resolver.count_unresolved_zig_calls",
+                            return_value=40,
+                        ):
+                            cli.main()
+
+        assert "enrich-zls" not in capsys.readouterr().out
+
+    def test_update_stays_quiet_when_changed_files_have_no_zig(self, capsys):
+        """An update that touched only ``.py`` files cannot revert ZLS work."""
+        argv = [
+            "code-review-graph",
+            "update",
+            "--skip-flows",
+            "--repo",
+            "repo-root",
+        ]
+        result = {
+            "files_updated": 1,
+            "total_nodes": 2,
+            "total_edges": 1,
+            "postprocess_level": "minimal",
+            "changed_files": ["src/main.py"],
+        }
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                graph = mock_store.return_value
+                graph.get_metadata.return_value = "2026-11-01T00:00:00+00:00"
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.tools.build.build_or_update_graph",
+                        return_value=result,
+                    ):
+                        with patch(
+                            "code_review_graph.zls_resolver.count_unresolved_zig_calls",
+                            return_value=7,
+                        ):
+                            cli.main()
+
+        assert "enrich-zls" not in capsys.readouterr().out, (
+            "an update that did not re-parse any .zig file cannot have "
+            "reverted ZLS enrichment; warning here is a false positive"
+        )
 
     def test_update_forwards_explicit_base_verbatim(self):
         argv = [

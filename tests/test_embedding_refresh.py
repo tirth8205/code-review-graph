@@ -695,6 +695,7 @@ class TestRefreshWiring:
             full_rebuild=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="full",
+            zls=False,
             embedding_provider="local",
             embedding_model="test-model",
         )

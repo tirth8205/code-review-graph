@@ -683,6 +683,102 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+def _report_zls_stats(stats: dict) -> None:
+    """Report one ZLS pass the same way wherever it was asked for.
+
+    Every counter names a different reason a call site is still unresolved,
+    so "nothing was unresolved" and "nothing answered" are not confused --
+    only the second one means the workspace is broken.
+    """
+    if stats.get("skipped"):
+        print(f"ZLS enrichment skipped: {stats.get('reason')}")
+        return
+    print(
+        "ZLS enrichment: "
+        f"resolved={stats.get('resolved', 0)} "
+        f"external={stats.get('external', 0)} "
+        f"unmatched={stats.get('unmatched', 0)} "
+        f"no_definition={stats.get('no_definition', 0)} "
+        f"conflicts={stats.get('site_conflicts', 0)} "
+        f"errors={stats.get('errors', 0)} "
+        f"mirrors={stats.get('mirrors', 0)} "
+        f"sites={stats.get('call_sites', 0)} "
+        f"elapsed={stats.get('elapsed_seconds', 0)}s"
+    )
+    if stats.get("warning"):
+        print(f"Warning: {stats['warning']}", file=sys.stderr)
+
+
+def _refresh_derived_after_zls(
+    repo_root: Path, stats: dict, *, quiet: bool,
+) -> None:
+    """Rebuild what the ZLS pass just invalidated.
+
+    Flows, criticality and communities are computed from ``CALLS`` edges, so
+    a pass that rewrote those targets leaves the derived data describing the
+    graph it replaced. Asking for ZLS is asking for the better targets to be
+    the ones the report is built from.
+    """
+    if stats.get("skipped") or not (
+        stats.get("resolved") or stats.get("external")
+    ):
+        return
+    from .tools.build import run_postprocess
+
+    result = run_postprocess(repo_root=str(repo_root))
+    if not quiet:
+        print("Recomputed flows, communities and criticality for those calls.")
+    for warning in result.get("warnings") or []:
+        print(f"Warning: {warning}", file=sys.stderr)
+
+
+def _warn_stale_zls_enrichment(
+    store, repo_root: Path, result: dict | None = None, *, quiet: bool,
+) -> None:
+    """Say so when this run threw away a ZLS pass the user already paid for.
+
+    An update rewrites the edges of every file it re-parses straight from
+    source, which reverts the targets a language-server pass had settled.
+    Nothing else reports that: the graph looks healthy, the Zig calls simply
+    stop being resolved, and the minutes spent on the pass are gone without a
+    trace. Only a graph that was enriched once before can lose that work.
+
+    Only warn when the update actually re-parsed at least one ``.zig`` file:
+    an update that touched no Zig files cannot have reverted enrichment, and
+    reporting it would be a false positive.
+    """
+    if quiet:
+        return
+    enriched_at = store.get_metadata("zls_enriched_at")
+    if not enriched_at:
+        return
+    # An update that did not touch any Zig file cannot have reverted the
+    # pass, regardless of how many unresolved Zig calls exist in the graph.
+    # Only skip when the result carries enough information to tell: a mock
+    # or a partial result without changed_files falls back to the old
+    # behaviour (warn on any unresolved count after enrichment).
+    if result is not None:
+        changed = result.get("changed_files")
+        if changed is not None:
+            dependent = result.get("dependent_files") or []
+            zig_touched = any(
+                str(f).endswith(".zig") for f in [*changed, *dependent]
+            )
+            if not zig_touched:
+                return
+    from .zls_resolver import count_unresolved_zig_calls
+
+    unresolved = count_unresolved_zig_calls(store)
+    if not unresolved:
+        return
+    print(
+        f"Note: this update re-parsed Zig files and reverted the ZLS "
+        f"enrichment from {enriched_at}: {unresolved} call target(s) are "
+        f"unresolved again. Restore them with "
+        f"`code-review-graph enrich-zls --repo {repo_root}`.",
+    )
+
+
 def _warn_failed_files(result: dict) -> None:
     """Report files that failed to parse; their previous graph rows are kept."""
     failed = result.get("errors") or []
@@ -1034,8 +1130,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     build_cmd.add_argument(
         "--zls", action="store_true",
-        help="After the build, resolve unresolved Zig CALLS through ZLS "
-             "(requires zls on PATH; much slower than parsing)",
+        help="During post-processing, resolve unresolved Zig CALLS through ZLS "
+             "before flows and communities are derived (requires zls on PATH; "
+             "much slower than parsing)",
     )
     build_cmd.add_argument(
         "--skip-postprocess",
@@ -2131,21 +2228,15 @@ def _dispatch() -> None:
                 request_timeout=args.timeout,
                 max_seconds=args.max_seconds,
             )
+            # Cause before effect: the pass is what made the derived data
+            # stale, so its counters have to be on screen first.
             if args.json_output:
                 print(json.dumps(result, indent=2, default=str))
             elif not args.quiet:
-                if result.get("skipped"):
-                    print(f"ZLS enrichment skipped: {result.get('reason')}")
-                else:
-                    print(
-                        "ZLS enrichment: "
-                        f"resolved={result.get('resolved', 0)} "
-                        f"external={result.get('external', 0)} "
-                        f"unmatched={result.get('unmatched', 0)} "
-                        f"errors={result.get('errors', 0)} "
-                        f"sites={result.get('call_sites', 0)} "
-                        f"elapsed={result.get('elapsed_seconds', 0)}s"
-                    )
+                _report_zls_stats(result)
+            _refresh_derived_after_zls(
+                repo_root, result, quiet=args.quiet or args.json_output,
+            )
 
         elif args.command == "build":
             pp = (
@@ -2163,6 +2254,7 @@ def _dispatch() -> None:
                     full_rebuild=True,
                     repo_root=str(repo_root),
                     postprocess=pp,
+                    zls=bool(getattr(args, "zls", False)),
                     **embedding_refresh_kwargs,
                 )
             finally:
@@ -2177,18 +2269,12 @@ def _dispatch() -> None:
                 )
                 if result.get("errors"):
                     print(f"Errors: {len(result['errors'])}")
-            if getattr(args, "zls", False):
-                from .zls_resolver import enrich_zls_calls
-
-                zls_result = enrich_zls_calls(store, repo_root)
-                if not args.quiet:
-                    print(
-                        "ZLS enrichment: "
-                        f"resolved={zls_result.get('resolved', 0)} "
-                        f"external={zls_result.get('external', 0)} "
-                        f"unmatched={zls_result.get('unmatched', 0)} "
-                        f"errors={zls_result.get('errors', 0)}"
-                    )
+            zls_stats = result.get("zls")
+            if zls_stats and not args.quiet:
+                # The pass ran inside post-processing, before flows and
+                # communities were derived, so there is nothing left to
+                # recompute here.
+                _report_zls_stats(zls_stats)
 
         elif args.command == "update":
             pp = (
@@ -2238,6 +2324,7 @@ def _dispatch() -> None:
                         f" (postprocess={pp})"
                     )
             _warn_failed_files(result)
+            _warn_stale_zls_enrichment(store, repo_root, result=result, quiet=args.quiet)
 
             # --brief: append a one-line change-impact summary with the same
             # estimated context-savings approximation that detect-changes uses.

@@ -46,9 +46,12 @@ postprocess: str = "full"            # "full", "minimal" (signatures + FTS), or 
 recurse_submodules: bool | None      # None falls back to CRG_RECURSE_SUBMODULES
 embedding_provider: str | None       # Refresh an existing embedding index; needs embedding_model
 embedding_model: str | None          # Exact model for embedding_provider
+zls: bool = False                    # Resolve unbound Zig CALLS through ZLS during post-processing
 ```
 If some files fail to parse, `status` is `"partial"` and the `summary` names
-them. Their previous graph rows are kept.
+them. Their previous graph rows are kept. With `zls`, the result also carries a
+`zls` object counting what the language server settled; the pass runs before
+flows and communities, so the derived data is built from the resolved targets.
 
 #### `run_postprocess_tool`
 ```
@@ -58,6 +61,7 @@ fts: bool = True
 repo_root: str | None
 embedding_provider: str | None       # Refresh an existing embedding index; needs embedding_model
 embedding_model: str | None
+zls: bool = False                    # Run the Zig ZLS pass before the derived stages
 ```
 
 #### `get_minimal_context_tool`
@@ -417,8 +421,8 @@ code-review-graph uninstall --platform codex  # Unbind one platform (keeps graph
 code-review-graph build                        # Full build
 code-review-graph build --skip-flows           # Parse + signatures + FTS only
 code-review-graph build --skip-postprocess     # Raw parse only
-code-review-graph build --zls                  # Full build, then resolve Zig CALLS with ZLS
-code-review-graph enrich-zls                   # Resolve unresolved Zig CALLS with ZLS (needs zls on PATH)
+code-review-graph build --zls                  # Full build; ZLS resolves Zig CALLS inside post-processing
+code-review-graph enrich-zls                   # Resolve unresolved Zig CALLS with ZLS, then re-derive flows/communities (needs zls on PATH)
 code-review-graph enrich-zls --limit 500 --timeout 12  # Bounded trial run
 code-review-graph update                       # Incremental update from the last-built commit
 code-review-graph update --base origin/main    # Custom base ref
@@ -519,6 +523,31 @@ Notes:
   full rebuild.
 - `update` prints a `Warning:` line on stderr naming files that failed to
   parse. Those files keep their previous graph rows.
+- Zig call targets that a name cannot bind (`x.doIt()` where `x`'s type is not
+  statically visible) are settled by the ZLS language server, not by the
+  parser. `build --zls` and `enrich-zls` both ask it, and the pass runs as a
+  post-processing *stage* — before flows, criticality and communities, which
+  are all derived from the `CALLS` edges it rewrites. Running it after them
+  would leave the derived data describing the graph it just replaced.
+  `enrich-zls` therefore recomputes that data itself; `--zls` does not need
+  to, because nothing has been derived yet.
+- ZLS needs `zls` on `PATH` and a project `zls` can configure (a `build.zig`
+  that builds). It is a language server, so it is far slower than parsing:
+  bound a first run with `--limit`, and expect it to report a warning when it
+  answers nothing, which usually means `zig build` fails.
+- `update` re-parses the files it touched and rewrites their edges from
+  source, which reverts any ZLS resolution those edges carried. The command
+  notices (the graph records when it was last enriched) and prints a note
+  naming how many call targets went back to unresolved; run `enrich-zls` to
+  restore them.
+- The ZLS line says where every candidate went, and the counters are not
+  interchangeable: `resolved` became a project target, `external` is known to
+  leave the repository, `unmatched` reached a definition nothing is indexed
+  for, `site_conflicts` had two call sites merged on one row disagree (the row
+  stays unresolved rather than guess), `no_definition` got a "there is no
+  definition here" answer, and `errors` never got a reply. Only the last two
+  mean something is broken, and they point at different fixes. `mirrors` is
+  how many `TESTED_BY` edges moved with the calls they were minted from.
 - `detect-changes --brief` is read-only against the existing graph and takes
   about a second. `update --brief` re-parses changed files first, then prints
   the same panel. Use `update --brief` after a rebase or a large change set,

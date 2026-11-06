@@ -3293,6 +3293,14 @@ class CodeParser:
         if not parser:
             return [], []
 
+        if language == "zig":
+            # The binding maps say what the file being parsed imports and
+            # declares. They must not outlive the parse: a re-parse of a file
+            # whose ``@import`` was removed would otherwise keep binding its
+            # calls to a module it no longer imports.
+            self._zig_import_aliases.clear()
+            self._zig_defined_types.clear()
+
         if tree is None:
             tree = parser.parse(parse_source)
         nodes: list[NodeInfo] = []
@@ -9735,13 +9743,6 @@ class CodeParser:
     # ------------------------------------------------------------------
 
     _ZIG_CONTAINER_KINDS = frozenset({"struct", "union", "enum", "opaque"})
-    #: Zig's builtin/std helpers that are not project symbols.  Marking them
-    #: external keeps the unresolved bucket focused on calls that could
-    #: actually be resolved inside this repository.
-    _ZIG_EXTERNAL_CALLEES = frozenset({
-        "expect", "expectEqual", "expectEqualStrings", "expectError",
-        "expectFmt", "expectString", "expectWithinEpsilon",
-    })
     #: Suffix-chain segment used when an earlier part of the receiver is a
     #: call expression (``foo().bar()``) rather than a name we can bind.
     _ZIG_UNKNOWN_RECEIVER = "?"
@@ -10109,7 +10110,7 @@ class CodeParser:
                     callee = prev.text.decode("utf-8", errors="replace")
                     receiver = self._zig_call_receiver(node)
                     extra = self._zig_receiver_extra(
-                        receiver, callee, file_path, enclosing_class,
+                        receiver, file_path, enclosing_class,
                     )
                     edges.append(EdgeInfo(
                         kind="CALLS",
@@ -10165,20 +10166,25 @@ class CodeParser:
     def _zig_receiver_extra(
         self,
         receiver: list[str],
-        callee: str,
         file_path: str,
         enclosing_class: Optional[str],
     ) -> dict:
-        """Build edge metadata that lets the resolver bind the callee."""
+        """Build edge metadata that lets the resolver bind the callee.
+
+        Extern-ness is a conclusion about the *receiver*, never about the
+        callee's name. ``checks.expect(ok)`` is a project call that happens to
+        share a name with a std helper; deciding from the name marked it
+        external before any binding was consulted, so neither the bare-name
+        resolver nor ZLS was ever asked about it.
+        """
         extra: dict = {}
-        if callee in self._ZIG_EXTERNAL_CALLEES:
-            extra["external"] = True
         if not receiver:
             return extra
         extra["receiver"] = ".".join(receiver)
 
         root = receiver[0]
         if root == self._ZIG_UNKNOWN_RECEIVER:
+            extra["receiver_binding"] = "unknown"
             return extra
         if root == "self" and len(receiver) == 1 and enclosing_class:
             extra["receiver_binding"] = "class"
@@ -10199,18 +10205,28 @@ class CodeParser:
                     extra["receiver_module"] = alias
             else:
                 # ``std``, ``builtin`` and package-style imports are outside
-                # this repository graph.
+                # this repository graph. The call is external because its
+                # receiver is, not because of what the callee is called.
                 extra["external"] = True
                 extra["external_module"] = alias
+                extra["receiver_binding"] = "external"
             return extra
 
         if root in self._zig_defined_types.get(file_path, ()):
+            # ``T.inner.run()`` is a call on ``inner``. Binding it to ``T``
+            # would attribute it to a method ``T`` does not have.
             extra["receiver_binding"] = "class"
-            extra["receiver_class"] = root
+            extra["receiver_class"] = receiver[-1]
             return extra
         if root in ("std", "builtin", "root"):
             extra["external"] = True
             extra["external_module"] = root
+            extra["receiver_binding"] = "external"
+            return extra
+        # A receiver this file says nothing about (``self.map.foo()``). The
+        # call does have a receiver, so the bare-name fallback must not fire;
+        # saying so explicitly is what keeps the read path honest about it.
+        extra["receiver_binding"] = "unknown"
         return extra
 
     # ------------------------------------------------------------------

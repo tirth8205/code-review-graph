@@ -10,10 +10,11 @@ import logging
 import random
 import re
 from collections import Counter, defaultdict
-from typing import Any
+from typing import Any, Optional
 
 from .constants import env_int
 from .graph import GraphEdge, GraphNode, GraphStore, _sanitize_name
+from .parser import is_test_file
 
 # Fixed seed for igraph's RNG so Leiden community detection is reproducible
 # across runs. Without this, two builds of the same graph produce different
@@ -1010,19 +1011,23 @@ _TEST_COMMUNITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A qualified name embeds its file path before ``::``; test directories are
-# a stronger signal than a generated community name.  ``src/tests`` in zlstack
-# is named "support-tcp" from its file stems, which the name regex cannot see.
-_TEST_PATH_RE = re.compile(
-    r"(^|/)(?:tests?|__tests__|specs?)(/|$)", re.IGNORECASE,
-)
 # Test-only files do not always live under a tests/ directory (zlink keeps
 # engine_test.zig beside the engine).  Inline ``test`` blocks in a production
 # file must NOT count, or a module with thorough unit tests looks test-only.
-_TEST_FILE_RE = re.compile(
-    r"(^|/)(?:test_[^/]+|[^/]*_test(?:[^/]*)?)\."
-    r"(?:zig|py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|cc|cpp|h|hpp|rb|php|cs)$",
+# These are the file-name conventions, matched against the basename alone, for
+# the languages whose test-file naming :func:`is_test_file` does not list (Zig,
+# C/C++ and friends).  Both halves are anchored: an unanchored ``_test`` middle
+# matched ``foo_testdata.py``, and the prefix rule belongs to the ecosystems
+# that name a test file by its first word.  Go, Zig and C put it at the end -
+# ``test_utils.go`` compiles into the package, so calling it test code would
+# hide a production module.
+_TEST_SUFFIX_FILE_RE = re.compile(
+    r"^[^/]+_tests?\.(?:"
+    r"zig|py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|cc|cpp|h|hpp|rb|php|cs)$",
     re.IGNORECASE,
+)
+_TEST_PREFIX_FILE_RE = re.compile(
+    r"^test[_-][^/.]*\.(?:py|pyi|rb|[rR])$",
 )
 
 
@@ -1031,14 +1036,44 @@ def _is_test_community(name: str) -> bool:
     return bool(_TEST_COMMUNITY_RE.search(name))
 
 
-def _qn_is_test(qualified_name: str) -> bool:
-    """True when a node's file is a test file (not merely an inline test)."""
+def _qn_is_test(qualified_name: str, repo_root: Optional[str] = None) -> bool:
+    """True when a node's file is a test file (not merely an inline test).
+
+    Directory conventions are delegated to :func:`is_test_file`, the single
+    rule the rest of the project uses, because the graph stores absolute
+    paths and the directories above a checkout belong to whoever cloned it:
+    judging ``tests/`` from the raw path made a repository checked out under a
+    directory named ``tests`` look entirely like test code (#1023). With no
+    root, :func:`is_test_file` reads only filename conventions for an absolute
+    path — it under-reports test files rather than hide a production gap.
+    """
     path = qualified_name.split("::", 1)[0]
-    return bool(_TEST_PATH_RE.search(path) or _TEST_FILE_RE.search(path))
+    if not path:
+        return False
+    basename = path.rsplit("/", 1)[-1]
+    if _TEST_SUFFIX_FILE_RE.match(basename) or _TEST_PREFIX_FILE_RE.match(basename):
+        return True
+    return is_test_file(path, repo_root)
+
+
+def _store_repo_root(store: GraphStore) -> Optional[str]:
+    """Repository root a build recorded in its own store, if it recorded one.
+
+    Test-ness is judged relative to the project, and an overview can be asked
+    of a database copied elsewhere; ``None`` means the answer has to come from
+    filenames alone.
+    """
+    try:
+        value = store.get_metadata("repo_root")
+    except Exception:  # noqa: BLE001 - an unreadable root is not an error here
+        logger.debug("Could not read repo_root metadata", exc_info=True)
+        return None
+    return str(value) if value else None
 
 
 def _test_dominated_community_ids(
     communities: list[dict[str, Any]],
+    repo_root: Optional[str] = None,
 ) -> set[int]:
     """Community IDs whose membership is mostly test code.
 
@@ -1054,7 +1089,11 @@ def _test_dominated_community_ids(
         if _is_test_community(name):
             ids.add(community.get("id", 0))
             continue
-        test_members = sum(1 for qn in members if _qn_is_test(qn))
+        if not members:
+            # A community with no members has no membership to judge. The
+            # ratio below is undefined and would abort the whole overview.
+            continue
+        test_members = sum(1 for qn in members if _qn_is_test(qn, repo_root))
         ratio = test_members / len(members)
         # Tiny mixed communities are too noisy to label from a 50% split;
         # a tiny community that is entirely test files is still clear.
@@ -1078,7 +1117,9 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
         Dict with keys: communities, cross_community_edges, warnings.
     """
     communities = get_communities(store)
-    test_communities = _test_dominated_community_ids(communities)
+    test_communities = _test_dominated_community_ids(
+        communities, _store_repo_root(store),
+    )
 
     # Build node -> community_id mapping
     node_to_community: dict[str, int] = {}
@@ -1126,9 +1167,12 @@ def get_architecture_overview(store: GraphStore) -> dict[str, Any]:
         if count > 10:
             name1 = comm_name_map.get(c1, f"community-{c1}")
             name2 = comm_name_map.get(c2, f"community-{c2}")
-            # Skip pairs where either community is test-dominated — coupling
-            # between test and production code is expected, not architectural.
-            if _is_test_community(name1) or _is_test_community(name2):
+            # Coupling between test and production code is expected, not
+            # architectural. Re-ask the question the edge count above asked,
+            # from the same membership evidence: judging the generated name a
+            # second time is a different rule, and two rules for one question
+            # is how a report contradicts itself.
+            if c1 in test_communities or c2 in test_communities:
                 continue
             warnings.append(
                 f"High coupling ({count} edges) between "

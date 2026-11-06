@@ -254,6 +254,7 @@ async def build_or_update_graph_tool(
     recurse_submodules: Optional[bool] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    zls: bool = False,
 ) -> dict:
     """Build or incrementally update the code knowledge graph.
 
@@ -285,6 +286,10 @@ async def build_or_update_graph_tool(
             the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit post-build embedding
             refresh. Must be supplied with embedding_provider. Default: disabled.
+        zls: Run the optional Zig language-server call-resolution pass during
+            post-processing, before flows and communities are derived. Slow,
+            and a no-op when the graph has no unresolved Zig calls. Default:
+            disabled.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -294,6 +299,7 @@ async def build_or_update_graph_tool(
             postprocess=postprocess, recurse_submodules=recurse_submodules,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
+            zls=zls,
         ),
         root,
         # Writes graph.db for as long as the repository takes. A timeout
@@ -310,6 +316,7 @@ async def run_postprocess_tool(
     repo_root: Optional[str] = None,
     embedding_provider: Optional[str] = None,
     embedding_model: Optional[str] = None,
+    zls: bool = False,
 ) -> dict:
     """Run post-processing on existing graph (flows, communities, FTS index).
 
@@ -330,6 +337,9 @@ async def run_postprocess_tool(
             the result sets embeddings_refresh_skipped; run embed_graph_tool first.
         embedding_model: Exact model for an explicit embedding refresh.
             Must be supplied with embedding_provider. Default: disabled.
+        zls: Run the optional Zig language-server call-resolution pass first,
+            so the derived stages describe the targets it settled. Slow.
+            Default: disabled.
     """
     root = _resolve_repo_root(repo_root)
     return await _offload(
@@ -338,6 +348,7 @@ async def run_postprocess_tool(
             flows=flows, communities=communities, fts=fts, repo_root=root,
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
+            zls=zls,
         ),
         root,
         # Writes graph.db for as long as the repository takes. A timeout

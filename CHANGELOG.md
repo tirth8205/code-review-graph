@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Zig calls now carry receiver evidence, and the ones a name cannot bind are
+  settled by ZLS. `x.doIt()` through a variable whose type is inferred, a
+  composite pointer or a generic call records what the parser actually knows
+  (`receiver`, `receiver_binding`, and for stdlib/SDK targets an
+  `external_module` label) instead of guessing from the callee's name. The
+  remaining unknowns are asked of the language server: `code-review-graph
+  build --zls`, `code-review-graph enrich-zls` and a `zls` argument on
+  `build_or_update_graph_tool` and `run_postprocess_tool`. The pass runs as a
+  post-processing stage, before flows, criticality and communities, because
+  all three are derived from the `CALLS` edges it rewrites. Needs `zls` on
+  `PATH` and a project that builds; it is much slower than parsing.
+
 ### Changed
 
 - The MCP server instructions now route by question type instead of introducing
@@ -17,6 +31,55 @@
 
 ### Fixed
 
+- Zig receiver evidence no longer invents an SDK call from a name. A callee
+  called `add`, `expect` or `default` was marked `external` because a
+  standard-library function shares that name, which pointed the blame for a
+  change at Zig's own `std` and let the receiver-backed resolver attribute the
+  edge to a struct in the calling file. `external` is now derived from what
+  the root of the chain is *bound to* (`@import` of a `.zig` path, a package
+  name, a declared type, or `std`/`builtin`), and a receiver the parser cannot
+  bind records `receiver_binding: "unknown"` — the resolver refuses to
+  attribute that instead of guessing. A container chain (`list.append(x)`)
+  also used the first segment as the module class; it now uses the segment the
+  call reaches. Worker processes reused one binding map across files, so an
+  alias from a previous file could decide the next one; both maps are now
+  reset per file.
+- A ZLS pass no longer leaves the graph half-enriched. Every resolved edge is
+  written in one transaction (the per-edge autocommit that issue #721 banned
+  for signatures), and the `TESTED_BY` mirror rows naming the same bare target
+  move with it — otherwise a function whose call edge ZLS resolved kept
+  reporting zero covering tests. Mirrors claimed by several new targets are
+  left alone and counted. When one edge covers several call sites that ZLS
+  answers differently, the edge stays unresolved and is reported under
+  `site_conflicts` instead of the first answer winning.
+- ZLS results no longer depend on the machine. An out-of-repo definition used
+  to store its absolute path (`/home/dev/.cache/zig/.../Build.zig`) in the
+  graph, which is unreproducible across machines; the module label is now the
+  portable tail (`std/Build.zig`). The LSP frame reader used `select`, which
+  on Windows only works on sockets and so hung the pass on named pipes; it is
+  a blocking reader thread now. `file:///C:/...`, UNC `file://host/share/...`
+  and percent-escaped URIs decode to the paths Zig reports, and a pass that
+  resolves nothing says so instead of returning zeroes, because that is what a
+  project that does not build looks like. The two ways that happens are counted
+  apart now — `no_definition` for sites the server looked at and did not know,
+  `errors` for requests that never came back — because they are fixed by
+  different things (`zig build`, versus a zls that does not match the zig
+  version on `PATH`). Calls already known to leave the repository are skipped
+  from the metadata rather than by matching the serialized edge, so a receiver
+  variable named `external` no longer hides the call from the pass.
+- Asking for ZLS no longer produces a graph whose derived data disagrees with
+  it. `build --zls` used to resolve edges *after* flows, criticality and
+  communities had been computed from the unresolved ones, and `enrich-zls`
+  rewrote edges without recomputing anything: the reports described the graph
+  that had just been replaced. The pass is a post-processing stage now, and
+  `enrich-zls` re-derives what it invalidated. `update` re-parses files and so
+  reverts earlier resolutions; it now prints how many call targets went back
+  to unresolved and tells you to re-run `enrich-zls`.
+- Test-dominated architecture communities no longer divide by zero on an empty
+  community, no longer treat every path component named `test` as a test file
+  (a repository directory called `test` was enough), and no longer warn about
+  a community they then declined to filter — the warning and the filter now
+  use the same root-aware test rule (#1143).
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

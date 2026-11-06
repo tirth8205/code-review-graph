@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 # instead of one per row (issue #721).
 _UPDATE_BATCH = 50_000
 
+#: Rows per ``WHERE id IN (...)`` read: SQLite caps bound parameters far
+#: below the write batch size, so an id list has to be shorter.
+_SELECT_CHUNK = 500
+
 # These are the canonical language values stored for the JavaScript ecosystem.
 # JSX files are stored as ``javascript`` and Astro files as ``typescript`` by
 # ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name.
@@ -325,6 +329,37 @@ class GraphEdge:
     #: 'direct', 'unresolved', or None where the distinction does not apply
     #: (a non-call edge) or has not been computed yet. See migration v11.
     target_resolution: Optional[str] = None
+
+
+@dataclass
+class CallResolution:
+    """One CALLS row whose target an oracle has settled.
+
+    Produced by a resolver that knows the concrete definition (ZLS) rather
+    than guessing from names, and consumed by
+    :meth:`GraphStore.apply_call_resolutions`.
+    """
+    edge_id: int
+    #: ``None`` keeps the row's current target: the resolution said the call
+    #: leaves the repository, which is an answer about the edge's metadata
+    #: rather than about its target.
+    target_qualified: Optional[str]
+    extra: dict
+
+
+#: Edge metadata that describes a *guess* about a target. It says nothing once
+#: the target is known, and leaving it behind makes every consumer that reads
+#: ``extra`` to explain an edge report the old uncertainty about a resolved
+#: call.
+_SUPERSEDED_TARGET_METADATA = (
+    "ambiguous_targets",
+    "ambiguous_target_count",
+    "ambiguous_targets_truncated",
+    "unresolved_targets",
+    "unresolved_target_count",
+    "unresolved_targets_truncated",
+    "bare_call_target",
+)
 
 
 @dataclass
@@ -1839,19 +1874,144 @@ class GraphStore:
 
         Returns the number of rows classified.
         """
-        placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
         self._begin_immediate()
         try:
-            cursor = self._conn.execute(
-                "UPDATE edges SET target_resolution = "  # noqa: S608
-                f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders})",
-                TARGET_RESOLUTION_KINDS,
-            )
+            classified = self._classify_target_resolution()
             self._conn.commit()
         except BaseException:
             self._conn.rollback()
             raise
+        return classified
+
+    def _classify_target_resolution(self) -> int:
+        """Run the ``target_resolution`` classification on the open connection.
+
+        Split out of :meth:`refresh_target_resolution` so a caller that is
+        already inside a write transaction classifies in that same one: a
+        rewritten target and its certainty column must never be observable
+        apart.
+        """
+        placeholders = ", ".join("?" for _ in TARGET_RESOLUTION_KINDS)
+        cursor = self._conn.execute(
+            "UPDATE edges SET target_resolution = "  # noqa: S608
+            f"{TARGET_RESOLUTION_EXPR} WHERE kind IN ({placeholders})",
+            TARGET_RESOLUTION_KINDS,
+        )
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+
+    def apply_call_resolutions(
+        self, resolutions: Iterable[CallResolution],
+    ) -> dict[str, int]:
+        """Rewrite CALLS rows an oracle settled, plus their ``TESTED_BY`` mirrors.
+
+        A definition lookup replaces the receiver-evidence rule, so the edge
+        loses the metadata that described the guess: the bare target, the
+        ambiguity lists, and the binding the parser could not derive.
+
+        ``TESTED_BY`` mirrors move with the call. The parser mints them from a
+        test's CALLS edge, so a mirror left on ``doIt`` while the call says
+        ``a.zig::A.doIt`` makes the resolved function answer "no test covers
+        this" — a false negative in exactly the report a reviewer acts on.
+        One bare name resolved to two different targets is genuinely
+        ambiguous, and its mirror is left alone rather than credited to both.
+
+        Every row is written in one transaction: an interrupted pass must not
+        leave some edges enriched and their siblings not (issue #721).
+        """
+        resolutions = list(resolutions)
+        if not resolutions:
+            return {"call_edges": 0, "mirror_edges": 0, "ambiguous_mirrors": 0}
+
+        # The old target and its file are read back rather than trusted from
+        # the caller: the target identifies the mirror rows the parser minted,
+        # and the file scopes that match so a bare name in another file is not
+        # accidentally dragged along.  Chunked under SQLite's bound-parameter
+        # limit, not the write batch size.
+        old_targets: dict[int, str] = {}
+        old_files: dict[int, str] = {}
+        edge_ids = [resolution.edge_id for resolution in resolutions]
+        for start in range(0, len(edge_ids), _SELECT_CHUNK):
+            chunk = edge_ids[start:start + _SELECT_CHUNK]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._conn.execute(
+                f"SELECT id, target_qualified, file_path FROM edges "  # noqa: S608
+                f"WHERE id IN ({marks})",
+                chunk,
+            ):
+                old_targets[row["id"]] = row["target_qualified"]
+                old_files[row["id"]] = row["file_path"]
+
+        call_updates: list[tuple[Optional[str], str, int]] = []
+        #: (bare target, file_path) -> every distinct qualified target
+        moved_to: dict[tuple[str, str], set[str]] = {}
+        #: (bare target, file_path) -> extra for the mirror the parser minted
+        mirror_extra_by_key: dict[tuple[str, str], dict] = {}
+        for resolution in resolutions:
+            extra = dict(resolution.extra)
+            for key in _SUPERSEDED_TARGET_METADATA:
+                extra.pop(key, None)
+            serialized = json.dumps(extra, sort_keys=True)
+            call_updates.append(
+                (resolution.target_qualified, serialized, resolution.edge_id),
+            )
+            old = old_targets.get(resolution.edge_id) or ""
+            if (
+                resolution.target_qualified is None
+                or "::" in old
+                or "::" not in resolution.target_qualified
+            ):
+                continue
+            file_path = old_files.get(resolution.edge_id, "")
+            mirror_key = (old, file_path)
+            moved_to.setdefault(mirror_key, set()).add(resolution.target_qualified)
+            mirror_extra_by_key.setdefault(mirror_key, extra)
+
+        mirror_updates: list[tuple[str, str, int]] = []
+        ambiguous = 0
+        for (bare_target, file_path), targets in moved_to.items():
+            if len(targets) != 1:
+                ambiguous += 1
+                continue
+            target = next(iter(targets))
+            serialized = json.dumps(
+                mirror_extra_by_key[(bare_target, file_path)], sort_keys=True,
+            )
+            for row in self._conn.execute(
+                "SELECT id FROM edges "
+                "WHERE kind = 'TESTED_BY' AND source_qualified = ? "
+                "AND file_path = ?",
+                (bare_target, file_path),
+            ).fetchall():
+                mirror_updates.append((target, serialized, row["id"]))
+
+        self._begin_immediate()
+        try:
+            call_sql = (
+                "UPDATE edges SET target_qualified = COALESCE(?, target_qualified), "
+                "extra = ? WHERE id = ?"
+            )
+            for start in range(0, len(call_updates), _UPDATE_BATCH):
+                self._conn.executemany(
+                    call_sql, call_updates[start:start + _UPDATE_BATCH]
+                )
+            mirror_sql = (
+                "UPDATE edges SET source_qualified = ?, extra = ? WHERE id = ?"
+            )
+            for start in range(0, len(mirror_updates), _UPDATE_BATCH):
+                self._conn.executemany(
+                    mirror_sql, mirror_updates[start:start + _UPDATE_BATCH]
+                )
+            self._classify_target_resolution()
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._invalidate_cache()
+        return {
+            "call_edges": len(call_updates),
+            "mirror_edges": len(mirror_updates),
+            "ambiguous_mirrors": ambiguous,
+        }
 
     def count_edges_by_resolution(self, kind: str = "CALLS") -> dict[str, int]:
         """Split one edge kind into certain and guessed target attributions.

@@ -157,6 +157,45 @@ def _fts_file_hint(
     return [normalize_file_path(root / path) for path in changed_files]
 
 
+def _run_zls_enrichment(
+    store: Any,
+    repo_root: str | None,
+    result: dict[str, Any],
+) -> list[str]:
+    """Ask ZLS about the Zig calls a name cannot bind, before derived data.
+
+    Flows, criticality and communities are all built from ``CALLS`` edges, so
+    a pass that rewrites those edges has to run before them. Running it after
+    post-processing leaves the derived data describing the graph the pass just
+    replaced, and it stays wrong until something else re-runs post-processing.
+    """
+    warnings: list[str] = []
+    try:
+        from ..zls_resolver import enrich_zls_calls
+    except ImportError as e:  # pragma: no cover - bundled dependency
+        warnings.append(f"ZLS enrichment unavailable: {type(e).__name__}: {e}")
+        return warnings
+    root = Path(repo_root) if repo_root else Path.cwd()
+    try:
+        stats = enrich_zls_calls(store, root)
+    except sqlite3.Error as e:
+        logger.warning("ZLS enrichment failed: %s", e)
+        _note_contention(result, e)
+        warnings.append(f"ZLS enrichment failed: {type(e).__name__}: {e}")
+        return warnings
+    result["zls"] = stats
+    if stats.get("skipped"):
+        reason = str(stats.get("reason") or "")
+        # Nothing left to ask is the normal outcome of an enriched graph, not
+        # a problem; a server that would not start is.
+        if "no unresolved" not in reason:
+            warnings.append(f"ZLS enrichment skipped: {reason}")
+        return warnings
+    if stats.get("warning"):
+        warnings.append(str(stats["warning"]))
+    return warnings
+
+
 def _run_postprocess(
     store: Any,
     build_result: dict[str, Any],
@@ -166,11 +205,15 @@ def _run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    zls: bool = False,
 ) -> list[str]:
     """Run post-build steps based on *postprocess* level.
 
     When *full_rebuild* is False and *changed_files* are available,
     uses incremental flow/community detection for faster updates.
+
+    *zls* runs the optional Zig language-server pass inside the resolution
+    stage, so the derived stages below see the targets it settled.
 
     Records structured stage durations in ``build_result["postprocess_timing"]``.
     Minimal processing reports ``signatures_s`` and ``fts_s``; full processing
@@ -181,6 +224,7 @@ def _run_postprocess(
     """
     warnings: list[str] = []
     build_result["postprocess_level"] = postprocess
+    timing: dict[str, float] = {}
 
     if postprocess == "none":
         _run_embedding_refresh(
@@ -200,6 +244,18 @@ def _run_postprocess(
             warnings.append(
                 f"Target-resolution refresh failed: {type(e).__name__}: {e}"
             )
+        if zls:
+            # Asked for explicitly, so it still runs; the warning is what stops
+            # the caller believing the derived data describes the new targets.
+            stage_started = time.perf_counter()
+            warnings.extend(_run_zls_enrichment(store, repo_root, build_result))
+            timing["zls_s"] = max(0.0, round(time.perf_counter() - stage_started, 6))
+            warnings.append(
+                "ZLS rewrote CALLS edges, but flows, criticality and "
+                "communities were not recomputed at postprocess=none. Run "
+                "`postprocess` to make the derived data match."
+            )
+        build_result["postprocess_timing"] = timing
         return warnings
 
     # Resolve bare and C++ scoped call targets before derived graph steps.
@@ -220,8 +276,30 @@ def _run_postprocess(
             f"Call-target resolution failed: {type(e).__name__}: {e}"
         )
 
+    # -- ZLS: the language server answers the calls names cannot bind --
+    if zls:
+        stage_started = time.perf_counter()
+        warnings.extend(_run_zls_enrichment(store, repo_root, build_result))
+        timing["zls_s"] = max(0.0, round(time.perf_counter() - stage_started, 6))
+        # ZLS scans every unresolved Zig call in the repository, not just the
+        # files an incremental update re-parsed.  Edges it rewrote in files the
+        # update did not touch are invisible to the incremental flow and
+        # community stages, which would leave derived data describing the old
+        # targets.  Merge those files into the set the derived stages see.
+        zls_stats = build_result.get("zls")
+        if isinstance(zls_stats, dict):
+            touched = zls_stats.get("touched_files")
+            if touched:
+                if changed_files is None:
+                    changed_files = []
+                seen = set(changed_files)
+                for path in touched:
+                    normalized = normalize_file_path(path)
+                    if normalized not in seen:
+                        changed_files.append(normalized)
+                        seen.add(normalized)
+
     # -- Signatures + FTS (fast, always run unless "none") --
-    timing: dict[str, float] = {}
     stage_started = time.perf_counter()
     try:
         rows = store.get_nodes_without_signature()
@@ -613,6 +691,7 @@ def build_or_update_graph(
     recurse_submodules: bool | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    zls: bool = False,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -639,6 +718,9 @@ def build_or_update_graph(
             source-derived text or load an embedding model unexpectedly.
         embedding_model: Exact model for an explicitly requested post-build
             embedding refresh. Must be supplied with ``embedding_provider``.
+        zls: Run the optional Zig language-server resolution pass inside
+            post-processing, before flows and communities are derived.
+            Requires ``zls`` on PATH and is much slower than parsing.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors.
@@ -779,6 +861,7 @@ def build_or_update_graph(
             repo_root=str(root),
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
+            zls=zls,
         )
         if warnings:
             build_result["warnings"] = warnings
@@ -805,6 +888,7 @@ def run_postprocess(
     repo_root: str | None = None,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    zls: bool = False,
 ) -> dict[str, Any]:
     """Run post-processing steps on an existing graph.
 
@@ -821,6 +905,8 @@ def run_postprocess(
             supplied with ``embedding_model``. Default: disabled.
         embedding_model: Exact model for an explicit refresh. Must be supplied
             with ``embedding_provider``. Default: disabled.
+        zls: Run the Zig language-server resolution pass before the derived
+            stages below. Default: disabled.
 
     Returns:
         Summary of what was computed.
@@ -852,6 +938,9 @@ def run_postprocess(
             warnings.append(
                 f"Call-target resolution failed: {type(e).__name__}: {e}"
             )
+
+        if zls:
+            warnings.extend(_run_zls_enrichment(store, repo_root, result))
 
         try:
             rows = store.get_nodes_without_signature()

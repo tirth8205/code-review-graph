@@ -8,6 +8,22 @@ and rewrites the edge when the definition lands on an indexed project node.
 The pass is deliberately opt-in: ZLS startup and per-call requests are much
 slower than parsing, so callers run it after a build (or on a schedule), not
 on every incremental update.
+
+What the pass guarantees, and what the tests hold it to:
+
+* every call site recorded on a row is asked, and the row is rewritten only
+  when all of them agree — a row merged from two sites answered by two
+  definitions stays unresolved instead of guessing one;
+* nothing is written until the whole pass is known, in one transaction, so an
+  interrupted pass leaves the graph exactly as it found it (issue #721);
+* the ``TESTED_BY`` mirror the parser minted from a rewritten call moves with
+  it, otherwise a resolved function reports that no test covers it;
+* an out-of-repository definition is stored as a portable module label, never
+  as this machine's absolute path;
+* the LSP transport uses blocking reads on a reader thread, because
+  ``select()`` does not work on Windows pipes; and
+* a pass that resolved nothing says so, because "nothing answered" is almost
+  always a repository that does not build.
 """
 
 from __future__ import annotations
@@ -15,15 +31,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import re
-import select
 import shutil
 import subprocess
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
+from .graph import CallResolution
 from .parser import normalize_file_path
 
 logger = logging.getLogger(__name__)
@@ -31,6 +50,35 @@ logger = logging.getLogger(__name__)
 _ZLS_DEFINITION_TIMEOUT = 8.0
 _ZLS_START_TIMEOUT = 20.0
 _ZLS_MAX_DEFINITION_DEPTH = 2
+_ZLS_READ_SIZE = 65536
+_ZLS_RESOLUTION_BASIS = "zls"
+#: Rows per progress log line, so a long pass is not silent on a busy terminal.
+_ZLS_LOG_EVERY = 200
+
+
+@dataclass(frozen=True)
+class DefinitionResult:
+    """The outcome of one ``textDocument/definition`` request.
+
+    Three states, all distinguishable by callers:
+
+    * ``ok=True``  — ZLS returned a location in ``location``.
+    * ``ok=False, reason="no_definition"`` — ZLS answered the request and
+      said there is no definition here.  This is a legitimate answer, not a
+      failure, and it points at a workspace that does not build.
+    * ``ok=False, reason="error"`` — the request never came back (timeout,
+      EOF, RPC error).  The server is running but not answering.
+    """
+
+    ok: bool
+    location: Optional[tuple[str, int]] = None
+    reason: str = ""
+
+
+#: Sentinel for a request that ZLS answered with "no definition".
+_NO_DEFINITION = DefinitionResult(ok=False, reason="no_definition")
+#: Sentinel for a request that never came back (timeout, EOF, RPC error).
+_REQUEST_ERROR = DefinitionResult(ok=False, reason="error")
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +99,12 @@ class ZlsClient:
         self._proc: Optional[subprocess.Popen] = None
         self._next_id = 1
         self._opened: set[str] = set()
-        self._buffer = bytearray()
         self._uri_root = repo_root.as_uri()
+        #: Messages arrive on a reader thread. Reading here instead of
+        #: ``select()``-polling the pipe is what makes the pass work on
+        #: Windows, where ``select()`` only supports sockets.
+        self._incoming: queue.Queue[Optional[dict]] = queue.Queue()
+        self._reader: Optional[threading.Thread] = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -73,6 +125,16 @@ class ZlsClient:
         except OSError as exc:
             logger.warning("Could not start ZLS: %s", exc)
             return False
+        if self._proc.stdout is None:  # pragma: no cover - PIPE above
+            self.stop()
+            return False
+        self._reader = threading.Thread(
+            target=_frame_reader,
+            args=(self._proc.stdout, self._incoming),
+            name="zls-reader",
+            daemon=True,
+        )
+        self._reader.start()
         params = {
             "processId": None,
             "rootUri": self._uri_root,
@@ -131,13 +193,28 @@ class ZlsClient:
 
     def definition(
         self, file_path: str, line: int, character: int,
-    ) -> Optional[tuple[str, int]]:
-        """Return ``(path, zero_based_line)`` for a call-site position."""
+    ) -> DefinitionResult:
+        """Return the definition location for a call-site position.
+
+        Distinguishes three outcomes so callers can report the right fix:
+        a location when ZLS answered, ``no_definition`` when ZLS said the
+        symbol has no definition, and ``error`` when the request never came
+        back (timeout, EOF, RPC error).
+        """
         result = self._request("textDocument/definition", {
             "textDocument": {"uri": Path(file_path).as_uri()},
             "position": {"line": line, "character": character},
         })
-        return _definition_location(result)
+        if result is None:
+            # The request timed out, hit EOF, or returned an RPC error.
+            # That is a transport failure, not a "no definition" answer.
+            return _REQUEST_ERROR
+        location = _definition_location(result)
+        if location is None:
+            # ZLS answered the request, but the response had no usable
+            # location — the symbol genuinely has no definition here.
+            return _NO_DEFINITION
+        return DefinitionResult(ok=True, location=location)
 
     # -- JSON-RPC ----------------------------------------------------------
 
@@ -158,8 +235,13 @@ class ZlsClient:
             if remaining <= 0:
                 logger.debug("ZLS request %s timed out", method)
                 return None
-            message = self._read_message(remaining)
+            try:
+                message = self._incoming.get(timeout=remaining)
+            except queue.Empty:
+                logger.debug("ZLS request %s timed out", method)
+                return None
             if message is None:
+                # The reader hit end of stream: the server is gone.
                 return None
             if message.get("id") == request_id:
                 if "error" in message:
@@ -189,66 +271,95 @@ class ZlsClient:
         )
         proc.stdin.flush()
 
-    def _read_message(self, timeout: float) -> Optional[dict]:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            return None
-        deadline = time.monotonic() + timeout
-        header_end = 0
-        length: Optional[int] = None
-        while True:
-            if length is None:
-                header_end = self._buffer.find(b"\r\n\r\n")
-                if header_end < 0:
-                    header_end = self._buffer.find(b"\n\n")
-                if header_end < 0:
-                    header_end = -1
-                else:
-                    separator = (
-                        4 if self._buffer[header_end:header_end + 4] == b"\r\n\r\n"
-                        else 2
-                    )
-                    header = bytes(self._buffer[:header_end])
-                    for line in header.splitlines():
-                        name, _, value = line.partition(b":")
-                        if name.strip().lower() == b"content-length":
-                            try:
-                                length = int(value.strip())
-                            except ValueError:
-                                return None
-                    if length is None:
-                        return None
-                    del self._buffer[:header_end + separator]
-            if length is not None and len(self._buffer) >= length:
-                body = bytes(self._buffer[:length])
-                del self._buffer[:length]
-                try:
-                    return json.loads(body)
-                except json.JSONDecodeError:
-                    return None
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            if not _wait_readable(proc.stdout.fileno(), remaining):
-                return None
+
+def _extract_frame(buffer: bytearray) -> Optional[bytes]:
+    """Cut one ``Content-Length`` framed body off *buffer*, in place.
+
+    Returns the body and consumes it, or ``None`` when the frame is not
+    complete yet — in which case *buffer* is left untouched so the next read
+    can finish it. A header without a usable ``Content-Length`` is discarded
+    with its body unknown, which cannot be recovered, so the caller sees the
+    stream as broken instead of resynchronising on garbage.
+    """
+    header_end = buffer.find(b"\r\n\r\n")
+    separator = 4
+    if header_end < 0:
+        header_end = buffer.find(b"\n\n")
+        separator = 2
+    if header_end < 0:
+        return None
+    length: Optional[int] = None
+    for line in bytes(buffer[:header_end]).splitlines():
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
             try:
-                chunk = os.read(proc.stdout.fileno(), 65536)
-            except OSError:
+                length = int(value.strip())
+            except ValueError:
                 return None
-            if not chunk:
-                return None
-            self._buffer.extend(chunk)
+    if length is None:
+        return None
+    body_start = header_end + separator
+    if len(buffer) - body_start < length:
+        return None
+    body = bytes(buffer[body_start:body_start + length])
+    del buffer[:body_start + length]
+    return body
 
 
-def _wait_readable(fd: int, timeout: float) -> bool:
+def _frame_reader(stream, out: "queue.Queue[Optional[dict]]") -> None:
+    """Read LSP frames from *stream* into *out* until the pipe closes.
+
+    Runs on its own thread so the blocking read costs a thread and not the
+    request deadline: ``_request`` waits on the queue with its own timeout.
+    ``None`` is the end-of-stream sentinel, which is how a crashed server
+    turns into "no answer" instead of an infinite wait.
+    """
+    buffer = bytearray()
     try:
-        ready, _, _ = select.select([fd], [], [], max(0.0, timeout))
-    except (OSError, ValueError):
-        return False
-    return bool(ready)
+        while True:
+            frame = _extract_frame(buffer)
+            if frame is None:
+                try:
+                    chunk = stream.read(_ZLS_READ_SIZE)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                continue
+            try:
+                out.put(json.loads(frame.decode("utf-8", errors="replace")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                logger.debug("Discarding malformed ZLS frame")
+    finally:
+        out.put(None)
+
+
+def uri_to_file_path(uri: str, *, windows: Optional[bool] = None) -> Optional[str]:
+    """Decode a ``file:`` URI into the path the graph indexes.
+
+    Two spellings are not the round trip of ``urlparse``: a Windows drive URI
+    keeps an empty authority, so ``file:///C:/x`` must lose its leading slash,
+    while ``file://host/share/x`` is UNC and has to keep the authority or the
+    path points at a directory that does not exist.
+    """
+    parsed = urlparse(uri)
+    if parsed.scheme and parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path or "")
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return path
+    if parsed.netloc:
+        return normalize_file_path(f"//{parsed.netloc}{path}")
+    if re.match(r"^/[A-Za-z]:", path):
+        path = path[1:]
+    return normalize_file_path(path)
 
 
 def _definition_location(result: Any) -> Optional[tuple[str, int]]:
+    """First ``(path, zero_based_line)`` in a definition response."""
     if not result:
         return None
     item = result[0] if isinstance(result, list) else result
@@ -257,10 +368,9 @@ def _definition_location(result: Any) -> Optional[tuple[str, int]]:
     uri = item.get("uri") or item.get("targetUri")
     if not isinstance(uri, str):
         return None
-    parsed = urlparse(uri)
-    if parsed.scheme != "file":
+    path = uri_to_file_path(uri)
+    if not path:
         return None
-    path = unquote(parsed.path)
     selection = item.get("targetSelectionRange") or item.get("range") or {}
     start = selection.get("start") if isinstance(selection, dict) else None
     if not isinstance(start, dict):
@@ -277,7 +387,12 @@ def _definition_location(result: Any) -> Optional[tuple[str, int]]:
 
 
 def _collect_call_sites(source: bytes) -> dict[tuple[int, str], list[tuple[int, int]]]:
-    """Map ``(1-based line, callee name)`` to UTF-16 call positions."""
+    """Map ``(1-based line, callee name)`` to UTF-16 call positions.
+
+    A line can hold several sites for the same name (``x.doIt(); y.doIt();``).
+    They are all returned, because they are all recorded on one edge row and
+    the row may only be rewritten to an answer they share.
+    """
     try:
         from tree_sitter_language_pack import get_parser
     except ImportError:  # pragma: no cover - bundled dependency
@@ -364,9 +479,172 @@ def _match_node(
     return None
 
 
+def _resolve_definition(
+    client,
+    index: dict[str, list[dict[str, Any]]],
+    location: tuple[str, int],
+    callee: str,
+) -> tuple[Optional[dict[str, Any]], str]:
+    """Follow a definition response to an indexed node.
+
+    Returns ``(node, path)``: the node when the definition names something the
+    graph holds, and the final path either way, because a path inside the
+    repository that matched nothing is a different outcome from a call that
+    left it.
+    """
+    target_path, definition_line = location
+    for depth in range(_ZLS_MAX_DEFINITION_DEPTH):
+        node = _match_node(index, target_path, definition_line, callee)
+        if node is not None:
+            return node, target_path
+        if depth == _ZLS_MAX_DEFINITION_DEPTH - 1:
+            break
+        # A definition may land on a re-export/alias; ask ZLS to follow it
+        # once more before giving up.
+        follow = client.definition(
+            target_path, definition_line,
+            _definition_probe_column(target_path, definition_line),
+        )
+        if not follow.ok:
+            break
+        target_path, definition_line = follow.location  # type: ignore[misc]
+    return None, target_path
+
+
+# ---------------------------------------------------------------------------
+# Edge metadata
+# ---------------------------------------------------------------------------
+
+
+def _resolved_extra(
+    node: dict[str, Any], receiver: Optional[str], original: dict | None = None,
+) -> dict:
+    """Metadata for a call whose definition ZLS confirmed.
+
+    The definition also names the receiver's type, which is the binding the
+    parser could not derive: ``x.doIt()`` resolving to ``a.zig::A.doIt`` says
+    ``x`` is an ``A``. Recording it in the vocabulary the parser uses keeps
+    the read path's receiver rule agreeing with the target, instead of
+    rejecting an edge it can no longer explain.
+
+    Metadata unrelated to target resolution (anything the parser recorded that
+    is not in ``_SUPERSEDED_TARGET_METADATA``) is preserved from *original*, so
+    enrichment does not silently drop context the graph already held.
+    """
+    from .graph import _SUPERSEDED_TARGET_METADATA
+
+    extra: dict[str, Any] = {}
+    if original:
+        for key, value in original.items():
+            if key not in _SUPERSEDED_TARGET_METADATA:
+                extra[key] = value
+    extra["resolution_basis"] = _ZLS_RESOLUTION_BASIS
+    if receiver:
+        extra["receiver"] = receiver
+    parent = node.get("parent_name")
+    if isinstance(parent, str) and parent:
+        extra["receiver_binding"] = "class"
+        extra["receiver_class"] = parent
+    else:
+        extra["receiver_binding"] = "module"
+        extra["receiver_module"] = node["file_path"]
+    return extra
+
+
+def _external_extra(
+    receiver: Optional[str], module_label: str, original: dict | None = None,
+) -> dict:
+    """Metadata for a call whose definition lives outside the repository.
+
+    Preserves unrelated metadata from *original* the same way
+    :func:`_resolved_extra` does.
+    """
+    from .graph import _SUPERSEDED_TARGET_METADATA
+
+    extra: dict[str, Any] = {}
+    if original:
+        for key, value in original.items():
+            if key not in _SUPERSEDED_TARGET_METADATA:
+                extra[key] = value
+    extra["external"] = True
+    extra["external_module"] = module_label
+    extra["receiver_binding"] = "external"
+    extra["resolution_basis"] = _ZLS_RESOLUTION_BASIS
+    if receiver:
+        extra["receiver"] = receiver
+    return extra
+
+
+def _is_absolute_path(path: str) -> bool:
+    """True for POSIX (``/x``), Windows drive-letter (``C:/x``, ``C:\\x``) and UNC paths."""
+    if path.startswith("/"):
+        return True
+    # Windows drive-letter path: ``C:/...`` or ``C:\...``
+    if len(path) >= 3 and path[1] in (":",) and path[0].isalpha() and path[2] in ("/", "\\"):
+        return True
+    return False
+
+
+def _portable_module_label(file_path: str) -> str:
+    """Label for an out-of-repository definition.
+
+    The absolute path is where the definition happened to live on this
+    machine: storing it makes graphs incomparable between machines and writes
+    a user directory into a shared artifact. The tail that names the module
+    (``std/mem/Allocator.zig``) says what the call reaches without either.
+    """
+    path = normalize_file_path(file_path)
+    if not _is_absolute_path(path):
+        return path
+    # Split on both ``/`` and ``\`` so Windows paths are handled the same way.
+    parts = [part for part in re.split(r"[\\/]", path) if part]
+    # A Windows drive letter (``C:``) is machine-specific and carries no
+    # module information, so drop it before taking the tail.
+    if parts and len(parts[0]) == 2 and parts[0][1] == ":":
+        parts = parts[1:]
+    if len(parts) >= 2:
+        return "/".join(parts[-2:])
+    return parts[-1] if parts else path
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+
+def _unresolved_zig_call_rows(store) -> list:
+    """Zig ``CALLS`` rows whose target is still a bare name.
+
+    That is what ``target_resolution = 'unresolved'`` records for them, but the
+    column is only filled by post-processing, and ``--zls`` can be asked for on
+    a store where it has not run yet. Reading the target itself keeps the pass
+    working on either store instead of reporting "nothing to do".
+
+    Rows already known to leave the repository are dropped: that answer is
+    recorded, and re-asking ZLS for them would repeat the expensive part of
+    every run for nothing. The decision reads the parsed metadata rather than
+    matching the JSON blob with ``LIKE``, because a receiver variable named
+    ``external`` would otherwise hide a call that still needs an answer.
+    """
+    rows = store._conn.execute(
+        "SELECT id, source_qualified, target_qualified, file_path, line, extra "
+        "FROM edges WHERE kind = 'CALLS' AND file_path LIKE '%.zig' "
+        "AND target_qualified NOT LIKE '%::%'",
+    ).fetchall()
+    return [
+        row for row in rows
+        if not _load_extra(row["extra"]).get("external")
+    ]
+
+
+def count_unresolved_zig_calls(store) -> int:
+    """How many Zig call targets are still a bare name.
+
+    ``update`` re-parses the files it touched and rewrites their edges from
+    source, which drops the targets a ZLS pass had settled. The graph keeps no
+    other trace of that work, so this is how the caller notices it went away.
+    """
+    return len(_unresolved_zig_call_rows(store))
 
 
 def enrich_zls_calls(
@@ -376,23 +654,31 @@ def enrich_zls_calls(
     limit: int = 0,
     request_timeout: float = _ZLS_DEFINITION_TIMEOUT,
     max_seconds: float = 1800.0,
+    client=None,
 ) -> dict[str, Any]:
-    """Resolve unresolved Zig CALLS through ZLS definitions."""
-    repo_root = repo_root.resolve()
+    """Resolve unresolved Zig CALLS through ZLS definitions.
+
+    ``client`` lets a caller (or a test) supply a running language server; the
+    pass then does not stop it, because it did not start it.
+    """
+    repo_root = Path(repo_root).resolve()
     started = time.monotonic()
 
-    rows = store._conn.execute(
-        "SELECT id, source_qualified, target_qualified, file_path, line, extra "
-        "FROM edges WHERE kind = 'CALLS' AND file_path LIKE '%.zig' "
-        "AND target_resolution = 'unresolved' "
-        "AND extra NOT LIKE '%\"external\"%'",
-    ).fetchall()
+    rows = _unresolved_zig_call_rows(store)
     if not rows:
         return {"skipped": True, "reason": "no unresolved Zig calls"}
 
-    client = ZlsClient(repo_root, request_timeout=request_timeout)
-    if not client.start():
-        return {"skipped": True, "reason": "zls unavailable"}
+    owns_client = client is None
+    if owns_client:
+        client = ZlsClient(repo_root, request_timeout=request_timeout)
+        if not client.start():
+            return {
+                "skipped": True,
+                "reason": (
+                    "zls did not start (not on PATH, or the workspace has no "
+                    "build.zig for it to configure from)"
+                ),
+            }
     index = _node_index(store)
     stats: dict[str, Any] = {
         "candidates": len(rows),
@@ -400,32 +686,42 @@ def enrich_zls_calls(
         "resolved": 0,
         "external": 0,
         "unmatched": 0,
+        "no_definition": 0,
+        "site_conflicts": 0,
         "errors": 0,
+        "touched_files": set(),
     }
     source_cache: dict[str, bytes] = {}
     sites_cache: dict[str, dict[tuple[int, str], list[tuple[int, int]]]] = {}
+    # Rows that share a file, line and callee are one call site recorded for
+    # several callers; they get one answer and are rewritten together.
     groups: dict[tuple[str, int, str], list[Any]] = {}
     for row in rows:
         key = (row["file_path"], row["line"], row["target_qualified"])
         groups.setdefault(key, []).append(row)
-    if limit:
-        keys = list(groups)[:limit]
-    else:
-        keys = list(groups)
+    keys = list(groups)[:limit] if limit else list(groups)
     stats["call_sites"] = len(keys)
 
+    resolutions: list[CallResolution] = []
     try:
         for position, key in enumerate(keys):
             if time.monotonic() - started > max_seconds:
                 stats["stopped_early"] = True
+                # Account for the sites that were never asked: without this
+                # the total would not add up to ``candidates``, and the
+                # caller could not tell how much work was left.
+                remaining = sum(len(groups[k]) for k in keys[position:])
+                stats.setdefault("skipped", 0)
+                stats["skipped"] += remaining
                 break
             file_path, line, callee = key
+            group = groups[key]
             source = source_cache.get(file_path)
             if source is None:
                 try:
                     source = Path(file_path).read_bytes()
                 except OSError:
-                    stats["errors"] += 1
+                    stats["errors"] += len(group)
                     continue
                 source_cache[file_path] = source
             sites = sites_cache.get(file_path)
@@ -434,99 +730,115 @@ def enrich_zls_calls(
                 sites_cache[file_path] = sites
             positions = sites.get((line, callee))
             if not positions:
-                stats["unmatched"] += 1
+                stats["unmatched"] += len(group)
                 continue
             try:
-                client.open_document(
-                    file_path, source.decode("utf-8", "replace"),
-                )
-                location = client.definition(
-                    file_path, positions[0][0], positions[0][1],
-                )
-            except Exception:  # noqa: BLE001 - ZLS transport is best-effort
-                stats["errors"] += 1
+                text = source.decode("utf-8", "replace")
+                client.open_document(file_path, text)
+                answers = [
+                    client.definition(file_path, line0, column)
+                    for line0, column in positions
+                ]
+            except Exception as exc:  # noqa: BLE001 - ZLS transport is best-effort
+                logger.debug("ZLS request failed for %s:%d: %s", file_path, line, exc)
+                stats["errors"] += len(group)
                 continue
-            if location is None:
-                stats["errors"] += 1
+            # Every site must have been answered, and they must all agree.
+            # A site that returned ``error`` (timeout/EOF/RPC failure) is not
+            # confirmed: accepting the others would mark an unconfirmed call as
+            # resolved.  A site that returned ``no_definition`` is a legitimate
+            # answer of "nothing here", which is different from an error.
+            if any(a.reason == "error" for a in answers):
+                stats["errors"] += len(group)
                 continue
-            target_path, definition_line = location
-            target_node = None
-            for _ in range(_ZLS_MAX_DEFINITION_DEPTH):
-                target_node = _match_node(
-                    index, target_path, definition_line, callee,
-                )
-                if target_node is not None:
-                    break
-                # A definition may land on a re-export/alias; ask ZLS to
-                # follow it once more before giving up.
-                extra_location = client.definition(
-                    target_path, definition_line,
-                    _definition_probe_column(target_path, definition_line),
-                )
-                if extra_location is None:
-                    break
-                target_path, definition_line = extra_location
-            if target_node is not None:
-                _rewrite_group(
-                    store, groups[key], target_node["qualified_name"],
-                )
-                stats["resolved"] += len(groups[key])
+            if any(a.reason == "no_definition" for a in answers):
+                stats["no_definition"] += len(group)
                 continue
-            if _path_is_external(repo_root, target_path):
-                _mark_external(store, groups[key], target_path)
-                stats["external"] += len(groups[key])
+            distinct = {a.location for a in answers if a.ok}
+            if len(distinct) > 1:
+                # Two sites merged onto one row disagree, so the row has no
+                # single honest target. Leave it unresolved and say why.
+                stats["site_conflicts"] += len(group)
+                continue
+            if not distinct:
+                # All sites returned ok with no location — defensive, since
+                # the no_definition and error checks above should have caught
+                # those states already.
+                stats["no_definition"] += len(group)
+                continue
+            node, target_path = _resolve_definition(
+                client, index, next(iter(distinct)), callee,
+            )
+            if node is not None:
+                for row in group:
+                    original = _load_extra(row["extra"])
+                    resolutions.append(CallResolution(
+                        edge_id=row["id"],
+                        target_qualified=node["qualified_name"],
+                        extra=_resolved_extra(
+                            node, original.get("receiver"), original,
+                        ),
+                    ))
+                stats["resolved"] += len(group)
+                stats["touched_files"].add(file_path)
+                stats["touched_files"].add(node["file_path"])
+            elif _path_is_external(repo_root, target_path):
+                label = _portable_module_label(target_path)
+                for row in group:
+                    original = _load_extra(row["extra"])
+                    resolutions.append(CallResolution(
+                        edge_id=row["id"],
+                        target_qualified=None,
+                        extra=_external_extra(
+                            original.get("receiver"), label, original,
+                        ),
+                    ))
+                stats["external"] += len(group)
+                stats["touched_files"].add(file_path)
             else:
-                stats["unmatched"] += len(groups[key])
-            if (position + 1) % 200 == 0:
+                stats["unmatched"] += len(group)
+            if (position + 1) % _ZLS_LOG_EVERY == 0:
                 logger.info(
                     "ZLS enrichment: %d/%d sites, resolved=%d",
                     position + 1, len(keys), stats["resolved"],
                 )
     finally:
-        client.stop()
+        if owns_client:
+            client.stop()
 
+    applied = store.apply_call_resolutions(resolutions)
+    stats["mirrors"] = applied["mirror_edges"]
+    stats["ambiguous_mirrors"] = applied["ambiguous_mirrors"]
     if stats["resolved"] or stats["external"]:
-        try:
-            store.refresh_target_resolution()
-        except Exception:  # noqa: BLE001 - best-effort classification refresh
-            logger.debug("ZLS resolve refresh failed", exc_info=True)
-        store.commit()
+        # A marker, not a memo: the next update rewrites these edges from
+        # source and the only way it can warn about that is by knowing the
+        # graph was enriched once before.  Both resolved and external-only
+        # passes are lost on re-parse, so both must leave the marker.
+        store.set_metadata("zls_enriched_at", time.strftime("%Y-%m-%dT%H:%M:%S"))
+    if not stats["resolved"] and not stats["external"] and stats["candidates"]:
+        if stats["errors"] > stats["no_definition"]:
+            stats["warning"] = (
+                f"ZLS requests failed for {stats['errors']} of "
+                f"{stats['candidates']} unresolved Zig call sites. The server "
+                "is running but not answering: check that zls and zig agree "
+                "on the version, and raise --timeout if the workspace is "
+                "large enough to answer slowly."
+            )
+        else:
+            stats["warning"] = (
+                f"ZLS answered no definition for any of the "
+                f"{stats['candidates']} unresolved Zig call sites. That is "
+                "usually a workspace that does not build: run 'zig build' "
+                "and check that zls and zig agree on the version."
+            )
     stats["elapsed_seconds"] = round(time.monotonic() - started, 2)
     logger.info(
-        "ZLS enrichment: resolved=%d external=%d unmatched=%d errors=%d",
-        stats["resolved"], stats["external"],
-        stats["unmatched"], stats["errors"],
+        "ZLS enrichment: resolved=%d external=%d unmatched=%d conflicts=%d "
+        "no-definition=%d errors=%d",
+        stats["resolved"], stats["external"], stats["unmatched"],
+        stats["site_conflicts"], stats["no_definition"], stats["errors"],
     )
     return stats
-
-
-def _rewrite_group(store, rows, target_qualified: str) -> None:
-    for row in rows:
-        extra = _load_extra(row["extra"])
-        for key in (
-            "ambiguous_targets", "ambiguous_target_count",
-            "ambiguous_targets_truncated", "unresolved_targets",
-            "unresolved_target_count", "unresolved_targets_truncated",
-            "bare_call_target",
-        ):
-            extra.pop(key, None)
-        extra["resolution_basis"] = "zls"
-        store._conn.execute(
-            "UPDATE edges SET target_qualified = ?, target_resolution = 'direct', "
-            "extra = ? WHERE id = ?",
-            (target_qualified, json.dumps(extra, sort_keys=True), row["id"]),
-        )
-
-
-def _mark_external(store, rows, target_path: str) -> None:
-    for row in rows:
-        extra = _load_extra(row["extra"])
-        extra["external"] = True
-        extra["external_module"] = target_path
-        store._conn.execute(
-            "UPDATE edges SET extra = ? WHERE id = ?",
-            (json.dumps(extra, sort_keys=True), row["id"]),
-        )
 
 
 def _load_extra(raw: Any) -> dict:
