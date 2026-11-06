@@ -72,6 +72,11 @@
   ignore a missing, relative or non-repository `cwd`. Upgrade the package before
   running `install --platform codex` again; `install` and `uninstall` both
   recognise the hooks earlier releases wrote.
+- `**/vendor/**` applies only when a root manifest shows `vendor/` holds
+  dependencies (`composer.json`, `go.mod`, `go.work`, `Gemfile`, `Rakefile`,
+  `Cargo.toml` or `*.gemspec`), and a nested one excludes its sibling
+  `vendor/`. A source package named `vendor` in any other repository stays in
+  the graph; add `vendor/` to `.code-review-graphignore` to exclude it (#1056).
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a
