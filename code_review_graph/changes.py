@@ -35,6 +35,24 @@ _TEST_GAP_EXEMPT_NAMES = frozenset({
     "__construct", "__init__", "__destruct",
 })
 
+
+def is_test_gap_exempt(node: GraphNode) -> bool:
+    """Return whether a lifecycle node is exempt from test-gap reporting."""
+    return node.kind == "Function" and node.name in _TEST_GAP_EXEMPT_NAMES
+
+
+def _is_test_lifecycle(node: GraphNode, store: GraphStore) -> bool:
+    """Return whether *node* is a lifecycle method of real test code.
+
+    The exemption matches on a name, and production code uses these names too:
+    an untested ``__init__`` can hold real logic, so it keeps its coverage risk
+    even though it is left out of the gap list.
+    """
+    return is_test_gap_exempt(node) and (
+        node.is_test or is_test_file(node.file_path, store.get_repo_root())
+    )
+
+
 # Being reached by a tested caller buys no risk discount at all. It was worth
 # 0.03 briefly and that was wrong twice over. Evidentially: a static CALLS path
 # shows the symbol is reachable, not that any test runs it -- about 6% of the
@@ -588,7 +606,8 @@ def compute_risk_score(
     Scoring factors:
       - Flow participation: 0.05 per flow membership, capped at 0.25
       - Community crossing: 0.05 per caller from a different community, capped at 0.15
-      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges)
+      - Test coverage: 0.30 (untested) scaling down to 0.05 (5+ TESTED_BY edges);
+        none for a lifecycle method in test code, which has no coverage to lack
       - Security sensitivity: 0.20 if name matches security keywords
       - Caller count: callers / 20, capped at 0.10
       - Change frequency (opt-in): commits touching the file / 10, capped
@@ -625,11 +644,12 @@ def compute_risk_score(
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(
-        node.qualified_name, include_helper_routes=False,
-    )
-    test_count = len(transitive_tests)
-    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+    if not _is_test_lifecycle(node, store):
+        transitive_tests = store.get_transitive_tests(
+            node.qualified_name, include_helper_routes=False,
+        )
+        test_count = len(transitive_tests)
+        score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
@@ -794,7 +814,7 @@ def analyze_changes(
     gap_candidates = [
         node for node in changed_funcs
         if not (node.is_test or is_test_file(node.file_path, gap_root))
-        and node.name not in _TEST_GAP_EXEMPT_NAMES
+        and not is_test_gap_exempt(node)
         and not node.extra.get("typescript_kind")
     ]
     # TESTED_BY edges are stored as source=production, target=test by the

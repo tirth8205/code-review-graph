@@ -10,6 +10,7 @@ from typing import Any
 from ..changes import (  # noqa: F401
     analyze_changes,
     compute_risk_score,
+    is_test_gap_exempt,
     parse_diff_ranges,
     parse_git_diff_ranges,
 )
@@ -531,7 +532,10 @@ def get_review_context(
             tested_qualified = {e.source_qualified for e in test_edges}
             test_gap_count = sum(
                 1 for f in changed_funcs
-                if f.qualified_name not in tested_qualified
+                if (
+                    f.qualified_name not in tested_qualified
+                    and not is_test_gap_exempt(f)
+                )
             )
 
             summary_parts = [
@@ -779,6 +783,7 @@ def _generate_review_guidance(
         if f.qualified_name not in tested_funcs
         and not f.is_test
         and not is_test_file(f.file_path, repo_root)
+        and not is_test_gap_exempt(f)
     ]
     if untested:
         routes: dict = {}
