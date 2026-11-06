@@ -14,6 +14,7 @@ from ._common import (
     _validate_positive_int,
     _validate_repo_root,
 )
+from .build import _lock_or_skip
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def embed_graph(
     repo_root: str | None = None,
     model: str | None = None,
     provider: str | None = None,
+    wait_for_lock: bool = False,
 ) -> dict[str, Any]:
     """Compute vector embeddings for all graph nodes to enable semantic search.
 
@@ -57,61 +59,75 @@ def embed_graph(
                   ``voyage`` requires VOYAGE_API_KEY and defaults to
                   voyage-code-3 unless a model arg or CRG_VOYAGE_MODEL is
                   supplied.
+        wait_for_lock: Block until another write to this graph finishes rather
+                  than stand down. The CLI's ``--wait``.
 
     Returns:
         Number of nodes embedded and total embedding count. The summary reports
-        semantic search as unavailable when no embeddings exist.
+        semantic search as unavailable when no embeddings exist. A run that
+        stood down because another writer holds the graph's write lock returns
+        ``status: contended`` and embeds nothing.
     """
-    store, root = _get_store(repo_root)
+    lock, contended = _lock_or_skip(
+        get_db_path(_resolve_root(repo_root), read_only=True),
+        wait_for_lock,
+        outcome="nothing was embedded",
+    )
+    if contended is not None:
+        return contended
     try:
-        db_path = get_db_path(root)
+        store, root = _get_store(repo_root)
         try:
-            emb_store = EmbeddingStore(db_path, provider=provider, model=model)
-        except ValueError as exc:
-            # Unknown provider name or missing provider env vars — surface
-            # as a structured error rather than a traceback.
-            logger.error("embed_graph: %s", exc)
-            return {"status": "error", "error": str(exc)}
-        try:
-            if not emb_store.available:
-                if provider in ("openai", "google", "minimax", "voyage"):
-                    err = (
-                        f"The '{provider}' embedding provider is not available. "
-                        "Check the required environment variables "
-                        "(see README and `get_provider()` docstring) and that "
-                        "the endpoint is reachable."
-                    )
-                else:
-                    err = (
-                        "The local embedding provider needs sentence-transformers. "
-                        "Install with: pip install code-review-graph[embeddings] — "
-                        "or switch provider to 'openai' / 'google' / 'minimax' "
-                        "/ 'voyage'."
-                    )
-                return {"status": "error", "error": err}
+            db_path = get_db_path(root)
+            try:
+                emb_store = EmbeddingStore(db_path, provider=provider, model=model)
+            except ValueError as exc:
+                # Unknown provider name or missing provider env vars — surface
+                # as a structured error rather than a traceback.
+                logger.error("embed_graph: %s", exc)
+                return {"status": "error", "error": str(exc)}
+            try:
+                if not emb_store.available:
+                    if provider in ("openai", "google", "minimax", "voyage"):
+                        err = (
+                            f"The '{provider}' embedding provider is not available. "
+                            "Check the required environment variables "
+                            "(see README and `get_provider()` docstring) and that "
+                            "the endpoint is reachable."
+                        )
+                    else:
+                        err = (
+                            "The local embedding provider needs sentence-transformers. "
+                            "Install with: pip install code-review-graph[embeddings] — "
+                            "or switch provider to 'openai' / 'google' / 'minimax' "
+                            "/ 'voyage'."
+                        )
+                    return {"status": "error", "error": err}
 
-            newly_embedded = embed_all_nodes(store, emb_store)
-            total = emb_store.count()
-            search_status = (
-                "Semantic search is now active."
-                if total > 0
-                else "No embeddings are available for semantic search."
-            )
+                newly_embedded = embed_all_nodes(store, emb_store)
+                total = emb_store.count()
+                search_status = (
+                    "Semantic search is now active."
+                    if total > 0
+                    else "No embeddings are available for semantic search."
+                )
 
-            return {
-                "status": "ok",
-                "summary": (
-                    f"Embedded {newly_embedded} new node(s). "
-                    f"Total embeddings: {total}. "
-                    f"{search_status}"
-                ),
-                "newly_embedded": newly_embedded,
-                "total_embeddings": total,
-            }
+                return {
+                    "status": "ok",
+                    "summary": (
+                        f"Embedded {newly_embedded} new node(s). "
+                        f"Total embeddings: {total}. "
+                        f"{search_status}"
+                    ),
+                    "newly_embedded": newly_embedded,
+                    "total_embeddings": total,
+                }
+            finally:
+                emb_store.close()
         finally:
-            emb_store.close()
+            store.close()
     finally:
-        store.close()
+        lock.release()
 
 
 # ---------------------------------------------------------------------------

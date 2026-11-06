@@ -425,7 +425,9 @@ code-review-graph update --wait                # Wait for a running build to fin
 code-review-graph postprocess                  # Re-run flows, communities, FTS
 code-review-graph forget PATH [PATH ...]       # Drop parsed files from the graph (no full rebuild)
 code-review-graph forget src/legacy --dry-run  # Preview which files would be forgotten
+code-review-graph forget PATH --wait           # Wait for a running write to finish, then forget
 code-review-graph embed --provider local       # Compute vector embeddings for semantic search
+code-review-graph embed --wait                 # Wait for a running write to finish, then embed
 code-review-graph update --embedding-provider local --embedding-model all-MiniLM-L6-v2
                                                 # Refresh an existing embedding index (default: off)
 
