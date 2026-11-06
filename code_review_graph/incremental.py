@@ -1874,6 +1874,16 @@ def full_build(
     store.set_metadata("last_updated", time.strftime("%Y-%m-%dT%H:%M:%S"))
     store.set_metadata("last_build_type", "full")
     _store_cpp_identity_pending(store, cpp_errors)
+    # Post-processing cannot redo these, so they run while the marker still
+    # says in progress: a process killed here gets a full rebuild.
+    python_stats = _run_python_resolver(store)
+    rescript_stats = _run_rescript_resolver(store)
+    spring_stats = _run_spring_resolver(store)
+    spring_event_stats = _run_spring_event_resolver(store)
+    temporal_stats = _run_temporal_resolver(store)
+    hcl_stats = _run_hcl_resolver(store)
+    scoped_stats = _run_scoped_resolver(store)
+    _refresh_target_resolution(store)
     # Storing is over: every file that could be parsed has its rows. Recorded
     # before the anchor and before post-processing, so a process killed from
     # here on leaves a graph that ``postprocess`` can genuinely finish, told
@@ -1883,15 +1893,6 @@ def full_build(
     # anchor still describes the commit the stored files were parsed at.
     _store_vcs_metadata(repo_root, store)
     store.commit()
-
-    python_stats = _run_python_resolver(store)
-    rescript_stats = _run_rescript_resolver(store)
-    spring_stats = _run_spring_resolver(store)
-    spring_event_stats = _run_spring_event_resolver(store)
-    temporal_stats = _run_temporal_resolver(store)
-    hcl_stats = _run_hcl_resolver(store)
-    scoped_stats = _run_scoped_resolver(store)
-    _refresh_target_resolution(store)
 
     return {
         "files_parsed": len(files),
