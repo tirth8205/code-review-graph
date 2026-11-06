@@ -509,7 +509,9 @@ def test_legacy_yaml_heavy_graph_is_rebuilt_at_most_once(
         for _ in range(3)
     ]
 
-    assert build_types == ["full", "incremental", "incremental"]
+    # Generic YAML now gives these files rows, so most graphs need no rebuild at all.
+    assert build_types.count("full") <= 1
+    assert build_types[1:] == ["incremental", "incremental"]
 
 
 def test_rebuild_with_file_errors_is_not_trusted_as_complete(

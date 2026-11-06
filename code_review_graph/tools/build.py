@@ -64,6 +64,7 @@ def _should_rebuild_partial_graph(
         return False
 
     tracked_files = get_all_tracked_files(repo_root, recurse_submodules)
+    tracked_paths: set[str] = set()
     if tracked_files:
         # Keep the common path cheap: a graph already representing at least
         # half of all tracked files cannot be severely partial. Below that,
@@ -89,6 +90,10 @@ def _should_rebuild_partial_graph(
         normalize_file_path(repo_root / relative)
         for relative in expected_files
     }
+    # collect_all_files also lists untracked files, which say nothing about
+    # whether the tracked ones made it into the graph.
+    if tracked_paths:
+        expected_paths &= tracked_paths
     represented_count = len(expected_paths & represented_paths)
     if represented_count <= len(expected_paths) * _PARTIAL_GRAPH_MAX_COVERAGE:
         return True

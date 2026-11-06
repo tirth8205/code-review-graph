@@ -200,10 +200,11 @@ Terraform provider aliases have distinct names (`provider.aws.west`), while the 
 provider retains `provider.aws`. Resource/data `provider` selections and module `providers`
 map values link to provider nodes; ordinary resource expressions retain resource references.
 
-When Python or Ruby classes in one file share a leaf name, their methods use the full
-enclosing class/module chain (for example, `Alpha.Same.run` and `Beta.Same.run`). Local
-calls stay in that lexical class. Unique class-leaf method names retain their existing
-identities. Rebuild an existing graph to replace rows created with colliding identities.
+Ruby methods use the full enclosing class/module chain (for example, `Alpha.Same.run`).
+When Python classes in one file share a leaf name, their methods use it too (`Alpha.Same.run`
+and `Beta.Same.run`), and unique Python class-leaf method names retain their existing
+identities. Local calls stay in that lexical class. Rebuild an existing graph to replace rows
+created with colliding identities.
 
 Storybook CSF files (`*.stories.js`, `.jsx`, `.ts`, `.tsx`) are indexed as test/demo code.
 Their imports, calls, and references alone do not keep application symbols alive in

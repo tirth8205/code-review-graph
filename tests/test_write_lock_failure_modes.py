@@ -73,7 +73,7 @@ def test_the_plugin_hook_tolerates_a_skipped_update():
     )
     commands = [
         hook["command"]
-        for groups in hooks.values()
+        for groups in hooks["hooks"].values()
         for group in groups
         for hook in group["hooks"]
         if "code-review-graph update" in hook["command"]

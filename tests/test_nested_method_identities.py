@@ -71,8 +71,10 @@ def test_unique_leaf_method_identities_keep_their_existing_spelling(language):
     parser = CodeParser()
     nodes, _ = parser.parse_bytes(path, source.encode())
     methods = [n for n in nodes if n.kind == 'Function']
+    # Ruby methods always carry the full lexical scope, so only Python has a leaf spelling.
+    scope = 'Same' if language == 'python' else 'Alpha.Same'
     assert {parser._node_qualified(n) for n in methods} == {
-        f'{path}::Same.run', f'{path}::Same.helper'
+        f'{path}::{scope}.run', f'{path}::{scope}.helper'
     }
 
 
@@ -184,9 +186,11 @@ def test_deep_method_is_contained_by_the_class_node_that_exists(language):
     _, nodes, edges = _parse(path, DEEP[language])
     classes = {f'{path}::{n.parent_name}.{n.name}' for n in nodes
                if n.kind == 'Class' and n.parent_name}
-    assert _contains_sources(edges, f'{path}::A.B.Same.run') == {f'{path}::B.Same'}
+    # A Python class keeps its direct parent plus its own name; a Ruby one its full scope.
+    deep_class = f'{path}::B.Same' if language == 'python' else f'{path}::A.B.Same'
+    assert _contains_sources(edges, f'{path}::A.B.Same.run') == {deep_class}
     assert _contains_sources(edges, f'{path}::C.Same.run') == {f'{path}::C.Same'}
-    assert {f'{path}::B.Same', f'{path}::C.Same'} <= classes
+    assert {deep_class, f'{path}::C.Same'} <= classes
 
 
 RUBY_NESTED_USER = '''module Admin
@@ -446,10 +450,11 @@ else:
             pass
 '''),
 ], ids=['ruby-reopened', 'python-conditional'])
-def test_reopened_or_redefined_class_keeps_the_existing_spelling(path, source):
+def test_reopened_or_redefined_class_keeps_one_spelling(path, source):
     """The same full scope declared twice is not a leaf collision."""
     parser, nodes, _ = _parse(path, source)
-    assert _methods(parser, nodes) == {f'{path}::Same.run', f'{path}::Same.helper'}
+    scope = 'Alpha.Same' if path.endswith('.rb') else 'Same'
+    assert _methods(parser, nodes) == {f'{path}::{scope}.run', f'{path}::{scope}.helper'}
 
 
 def test_parser_reuse_does_not_leak_scopes_between_files():
@@ -502,7 +507,7 @@ end
     ('csharp', b'class Alpha { class Same { void Run() {} } }\n'
                b'class Beta { class Same { void Run() {} } }\n'),
 ], ids=['java', 'csharp'])
-def test_scope_index_is_limited_to_python_and_ruby(language, source):
+def test_scope_index_is_limited_to_python(language, source):
     """Other languages (C# identity is #964's) are left to their own scheme."""
     parser = CodeParser()
     tree = parser._get_parser(language).parse(source)

@@ -203,8 +203,9 @@ def test_importer_edited_during_the_update_is_stored_whole(tmp_path, monkeypatch
 def test_update_post_processes_the_importers_it_reparsed(tmp_path, monkeypatch):
     monkeypatch.delenv('CRG_DATA_DIR', raising=False)
     repo = _repo((tmp_path / 'repo').resolve())
+    # Not postprocess='none': a pending marker recomputes all derived data.
     assert build_or_update_graph(
-        full_rebuild=True, repo_root=str(repo), postprocess='none',
+        full_rebuild=True, repo_root=str(repo), postprocess='minimal',
     )['status'] == 'ok'
     (repo / 'fee.ts').write_text('// note\n' + FILES['fee.ts'], encoding='utf-8')
     _git(repo, 'commit', '-qam', 'comment')

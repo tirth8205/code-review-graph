@@ -581,11 +581,6 @@ def test_watch_save_reads_the_saved_file_at_most_twice(built, monkeypatch):
     assert reads.count('unrelated.ts') <= 2, reads
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='Pre-existing: stale reconciliation drops fee.ts and its incoming edges '
-           'before the dependents lookup, so `update` never re-parses the importers.',
-)
 def test_deleted_seed_through_update_keeps_importer_edges(committed):
     """The watch path is covered above; this is ``update`` after ``git rm``."""
     repo, store = committed

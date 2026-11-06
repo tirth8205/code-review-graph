@@ -12806,7 +12806,8 @@ class CodeParser:
         if len(args) != 1 and not (name == "memo" and len(args) == 2):
             return None
         arg = args[0]
-        if arg.type in self._JS_FUNC_VALUE_TYPES:
+        # A generator returns an iterator, so no wrapper makes a component of one.
+        if arg.type in self._JS_FUNC_VALUE_TYPES and arg.type != "generator_function":
             if chain is not None:
                 chain.append(call_node)
             return arg
@@ -14697,8 +14698,11 @@ class CodeParser:
         The per-file import map already carries internal resolver metadata.
         Keeping this index there avoids parser-instance state leaking between
         files (including recursive parsing). The tree is visited once.
+
+        Python only: a Ruby class already descends with its full lexical scope,
+        so its methods cannot collide on a leaf.
         """
-        if language not in ("python", "ruby"):
+        if language != "python":
             return
         scopes: dict[str, set[str]] = {}
         methods: list[tuple[int, str, str]] = []
@@ -14815,7 +14819,7 @@ class CodeParser:
 
         parent_name = enclosing_class
         container_scope = enclosing_class
-        if language in ("python", "ruby") and import_map is not None:
+        if language == "python" and import_map is not None:
             parent_name = import_map.get(f"__crg_method_scope__:{child.id}", parent_name)
             # A Class node's identity is its direct parent plus its own name,
             # however deep it sits, so CONTAINS must use the same two parts.
