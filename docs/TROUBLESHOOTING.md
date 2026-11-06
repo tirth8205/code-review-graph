@@ -213,9 +213,14 @@ exit `75` (`EX_TEMPFAIL`).
 - Two different repositories never block each other, and a graph stored
   outside the working tree (`CRG_DATA_DIR`, `--data-dir`) keeps its lock with
   it.
-- Because the name and location are fixed, a wrapper script can exclude itself
-  from a build with `flock -n .code-review-graph/write.lock <command>`, and
-  both sides exclude each other.
+- External writers that do not acquire this lock themselves can use
+  `flock -n .code-review-graph/write.lock external-writer` to exclude CRG
+  builds while they work. Invoke `code-review-graph build`, `update` and
+  `postprocess` directly. Wrapping those commands in `flock` makes them
+  contend with the wrapper's lock and exit `75`; adding `--wait` deadlocks.
+- Locking errors other than contention (for example, a filesystem that does
+  not support `flock`) are raised as errors, not reported as another writer.
+  `--wait` does not repair unsupported filesystem locking.
 
 ## Large repositories
 

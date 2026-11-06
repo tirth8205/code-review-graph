@@ -25,8 +25,10 @@ Properties this relies on, all of them deliberate:
 * **Scoped to one repository's database.** The lock file sits in the data
   directory next to ``graph.db``, so two repositories built at once never
   block each other. The name is fixed (``write.lock``) and documented, so
-  external tooling can exclude itself from a build with
-  ``flock -n .code-review-graph/write.lock code-review-graph build``.
+  external writers can exclude themselves from a build with
+  ``flock -n .code-review-graph/write.lock external-writer``. Invoke CRG's
+  protected commands directly: wrapping them in another flock makes them
+  contend with their own wrapper (or deadlock with ``--wait``).
 * **Non-blocking by default.** Skipping is the right answer for a hook: the
   in-flight build already covers the same working tree. Callers that want to
   wait (a human running ``build``/``update`` by hand) ask for it.
@@ -40,13 +42,33 @@ Properties this relies on, all of them deliberate:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Any
+from weakref import WeakSet
 
 logger = logging.getLogger(__name__)
+
+# Register one callback, not a bound method per instance: at-fork callbacks
+# cannot be unregistered and would otherwise keep every finished lock alive.
+_open_locks: WeakSet[WriteLock] = WeakSet()
+
+
+def _close_inherited_locks() -> None:
+    for lock in list(_open_locks):
+        handle, lock._handle = lock._handle, None
+        if handle is not None:
+            # Only close this child's descriptor. LOCK_UN or release() would
+            # change the parent's shared lock or erase its diagnostic PID.
+            handle.close()
+    _open_locks.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_close_inherited_locks)
 
 #: Name of the lock file inside the data directory.
 #:
@@ -78,8 +100,10 @@ def _flock(handle: Any, blocking: bool) -> bool:
     flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
     try:
         fcntl.flock(handle.fileno(), flags)
-    except OSError:
-        return False
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return False
+        raise
     return True
 
 
@@ -137,10 +161,20 @@ class WriteLock:
             # asked for anyway.
             logger.warning("Cannot open write lock %s: %s", self.path, exc)
             return True
-        if not _flock(handle, blocking):
+        self._handle = handle
+        _open_locks.add(self)
+        try:
+            acquired = _flock(handle, blocking)
+        except BaseException:
+            self._handle = None
+            _open_locks.discard(self)
+            handle.close()
+            raise
+        if not acquired:
+            self._handle = None
+            _open_locks.discard(self)
             handle.close()
             return False
-        self._handle = handle
         self._record_holder(handle)
         return True
 
@@ -162,6 +196,7 @@ class WriteLock:
     def release(self) -> None:
         """Drop the lock if this instance holds it."""
         handle, self._handle = self._handle, None
+        _open_locks.discard(self)
         if handle is None:
             return
         try:
