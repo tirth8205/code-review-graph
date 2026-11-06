@@ -3137,6 +3137,26 @@ def _yaml_scalar(node: object) -> Optional[str]:
 
 _YAML_SIMPLE_PATH_SEGMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
+# Folders that hold translations. ``lang`` and ``languages`` are left out on
+# purpose: they hold programming-language settings as often as translations.
+_LOCALE_DIR_NAMES = frozenset({"i18n", "l10n", "locale", "locales", "translations"})
+
+_LANGUAGE_TAG_RE = re.compile(r"([a-z]{2,3})(?:[-_@][a-z0-9]{2,8})*")
+
+# ISO 639-1, then the three-letter codes translation projects commonly use. Any
+# other three letters are not trusted: ``api.yml`` and ``web.yml`` fit the shape.
+_LANGUAGE_CODES = frozenset((
+    "aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch "
+    "co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga "
+    "gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja "
+    "jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv "
+    "mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or "
+    "os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr "
+    "ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi "
+    "vo wa wo xh yi yo za zh zu "
+    "ast ceb ckb fil gsw haw hsb kab kmr nds sco szl tok tzl yue zgh"
+).split())
+
 
 def _yaml_path_child(prefix: str, segment: str) -> str:
     """Append a mapping key to a path without making dotted keys ambiguous."""
@@ -3157,6 +3177,41 @@ def _yaml_value_type(node: object) -> str:
     if scalar_type in {"binary", "bool", "float", "int", "null", "str", "timestamp"}:
         return scalar_type
     return "scalar"
+
+
+def _is_language_tag(text: str) -> bool:
+    """Whether *text* is a language tag such as ``en``, ``pt-BR`` or ``zh_Hans``."""
+    match = _LANGUAGE_TAG_RE.fullmatch(text.lower())
+    return match is not None and match.group(1) in _LANGUAGE_CODES
+
+
+def _is_locale_yaml(path: "str | PurePath", repo_root: "str | PurePath | None") -> bool:
+    """Whether *path* is a translation file, judged inside the repository.
+
+    A translation catalogue repeats the same keys once per language, so it adds
+    thousands of paths that say nothing about the code. It takes two pieces of
+    evidence to call a file one. A translation folder alone is not enough
+    (``locales/deploy.yml``), and neither is the name alone: ``config/en.yml``
+    could be anything, and ``it.yml`` or ``no.yml`` are ordinary words. A file
+    this misses keeps its paths, which costs some noise; a false match would
+    lose real config, so doubtful files stay indexed.
+
+    The folders above a checkout belong to whoever cloned it, so with no root
+    to read the path against, nothing is called a translation file.
+    """
+    relative = repo_relative_path(path, repo_root)
+    if relative is None:
+        return False
+    *folders, filename = relative.lower().split("/")
+    names = [folder.lstrip("_") for folder in folders]
+    if not _LOCALE_DIR_NAMES.intersection(names):
+        return False
+    if any(_is_language_tag(part) for part in filename.split(".")[:-1]):
+        return True
+    return any(
+        parent in _LOCALE_DIR_NAMES and _is_language_tag(child)
+        for parent, child in zip(names, names[1:])
+    )
 
 
 def _ansible_is_play_item(item: object) -> bool:
@@ -9064,6 +9119,23 @@ class CodeParser:
                 self._MAX_GENERIC_YAML_BYTES,
             )
             return [], []
+
+        if _is_locale_yaml(path, self._repo_root):
+            # The file node keeps it visible to change detection and listings.
+            locale_file_path = normalize_file_path(path)
+            return [NodeInfo(
+                kind="File",
+                name=locale_file_path,
+                file_path=locale_file_path,
+                line_start=1,
+                line_end=source.count(b"\n") + 1,
+                language="yaml",
+                extra={
+                    "config_format": path.suffix.lower().lstrip("."),
+                    "yaml_locale_file": True,
+                    "values_indexed": False,
+                },
+            )], []
 
         text = source.decode("utf-8", errors="replace")
         try:
