@@ -249,8 +249,22 @@ def _exact_name_candidates(
     return exact, 0
 
 
+def _selectable_qualified_name(node: GraphNode, root: Path) -> str:
+    """Return a qualified name that still selects *node* when sent back.
+
+    A long checkout path can push a name past the cut ``_sanitize_name`` makes,
+    and a cut name selects nothing. ``query_graph`` also reads a name relative
+    to the repo root, which is much shorter.
+    """
+    qualified = node.qualified_name
+    prefix = f"{normalize_file_path(root)}/"
+    if len(qualified) > _SANITIZED_NAME_MAX and qualified.startswith(prefix):
+        qualified = qualified[len(prefix):]
+    return _sanitize_name(qualified)
+
+
 def _rank_disambiguation_candidates(
-    candidates: list[GraphNode], target: str,
+    candidates: list[GraphNode], target: str, root: Path,
 ) -> list[dict[str, Any]]:
     """Return deterministic, sanitized candidates ordered by match quality."""
     target_lower = target.lower()
@@ -266,7 +280,13 @@ def _rank_disambiguation_candidates(
             rank = 3
         return rank, node.qualified_name
 
-    return [node_to_dict(node) for node in sorted(candidates, key=score)]
+    return [
+        {
+            **node_to_dict(node),
+            "qualified_name": _selectable_qualified_name(node, root),
+        }
+        for node in sorted(candidates, key=score)
+    ]
 
 
 def get_impact_radius(
@@ -697,7 +717,7 @@ def query_graph(
                         candidates = candidates[:_MAX_BARE_TARGET_CANDIDATES]
                     else:
                         candidate_count = store.count_search_nodes(target)
-                    ranked = _rank_disambiguation_candidates(candidates, target)
+                    ranked = _rank_disambiguation_candidates(candidates, target, root)
                     if minimal:
                         # Names only, once: the agent needs one of these to
                         # re-run the query, not a full row for each.

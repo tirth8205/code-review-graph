@@ -230,6 +230,43 @@ def test_standard_ambiguous_answer_keeps_both_keys(tmp_path):
 
 
 @pytest.mark.parametrize("detail", ["minimal", "standard"])
+def test_long_checkout_path_candidates_can_still_be_selected(tmp_path, detail):
+    """Names past the 256 character cut must stay distinct and usable."""
+    root, store = _repo(tmp_path)
+    deep = root / ("d" * 120) / ("e" * 120)
+    try:
+        first = _add(store, deep / "a.py", "process")
+        second = _add(store, deep / "b.py", "process")
+        store.commit()
+    finally:
+        store.close()
+    assert len(first) > 256
+
+    ambiguous = query_graph("callers_of", "process", str(root), detail_level=detail)
+
+    names = [row["qualified_name"] for row in ambiguous["candidates"]]
+    assert len(set(names)) == 2
+    for name, stored in zip(sorted(names), sorted([first, second])):
+        assert stored.endswith(name)
+        assert query_graph("children_of", name, str(root))["status"] == "ok"
+
+
+def test_exact_name_lookup_uses_an_index(tmp_path):
+    """Every bare-name query runs this, so it must not scan the whole graph."""
+    _root, store = _repo(tmp_path)
+    try:
+        plan = store._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT * FROM nodes WHERE name = ? ORDER BY qualified_name",
+            ("process",),
+        ).fetchall()
+    finally:
+        store.close()
+
+    assert "idx_nodes_name" in " ".join(row[3] for row in plan)
+
+
+@pytest.mark.parametrize("detail", ["minimal", "standard"])
 def test_resolved_callees_come_before_guesses(tmp_path, detail):
     """Five bare builtins must not fill the window and hide the real callee."""
     root, store = _repo(tmp_path)
