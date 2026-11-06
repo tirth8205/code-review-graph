@@ -516,6 +516,15 @@ def detect_entry_points(
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
+    # Ruby and Java test calls did not bind to the methods they call until
+    # recently, so a method used only by its tests was an entry point. Keep it
+    # one: being well tested must not hide a method from flow analysis.
+    called_outside_tests = (
+        store.get_call_targets_outside_tests()
+        if any(node.language in ("ruby", "java") for node in candidate_nodes)
+        else set()
+    )
+
     entry_points: list[GraphNode] = []
     seen_qn: set[str] = set()
 
@@ -535,7 +544,12 @@ def detect_entry_points(
         is_entry = False
 
         # True root: no one calls this function.
-        if node.qualified_name not in called_qnames:
+        called = (
+            called_outside_tests
+            if node.language in ("ruby", "java")
+            else called_qnames
+        )
+        if node.qualified_name not in called:
             is_entry = True
 
         # Framework decorator match.
