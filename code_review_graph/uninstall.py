@@ -1245,6 +1245,12 @@ def _process_user(
             report,
             dry_run=dry_run,
         )
+    if not dry_run:
+        # install creates the skills root, so an empty one is ours to remove.
+        try:
+            skill_dir.parent.rmdir()
+        except OSError:
+            pass
     _remove_hooks(
         home / ".cursor" / "hooks.json",
         _commands(skills.generate_cursor_hooks_config()),

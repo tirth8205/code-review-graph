@@ -1174,3 +1174,19 @@ def test_cli_uninstall_platform_scopes_to_one_binding(
     assert "unbind" in out
     assert _read_jsonc(claude_config) == {"mcpServers": {"other": {}}}
     assert "[mcp_servers.code-review-graph]" in codex_config.read_text(encoding="utf-8")
+
+
+def test_uninstall_removes_the_empty_codex_skills_folder(
+    fake_home: Path, fake_repo: Path, monkeypatch,
+):
+    from code_review_graph import codex_skill
+
+    home = fake_home / ".codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    assert codex_skill.install_codex_skill() is not None
+    skills_root = home / "skills"
+    assert skills_root.is_dir()
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert not skills_root.exists()

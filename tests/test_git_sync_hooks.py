@@ -299,3 +299,16 @@ def test_orphan_end_marker_is_left_alone(tmp_path, monkeypatch):
     hook.write_text(broken)
     install_git_sync_hooks(clone)
     assert hook.read_text() == broken
+
+
+def test_pre_commit_in_another_language_is_left_alone(tmp_path):
+    """A shell block appended to a Python hook made every commit fail."""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    hook = tmp_path / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    original = "#!/usr/bin/env python3\nprint('checked')\n"
+    hook.write_text(original, encoding="utf-8")
+
+    assert skills.install_git_hook(tmp_path) == hook
+
+    assert hook.read_text(encoding="utf-8") == original

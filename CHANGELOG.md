@@ -57,6 +57,7 @@
 
 ### Changed
 
+- After upgrading, run `build` once to pick up generic YAML and workspace imports: `update` only re-parses files that changed.
 - Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
   paths and value types, never values. `detect_changes` reports them as
   `changed_yaml_paths`, bounded by `max_results`. `pnpm-lock.yaml` is ignored at
@@ -266,7 +267,9 @@
 - JavaScript and TypeScript generator functions are `Function` nodes that own their calls (#1131).
 - Components wrapped in `forwardRef`, `memo` and similar calls are `Function` nodes (#972, #971).
 - TypeScript abstract classes are indexed, with nodes for their abstract methods (#1033, #1031).
-- Compact Ruby `class Foo::Bar` declarations emit `Class` nodes with stable identity. This moves the schema to version 14 (#933, #932).
+- Compact Ruby `class Foo::Bar` declarations emit `Class` nodes with stable identity, and all nested Ruby methods now carry their full scope, such as `Auth.User.to_s`. This moves the schema to version 14, and the next `update` re-keys Ruby files by itself (#933, #932).
+- `install` no longer appends a shell block to a `pre-commit` hook written in another language, which made every commit fail.
+- `uninstall` removes the empty Codex skills folder it created.
 - Calls inside Rust `if false` blocks are left out of the graph (#1132).
 - `@Override` methods and JUnit lifecycle methods count as entry points in dead-code analysis (#1035, #1034).
 - Spring calls on a concrete injected type stay on that type instead of moving to its only subclass (#1075, #1074).

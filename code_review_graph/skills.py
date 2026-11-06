@@ -1716,7 +1716,18 @@ def install_git_hook(repo_root: Path) -> Path | None:
     hook_path.parent.mkdir(parents=True, exist_ok=True)
 
     if hook_path.exists():
-        existing = hook_path.read_text(encoding="utf-8")
+        try:
+            existing = hook_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            existing = None
+        # A shell block appended to a Python or Node hook breaks every commit.
+        if existing is None or not _is_shell_hook(existing):
+            logger.warning(
+                "%s is not a shell script; leaving it alone. Call "
+                "'code-review-graph detect-changes --brief' from it to get the risk summary.",
+                hook_path,
+            )
+            return hook_path
         if _GIT_HOOK_BEGIN_MARKER in existing and not _git_hook_markers_balanced(existing):
             logger.warning(
                 "%s has a code-review-graph begin marker with no matching end "

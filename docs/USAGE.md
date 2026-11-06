@@ -81,6 +81,8 @@ graph health once per repository/task; a missing, empty, or stale graph never
 causes an implicit build or update. WSL and Windows Codex processes have
 separate `CODEX_HOME` directories and tool inventories, so install CRG in the
 runtime that will actually run the task and restart/refresh that runtime.
+Codex runs the installed hooks only after you mark them as trusted in Codex; until then the
+graph does not update on its own there.
 
 ## Core Workflow
 

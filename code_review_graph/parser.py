@@ -6645,9 +6645,20 @@ class CodeParser:
         }
         disambiguated_leaves = {
             node.parent_name.rsplit(".", 1)[-1] for node in nodes
-            if node.language in ("python", "ruby") and node.parent_name
+            if node.language == "python" and node.parent_name
             and "." in node.parent_name and node.kind in ("Function", "Test")
         }
+        # Every nested Ruby class has a dotted scope, so a dot proves nothing
+        # there. A Ruby leaf is ambiguous only when two scopes really share it.
+        ruby_scopes_by_leaf: dict[str, set[str]] = {}
+        for node in nodes:
+            if node.language == "ruby" and node.parent_name and node.kind in ("Function", "Test"):
+                ruby_scopes_by_leaf.setdefault(
+                    node.parent_name.rsplit(".", 1)[-1], set(),
+                ).add(node.parent_name)
+        disambiguated_leaves.update(
+            leaf for leaf, scopes in ruby_scopes_by_leaf.items() if len(scopes) > 1
+        )
         disambiguated_scopes = {
             node.parent_name for node in nodes
             if node.language in ("python", "ruby") and node.parent_name

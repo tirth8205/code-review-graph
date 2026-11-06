@@ -631,3 +631,26 @@ def test_full_build_twice_and_incremental_agree(tmp_path, monkeypatch):
         assert _graph_snapshot(store) == first
         incremental_update(tmp_path, store, changed_files=['m.py', 'test_m.py'])
         assert _graph_snapshot(store) == first
+
+
+def test_ruby_call_across_nested_modules_keeps_its_target():
+    """A dotted Ruby scope alone is not a leaf collision (#933 with #1087)."""
+    source = """module Outer
+  module Thing
+    def confirm
+    end
+
+    module ClassMethods
+      def confirm_by_token(token)
+        item = new
+        item.confirm
+      end
+    end
+  end
+end
+"""
+    _, _, edges = _parse('thing.rb', source)
+    caller = 'thing.rb::Outer.Thing.ClassMethods.confirm_by_token'
+    assert 'thing.rb::Outer.Thing.confirm' in {
+        e.target for e in edges if e.kind == 'CALLS' and e.source == caller
+    }

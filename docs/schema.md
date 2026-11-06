@@ -318,7 +318,7 @@ CREATE TABLE embeddings (
 
 | Key | Set by |
 |---|---|
-| `schema_version` | `migrations.py`; `13` on a current database |
+| `schema_version` | `migrations.py`; `14` on a current database |
 | `fts_state_synced` | `search.rebuild_fts_index`; mirror-shape version |
 | `last_updated` | Full and incremental builds |
 | `last_build_type` | Full and incremental builds |
