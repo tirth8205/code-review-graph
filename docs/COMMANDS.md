@@ -72,6 +72,7 @@ base: str = "HEAD~1"
 ```
 changed_files: list[str] | None  # Auto-detected from VCS
 max_depth: int = 2               # Hops in graph
+max_results: int                 # Nodes to traverse to; default CRG_MAX_IMPACT_NODES, or 500
 repo_root: str | None
 base: str = "HEAD~1"
 detail_level: str = "standard"   # "standard" or "minimal"
@@ -131,20 +132,24 @@ Responses may include estimated `context_savings` metadata.
 query: str
 depth: int = 3                  # Clamped to 1-6
 mode: str = "bfs"               # "bfs" or "dfs"
-token_budget: int = 2000
+token_budget: int = 2000        # At most 10000 approximate tokens; the walk stops there
 repo_root: str | None
 ```
+`truncated` means the budget ran out before the walk did.
 
 #### `semantic_search_nodes_tool`
 ```
 query: str           # Search string
 kind: str | None     # File, Class, Function, Type, Test, YamlPath
-limit: int = 20
+limit: int = 20      # At most 100; at most 5 with detail_level "minimal"
 repo_root: str | None
 model: str | None    # Embedding model (falls back to provider-specific env vars)
 provider: str | None # local, openai, google, minimax, voyage
 detail_level: str = "standard"
 ```
+Search ranks three times what it shows. `total` and `result_count` count the
+matches it ranked, `results_omitted` those not shown, and `total_is_lower_bound`
+says there may be more.
 
 #### `embed_graph_tool`
 ```
@@ -166,9 +171,11 @@ repo_root: str | None
 min_lines: int = 50                # Minimum line count
 kind: str | None                   # File, Class, Function, Test, or YamlPath
 file_path_pattern: str | None      # File path substring
-limit: int = 50
+limit: int = 50                    # At most 100; at most 25 with detail_level "minimal"
 repo_root: str | None
+detail_level: str = "standard"     # "minimal" gives fewer, smaller rows
 ```
+`total` and `result_count` count every match before the cut.
 
 #### `get_docs_section_tool`
 ```

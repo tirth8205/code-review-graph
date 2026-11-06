@@ -1053,6 +1053,8 @@ WRONG_TYPE_CASES: dict[str, dict[str, Any]] = {
 OUT_OF_RANGE_REFUSED: dict[str, dict[str, Any]] = {
     "query_graph_tool": {"pattern": "callers_of", "target": "helper_0_0_0", "max_results": 0},
     "get_review_context_tool": {"max_lines_per_file": -5},
+    "semantic_search_nodes_tool": {"query": "helper", "limit": 0},
+    "find_large_functions_tool": {"limit": 0},
     "list_flows_tool": {"limit": 0},
     "get_flow_tool": {"flow_id": 1, "max_steps": 0},
     "list_communities_tool": {"max_results": 0},
@@ -1088,10 +1090,6 @@ OUT_OF_RANGE_ACCEPTED: dict[str, dict[str, Any]] = {
     "get_impact_radius_tool": {"max_depth": -1},
     # depth is documented "1-6"; 99 is silently clamped to 6, not refused.
     "traverse_graph_tool": {"query": "helper_0_1_2", "depth": 99},
-    # limit is neither validated nor capped (see QUERY_OWNED_UNBOUNDED in
-    # tests/test_token_budget.py); limit=0 silently returns no results.
-    "semantic_search_nodes_tool": {"query": "helper", "limit": 0},
-    "find_large_functions_tool": {"limit": 0},
     # max_flows=0 is the documented "no caller limit" escape, but -1 is not.
     "get_affected_flows_tool": {"max_flows": -1},
 }

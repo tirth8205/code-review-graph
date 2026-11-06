@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config_keys import normalize_spring_config_key
-from ..constants import IMPORT_SCOPE_KEY
+from ..constants import IMPORT_SCOPE_KEY, MAX_IMPACT_NODES
 from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
 from ..errors import ChangeDiscoveryError
@@ -46,7 +46,9 @@ from ._common import (
     _get_store,
     _resolve_graph_file_paths,
     _resolve_graph_file_paths_with_unmatched,
+    _shown_of,
     _unmatched_file_warning,
+    _validate_positive_int,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,20 @@ logger = logging.getLogger(__name__)
 _MAX_IMPACT_NODES_SHOWN = 100
 _MAX_IMPACT_EDGES = 150
 _MAX_IMPACT_FILES = 200
+
+# Hard ceilings for the other query tools. A caller may lower a bound but not ask
+# for a reply that dwarfs the client: at a huge ``limit`` these returned 1.8M
+# tokens on this repository. They bound the work as well as the reply, so a small
+# request stays cheap. A minimal row is about a third of a full one, so its
+# ceiling has to be lower than three times the full one for minimal to cost less.
+_MAX_SEARCH_RESULTS_STANDARD = 100
+_MAX_SEARCH_RESULTS_MINIMAL = 5
+_MAX_LARGE_FUNCTIONS_STANDARD = 100
+_MAX_LARGE_FUNCTIONS_MINIMAL = 25
+_MAX_TRAVERSAL_TOKEN_BUDGET = 10_000
+# Search ranks this many times what it shows. ``total`` counts that window, so a
+# full window means "at least this many", not the size of the whole graph.
+_SEARCH_WINDOW_FACTOR = 3
 
 # Source snippets attached to search hits when include_source is set. Without
 # them a caller only gets names and line numbers, so it has to open the files
@@ -247,7 +263,7 @@ def _rank_disambiguation_candidates(
 def get_impact_radius(
     changed_files: list[str] | None = None,
     max_depth: int = 2,
-    max_results: int = 500,
+    max_results: int = MAX_IMPACT_NODES,
     repo_root: str | None = None,
     base: str = "HEAD~1",
     detail_level: str = "standard",
@@ -259,7 +275,8 @@ def get_impact_radius(
         changed_files: Explicit list of changed file paths (relative to repo root).
                        If omitted, auto-detects from git diff.
         max_depth: How many hops to traverse in the graph (default: 2).
-        max_results: Maximum impacted nodes to return (default: 500).
+        max_results: Maximum impacted nodes to return (default:
+            ``CRG_MAX_IMPACT_NODES``, or 500).
         repo_root: Repository root path. Auto-detected if omitted.
         base: Git ref for auto-detecting changes (default: HEAD~1).
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -1374,7 +1391,8 @@ def semantic_search_nodes(
     Args:
         query: Search string to match against node names and qualified names.
         kind: Optional filter by node kind (File, Class, Function, Type, Test).
-        limit: Maximum results to return (default: 20).
+        limit: Maximum results to return (default: 20, at most 100, or 5
+            with detail_level "minimal").
         repo_root: Repository root path. Auto-detected if omitted.
         context_files: Optional list of file paths. Nodes in these files
             receive a relevance boost.
@@ -1391,15 +1409,35 @@ def semantic_search_nodes(
             The response is additionally capped in total.
 
     Returns:
-        Ranked list of matching nodes.
+        Ranked list of matching nodes. ``total`` and ``result_count`` count the
+        matches that were ranked, ``results_omitted`` those not shown, and
+        ``total_is_lower_bound`` says there may be more than were ranked.
     """
+    _validate_positive_int(limit, "limit")
+    shown_limit = min(
+        limit,
+        _MAX_SEARCH_RESULTS_MINIMAL if detail_level == "minimal"
+        else _MAX_SEARCH_RESULTS_STANDARD,
+    )
+    window = shown_limit * _SEARCH_WINDOW_FACTOR
+
     store, root = _get_store(repo_root)
     try:
         mode_out: list[str] = []
-        results = hybrid_search(
-            store, query, kind=kind, limit=limit, context_files=context_files,
+        ranked = hybrid_search(
+            store, query, kind=kind, limit=window, context_files=context_files,
             model=model, provider=provider, _out_mode=mode_out, repo_root=root,
         )
+        results, total, truncated = _bounded(ranked, shown_limit, shown_limit)
+        lower_bound = total >= window
+        bounds: dict[str, Any] = {
+            "result_count": total,
+            "total": total,
+            "truncated": truncated,
+            "results_omitted": total - len(results),
+        }
+        if lower_bound:
+            bounds["total_is_lower_bound"] = True
 
         search_mode = mode_out[0] if mode_out else "keyword"
 
@@ -1432,9 +1470,10 @@ def semantic_search_nodes(
                 )
             source_omitted = budget.omitted
 
-        summary = f"Found {len(results)} node(s) matching '{query}'" + (
+        total_text = f"{total}+" if lower_bound else str(total)
+        summary = f"Found {total_text} node(s) matching '{query}'" + (
             f" (kind={kind})" if kind else ""
-        )
+        ) + _shown_of(len(results), total)
 
         # Zero hits can mean "no such symbol" or "never indexed"/"stale index";
         # only the marker distinguishes them.
@@ -1449,7 +1488,7 @@ def semantic_search_nodes(
                     for k in ("name", "kind", "file_path", "score")
                     if k in r
                 }
-                for r in results[:5]
+                for r in results
             ]
             minimal_response: dict[str, Any] = {
                 "status": "ok",
@@ -1457,8 +1496,7 @@ def semantic_search_nodes(
                 "search_mode": search_mode,
                 "summary": summary,
                 "results": minimal_results,
-                "result_count": len(results),
-                "results_omitted": max(0, len(results) - len(minimal_results)),
+                **bounds,
             }
             if confidence:
                 minimal_response["confidence"] = confidence
@@ -1470,6 +1508,7 @@ def semantic_search_nodes(
             "search_mode": search_mode,
             "summary": summary,
             "results": results,
+            **bounds,
         }
         if source_omitted:
             result["source_omitted"] = source_omitted
@@ -1570,6 +1609,7 @@ def find_large_functions(
     file_path_pattern: str | None = None,
     limit: int = 50,
     repo_root: str | None = None,
+    detail_level: str = "standard",
 ) -> dict[str, Any]:
     """Find functions, classes, or files exceeding a line-count threshold.
 
@@ -1580,19 +1620,34 @@ def find_large_functions(
         min_lines: Minimum line count to flag (default: 50).
         kind: Filter by node kind: Function, Class, File, or Test.
         file_path_pattern: Filter by file path substring (e.g. "components/").
-        limit: Maximum results (default: 50).
+        limit: Maximum results (default: 50, at most 100, or 25 with
+            detail_level "minimal").
         repo_root: Repository root path. Auto-detected if omitted.
+        detail_level: "standard" (full rows) or "minimal" (fewer, smaller rows).
 
     Returns:
-        Oversized nodes with line counts, ordered largest first.
+        Oversized nodes with line counts, ordered largest first. ``total``,
+        ``total_found`` and ``result_count`` are the count before the cut.
     """
+    _validate_positive_int(limit, "limit")
+    minimal = detail_level == "minimal"
+    shown_limit = min(
+        limit,
+        _MAX_LARGE_FUNCTIONS_MINIMAL if minimal else _MAX_LARGE_FUNCTIONS_STANDARD,
+    )
+
     store, root = _get_store(repo_root)
     try:
+        total = store.count_nodes_by_size(
+            min_lines=min_lines,
+            kind=kind,
+            file_path_pattern=file_path_pattern,
+        )
         nodes = store.get_nodes_by_size(
             min_lines=min_lines,
             kind=kind,
             file_path_pattern=file_path_pattern,
-            limit=limit,
+            limit=shown_limit,
         )
 
         results = []
@@ -1611,9 +1666,10 @@ def find_large_functions(
             results.append(d)
 
         summary_parts = [
-            f"Found {len(results)} node(s) with >= {min_lines} lines"
+            f"Found {total} node(s) with >= {min_lines} lines"
             + (f" (kind={kind})" if kind else "")
             + (f" matching '{file_path_pattern}'" if file_path_pattern else "")
+            + _shown_of(len(results), total)
             + ":",
         ]
         for r in results[:10]:
@@ -1624,10 +1680,24 @@ def find_large_functions(
         if len(results) > 10:
             summary_parts.append(f"  ... and {len(results) - 10} more")
 
+        if minimal:
+            results = [
+                {
+                    key: row[key]
+                    for key in ("name", "kind", "relative_path", "line_start", "line_count")
+                    if key in row
+                }
+                for row in results
+            ]
+
         return {
             "status": "ok",
             "summary": "\n".join(summary_parts),
-            "total_found": len(results),
+            "total_found": total,
+            "total": total,
+            "result_count": total,
+            "results_omitted": total - len(results),
+            "truncated": total > len(results),
             "min_lines": min_lines,
             "results": results,
         }
@@ -1653,9 +1723,14 @@ def traverse_graph_func(
         query: Search string to find the starting node.
         mode: "bfs" (breadth-first) or "dfs" (depth-first).
         depth: Max traversal depth (1-6). Default: 3.
-        token_budget: Approximate token limit for results.
+        token_budget: Approximate token limit for results, at most 10,000. The
+            walk stops when it runs out, so a small budget does little work and
+            ``truncated`` means there was more.
         repo_root: Repository root path.
     """
+    _validate_positive_int(token_budget, "token_budget")
+    token_budget = min(token_budget, _MAX_TRAVERSAL_TOKEN_BUDGET)
+
     store, root = _get_store(repo_root)
     try:
         results = hybrid_search(store, query, limit=1)
@@ -1682,7 +1757,11 @@ def traverse_graph_func(
             else:
                 current_qn, cur_depth = queue.pop()
 
-            if current_qn in visited:
+            # DFS can reach a node late by a long path first. Reaching it again
+            # by a shorter one must still expand it, or what lies past it is
+            # missed, but it is only listed once.
+            seen_at = visited.get(current_qn)
+            if seen_at is not None and seen_at <= cur_depth:
                 continue
             if cur_depth > depth:
                 continue
@@ -1692,18 +1771,19 @@ def traverse_graph_func(
             if not node:
                 continue
 
-            entry = {
-                "name": _sanitize_name(node.name),
-                "qualified_name": node.qualified_name,
-                "kind": node.kind,
-                "file": node.file_path,
-                "depth": cur_depth,
-            }
-            approx_tokens += len(str(entry)) // 4
-            if approx_tokens > token_budget:
-                break
+            if seen_at is None:
+                entry = {
+                    "name": _sanitize_name(node.name),
+                    "qualified_name": node.qualified_name,
+                    "kind": node.kind,
+                    "file": node.file_path,
+                    "depth": cur_depth,
+                }
+                approx_tokens += len(str(entry)) // 4
+                if approx_tokens > token_budget:
+                    break
 
-            traversal.append(entry)
+                traversal.append(entry)
 
             # Get neighbours
             out_edges = store.get_edges_by_source(
@@ -1712,19 +1792,21 @@ def traverse_graph_func(
             in_edges = store.get_edges_by_target(
                 current_qn
             )
+            next_depth = cur_depth + 1
             for e in out_edges:
                 tgt = e.target_qualified
-                if tgt not in visited:
-                    queue.append((tgt, cur_depth + 1))
+                if visited.get(tgt, next_depth + 1) > next_depth:
+                    queue.append((tgt, next_depth))
             for e in in_edges:
                 src = e.source_qualified
-                if src not in visited:
-                    queue.append((src, cur_depth + 1))
+                if visited.get(src, next_depth + 1) > next_depth:
+                    queue.append((src, next_depth))
 
         return {
             "start_node": start_qn,
             "mode": mode,
             "max_depth": depth,
+            "token_budget": token_budget,
             "nodes_visited": len(traversal),
             "traversal": traversal,
             "truncated": approx_tokens > token_budget,

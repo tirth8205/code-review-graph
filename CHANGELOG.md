@@ -88,6 +88,20 @@
 
 ### Fixed
 
+- `find_large_functions_tool`, `semantic_search_nodes_tool` and
+  `traverse_graph_tool` now have hard ceilings. At a huge `limit` or
+  `token_budget` they returned up to 1.8M tokens on this repository, and now
+  return under 25,000. `limit` and `token_budget` reject zero, negatives and
+  booleans. The ceilings also bound the work: search ranks three times what it
+  shows, the large-functions query fetches only what it shows and counts the rest
+  in SQL, and the walk stops when the budget ends. `find_large_functions_tool`
+  gains `detail_level`, and `minimal` costs less than `standard`. `result_count`
+  on these tools now means the count before the cut, as on `query_graph_tool`.
+  (#895, #888)
+- `CRG_MAX_IMPACT_NODES` now reaches `get_impact_radius_tool`. A literal default
+  of 500 shadowed it, so the setting did nothing through MCP. (#888)
+- `traverse_graph_tool` in `dfs` mode no longer misses what lies past a node it
+  first reached at the depth limit, then reached again by a shorter path.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

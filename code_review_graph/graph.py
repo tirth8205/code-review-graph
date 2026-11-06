@@ -3407,6 +3407,50 @@ class GraphStore:
             last_updated=last_updated,
         )
 
+    @staticmethod
+    def _nodes_by_size_filter(
+        min_lines: int,
+        max_lines: int | None,
+        kind: str | None,
+        file_path_pattern: str | None,
+    ) -> tuple[str, list]:
+        """Build the WHERE clause and parameters for a line-count range."""
+        conditions = [
+            "line_start IS NOT NULL",
+            "line_end IS NOT NULL",
+            "(line_end - line_start + 1) >= ?",
+            "extra NOT LIKE '%\"verilog_kind\"%'",
+        ]
+        params: list = [min_lines]
+
+        if max_lines is not None:
+            conditions.append("(line_end - line_start + 1) <= ?")
+            params.append(max_lines)
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if file_path_pattern:
+            conditions.append("file_path LIKE ?")
+            params.append(f"%{file_path_pattern}%")
+        return " AND ".join(conditions), params
+
+    def count_nodes_by_size(
+        self,
+        min_lines: int = 50,
+        max_lines: int | None = None,
+        kind: str | None = None,
+        file_path_pattern: str | None = None,
+    ) -> int:
+        """Count what :meth:`get_nodes_by_size` would return without a limit."""
+        where, params = self._nodes_by_size_filter(
+            min_lines, max_lines, kind, file_path_pattern,
+        )
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM nodes WHERE {where}",  # nosec B608
+            params,
+        ).fetchone()
+        return int(row[0])
+
     def get_nodes_by_size(
         self,
         min_lines: int = 50,
@@ -3427,26 +3471,10 @@ class GraphStore:
         Returns:
             List of GraphNode objects, ordered by line count descending.
         """
-        conditions = [
-            "line_start IS NOT NULL",
-            "line_end IS NOT NULL",
-            "(line_end - line_start + 1) >= ?",
-            "extra NOT LIKE '%\"verilog_kind\"%'",
-        ]
-        params: list = [min_lines]
-
-        if max_lines is not None:
-            conditions.append("(line_end - line_start + 1) <= ?")
-            params.append(max_lines)
-        if kind:
-            conditions.append("kind = ?")
-            params.append(kind)
-        if file_path_pattern:
-            conditions.append("file_path LIKE ?")
-            params.append(f"%{file_path_pattern}%")
-
+        where, params = self._nodes_by_size_filter(
+            min_lines, max_lines, kind, file_path_pattern,
+        )
         params.append(limit)
-        where = " AND ".join(conditions)
         rows = self._conn.execute(
             f"SELECT * FROM nodes WHERE {where} "  # nosec B608
             "ORDER BY (line_end - line_start + 1) DESC LIMIT ?",
