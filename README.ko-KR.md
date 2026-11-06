@@ -525,6 +525,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_EMBEDDING_MODEL` | 로컬 벡터 임베딩의 기본 모델 | `all-MiniLM-L6-v2` |
 | `CRG_ACCEPT_CLOUD_EMBEDDINGS` | `1`로 두면 클라우드 임베딩 전송 경고를 숨김 | - |
 | `CRG_ALLOW_REMOTE_CODE` | `trust_remote_code=True`가 필요한 HuggingFace 모델 허용 | `0` |
+| `CRG_VECTOR_CACHE` | `1`로 두면 디코딩한 임베딩 벡터를 시맨틱 검색 사이에도 메모리에 유지해, 쿼리마다 SQLite에서 전부 다시 읽지 않음. 대신 RAM(캐시한 인덱스마다 벡터 수 × 차원 수 × 4바이트)과, 캐시한 데이터베이스마다 프로세스가 끝날 때까지 열려 있는 읽기 연결 1개를 사용함. Windows에서는 열려 있는 동안 `graph.db`를 삭제하거나 교체할 수 없음 | - |
 | `CRG_MAX_IMPACT_NODES` | 영향 분석에 넣는 최대 노드 수 | `500` |
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |

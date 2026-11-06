@@ -474,6 +474,9 @@ communities = [
 ]
 dev = [
     { name = "mypy" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -524,6 +527,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.0.0,<3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10,<3" },
     { name = "networkx", specifier = ">=3.2,<4" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26,<3" },
     { name = "numpy", marker = "extra == 'embeddings'", specifier = ">=1.26,<3" },
     { name = "ollama", marker = "extra == 'wiki'", specifier = ">=0.1.0" },
     { name = "playwright", marker = "extra == 'browser-test'", specifier = ">=1.45,<2" },
