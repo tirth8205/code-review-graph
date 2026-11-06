@@ -40,8 +40,8 @@ def impact_repo(tmp_path):
                 line_start=1, line_end=2, language="python",
             ))
             store.upsert_edge(EdgeInfo(
-                kind="CALLS", source=f"{path}::{name}",
-                target=f"{paths[0]}::execute", file_path=str(path), line=1,
+                kind="CALLS", source=f"{path.as_posix()}::{name}",
+                target=f"{paths[0].as_posix()}::execute", file_path=str(path), line=1,
             ))
     store.commit()
     store.close()
@@ -154,6 +154,50 @@ def test_unindexed_file_keeps_uncertainty_marker(impact_repo):
     )
     assert result["confidence"]
     assert result["confidence"] == standard["confidence"]
+
+
+def test_compact_keeps_unindexed_requested_paths(impact_repo):
+    result = query.get_impact_radius(
+        changed_files=["src/core.py", "unindexed.py"], repo_root=str(impact_repo),
+        detail_level="compact",
+    )
+    assert result["changed_files"] == ["src/core.py", "unindexed.py"]
+    assert result["impacted_file_count"] == 3
+
+
+def test_compact_displays_cwd_relative_graph_paths_from_repo_root(tmp_path):
+    root = tmp_path / "fixtures" / "sample_repo"
+    (root / "src").mkdir(parents=True)
+    for name in ("core.py", "app.py"):
+        (root / "src" / name).write_text("def f():\n    pass\n")
+    store = GraphStore(root / ".code-review-graph" / "graph.db")
+    for name in ("core.py", "app.py"):
+        stored = f"fixtures/sample_repo/src/{name}"
+        store.upsert_node(NodeInfo(
+            kind="File", name=stored, file_path=stored,
+            line_start=1, line_end=2, language="python",
+        ))
+    store.upsert_node(NodeInfo(
+        kind="Function", name="execute", file_path="fixtures/sample_repo/src/core.py",
+        line_start=1, line_end=2, language="python",
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Function", name="handle", file_path="fixtures/sample_repo/src/app.py",
+        line_start=1, line_end=2, language="python",
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="CALLS", source="fixtures/sample_repo/src/app.py::handle",
+        target="fixtures/sample_repo/src/core.py::execute",
+        file_path="fixtures/sample_repo/src/app.py", line=1,
+    ))
+    store.commit()
+    store.close()
+
+    result = query.get_impact_radius(
+        changed_files=["src/core.py"], repo_root=str(root), detail_level="compact",
+    )
+    assert result["changed_files"] == ["src/core.py"]
+    assert result["impacted_files"] == ["src/app.py"]
 
 
 def test_standard_response_is_unchanged_by_compact_file_limit(impact_repo):

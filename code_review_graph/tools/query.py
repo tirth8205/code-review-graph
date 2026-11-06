@@ -32,7 +32,7 @@ from ..incremental import (
     discover_review_changes,
     get_db_path,
 )
-from ..parser import normalize_file_path
+from ..parser import normalize_file_path, repo_relative_path
 from ..search import hybrid_search
 from ..uncertainty import (
     empty_impact_confidence,
@@ -207,11 +207,18 @@ def _compact_impact_response(
 ) -> dict[str, Any]:
     """Project the radius onto files without serializing its graph records."""
     def display_path(path: str) -> str:
-        try:
-            return Path(path).relative_to(root).as_posix()
-        except ValueError:
+        relative = repo_relative_path(path, root)
+        if relative is None:
             # A graph may include an external file: retain its identity.
             return path
+        if not (root / relative).exists():
+            # A cwd-relative graph path (``fixtures/repo/src/app.py`` for root
+            # ``.../fixtures/repo``) starts with the root's trailing parts.
+            parts = relative.split("/")
+            for k in range(min(len(root.parts), len(parts) - 1), 0, -1):
+                if tuple(parts[:k]) == root.parts[-k:]:
+                    return "/".join(parts[k:])
+        return relative
 
     # The graph already ranks nodes best-first. Keep each file's first
     # appearance, rather than using impacted_files' unordered set order.
@@ -312,7 +319,7 @@ def get_impact_radius(
 
         if detail_level == "compact":
             compact_response = _compact_impact_response(
-                result, root, abs_files, max_files, resolution,
+                result, root, changed_files, max_files, resolution,
                 store.count_unresolved_call_sites({
                     n.name for n in result["changed_nodes"] if n.kind != "File"
                 }),
