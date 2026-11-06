@@ -11,6 +11,7 @@ import pytest
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.errors import ChangeDiscoveryError
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
     _create_watch_handler,
@@ -34,7 +35,6 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
-from code_review_graph.errors import ChangeDiscoveryError
 
 
 class TestParseExecutorSelection:
@@ -549,6 +549,48 @@ class TestIsBinary:
     def test_missing_file_is_binary(self, tmp_path):
         f = tmp_path / "missing.txt"
         assert _is_binary(f)
+
+
+def test_collect_all_files_skips_undecodable_git_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "git")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        incremental_module,
+        "_get_untracked_files",
+        lambda *_args, **_kwargs: ["notes-\udcff.txt"],
+    )
+
+    assert incremental_module.collect_all_files(tmp_path) == []
+
+
+def test_collect_all_files_skips_undecodable_filesystem_fallback_paths(
+    tmp_path,
+    monkeypatch,
+):
+    invalid_path = tmp_path / "notes-\udcff.txt"
+    original_rglob = Path.rglob
+    original_is_file = Path.is_file
+
+    def fake_rglob(path, pattern):
+        if path == tmp_path:
+            return iter([invalid_path])
+        return original_rglob(path, pattern)
+
+    def fake_is_file(path):
+        if path == invalid_path:
+            return True
+        return original_is_file(path)
+
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "none")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(Path, "rglob", fake_rglob)
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    assert incremental_module.collect_all_files(tmp_path) == []
 
 
 class TestGitOperations:

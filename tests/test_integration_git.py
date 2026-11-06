@@ -167,6 +167,28 @@ def test_get_changed_files_includes_untracked_but_not_ignored_files(
     ]
 
 
+def test_untracked_file_does_not_hide_tracked_working_tree_edit(
+    git_repo_with_unicode_path: Path,
+) -> None:
+    tracked = git_repo_with_unicode_path / "café.py"
+    tracked.write_text("value = 2\n", encoding="utf-8")
+    _git_ok(git_repo_with_unicode_path, "add", "--", "café.py")
+    _git_ok(git_repo_with_unicode_path, "commit", "-m", "change tracked file")
+
+    # Restore the worktree copy to HEAD~1 so the commit diff is empty while
+    # the file remains modified relative to HEAD.
+    tracked.write_text("value = 1\n", encoding="utf-8")
+    (git_repo_with_unicode_path / "new.py").write_text(
+        "value = 3\n", encoding="utf-8",
+    )
+
+    assert set(get_changed_files(git_repo_with_unicode_path, "HEAD~1")) == {
+        "café.py", "new.py",
+    }
+    files, _ = discover_review_changes(git_repo_with_unicode_path, "HEAD~1")
+    assert set(files) == {"café.py", "new.py"}
+
+
 def test_discovery_keeps_unstaged_edits_when_base_does_not_resolve(
     git_repo_with_unicode_path: Path,
 ) -> None:
