@@ -512,7 +512,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anyio", specifier = ">=4.0,<5" },
+    { name = "anyio", specifier = ">=4.8.0,<5" },
     { name = "code-review-graph", extras = ["communities"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["embeddings"], marker = "extra == 'all'" },
     { name = "code-review-graph", extras = ["enrichment"], marker = "extra == 'all'" },
@@ -535,7 +535,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23,<2" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0,<8" },
     { name = "pytest-playwright", marker = "extra == 'browser-test'", specifier = ">=0.5,<1" },
-    { name = "pyyaml", specifier = ">=6.0,<7" },
+    { name = "pyyaml", specifier = ">=6.0.2,<7" },
     { name = "pyyaml", marker = "extra == 'eval'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.3.0,<1" },
     { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=3.0.0,<7" },

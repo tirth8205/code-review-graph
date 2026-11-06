@@ -1,57 +1,74 @@
-"""Keep declared dependency floors synchronized with minimum-version CI."""
+"""Keep the declared dependency floors in step with the minimum-version CI job.
+
+``pyproject.toml`` is the one source of the floors, and the pinned file must
+match it in both directions, so a new dependency cannot skip the job. See: #896
+"""
 
 from __future__ import annotations
 
-import sys
+import re
 from pathlib import Path
+
+import yaml
 
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
-
-EXPECTED_FLOORS = {
-    "mcp": "1.29.0",
-    "fastmcp": "3.2.4",
-    "tree-sitter": "0.26.0",
-    "tree-sitter-language-pack": "0.13.0",
-    "pyyaml": "6.0",
-    "networkx": "3.2",
-    "watchdog": "4.0.0",
-}
+REPO = Path(__file__).parents[1]
 
 
-def test_project_declares_tested_dependency_floors() -> None:
-    with Path("pyproject.toml").open("rb") as source:
-        project = tomllib.load(source)
-
-    declared = {
-        dependency.split(">=", 1)[0]: dependency.split(">=", 1)[1].split(",", 1)[0]
-        for dependency in project["project"]["dependencies"]
-        if ">=" in dependency
-    }
-
-    for package, floor in EXPECTED_FLOORS.items():
-        assert declared[package] == floor
+def _project() -> dict:
+    with (REPO / "pyproject.toml").open("rb") as source:
+        return tomllib.load(source)["project"]
 
 
-def test_minimum_ci_pins_match_declared_floors() -> None:
-    requirements = {
-        line.split("==", 1)[0]: line.split("==", 1)[1].split(";", 1)[0]
-        for line in Path(".github/requirements-minimum.txt").read_text().splitlines()
-        if line and not line.startswith("#")
-    }
-
-    expected = dict(EXPECTED_FLOORS)
-    if sys.version_info < (3, 11):
-        expected["tomli"] = "2.0.0"
-
-    assert requirements == expected
+def _declared_floors() -> dict[str, str]:
+    floors = {}
+    for dependency in _project()["dependencies"]:
+        requirement = dependency.split(";", 1)[0].strip()
+        match = re.fullmatch(r"([A-Za-z0-9._-]+)>=([^,]+),<.+", requirement)
+        assert match, f"{dependency!r} must declare a floor and an upper bound"
+        floors[match[1]] = match[2]
+    return floors
 
 
-def test_minimum_ci_checks_dependency_resolution() -> None:
-    workflow = Path(".github/workflows/ci.yml").read_text()
+def _pinned_floors() -> dict[str, str]:
+    pins = {}
+    text = (REPO / ".github" / "requirements-minimum.txt").read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line and not line.startswith("#"):
+            package, version = line.split(";", 1)[0].strip().split("==", 1)
+            pins[package] = version
+    return pins
 
-    assert "minimum-dependencies:" in workflow
-    assert "python -m pip check" in workflow
+
+def test_every_declared_dependency_has_a_pinned_floor() -> None:
+    assert _pinned_floors() == _declared_floors()
+
+
+def test_minimum_job_checks_and_tests_the_floors() -> None:
+    workflow = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    job = workflow["jobs"]["minimum-dependencies"]
+    commands = "\n".join(step.get("run", "") for step in job["steps"])
+
+    assert "-r .github/requirements-minimum.txt" in commands
+    assert "python -m pip check" in commands
+    assert re.search(r"^pytest\b", commands, re.MULTILINE)
+
+
+def test_minimum_job_covers_every_supported_python() -> None:
+    workflow = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    supported = [
+        classifier.rsplit(" ", 1)[1]
+        for classifier in _project()["classifiers"]
+        if re.fullmatch(r"Programming Language :: Python :: 3\.\d+", classifier)
+    ]
+
+    job = workflow["jobs"]["minimum-dependencies"]
+    assert job["strategy"]["matrix"]["python-version"] == supported

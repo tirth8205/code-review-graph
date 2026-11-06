@@ -1804,6 +1804,11 @@ class TestWatchReconciliation:
     def test_watch_dispatch_ignores_irrelevant_events(self, tmp_path, event_factory):
         from watchdog import events
 
+        # FileClosedNoWriteEvent arrived in watchdog 5. Our code filters on the
+        # event_type string, so the watchdog 4 floor is fine at runtime.
+        if not hasattr(events, event_factory):
+            pytest.skip(f"this watchdog has no {event_factory}")
+
         store = GraphStore(tmp_path / "graph.db")
         debouncer = MagicMock()
         with patch(
