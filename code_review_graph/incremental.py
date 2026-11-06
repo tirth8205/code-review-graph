@@ -21,7 +21,7 @@ import time
 import uuid
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Iterable, NamedTuple, Optional
 
 from .build_state import advance_to_postprocess_pending
 from .constants import GIT_TIMEOUT as _GIT_TIMEOUT
@@ -1154,7 +1154,6 @@ def get_changed_files(
     strict: bool = False,
     timeout: float | None = None,
     require_vcs: bool = False,
-    include_untracked: bool = True,
 ) -> list[str]:
     """Get list of changed files via git diff or svn status.
 
@@ -1187,8 +1186,6 @@ def get_changed_files(
             It is also what makes the short *timeout* above safe to use: a
             budget that is exhausted has to be reported, not rounded down to
             "no changes".
-        include_untracked: Add untracked files to a Git diff. Pass False to
-            learn whether the tracked diff alone is empty.
     """
     if timeout is None:
         timeout = _GIT_TIMEOUT
@@ -1232,8 +1229,16 @@ def get_changed_files(
             logger.warning("git diff failed while discovering changed files")
             return []
         changed = _decode_name_status_paths(result.stdout)
-        if not include_untracked:
-            return changed
+        if not changed:
+            # An empty commit diff can coexist with tracked worktree edits
+            # restored to the base contents. Preserve those edits before
+            # merging untracked paths, which would otherwise make this list
+            # look non-empty to discover_review_changes and skip its fallback.
+            return get_staged_and_unstaged(
+                repo_root,
+                timeout=timeout,
+                require_vcs=require_vcs or strict,
+            )
         untracked = _get_untracked_files(
             repo_root,
             timeout=timeout,
@@ -1356,6 +1361,23 @@ def _get_svn_changed_files(
         return []
 
 
+def _utf8_paths(paths: Iterable[str]) -> list[str]:
+    """Drop names that are not valid UTF-8: SQLite raises on any lookup of one.
+
+    ``os.fsdecode`` keeps such a name as surrogate escapes, and these lists go
+    straight into graph queries from ``update`` and the review tools.
+    """
+    kept = []
+    for path in paths:
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            logger.debug("Skipping path that is not UTF-8: %r", path[:120])
+            continue
+        kept.append(path)
+    return kept
+
+
 def get_staged_and_unstaged(
     repo_root: Path,
     *,
@@ -1424,7 +1446,7 @@ def get_staged_and_unstaged(
                 if b"R" in status or b"C" in status:
                     index += 1
             index += 1
-        return files
+        return _utf8_paths(files)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
@@ -1482,14 +1504,8 @@ def discover_review_changes(
     resolved_base = resolve_review_base(
         repo_root, base, timeout=budget, require_vcs=True,
     )
-    # Untracked files stay out of this check: they must not hide the fallback
-    # from a tracked edit that the diff against the base cannot see.
     changed = get_changed_files(
-        repo_root,
-        resolved_base,
-        timeout=budget,
-        require_vcs=True,
-        include_untracked=False,
+        repo_root, resolved_base, timeout=budget, require_vcs=True,
     )
     if not changed:
         changed = get_staged_and_unstaged(
@@ -1568,19 +1584,7 @@ def _get_untracked_files(
                     f"(rc={result.returncode})"
                 )
             return []
-        files = []
-        for raw_path in result.stdout.split(b"\0"):
-            if not raw_path:
-                continue
-            path = os.fsdecode(raw_path)
-            try:
-                path.encode("utf-8")
-            except UnicodeEncodeError:
-                # SQLite and the path checks cannot hold this name.
-                logger.debug("Skipping untracked path that is not UTF-8: %r", raw_path[:120])
-                continue
-            files.append(path)
-        return files
+        return _utf8_paths(os.fsdecode(path) for path in result.stdout.split(b"\0") if path)
     except (OSError, subprocess.TimeoutExpired) as exc:
         if require_vcs:
             raise _vcs_unavailable("git", exc, timeout=timeout) from exc
@@ -1648,9 +1652,13 @@ def collect_all_files(
         # Skip paths that would exceed OS filename limits (macOS: 255 bytes
         # per component, ~1024 total; Windows: 260 total).
         try:
+            # ``os.fsdecode`` preserves undecodable POSIX filename bytes as
+            # surrogate escapes. Graph paths are stored as UTF-8, so reject
+            # those before the component-length checks call ``encode()``.
+            rel_path.encode("utf-8")
             full_path = repo_root / rel_path
-        except (OSError, ValueError):
-            logger.debug("Skipping path that cannot be constructed: %s", rel_path)
+        except (OSError, UnicodeEncodeError, ValueError):
+            logger.debug("Skipping path that cannot be represented safely")
             continue
         if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
             logger.debug("Skipping overlong path: %s", rel_path[:120])

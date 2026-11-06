@@ -552,6 +552,48 @@ class TestIsBinary:
         assert _is_binary(f)
 
 
+def test_collect_all_files_skips_undecodable_git_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "git")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        incremental_module,
+        "_get_untracked_files",
+        lambda *_args, **_kwargs: ["notes-\udcff.txt"],
+    )
+
+    assert incremental_module.collect_all_files(tmp_path) == []
+
+
+def test_collect_all_files_skips_undecodable_filesystem_fallback_paths(
+    tmp_path,
+    monkeypatch,
+):
+    invalid_path = tmp_path / "notes-\udcff.txt"
+    original_rglob = Path.rglob
+    original_is_file = Path.is_file
+
+    def fake_rglob(path, pattern):
+        if path == tmp_path:
+            return iter([invalid_path])
+        return original_rglob(path, pattern)
+
+    def fake_is_file(path):
+        if path == invalid_path:
+            return True
+        return original_is_file(path)
+
+    monkeypatch.setattr(incremental_module, "detect_vcs", lambda _root: "none")
+    monkeypatch.setattr(
+        incremental_module, "get_all_tracked_files", lambda *_args: [],
+    )
+    monkeypatch.setattr(Path, "rglob", fake_rglob)
+    monkeypatch.setattr(Path, "is_file", fake_is_file)
+
+    assert incremental_module.collect_all_files(tmp_path) == []
+
+
 class TestGitOperations:
     @patch("code_review_graph.incremental.subprocess.run")
     def test_get_changed_files(self, mock_run, tmp_path):
@@ -2507,7 +2549,6 @@ class TestDiscoverReviewChanges:
 
         def fake_changed(
             root, base, *, timeout=None, strict=False, require_vcs=False,
-            include_untracked=True,
         ):
             seen["changed"] = (base, timeout, require_vcs)
             return []

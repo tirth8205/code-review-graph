@@ -559,11 +559,7 @@ class TestDetectChangesCommand:
             repo.resolve(), "origin/main", timeout=budget, require_vcs=True,
         )
         get_changed.assert_called_once_with(
-            repo.resolve(),
-            "merge-base-sha",
-            timeout=budget,
-            require_vcs=True,
-            include_untracked=False,
+            repo.resolve(), "merge-base-sha", timeout=budget, require_vcs=True,
         )
         assert budget <= 5.0
         assert analyze.call_args.kwargs["base"] == "merge-base-sha"
