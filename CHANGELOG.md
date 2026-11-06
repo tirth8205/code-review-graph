@@ -125,6 +125,11 @@
   instead of its own, and the unbounded search was quadratic on a file
   with many members (~4s for 4,000). It now takes a `limit`, bounding a
   member's search to its own enclosing package body (PR #785 review).
+- An incremental update now keeps flows and communities in step with the
+  graph. A new entry point gets its flow, a re-parsed file's flows follow its
+  nodes to their new IDs, and a deleted file leaves no empty community behind.
+  Before, relative changed paths never matched the stored absolute ones, so
+  flows and communities were silently skipped (#569, #1058).
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

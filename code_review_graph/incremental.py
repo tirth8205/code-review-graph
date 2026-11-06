@@ -1526,11 +1526,15 @@ def _reconcile_stale_files(
     current_files: list[str] | None = None,
     *,
     known_text: set[str] | None = None,
+    remove: bool = True,
 ) -> list[str]:
     """Remove graph files absent from the current parseable repository inventory.
 
     ``known_text`` holds stored spellings already read and found not binary in
     this update, so they are not read again just to repeat that check.
+
+    When *remove* is False, only identify stale paths so callers can capture
+    flow/community state before the permanent delete (#569).
     """
     stored_files = set(store.get_all_files())
     current_paths: set[str]
@@ -1560,7 +1564,7 @@ def _reconcile_stale_files(
             ):
                 current_paths.add(stored_file)
     stale_files = sorted(stored_files - current_paths)
-    if stale_files:
+    if stale_files and remove:
         store.remove_files_permanently(stale_files, stored_paths=True)
     return stale_files
 
@@ -1995,11 +1999,36 @@ def incremental_update(
             [_relative_update_input(repo_root, p) for p in [*changed_files, *content_mismatches]]
         )
     )
+    # Defer permanent stale removal until after flow/community capture (#569).
     stale_files = (
-        _reconcile_stale_files(repo_root, store, known_text=known_text)
+        _reconcile_stale_files(
+            repo_root, store, known_text=known_text, remove=False,
+        )
         if reconcile_stale
         else []
     )
+
+    # Authoritative empty syncs (``base`` equals the last-stored HEAD) must
+    # still fall through to the freshness write below — otherwise an empty
+    # commit leaves the graph looking stale (#952 / PR #673 review).
+    if (
+        not changed_files
+        and not stale_files
+        and not identity_pending
+        and not authoritative_git_sync
+    ):
+        return {
+            "files_updated": 0,
+            "total_nodes": 0,
+            "total_edges": 0,
+            "changed_files": [],
+            "dependent_files": [],
+            "stale_files_removed": 0,
+            "flow_entry_point_qns": [],
+            "communities_were_affected": False,
+            "errors": [],
+            "freshness_advanced": False,
+        }
 
     # Find dependent files (files that import from changed files)
     dependent_files: set[str] = set()
@@ -2071,8 +2100,41 @@ def incremental_update(
             pass
         to_parse.append(rel_path)
 
-    # Persist deletions before store_file_nodes_edges() opens its own
-    # explicit transaction — avoids nested transaction errors.
+    # Capture flow/community memberships BEFORE node replacement or permanent
+    # deletion. After nodes are removed/recreated the old IDs are gone, so
+    # postprocess can no longer discover affected flows via membership JOINs
+    # (#569). Include deleted/renamed/stale paths here — not only to_parse.
+    # A failed parse keeps its flow/community state. A successful one remaps it
+    # below; nothing is deleted unless its file is gone, because the hooks run
+    # ``update --skip-flows`` and would never get the flows back.
+    from .communities import (
+        capture_community_assignments,
+        purge_empty_communities,
+        remap_community_assignments,
+    )
+    from .flows import (
+        capture_affected_flow_entry_points,
+        capture_flow_node_ids,
+        clear_flows_for_files,
+        expand_changed_file_paths,
+        purge_orphan_flow_data,
+        remap_flow_node_ids,
+    )
+
+    # Pass raw relative/absolute paths; expand_changed_file_paths owns
+    # variant generation so we do not expand twice per update.
+    lifecycle_inputs = [
+        *[rel_path.replace("\\", "/") for rel_path in to_parse],
+        *missing_paths,
+        *stale_files,
+    ]
+    lifecycle_paths = expand_changed_file_paths(
+        store, lifecycle_inputs, repo_root=repo_root,
+    )
+    community_by_qn = capture_community_assignments(store, lifecycle_paths)
+    cleared_entry_qns: set[str] = set()
+    flow_node_ids: dict[int, str] = {}
+
     use_serial = os.environ.get("CRG_SERIAL_PARSE", "") == "1"
     parsed_files = 0
 
@@ -2090,10 +2152,16 @@ def incremental_update(
                 logger.warning("Error parsing %s: %s", rel_path, e)
                 errors.append({"file": rel_path, "error": str(e)})
                 continue
+            # Parse succeeded: note this file's flows, then replace its nodes.
             # Same reasoning as the serial loop in full_build: a failed write
             # is not a failed parse. Letting it propagate stops the update
             # before the freshness anchor is advanced, so the next run still
             # sees this file as changed.
+            file_paths = expand_changed_file_paths(
+                store, [rel_path], repo_root=repo_root,
+            )
+            cleared_entry_qns |= capture_affected_flow_entry_points(store, file_paths)
+            flow_node_ids |= capture_flow_node_ids(store, file_paths)
             store.store_file_nodes_edges(str(abs_path), nodes, edges, fhash)
             remaining_identity.discard(rel_path)
             parsed_files += 1
@@ -2112,6 +2180,11 @@ def incremental_update(
                     logger.warning("Error parsing %s: %s", rel_path, error)
                     errors.append({"file": rel_path, "error": error})
                     continue
+                file_paths = expand_changed_file_paths(
+                    store, [rel_path], repo_root=repo_root,
+                )
+                cleared_entry_qns |= capture_affected_flow_entry_points(store, file_paths)
+                flow_node_ids |= capture_flow_node_ids(store, file_paths)
                 store.store_file_nodes_edges(
                     str(repo_root / rel_path),
                     nodes,
@@ -2123,8 +2196,32 @@ def incremental_update(
                 total_nodes += len(nodes)
                 total_edges += len(edges)
 
-    removed_files = store.remove_files_permanently(sorted(missing_paths)) if missing_paths else 0
-    files_updated = parsed_files + len(stale_files) + removed_files
+    removed_files = 0
+    to_remove = sorted(set(missing_paths) | set(stale_files))
+    if to_remove:
+        remove_paths = expand_changed_file_paths(
+            store, to_remove, repo_root=repo_root,
+        )
+        cleared_entry_qns |= clear_flows_for_files(store, remove_paths)
+        removed_files = store.remove_files_permanently(
+            to_remove, stored_paths=True,
+        )
+
+    # Remap surviving community IDs onto replacement nodes, drop orphan flow
+    # rows, and remove community rows that no longer have any members.
+    remap_community_assignments(store, community_by_qn)
+    remap_flow_node_ids(store, flow_node_ids)
+    purge_orphan_flow_data(store)
+    purge_empty_communities(store)
+
+    flow_entry_point_qns = sorted(cleared_entry_qns)
+    communities_were_affected = (
+        (bool(community_by_qn) and (parsed_files > 0 or bool(to_remove)))
+        or bool(missing_paths)
+        or bool(stale_files)
+    )
+
+    files_updated = parsed_files + removed_files
     if identity_pending is not None and remaining_identity != identity_pending:
         _store_cpp_identity_pending(store, remaining_identity)
         store.commit()
@@ -2189,6 +2286,8 @@ def incremental_update(
         "changed_files": list(changed_files),
         "dependent_files": list(dependent_files),
         "stale_files_removed": len(stale_files),
+        "flow_entry_point_qns": flow_entry_point_qns,
+        "communities_were_affected": communities_were_affected,
         "errors": errors,
         "freshness_advanced": freshness_advanced,
         "python_resolution": python_stats,
