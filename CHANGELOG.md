@@ -57,6 +57,7 @@
 
 ### Changed
 
+- `staging` is no longer promoted to `testing` automatically. The `Auto promote` workflow and its script are gone, so a person reviews and merges every promotion, and a test fails if any workflow merges a pull request.
 - After upgrading, run `build` once to pick up generic YAML and workspace imports: `update` only re-parses files that changed.
 - Generic `.yml` and `.yaml` files are indexed as `YamlPath` nodes that hold key
   paths and value types, never values. `detect_changes` reports them as
