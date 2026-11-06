@@ -1,4 +1,4 @@
-"""``tests_for`` must find Java and Ruby tests, and only the true ones.
+"""``tests_for`` must find Java and Ruby tests, and only the true ones (PR #1154).
 
 Java: a test in ``src/test/java`` could not reach ``src/main/java``. The import
 walk only climbs the caller's own directories, and a class in the same package
