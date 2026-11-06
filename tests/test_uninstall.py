@@ -372,6 +372,34 @@ def test_source_pr_legacy_hook_commands_are_removed_exactly(
     assert _read_jsonc(fake_home / ".codex" / "hooks.json") == {}
 
 
+def test_removes_codex_hooks_every_release_wrote(fake_home: Path, fake_repo: Path):
+    """The v2.3.9 commands are no longer what the installer generates."""
+    released = {
+        "PostToolUse": (
+            "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+            " && code-review-graph update --skip-flows || true"
+        ),
+        "SessionStart": (
+            "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+            " && code-review-graph status || echo 'Not a git repo, skipping'"
+        ),
+    }
+    path = fake_home / ".codex" / "hooks.json"
+    _write_json(
+        path,
+        {
+            "hooks": {
+                event: [{"hooks": [{"type": "command", "command": command}]}]
+                for event, command in released.items()
+            }
+        },
+    )
+
+    uninstall.run(repo=fake_repo, keep_data=True)
+
+    assert _read_jsonc(path) == {}
+
+
 def test_shared_skill_directories_keep_user_files_and_unrelated_skills(
     fake_repo: Path,
     fake_home: Path,

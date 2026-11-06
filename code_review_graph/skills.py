@@ -1454,6 +1454,14 @@ def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def _codex_hook_command(subcommand: str) -> str:
+    """Forward the event JSON to a payload-scoped subcommand when the CLI exists."""
+    return (
+        "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+        f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+    )
+
+
 def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate native Codex hooks configuration for ~/.codex/hooks.json."""
     return {
@@ -1464,12 +1472,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph update --skip-flows"
-                                " || true"
-                            ),
+                            "command": _codex_hook_command("hook-update"),
                             "timeout": 30,
                             "statusMessage": "Updating code-review-graph",
                         },
@@ -1482,12 +1485,7 @@ def generate_codex_hooks_config(repo_root: Path) -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": (
-                                "cat >/dev/null || true; "
-                                "git rev-parse --git-dir >/dev/null 2>&1"
-                                " && code-review-graph status"
-                                " || echo 'Not a git repo, skipping'"
-                            ),
+                            "command": _codex_hook_command("hook-status"),
                             "timeout": 10,
                             "statusMessage": "Checking code-review-graph status",
                         },
@@ -1767,14 +1765,18 @@ def _hook_body_pattern() -> str:
 # The CLI one-liners every release has written, as one anchored pattern. Each
 # optional piece is a prelude some release added around the body.
 _GENERATED_HOOK_COMMAND_RE = re.compile(
-    r"\A"
+    r"\A(?:"
     r"(?:cat\s*>\s*/dev/null\s*\|\|\s*true;\s*)?"
     r"(?:command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1\s*\|\|\s*exit\s+0;\s*)?"
     r"(?:git\s+rev-parse\s+--git-dir\s*>/dev/null\s+2>&1\s*&&\s*)?"
     r"code-review-graph\s+(?:" + _hook_body_pattern() + r")"
     r"(?:\s+--repo\s+(?:\"[^\"]*\"|'[^']*'|[^\s\"'|&;<>]+))?"
     r"(?:\s*\|\|\s*(?:true|echo\s+'Not a git repo, skipping'))?"
-    r"\Z"
+    # The Codex hook that forwards the event JSON to a payload-scoped subcommand.
+    r"|cat\s*\|\s*\{\s*if\s+command\s+-v\s+code-review-graph\s*>/dev/null\s+2>&1;\s*"
+    r"then\s+code-review-graph\s+hook-(?:update|status);\s*"
+    r"else\s+cat\s*>/dev/null;\s*fi;\s*\}"
+    r")\Z"
 )
 
 # Loose spellings that merely *mention* this project. Used only to tell the
