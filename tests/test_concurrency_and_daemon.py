@@ -837,7 +837,7 @@ class TestConcurrentAccess:
         """The shipped hook (``update``) firing while the watcher is mid-update.
 
         ``hooks/hooks.json`` runs ``code-review-graph update --skip-flows`` on
-        every Write/Edit/Bash. With a daemon running that is a second writer on
+        every Write/Edit. With a daemon running that is a second writer on
         the same database, for the same files, at the same moment — and a
         hand-run ``build`` makes a third.
         """
