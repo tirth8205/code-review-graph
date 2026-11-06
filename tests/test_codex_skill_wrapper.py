@@ -245,3 +245,41 @@ def test_fallback_does_not_initialize_an_empty_database(tmp_path):
     assert result.returncode == 1
     assert "No graph found" in result.stderr
     assert _snapshot(db) == before
+
+
+@pytest.mark.parametrize("command", [("status",), ("detect-changes",), ("flows",)])
+def test_fallback_refuses_a_graph_it_cannot_migrate(tmp_path, command):
+    """A read-only open cannot migrate, so an old graph gets a clear error."""
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    db = repo / ".code-review-graph" / "graph.db"
+    db.parent.mkdir()
+    GraphStore(db).close()
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("DROP TABLE flow_memberships")
+        connection.execute("DROP TABLE flows")
+        connection.execute("UPDATE metadata SET value = '1' WHERE key = 'schema_version'")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+    before = _snapshot(db)
+    env = {
+        **os.environ,
+        "CRG_BIN": str(_wrapper_cli(tmp_path)),
+        "CRG_HOME": str(tmp_path / "crg-home"),
+        "PYTHONPATH": str(PROJECT_ROOT),
+    }
+
+    result = subprocess.run(
+        [sys.executable, str(WRAPPER), *command, "--repo", str(repo)],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Traceback" not in result.stderr
+    assert "code-review-graph update" in result.stderr
+    assert _snapshot(db) == before

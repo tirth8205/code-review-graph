@@ -737,6 +737,15 @@ class GraphStore:
                     f"No graph found at {self.db_path}. "
                     "Run `code-review-graph build` first."
                 )
+            if self.read_only and get_schema_version(conn) < LATEST_VERSION:
+                # Migrations write, so queries would hit tables and columns
+                # this old graph does not have yet.
+                raise GraphStoreError(
+                    f"The graph at {self.db_path} is schema "
+                    f"v{get_schema_version(conn)}, this build needs "
+                    f"v{LATEST_VERSION}, and a read-only open cannot upgrade it. "
+                    "Run `code-review-graph update` first."
+                )
             self._conn = conn
             if not self.read_only:
                 self._init_schema()
