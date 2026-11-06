@@ -2,7 +2,8 @@
 
 Each clause is its own ``def``, but they share one qualified name and the graph
 keeps one node per name, so the last clause used to overwrite the others: the
-earlier lines belonged to no function and a change there was missed. See: #979
+earlier lines belonged to no function and a change there was missed.
+See: #979, #1152
 """
 
 from __future__ import annotations
