@@ -87,11 +87,16 @@ _PYTHON_RETURN_ANNOTATION_CACHE_LOCK = threading.RLock()
 _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE: dict[
     tuple[str, int, int], dict[tuple[str, str], str],
 ] = {}
+_PYTHON_MODULE_CLASS_IDENTITY_CACHE: dict[
+    tuple[str, int, int], dict[str, tuple[str, str]],
+] = {}
+_PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK = threading.RLock()
 
 # Marker separating expression-receiver evidence from name-receiver evidence
 # in the receiver-evidence map. ``\x00`` cannot occur in a Python identifier,
 # so the two key spaces cannot collide.
 _PY_EXPR_RECEIVER_KEY = "\x00expr:"
+_PY_CLASS_IDENTITY_PREFIX = "\x00python-class\x00"
 
 _PY_TUPLE_ANNOTATION_NAMES = frozenset({"Tuple", "tuple"})
 _PY_TARGET_PATTERN_TYPES = frozenset({
@@ -100,6 +105,24 @@ _PY_TARGET_PATTERN_TYPES = frozenset({
     "list", "list_pattern", "pattern_list", "tuple", "tuple_pattern",
 })
 _PY_SPLAT_PATTERN_TYPES = frozenset({"list_splat", "list_splat_pattern"})
+
+
+def _python_qualified_class_identity(file_path: str, class_name: str) -> str:
+    """Keep a class's defining module attached to its receiver evidence."""
+    return f"{_PY_CLASS_IDENTITY_PREFIX}{file_path}\x00{class_name}"
+
+
+def _python_split_class_identity(
+    identity: str,
+) -> Optional[tuple[str, str]]:
+    if not identity.startswith(_PY_CLASS_IDENTITY_PREFIX):
+        return None
+    file_path, separator, class_name = identity[
+        len(_PY_CLASS_IDENTITY_PREFIX):
+    ].partition("\x00")
+    if not separator or not file_path or not class_name:
+        return None
+    return file_path, class_name
 
 
 class _PyReceiverContext(NamedTuple):
@@ -178,6 +201,45 @@ class _PythonScopeBindingVisitor(ast.NodeVisitor):
             if alias.name != "*":
                 self.names.add(alias.asname or alias.name)
 
+    def visit_Global(self, node: ast.Global) -> None:  # noqa: N802
+        self.names.update(node.names)
+
+def _python_function_scope_bindings(
+    source: bytes,
+) -> dict[tuple[int, int], tuple[frozenset[str], frozenset[str]]]:
+    """Return parameter and local names for each Python function position."""
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return {}
+    scopes: dict[
+        tuple[int, int], tuple[frozenset[str], frozenset[str]],
+    ] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        arguments = node.args
+        parameter_names = {
+            argument.arg
+            for argument in (
+                *arguments.posonlyargs,
+                *arguments.args,
+                *arguments.kwonlyargs,
+            )
+        }
+        if arguments.vararg is not None:
+            parameter_names.add(arguments.vararg.arg)
+        if arguments.kwarg is not None:
+            parameter_names.add(arguments.kwarg.arg)
+        bindings = _PythonScopeBindingVisitor()
+        for statement in node.body:
+            bindings.visit(statement)
+        bindings.names.update(parameter_names)
+        scopes[(node.lineno, node.col_offset)] = (
+            frozenset(parameter_names), frozenset(bindings.names),
+        )
+    return scopes
+
 
 def _python_type_checking_aliases(
     tree: ast.Module,
@@ -253,7 +315,7 @@ def _python_static_truth(
 
 
 class _PythonUnreachableCallVisitor(ast.NodeVisitor):
-    """Collect calls inside branches whose condition is statically false."""
+    """Collect calls and attribute loads in statically unreachable branches."""
 
     def __init__(
         self,
@@ -266,6 +328,11 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
         self._typing_modules = typing_modules
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
         if self._dead:
             self.positions.add((node.lineno, node.col_offset))
         self.generic_visit(node)
@@ -369,7 +436,7 @@ class _PythonUnreachableCallVisitor(ast.NodeVisitor):
 def _python_unreachable_call_positions(
     source: bytes,
 ) -> frozenset[tuple[int, int]]:
-    """Return one-based line/byte-column positions of proven-dead calls."""
+    """Return positions of calls and attribute loads in proven-dead branches."""
     try:
         tree = ast.parse(source.decode("utf-8"))
     except (SyntaxError, UnicodeDecodeError, ValueError):
@@ -3340,7 +3407,7 @@ class CodeParser:
                 python_receiver_evidence,
                 python_property_read_edges,
             ) = self._collect_python_receiver_evidence(
-                tree.root_node, file_path_str,
+                tree.root_node, file_path_str, source,
             )
         else:
             python_receiver_evidence = {}
@@ -6205,7 +6272,7 @@ class CodeParser:
     # consulted anywhere.
 
     def _collect_python_receiver_evidence(
-        self, root, file_path: str,
+        self, root, file_path: str, source: bytes,
     ) -> tuple[
         dict[tuple[int, str], tuple[str, str]],
         list[EdgeInfo],
@@ -6229,8 +6296,7 @@ class CodeParser:
         imported_names: set[str] = set()
         class_names: set[str] = set()
         ambiguous_property_classes: set[str] = set()
-        symbol_origins: dict[str, str] = {}
-        symbol_names: dict[str, str] = {}
+        symbol_binding_candidates: dict[str, set[tuple[str, str]]] = {}
         local_returns: dict[str, str] = {}
         property_returns: dict[tuple[str, str], str] = {}
         ambiguous_returns: set[str] = set()
@@ -6291,10 +6357,18 @@ class CodeParser:
                     node, file_path, module_bindings, imported_names,
                 )
             elif node.type == "import_from_statement":
+                import_origins: dict[str, str] = {}
+                import_names: dict[str, str] = {}
                 self._python_from_import_bindings(
                     node, file_path, module_bindings, imported_names,
-                    symbol_origins, symbol_names,
+                    import_origins, import_names,
                 )
+                for name, origin in import_origins.items():
+                    imported_name = import_names.get(name)
+                    if imported_name is not None:
+                        symbol_binding_candidates.setdefault(name, set()).add(
+                            (origin, imported_name),
+                        )
             for child in node.children:
                 scan_declarations(
                     child, owner_class,
@@ -6303,6 +6377,16 @@ class CodeParser:
                 )
 
         scan_declarations(root, None)
+        symbol_origins = {
+            name: next(iter(bindings))[0]
+            for name, bindings in symbol_binding_candidates.items()
+            if len(bindings) == 1
+        }
+        symbol_names = {
+            name: next(iter(bindings))[1]
+            for name, bindings in symbol_binding_candidates.items()
+            if len(bindings) == 1
+        }
         for name in ambiguous_returns:
             local_returns.pop(name, None)
         if ambiguous_property_classes:
@@ -6339,6 +6423,8 @@ class CodeParser:
         evidence: dict[tuple[int, str], tuple[str, str]] = {}
         expression_evidence: dict[tuple[int, str], list[tuple[str, str]]] = {}
         property_read_edges: list[EdgeInfo] = []
+        unreachable_positions = _python_unreachable_call_positions(source)
+        function_scopes = _python_function_scope_bindings(source)
 
         def bind_targets(
             left, value, type_node, env, class_fields, current_class,
@@ -6413,12 +6499,22 @@ class CodeParser:
             while parent is not None:
                 if parent.type in ("attribute", "subscript", "augmented_assignment"):
                     return False
-                if parent.type in ("assignment", "for_statement"):
-                    target = parent.child_by_field_name("left")
+                if parent.type in (
+                    "assignment", "for_statement", "for_in_clause",
+                ):
+                    target = (
+                        parent.child_by_field_name("left")
+                        or parent.child_by_field_name("target")
+                    )
                     return (
                         target is not None
                         and target.start_byte <= attribute_node.start_byte
                         and attribute_node.end_byte <= target.end_byte
+                    )
+                if parent.type == "as_pattern":
+                    alias = parent.child_by_field_name("alias")
+                    return alias is not None and _node_is_in_child(
+                        attribute_node, alias,
                     )
                 if parent.type == "delete_statement":
                     return True
@@ -6457,6 +6553,12 @@ class CodeParser:
             if node_type == "function_definition":
                 scoped = dict(env)
                 scoped.update(class_fields)
+                function_key = (node.start_point[0] + 1, node.start_point[1])
+                parameter_names, local_names = function_scopes.get(
+                    function_key, (frozenset(), frozenset()),
+                )
+                for parameter_name in parameter_names:
+                    scoped.pop(parameter_name, None)
                 for name, type_name in self._collect_function_typed_parameters(
                     node, "python",
                 ).items():
@@ -6470,12 +6572,22 @@ class CodeParser:
                 receiver_name = (
                     instance_receiver_parameter(node)
                     if current_class and current_function is None
-                    else None
+                    else (
+                        instance_receiver_name
+                        if instance_receiver_name is not None
+                        and instance_receiver_name not in local_names
+                        else None
+                    )
                 )
                 class_receiver = (
                     class_receiver_parameter(node)
                     if current_class and current_function is None
-                    else class_receiver_name
+                    else (
+                        class_receiver_name
+                        if class_receiver_name is not None
+                        and class_receiver_name not in local_names
+                        else None
+                    )
                 )
                 for child in node.children:
                     walk(
@@ -6533,6 +6645,8 @@ class CodeParser:
                 )
                 if (
                     not is_attribute_store_target(node)
+                    and (node.start_point[0] + 1, node.start_point[1])
+                    not in unreachable_positions
                     and owner_evidence is not None
                     and owner_evidence[0] == "class"
                     and property_name_node is not None
@@ -6690,6 +6804,15 @@ class CodeParser:
         import in the current module. An unresolved or ambiguous import never
         supplies a property definition.
         """
+        identity = _python_split_class_identity(owner_type)
+        if identity is not None:
+            origin, actual_class = identity
+            annotations = self._python_module_property_return_annotations(origin)
+            key = (actual_class, property_name)
+            if key not in annotations:
+                return None
+            return origin, actual_class, annotations[key]
+
         local_key = (owner_type, property_name)
         if local_key in context.property_returns:
             return context.file_path, owner_type, context.property_returns[local_key]
@@ -6736,6 +6859,90 @@ class CodeParser:
                     _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE.pop(oldest, None)
             _PYTHON_PROPERTY_RETURN_ANNOTATION_CACHE[cache_key] = properties
             return properties
+
+    def _python_module_class_identities(
+        self, module_file: str,
+    ) -> dict[str, tuple[str, str]]:
+        """Resolve class names in one module without borrowing caller names."""
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+            source = module_path.read_bytes()
+        except (OSError, RuntimeError, ValueError):
+            return {}
+        resolved = normalize_file_path(module_path)
+        if self._excluded_files and resolved in self._excluded_files:
+            return {}
+        cache_key = (resolved, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK:
+            cached = _PYTHON_MODULE_CLASS_IDENTITY_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+        parser = self._get_parser("python")
+        if not parser:
+            return {}
+        try:
+            tree = parser.parse(source)  # type: ignore[union-attr]
+        except (RecursionError, ValueError):  # pragma: no cover
+            return {}
+
+        class_counts: dict[str, int] = {}
+        imported_names: set[str] = set()
+        module_bindings: dict[str, set[str]] = {}
+        symbol_bindings: dict[str, set[tuple[str, str]]] = {}
+
+        def visit(node, depth: int = 0) -> None:
+            if depth > self._MAX_AST_DEPTH or node.type == "function_definition":
+                return
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                if name_node is not None:
+                    name = name_node.text.decode("utf-8", errors="replace")
+                    class_counts[name] = class_counts.get(name, 0) + 1
+            elif node.type == "import_statement":
+                self._python_plain_import_bindings(
+                    node, resolved, module_bindings, imported_names,
+                )
+            elif node.type == "import_from_statement":
+                import_origins: dict[str, str] = {}
+                import_names: dict[str, str] = {}
+                self._python_from_import_bindings(
+                    node, resolved, module_bindings, imported_names,
+                    import_origins, import_names,
+                )
+                for name, origin in import_origins.items():
+                    imported_name = import_names.get(name)
+                    if imported_name is not None:
+                        symbol_bindings.setdefault(name, set()).add(
+                            (origin, imported_name),
+                        )
+            for child in node.children:
+                visit(child, depth + 1)
+
+        visit(tree.root_node)
+        identities = {
+            name: (resolved, name)
+            for name, count in class_counts.items()
+            if count == 1 and name not in symbol_bindings
+        }
+        for name, bindings in symbol_bindings.items():
+            if len(bindings) == 1 and name not in class_counts:
+                identities[name] = next(iter(bindings))
+
+        with _PYTHON_MODULE_CLASS_IDENTITY_CACHE_LOCK:
+            for stale in [
+                key for key in _PYTHON_MODULE_CLASS_IDENTITY_CACHE
+                if key[0] == resolved and key != cache_key
+            ]:
+                _PYTHON_MODULE_CLASS_IDENTITY_CACHE.pop(stale, None)
+            if len(_PYTHON_MODULE_CLASS_IDENTITY_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                for oldest in list(_PYTHON_MODULE_CLASS_IDENTITY_CACHE)[
+                    : _PYTHON_STAR_CACHE_MAX // 2
+                ]:
+                    _PYTHON_MODULE_CLASS_IDENTITY_CACHE.pop(oldest, None)
+            _PYTHON_MODULE_CLASS_IDENTITY_CACHE[cache_key] = identities
+        return identities
 
     def _read_python_property_return_annotations(
         self, module_path: Path,
@@ -6868,7 +7075,30 @@ class CodeParser:
         if not annotation:
             return ("unknown", "")
         type_name = self._base_type_name(annotation)
-        return ("class", type_name) if type_name else ("builtin", "")
+        if not type_name:
+            return ("builtin", "")
+        defining_file = definition[0]
+        if defining_file == context.file_path:
+            origin = context.symbol_origins.get(type_name)
+            if origin:
+                if (
+                    type_name in context.class_names
+                    or type_name in context.imported_names
+                ):
+                    return "unknown", ""
+                return (
+                    "class",
+                    _python_qualified_class_identity(
+                        origin, context.symbol_names.get(type_name, type_name),
+                    ),
+                )
+            return "class", type_name
+        identity = self._python_module_class_identities(defining_file).get(
+            type_name,
+        )
+        if identity is None:
+            return "unknown", ""
+        return "class", _python_qualified_class_identity(*identity)
 
     @staticmethod
     def _merge_python_evidence(
@@ -7463,7 +7693,11 @@ class CodeParser:
             if kind == "module":
                 extra["receiver_module"] = detail
             elif kind == "class":
-                extra["receiver_class"] = detail
+                identity = _python_split_class_identity(detail)
+                if identity is None:
+                    extra["receiver_class"] = detail
+                else:
+                    extra["receiver_class_file"], extra["receiver_class"] = identity
             annotated.append(EdgeInfo(
                 kind=edge.kind,
                 source=edge.source,
