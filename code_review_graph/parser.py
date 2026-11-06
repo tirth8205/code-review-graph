@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePath
@@ -3221,8 +3222,12 @@ class CodeParser:
     _BLADE_DIRECTIVE_RE = re.compile(
         r"""(?<!@)@(extends|include|component|livewire)\s*\(\s*(['"])([^'"]+)\2\s*\)""",
     )
-    _LIQUID_COMMENT_RE = re.compile(
-        r"\{%-?\s*comment\s*-?%\}.*?\{%-?\s*endcomment\s*-?%\}",
+    # Blocks whose body Liquid does not run, plus inline comment tags. ``style``
+    # is left out on purpose: Liquid does run inside it.
+    _LIQUID_LITERAL_RE = re.compile(
+        r"\{%-?\s*(comment|raw|doc|schema|javascript|stylesheet)\s*-?%\}"
+        r".*?\{%-?\s*end\1\s*-?%\}"
+        r"|\{%-?\s*#.*?-?%\}",
         re.DOTALL,
     )
     _LIQUID_TAG_RE = re.compile(
@@ -3230,12 +3235,9 @@ class CodeParser:
         re.DOTALL,
     )
     _LIQUID_OUTPUT_RE = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}", re.DOTALL)
-    _LIQUID_ASSIGN_RE = re.compile(
-        r"(?<![\w-])assign\s+([A-Za-z_][A-Za-z0-9_]*)\s*="
-    )
-    _LIQUID_RENDER_RE = re.compile(
-        r"(?<![\w-])(render|include)\s+(['\"])([^'\"]+)\2"
-    )
+    _LIQUID_ASSIGN_RE = re.compile(r"\s*([A-Za-z_][A-Za-z0-9_-]*)\s*=")
+    _LIQUID_TARGET_RE = re.compile(r"\s*(['\"])([^'\"]+)\1")
+    _LIQUID_MAX_OUTPUT_NAME = 120
     _LARAVEL_ROUTE_FACADE = "Illuminate\\Support\\Facades\\Route"
     _LARAVEL_ELOQUENT_MODEL = "Illuminate\\Database\\Eloquent\\Model"
     _LARAVEL_ROUTE_VERBS = frozenset({
@@ -3900,25 +3902,78 @@ class CodeParser:
             ))
         return nodes, edges
 
-    @classmethod
-    def _mask_liquid_comments(cls, text: str) -> str:
-        """Mask Liquid comments while preserving offsets and line numbers."""
-        def replace_comment(match: re.Match[str]) -> str:
-            return "".join(
-                character if character in "\r\n" else " "
-                for character in match.group(0)
-            )
+    @staticmethod
+    def _blank_liquid_span(match: re.Match[str]) -> str:
+        """Blank a span of a template, keeping its offsets and line numbers."""
+        return "".join(
+            character if character in "\r\n" else " "
+            for character in match.group(0)
+        )
 
-        return cls._LIQUID_COMMENT_RE.sub(replace_comment, text)
+    def _liquid_statements(self, masked: str) -> Iterator[tuple[str, str, int]]:
+        """Yield ``(directive, arguments, offset)`` for each Liquid statement.
+
+        Only a statement's first word is its directive, so a quoted value can
+        never read as one. A ``{% liquid %}`` tag holds one statement per line,
+        with ``#`` and ``comment`` lines of its own.
+        """
+        for tag in self._LIQUID_TAG_RE.finditer(masked):
+            if tag.group(1) != "liquid":
+                yield tag.group(1), tag.group(2), tag.start(2)
+                continue
+            offset = tag.start(2)
+            in_comment = False
+            for line in tag.group(2).split("\n"):
+                words = line.split(maxsplit=1)
+                directive = words[0] if words else ""
+                if directive == "comment":
+                    in_comment = True
+                elif directive == "endcomment":
+                    in_comment = False
+                elif directive and not directive.startswith("#") and not in_comment:
+                    yield directive, words[1] if len(words) > 1 else "", offset
+                offset += len(line) + 1
+
+    def _resolve_liquid_snippet(self, path: Path, name: str) -> Optional[str]:
+        """Return the ``snippets/<name>.liquid`` a render or include names.
+
+        A theme keeps its snippets in one folder at its root and can sit anywhere
+        in the repository, so walk up from the template, stopping at the root.
+        """
+        if self._repo_root is None or not path.resolve().is_relative_to(self._repo_root):
+            return None
+        if ".." in Path(name).parts or Path(name).is_absolute():
+            return None
+        filename = name if name.endswith(".liquid") else f"{name}.liquid"
+        directory = path.parent
+        while True:
+            candidate = directory / "snippets" / filename
+            if self._file_exists_exact(candidate):
+                return normalize_file_path(candidate)
+            if directory.resolve() == self._repo_root or directory.parent == directory:
+                return None
+            directory = directory.parent
+
+    def _liquid_output_name(self, expression: str) -> str:
+        """Name an output by what it prints, so the name survives line changes."""
+        if len(expression) <= self._LIQUID_MAX_OUTPUT_NAME:
+            return f"output:{expression}"
+        digest = hashlib.sha256(expression.encode("utf-8")).hexdigest()[:8]
+        return f"output:{expression[:self._LIQUID_MAX_OUTPUT_NAME]}#{digest}"
 
     def _parse_liquid(
         self,
         path: Path,
         source: bytes,
     ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
-        """Index Liquid files without requiring a dedicated Tree-sitter grammar."""
+        """Index Liquid files without requiring a dedicated Tree-sitter grammar.
+
+        A repeated assignment or output is one node with every line in
+        ``extra["lines"]``: names carry no line number, so an edit above them
+        does not rename them, and a second use cannot overwrite the first.
+        """
         text = source.decode("utf-8", errors="replace")
-        masked = self._mask_liquid_comments(text)
+        masked = self._LIQUID_LITERAL_RE.sub(self._blank_liquid_span, text)
         file_path = normalize_file_path(path)
         nodes = [
             NodeInfo(
@@ -3928,7 +3983,7 @@ class CodeParser:
                 line_start=1,
                 line_end=source.count(b"\n") + 1,
                 language="liquid",
-                is_test=_is_test_file(file_path),
+                is_test=self._is_test_path(file_path),
             ),
         ]
         edges: list[EdgeInfo] = []
@@ -3936,48 +3991,58 @@ class CodeParser:
         def line_at(offset: int) -> int:
             return masked.count("\n", 0, offset) + 1
 
-        for match in self._LIQUID_OUTPUT_RE.finditer(masked):
-            expression = " ".join(match.group(1).split())
-            if not expression:
-                continue
-            line = line_at(match.start())
-            nodes.append(NodeInfo(
-                kind="Output",
-                name=f"output_{line}:{expression[:120]}",
-                file_path=file_path,
-                line_start=line,
-                line_end=line_at(match.end()),
-                language="liquid",
-            ))
+        # name -> (kind, every line, line the first use ends on)
+        children: dict[str, tuple[str, list[int], int]] = {}
 
-        for tag_match in self._LIQUID_TAG_RE.finditer(masked):
-            tag = tag_match.group(1)
-            body = tag_match.group(2)
-            segments = [body] if tag == "liquid" else []
-            if tag in ("assign", "render", "include"):
-                segments.append(f"{tag}{body}")
-            for segment in segments:
-                for assign in self._LIQUID_ASSIGN_RE.finditer(segment):
-                    line = line_at(tag_match.start(2) + assign.start())
-                    nodes.append(NodeInfo(
-                        kind="Variable",
-                        name=assign.group(1),
-                        file_path=file_path,
-                        line_start=line,
-                        line_end=line,
-                        language="liquid",
-                    ))
-
-                for render in self._LIQUID_RENDER_RE.finditer(segment):
-                    offset = tag_match.start(2) + render.start()
+        for directive, arguments, offset in self._liquid_statements(masked):
+            if directive == "assign":
+                assign = self._LIQUID_ASSIGN_RE.match(arguments)
+                if assign:
+                    line = line_at(offset)
+                    children.setdefault(assign.group(1), ("Variable", [], line))[1].append(line)
+            elif directive in ("render", "include"):
+                target = self._LIQUID_TARGET_RE.match(arguments)
+                if target:
                     edges.append(EdgeInfo(
-                        kind="REFERENCES",
+                        kind="IMPORTS_FROM",
                         source=file_path,
-                        target=render.group(3),
+                        target=(
+                            self._resolve_liquid_snippet(path, target.group(2))
+                            or target.group(2)
+                        ),
                         file_path=file_path,
                         line=line_at(offset),
-                        extra={"liquid_directive": render.group(1)},
+                        extra={"liquid_directive": directive},
                     ))
+
+        # Text inside a tag, such as a quoted value, is not output.
+        for match in self._LIQUID_OUTPUT_RE.finditer(
+            self._LIQUID_TAG_RE.sub(self._blank_liquid_span, masked),
+        ):
+            expression = " ".join(match.group(1).split())
+            if expression:
+                children.setdefault(
+                    self._liquid_output_name(expression),
+                    ("Output", [], line_at(match.end())),
+                )[1].append(line_at(match.start()))
+
+        for name, (kind, lines, line_end) in children.items():
+            nodes.append(NodeInfo(
+                kind=kind,
+                name=name,
+                file_path=file_path,
+                line_start=lines[0],
+                line_end=line_end,
+                language="liquid",
+                extra={"lines": lines} if len(lines) > 1 else {},
+            ))
+            edges.append(EdgeInfo(
+                kind="CONTAINS",
+                source=file_path,
+                target=f"{file_path}::{name}",
+                file_path=file_path,
+                line=lines[0],
+            ))
 
         return nodes, edges
 

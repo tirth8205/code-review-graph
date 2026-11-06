@@ -557,7 +557,9 @@ async def semantic_search_nodes_tool(
 
     Args:
         query: Search string to match against node names.
-        kind: Optional filter: File, Class, Function, Type, Test, or YamlPath.
+        kind: Optional filter: File, Class, Function, Type, Test, YamlPath,
+              Variable, or Output. Liquid Output nodes are found only by asking
+              for that kind.
         limit: Maximum results. Default: 20.
         repo_root: Repository root path. Auto-detected if omitted.
         model: Embedding model for query vectors. Must match the model used

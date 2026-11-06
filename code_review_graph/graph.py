@@ -2676,7 +2676,9 @@ class GraphStore:
         """Keyword search across node names.
 
         Tries FTS5 first (fast, tokenized matching), then falls back to
-        LIKE-based substring search when FTS5 returns no results.
+        LIKE-based substring search when FTS5 returns no results. Liquid
+        ``Output`` nodes are left out: their names are the text a template
+        prints, and on a theme they would crowd out every real match.
         """
         words = query.split()
         if not words:
@@ -2693,7 +2695,7 @@ class GraphStore:
             rows = self._conn.execute(
                 "SELECT n.* FROM nodes_fts f "
                 "JOIN nodes n ON f.rowid = n.id "
-                "WHERE nodes_fts MATCH ? LIMIT ?",
+                "WHERE nodes_fts MATCH ? AND n.kind != 'Output' LIMIT ?",
                 (fts_query, limit),
             ).fetchall()
             if rows:
@@ -2712,7 +2714,9 @@ class GraphStore:
             params.extend([f"%{w}%", f"%{w}%"])
 
         where = " AND ".join(conditions)
-        sql = f"SELECT * FROM nodes WHERE {where} LIMIT ?"  # nosec B608
+        sql = (  # nosec B608
+            f"SELECT * FROM nodes WHERE {where} AND kind != 'Output' LIMIT ?"
+        )
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_node(r) for r in rows]
@@ -2733,7 +2737,7 @@ class GraphStore:
             count = self._conn.execute(
                 "SELECT COUNT(*) FROM nodes_fts f "
                 "JOIN nodes n ON f.rowid = n.id "
-                "WHERE nodes_fts MATCH ?",
+                "WHERE nodes_fts MATCH ? AND n.kind != 'Output'",
                 (fts_query,),
             ).fetchone()[0]
             if count:
@@ -2750,7 +2754,9 @@ class GraphStore:
             )
             params.extend([f"%{value}%", f"%{value}%"])
         where = " AND ".join(conditions)
-        sql = f"SELECT COUNT(*) FROM nodes WHERE {where}"  # nosec B608
+        sql = (  # nosec B608
+            f"SELECT COUNT(*) FROM nodes WHERE {where} AND kind != 'Output'"
+        )
         return int(self._conn.execute(sql, params).fetchone()[0])
 
     def count_nodes_by_name(

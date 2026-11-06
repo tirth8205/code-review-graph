@@ -4,6 +4,16 @@
 
 ### Added
 
+- Liquid templates (`.liquid`) are indexed. A template gets `Variable` nodes for
+  `assign` and `Output` nodes for `{{ ... }}`, and `render` and `include` link to
+  the `snippets/<name>.liquid` file, so `importers_of` answers who renders a
+  snippet and it counts towards impact. `raw`, `comment`, `doc`, `schema`,
+  `javascript` and `stylesheet` blocks, `#` comments and quoted text are not read
+  as code. Names hold no line number, so an edit above them does not rename them,
+  and a repeated name is one node that lists every line. `Output` nodes are found
+  by search only with `kind="Output"`: on Shopify's Dawn theme they otherwise took
+  all ten top hits for "product". (#878, #348)
+
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`
