@@ -76,6 +76,18 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def _write_chain(root: Path) -> None:
+    """``launch`` -> ``service`` -> ``leaf``, one function per file."""
+    (root / "cmd.py").write_text(
+        "from services import service\n\n\ndef launch():\n    return service()\n"
+    )
+    (root / "services.py").write_text(
+        "from storage import leaf\n\n\ndef service():\n    return leaf()\n"
+    )
+    (root / "storage.py").write_text("def leaf():\n    return 1\n")
+    _commit_all(root, "chain")
+
+
 def _build(root: Path, *, full: bool, postprocess: str = "full") -> dict:
     result = build_or_update_graph(
         full_rebuild=full,
@@ -135,7 +147,8 @@ def _dangling(store: GraphStore) -> tuple[int, int]:
     conn = store._conn
     memberships = conn.execute(
         "SELECT COUNT(*) FROM flow_memberships "
-        "WHERE node_id NOT IN (SELECT id FROM nodes)"
+        "WHERE node_id NOT IN (SELECT id FROM nodes) "
+        "OR flow_id NOT IN (SELECT id FROM flows)"
     ).fetchone()[0]
     entry_points = conn.execute(
         "SELECT COUNT(*) FROM flows WHERE entry_point_id NOT IN (SELECT id FROM nodes)"
@@ -237,6 +250,81 @@ class TestBuildToolParity:
                 assert members, "community row kept with no members"
                 assert size == len(members)
         _assert_matches_full_rebuild(repo)
+
+    def test_deleted_entry_point_promotes_its_surviving_callee(self, repo: Path) -> None:
+        """With the caller's file gone, the next function down heads the flow."""
+        _write_chain(repo)
+        _build(repo, full=True)
+        assert "launch" in _flow_names(repo)
+        assert "service" not in _flow_names(repo)
+        _git_ok(repo, "rm", "-q", "cmd.py")
+        _commit_all(repo, "delete the caller")
+
+        _build(repo, full=False)
+        assert "launch" not in _flow_names(repo)
+        assert "service" in _flow_names(repo)
+        _assert_matches_full_rebuild(repo)
+
+    def test_caller_dropping_a_call_promotes_the_callee(self, repo: Path) -> None:
+        """Only the caller's file changed, yet its old callee now heads a flow."""
+        _write_chain(repo)
+        _build(repo, full=True)
+        (repo / "cmd.py").write_text(
+            "def launch():\n    return other()\n\n\ndef other():\n    return 2\n"
+        )
+        _commit_all(repo, "stop calling service")
+
+        _build(repo, full=False)
+        assert "service" in _flow_names(repo)
+        _assert_matches_full_rebuild(repo, communities=False)
+
+    def test_callee_that_heads_its_own_flow_is_not_traced_twice(self, repo: Path) -> None:
+        """``main`` is an entry point by name, and is also a member of ``launch``."""
+        (repo / "cmd.py").write_text(
+            "from services import main as svc\n\n\ndef launch():\n    return svc()\n"
+        )
+        (repo / "services.py").write_text(
+            "from storage import leaf\n\n\ndef main():\n    return leaf()\n"
+        )
+        (repo / "storage.py").write_text("def leaf():\n    return 1\n")
+        (repo / "app.py").unlink()
+        _commit_all(repo, "chain")
+        _build(repo, full=True)
+        (repo / "cmd.py").write_text(
+            "from services import main as svc\n\n\ndef launch():\n"
+            "    svc()\n    return 2\n"
+        )
+        _commit_all(repo, "edit the caller")
+
+        _build(repo, full=False)
+        assert _flow_names(repo).count("main") == 1
+        _assert_matches_full_rebuild(repo, communities=False)
+
+    def test_captured_flow_names_stay_out_of_the_tool_response(self, repo: Path) -> None:
+        """Every node of every touched flow would be a very long list for a client."""
+        _write_chain(repo)
+        _build(repo, full=True)
+        (repo / "storage.py").write_text("def leaf():\n    return 2\n")
+        _commit_all(repo, "edit the callee")
+
+        assert "flow_entry_point_qns" not in _build(repo, full=False)
+
+    def test_renamed_entry_point_leaves_no_phantom_membership(self, repo: Path) -> None:
+        """The hook path drops the old flow, so its other members must go with it."""
+        _write_chain(repo)
+        _build(repo, full=True)
+        (repo / "cmd.py").write_text(
+            "from services import service\n\n\ndef relaunch():\n    return service()\n"
+        )
+        _commit_all(repo, "rename the entry point")
+
+        _build(repo, full=False, postprocess="minimal")
+        with GraphStore(get_db_path(repo)) as store:
+            assert _dangling(store) == (0, 0)
+            service = next(
+                n for n in store.get_nodes_by_kind(["Function"]) if n.name == "service"
+            )
+            assert store.count_flow_memberships(service.id) == 0
 
     def test_rename_matches_full_rebuild(self, repo: Path) -> None:
         _build(repo, full=True)
@@ -416,7 +504,7 @@ class TestBuildToolParity:
             )
             store._conn.execute(
                 "UPDATE nodes SET community_id = NULL WHERE file_path = ?",
-                (str((repo / "lonely.py").resolve()),),
+                (normalize(repo / "lonely.py"),),
             )
             store.commit()
             assert _dangling(store) != (0, 0)
@@ -480,7 +568,7 @@ class TestPathSpellings:
 
         with GraphStore(get_db_path(real)) as store:
             expanded = expand_changed_file_paths(store, ["tool.py"], repo_root=link)
-        assert str((real / "tool.py").resolve()) in expanded
+        assert normalize(real / "tool.py") in expanded
 
     def test_windows_separator_input_matches_posix_identity(
         self, tmp_path: Path,
@@ -659,7 +747,7 @@ class TestLifecycleHelpers:
             assert len(captured) == 2 * count
 
             entry_qns = clear_flows_for_files(store, paths)
-            assert len(entry_qns) == count
+            assert len(entry_qns) == 2 * count, "every entry point and its worker"
             assert store._conn.execute("SELECT COUNT(*) FROM flows").fetchone()[0] == 0
 
             retraced = incremental_trace_flows(
@@ -721,7 +809,9 @@ def test_failed_parse_in_parallel_path_keeps_flows(
         assert len(m0) == 1 and m0[0][1] != _MISSING, "failed file lost its flow"
         assert _dangling(store) == (0, 0)
         assert sorted(result["flow_entry_point_qns"]) == sorted(
-            f"{normalize(tmp_path / n)}::entry_{n[:-3]}" for n in names[1:]
+            f"{normalize(tmp_path / n)}::{kind}_{n[:-3]}"
+            for n in names[1:]
+            for kind in ("entry", "work")
         )
     finally:
         store.close()

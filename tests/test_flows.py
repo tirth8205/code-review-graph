@@ -637,8 +637,8 @@ class TestFlows:
 
     def test_incremental_trace_flows_relative_vs_absolute_new_entry(self, tmp_path):
         """Relative git paths must match absolute graph file_path values (#569)."""
-        abs_a = str((tmp_path / "a.py").resolve())
-        abs_b = str((tmp_path / "b.py").resolve())
+        abs_a = (tmp_path / "a.py").resolve().as_posix()
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
 
         self._add_func("old_entry", path=abs_a)
         self._add_func("old_callee", path=abs_a)
@@ -668,8 +668,8 @@ class TestFlows:
         )
         from code_review_graph.parser import EdgeInfo, NodeInfo
 
-        abs_routes = str((tmp_path / "routes.py").resolve())
-        abs_services = str((tmp_path / "services.py").resolve())
+        abs_routes = (tmp_path / "routes.py").resolve().as_posix()
+        abs_services = (tmp_path / "services.py").resolve().as_posix()
 
         handler_id = self._add_func("handler", path=abs_routes)
         service_id = self._add_func("service", path=abs_services)
@@ -751,7 +751,7 @@ class TestFlows:
 
     def test_incremental_trace_flows_relative_without_repo_root(self, tmp_path):
         """Relative changed_files must match absolute paths without repo_root (#569)."""
-        abs_b = str((tmp_path / "b.py").resolve())
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
         self._add_func("new_entry", path=abs_b)
         self._add_func("new_callee", path=abs_b)
         self._add_call(f"{abs_b}::new_entry", f"{abs_b}::new_callee", abs_b)
@@ -765,10 +765,10 @@ class TestFlows:
         """Filenames containing _ or % must not fuzzy-match siblings (#569)."""
         from code_review_graph.flows import expand_changed_file_paths
 
-        abs_literal = str((tmp_path / "a_b.py").resolve())
-        abs_other = str((tmp_path / "acb.py").resolve())
-        abs_pct = str((tmp_path / "a%z.py").resolve())
-        abs_pct_other = str((tmp_path / "axz.py").resolve())
+        abs_literal = (tmp_path / "a_b.py").resolve().as_posix()
+        abs_other = (tmp_path / "acb.py").resolve().as_posix()
+        abs_pct = (tmp_path / "a%z.py").resolve().as_posix()
+        abs_pct_other = (tmp_path / "axz.py").resolve().as_posix()
         self._add_func("literal", path=abs_literal)
         self._add_func("other", path=abs_other)
         self._add_func("pct", path=abs_pct)
@@ -791,10 +791,10 @@ class TestFlows:
         """b.py must not match ab.py / data_utils.py-style suffix collisions."""
         from code_review_graph.flows import expand_changed_file_paths
 
-        abs_b = str((tmp_path / "b.py").resolve())
-        abs_ab = str((tmp_path / "ab.py").resolve())
-        abs_utils = str((tmp_path / "utils.py").resolve())
-        abs_data_utils = str((tmp_path / "data_utils.py").resolve())
+        abs_b = (tmp_path / "b.py").resolve().as_posix()
+        abs_ab = (tmp_path / "ab.py").resolve().as_posix()
+        abs_utils = (tmp_path / "utils.py").resolve().as_posix()
+        abs_data_utils = (tmp_path / "data_utils.py").resolve().as_posix()
         self._add_func("b_fn", path=abs_b)
         self._add_func("ab_fn", path=abs_ab)
         self._add_func("utils_fn", path=abs_utils)
@@ -821,8 +821,8 @@ class TestFlows:
         right = tmp_path / "right"
         left.mkdir()
         right.mkdir()
-        abs_left = str((left / "util.py").resolve())
-        abs_right = str((right / "util.py").resolve())
+        abs_left = (left / "util.py").resolve().as_posix()
+        abs_right = (right / "util.py").resolve().as_posix()
         self._add_func("left_fn", path=abs_left)
         self._add_func("right_fn", path=abs_right)
 
@@ -839,8 +839,8 @@ class TestFlows:
 
         left = tmp_path / "left"
         left.mkdir()
-        abs_root = str((tmp_path / "util.py").resolve())
-        abs_nested = str((left / "util.py").resolve())
+        abs_root = (tmp_path / "util.py").resolve().as_posix()
+        abs_nested = (left / "util.py").resolve().as_posix()
         self._add_func("root_util", path=abs_root)
         self._add_func("nested_util", path=abs_nested)
 

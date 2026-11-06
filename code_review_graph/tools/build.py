@@ -793,7 +793,8 @@ def build_or_update_graph(
         if not full_rebuild:
             changed = list(result.get("changed_files") or [])
             changed.extend(result.get("dependent_files") or [])
-            entry_qns = list(result.get("flow_entry_point_qns") or [])
+            # Internal, and can run to thousands of names: not for the response.
+            entry_qns = list(build_result.pop("flow_entry_point_qns", None) or [])
             communities_affected = bool(
                 result.get("communities_were_affected")
             )

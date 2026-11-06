@@ -648,7 +648,7 @@ class TestCommunities:
         )
         from code_review_graph.parser import NodeInfo
 
-        abs_auth = str((tmp_path / "auth.py").resolve())
+        abs_auth = (tmp_path / "auth.py").resolve().as_posix()
         login = NodeInfo(
             kind="Function",
             name="login",

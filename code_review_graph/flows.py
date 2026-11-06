@@ -141,29 +141,44 @@ def _flows_touching_files(
     if not flow_ids:
         return node_ids, [], set()
 
-    conn = store._conn
-    entry_qns: set[str] = set()
+    return node_ids, flow_ids, _flow_node_qns(store, flow_ids)
+
+
+def _flow_node_qns(store: GraphStore, flow_ids: list[int]) -> set[str]:
+    """Return the qualified names of every node in *flow_ids*, entry points included.
+
+    Any of them may head a flow once these flows go: when a caller is deleted or
+    stops calling, the next function down has no caller left, so a full rebuild
+    traces it even though its own file did not change.
+    """
+    qns: set[str] = set()
     for i in range(0, len(flow_ids), _SQL_BATCH):
         batch = flow_ids[i:i + _SQL_BATCH]
         placeholders = ",".join("?" * len(batch))
-        rows = conn.execute(
+        rows = store._conn.execute(
             f"SELECT n.qualified_name FROM flows f "  # nosec B608
             f"JOIN nodes n ON n.id = f.entry_point_id "
-            f"WHERE f.id IN ({placeholders})",
-            batch,
+            f"WHERE f.id IN ({placeholders}) "
+            f"UNION "
+            f"SELECT n.qualified_name FROM flow_memberships fm "
+            f"JOIN nodes n ON n.id = fm.node_id "
+            f"WHERE fm.flow_id IN ({placeholders})",
+            [*batch, *batch],
         ).fetchall()
-        entry_qns.update(r[0] for r in rows if r[0])
-    return node_ids, flow_ids, entry_qns
+        qns.update(r[0] for r in rows if r[0])
+    return qns
 
 
 def capture_affected_flow_entry_points(
     store: GraphStore,
     file_paths: list[str],
 ) -> set[str]:
-    """Return entry-point qualified names for flows touching *file_paths*.
+    """Return the names that may head a flow, for flows touching *file_paths*.
 
-    Must run **before** node replacement: after ``remove_file_data`` the old
-    node IDs are gone and membership JOINs can no longer find those flows.
+    That is every node of those flows, not only their entry points; see
+    :func:`_flow_node_qns`. Must run **before** node replacement: after
+    ``remove_file_data`` the old node IDs are gone and membership JOINs can no
+    longer find those flows.
     """
     _node_ids, _flow_ids, entry_qns = _flows_touching_files(store, file_paths)
     return entry_qns
@@ -241,8 +256,8 @@ def remap_flow_node_ids(store: GraphStore, old_ids: dict[int, str]) -> int:
 def clear_flows_for_files(store: GraphStore, file_paths: list[str]) -> set[str]:
     """Delete flows that touch *file_paths* before those nodes are replaced.
 
-    Returns the entry-point qualified names that should be re-traced after
-    replacement (stable across node ID churn).
+    Returns the qualified names to re-trace after replacement if they are entry
+    points then (stable across node ID churn); see :func:`_flow_node_qns`.
     """
     if not file_paths:
         return set()
@@ -311,6 +326,12 @@ def purge_orphan_flow_data(store: GraphStore) -> int:
             "DELETE FROM flows WHERE id NOT IN ("
             "SELECT DISTINCT flow_id FROM flow_memberships)"
         )
+        # No foreign key cascades: a flow dropped above for its missing entry
+        # point still has rows for the members that are alive.
+        cur = conn.execute(
+            "DELETE FROM flow_memberships WHERE flow_id NOT IN (SELECT id FROM flows)"
+        )
+        deleted += cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else 0
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -764,8 +785,8 @@ def incremental_trace_flows(
     3. Find flow IDs whose memberships reference nodes in the expanded paths.
     4. Collect entry-point node IDs / qualified names before deleting those flows.
     5. Delete only the affected flows and their memberships.
-    6. Re-detect entry points in expanded paths **or** matching pre-captured
-       entry-point qualified names (stable across node replacement).
+    6. Re-detect entry points in expanded paths **or** matching the qualified
+       names of nodes in those flows (stable across node replacement).
     7. BFS-trace each relevant entry point via :func:`_trace_single_flow`.
     8. INSERT the new flows (without clearing unrelated flows).
 
@@ -800,6 +821,7 @@ def incremental_trace_flows(
                 path_batch,
             ).fetchall()
             affected_ids.extend(r[0] for r in affected_rows)
+    preserved_entry_qns |= _flow_node_qns(store, list(dict.fromkeys(affected_ids)))
     # A captured entry point's flow may have lost every row in the changed
     # files (the function it called was renamed). It is re-traced below, so
     # the old row has to go or the flow would be stored twice.
