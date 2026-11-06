@@ -830,6 +830,19 @@ def test_grep_rank_tie_breaks_on_path():
         assert ranked == [("aa.py", 2), ("zz.py", 2)]
 
 
+def test_grep_rank_puts_test_files_below_code_unless_asked():
+    from code_review_graph.eval.benchmarks.agent_baseline import grep_rank
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        corpus = Path(tmpdir)
+        (corpus / "tests").mkdir()
+        (corpus / "tests" / "helpers.py").write_text("greet " * 5, encoding="utf-8")
+        (corpus / "impl.py").write_text("greet " * 3, encoding="utf-8")
+
+        assert grep_rank(corpus, ["greet"])[0][0] == "impl.py"
+        assert Path(grep_rank(corpus, ["greet", "fixture"])[0][0]).name == "helpers.py"
+
+
 def test_agent_baseline_run_with_mock_repo():
     from code_review_graph.eval.benchmarks import agent_baseline
 
