@@ -3645,6 +3645,7 @@ class CodeParser:
             self._extract_php_laravel_edges(
                 tree.root_node,
                 file_path_str,
+                nodes,
                 edges,
             )
             edges = self._resolve_php_scoped_calls(
@@ -15833,12 +15834,14 @@ class CodeParser:
         self,
         root,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
     ) -> None:
         """Run evidence-gated Laravel analysis without altering generic calls."""
         self._walk_php_laravel_sequence(
             root,
             file_path,
+            nodes,
             edges,
             namespace="",
         )
@@ -15847,6 +15850,7 @@ class CodeParser:
         self,
         container,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         namespace: str,
     ) -> None:
@@ -15868,6 +15872,7 @@ class CodeParser:
                     self._walk_php_laravel_sequence(
                         block,
                         file_path,
+                        nodes,
                         edges,
                         namespace=child_namespace,
                     )
@@ -15883,6 +15888,7 @@ class CodeParser:
             self._walk_php_laravel_node(
                 child,
                 file_path,
+                nodes,
                 edges,
                 current_namespace,
                 imports,
@@ -15895,6 +15901,7 @@ class CodeParser:
         self,
         node,
         file_path: str,
+        nodes: list[NodeInfo],
         edges: list[EdgeInfo],
         namespace: str,
         imports: dict[str, str],
@@ -15917,6 +15924,7 @@ class CodeParser:
                 self._walk_php_laravel_node(
                     child,
                     file_path,
+                    nodes,
                     edges,
                     namespace,
                     imports,
@@ -15932,6 +15940,7 @@ class CodeParser:
                 self._walk_php_laravel_node(
                     child,
                     file_path,
+                    nodes,
                     edges,
                     namespace,
                     imports,
@@ -15951,21 +15960,29 @@ class CodeParser:
                 enclosing_class,
                 enclosing_func,
             )
-        elif node.type == "member_call_expression" and eloquent_model:
-            self._emit_laravel_relationship_edge(
-                node,
-                file_path,
-                edges,
-                namespace,
-                imports,
-                enclosing_class,
-                enclosing_func,
+            self._emit_laravel_endpoint_nodes(
+                node, file_path, nodes, edges, namespace, imports,
+            )
+        elif node.type == "member_call_expression":
+            if eloquent_model:
+                self._emit_laravel_relationship_edge(
+                    node,
+                    file_path,
+                    edges,
+                    namespace,
+                    imports,
+                    enclosing_class,
+                    enclosing_func,
+                )
+            self._emit_laravel_endpoint_nodes(
+                node, file_path, nodes, edges, namespace, imports,
             )
 
         for child in node.children:
             self._walk_php_laravel_node(
                 child,
                 file_path,
+                nodes,
                 edges,
                 namespace,
                 imports,
@@ -16167,6 +16184,269 @@ class CodeParser:
         ):
             return None
         return class_reference, method
+
+    @staticmethod
+    def _php_route_arguments(node) -> list:
+        arguments = next((c for c in node.children if c.type == "arguments"), None)
+        return [c for c in arguments.children if c.type == "argument"] if arguments else []
+
+    @staticmethod
+    def _php_string_literal(value) -> Optional[str]:
+        """Return a quoted PHP string's value without interpolation or escapes, else None.
+
+        Single-quoted strings are decoded (``\\'`` and ``\\\\``); double-quoted strings
+        with escape sequences or interpolation are rejected.
+        """
+        if value is None:
+            return None
+        if value.type == "encapsed_string" and any(
+            c.is_named and c.type != "string_content" for c in value.children
+        ):
+            return None
+        if value.type not in ("string", "encapsed_string"):
+            return None
+        text = value.text.decode("utf-8", errors="replace")
+        if value.type == "string" and text.startswith("'"):
+            return re.sub(r"\\([\\'])", r"\1", text[1:-1])
+        return text[1:-1]
+
+    @classmethod
+    def _php_route_literal(cls, node) -> Optional[str]:
+        return cls._php_string_literal(next((c for c in node.children if c.is_named), None))
+
+    def _php_route_facade_call(
+        self, node, namespace: str, imports: dict[str, str],
+    ) -> Optional[str]:
+        receiver, method = self._php_scoped_call_parts(node)
+        if not receiver or not method:
+            return None
+        resolved = self._php_resolve_class_reference(receiver, namespace, imports)
+        return method if resolved.casefold() == self._LARAVEL_ROUTE_FACADE.casefold() else None
+
+    def _php_route_group_settings(
+        self, call, namespace: str, imports: dict[str, str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """Read literal prefix and controller from a Route group call chain."""
+        prefix = ""
+        controller = None
+        chain = []
+        current = call
+        while current.type == "member_call_expression":
+            name = current.child_by_field_name("name")
+            if name is None:
+                return None
+            chain.append((name.text.decode("utf-8"), self._php_route_arguments(current)))
+            current = current.child_by_field_name("object")
+            if current is None:
+                return None
+        base = self._php_route_facade_call(current, namespace, imports)
+        if base is None:
+            return None
+        chain.append((base, self._php_route_arguments(current)))
+        for method, args in reversed(chain):
+            if method == "prefix":
+                if not args or (part := self._php_route_literal(args[0])) is None:
+                    return None
+                prefix = self._join_spring_route(prefix, part)
+            elif method == "controller":
+                if not args:
+                    return None
+                access = next(
+                    (c for c in args[0].children if c.type == "class_constant_access_expression"),
+                    None,
+                )
+                controller = self._php_class_constant_reference(access) if access else None
+                if controller is None:
+                    return None
+            elif method == "group" and len(args) > 1:
+                # Route::group($attributes, $routes): only a literal array with literal
+                # keys is static evidence; anything else may carry a prefix we cannot see.
+                options = next((c for c in args[0].children if c.is_named), None)
+                if options is None or options.type != "array_creation_expression":
+                    return None
+                for item in options.children:
+                    if item.type != "array_element_initializer":
+                        continue
+                    values = [c for c in item.children if c.is_named]
+                    if len(values) != 2:
+                        return None
+                    key = self._php_string_literal(values[0])
+                    if key is None:
+                        return None
+                    if key == "prefix":
+                        part = self._php_string_literal(values[1])
+                        if part is None:
+                            return None
+                        prefix = self._join_spring_route(prefix, part)
+                    elif key == "controller":
+                        controller = (
+                            self._php_class_constant_reference(values[1])
+                            if values[1].type == "class_constant_access_expression"
+                            else None
+                        )
+                        if controller is None:
+                            return None
+        return prefix, controller
+
+    def _php_route_enclosing_groups(
+        self, node, namespace: str, imports: dict[str, str],
+    ) -> Optional[tuple[str, Optional[str]]]:
+        groups = []
+        current = node.parent
+        while current is not None:
+            if current.type in ("anonymous_function", "arrow_function"):
+                argument = current.parent
+                if argument is not None and argument.type == "argument":
+                    arguments = argument.parent
+                    call = arguments.parent if arguments is not None else None
+                    if call is not None and call.type in (
+                        "scoped_call_expression", "member_call_expression",
+                    ):
+                        name = call.child_by_field_name("name")
+                        if name is not None and name.text == b"group":
+                            settings = self._php_route_group_settings(call, namespace, imports)
+                            if settings is None:
+                                return None
+                            groups.append(settings)
+            current = current.parent
+        prefix = ""
+        controller = None
+        for group_prefix, group_controller in reversed(groups):
+            prefix = self._join_spring_route(prefix, group_prefix)
+            controller = group_controller or controller
+        return prefix, controller
+
+    def _php_endpoint_handler(
+        self, argument, group_controller: Optional[str],
+    ) -> Optional[tuple[str, str]]:
+        value = next((c for c in argument.children if c.is_named), None)
+        if value is None:
+            return None
+        if value.type == "class_constant_access_expression":
+            controller = self._php_class_constant_reference(value)
+            return (controller, "__invoke") if controller else None
+        if value.type in ("string", "encapsed_string"):
+            literal = self._php_route_literal(argument)
+            if literal is None:
+                return None
+            if "@" in literal:
+                # Laravel reads 'Class@method' as a class name, not through PHP `use`
+                # aliases or the file namespace; the leading backslash keeps it literal.
+                class_name, method = literal.rsplit("@", 1)
+                controller = "\\" + class_name.lstrip("\\") if class_name.strip("\\") else None
+            else:
+                controller, method = group_controller, literal
+            if controller and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
+                return controller, method
+            return None
+        if value.type != "array_creation_expression":
+            return None
+        elements = [c for c in value.children if c.type == "array_element_initializer"]
+        if len(elements) != 2:
+            return None
+        access = next(
+            (c for c in elements[0].children if c.type == "class_constant_access_expression"),
+            None,
+        )
+        controller = self._php_class_constant_reference(access) if access else None
+        method = self._php_route_literal(elements[1])
+        if controller and method and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", method):
+            return controller, method
+        return None
+
+    def _emit_laravel_endpoint_nodes(
+        self, node, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo],
+        namespace: str, imports: dict[str, str],
+    ) -> None:
+        """Emit parse-time Laravel endpoints using Spring's node and edge shape."""
+        if Path(file_path).parent.name != "routes":
+            return
+        fluent_prefix, fluent_controller = "", None
+        if node.type == "member_call_expression":
+            # Route::middleware('auth')->get(...): the chain may carry settings.
+            name_node = node.child_by_field_name("name")
+            verb = name_node.text.decode("utf-8") if name_node is not None else None
+        else:
+            verb = self._php_route_facade_call(node, namespace, imports)
+        if verb not in self._LARAVEL_ROUTE_VERBS or verb in {"resource", "apiResource"}:
+            return
+        if node.type == "member_call_expression":
+            fluent = self._php_route_group_settings(node, namespace, imports)
+            if fluent is None:
+                return
+            fluent_prefix, fluent_controller = fluent
+        args = self._php_route_arguments(node)
+        path_index = 1 if verb == "match" else 0
+        if len(args) <= path_index + 1:
+            return
+        path = self._php_route_literal(args[path_index])
+        if path is None:
+            return
+        context = self._php_route_enclosing_groups(node, namespace, imports)
+        if context is None:
+            return
+        prefix = self._join_spring_route(context[0], fluent_prefix)
+        group_controller = fluent_controller or context[1]
+        handler = self._php_endpoint_handler(args[path_index + 1], group_controller)
+        handler_value = next(
+            (c for c in args[path_index + 1].children if c.is_named), None,
+        )
+        if handler is None and (
+            handler_value is None
+            or handler_value.type not in ("anonymous_function", "arrow_function")
+        ):
+            return
+        methods = [verb.upper()]
+        if verb == "match":
+            array = next(
+                (c for c in args[0].children if c.type == "array_creation_expression"),
+                None,
+            )
+            if array is None:
+                return
+            methods = []
+            for item in array.children:
+                if item.type == "array_element_initializer":
+                    method = self._php_route_literal(item)
+                    if method is None:
+                        return
+                    methods.append(method.upper())
+        route = self._join_spring_route(prefix, path)
+        # Route::get(...)->prefix('v1') prepends to the full URI, once per call.
+        current = node
+        while (
+            current.parent is not None
+            and current.parent.type == "member_call_expression"
+            and current.parent.child_by_field_name("object") == current
+        ):
+            current = current.parent
+            name = current.child_by_field_name("name")
+            if name is not None and name.text == b"prefix":
+                chain_args = self._php_route_arguments(current)
+                part = self._php_route_literal(chain_args[0]) if chain_args else None
+                if part is None:
+                    return
+                route = self._join_spring_route(part, route)
+        handler_name = handler[1] if handler else "closure"
+        for method in dict.fromkeys(methods):
+            # No position in the name: a line added above must not rename the node.
+            name = f"{handler_name}@Route {method} {route}"
+            metadata = {"http_method": method, "route": route, "handler": handler_name}
+            nodes.append(NodeInfo(
+                kind="Endpoint", name=name, file_path=file_path,
+                line_start=node.start_point[0] + 1, line_end=node.end_point[0] + 1,
+                language="php", extra=metadata,
+            ))
+            if handler:
+                edges.append(EdgeInfo(
+                    kind="HANDLES",
+                    source=self._php_semantic_target(
+                        handler[0], namespace, imports, file_path, handler[1],
+                    ),
+                    target=self._qualify(name, file_path, None),
+                    file_path=file_path, line=node.start_point[0] + 1,
+                    extra=metadata,
+                ))
 
     def _php_semantic_target(
         self,
