@@ -3240,7 +3240,7 @@ class TestElixirParsing:
         functions = [node for node in nodes if node.kind == "Function"]
         assert [node.name for node in functions] == [name]
 
-    def test_multi_clause_functions_keep_distinct_parser_ranges(self, tmp_path):
+    def test_multi_clause_functions_span_every_clause(self, tmp_path):
         path = tmp_path / "clauses.ex"
         source = (
             b"defmodule T do\n"
@@ -3256,7 +3256,7 @@ class TestElixirParsing:
             node for node in nodes
             if node.kind == "Function" and node.name == "multi"
         ]
-        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 4), (5, 5)]
+        assert [(node.line_start, node.line_end) for node in clauses] == [(4, 5)]
 
         for writer_name, writer in (
             ("nodes_edges", lambda store: store.store_file_nodes_edges(path, nodes, edges)),
@@ -3267,7 +3267,7 @@ class TestElixirParsing:
                 multi = store.get_node(f"{path.as_posix()}::T.multi")
 
             assert multi is not None
-            assert (multi.line_start, multi.line_end) == (5, 5)
+            assert (multi.line_start, multi.line_end) == (4, 5)
 
 
 class TestGDScriptParsing:

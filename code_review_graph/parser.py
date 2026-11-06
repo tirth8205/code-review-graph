@@ -3641,6 +3641,9 @@ class CodeParser:
             import_map=import_map, defined_names=defined_names,
         )
 
+        if language == "elixir":
+            nodes, edges = self._merge_elixir_clauses(nodes, edges)
+
         if language == "php":
             self._extract_php_laravel_edges(
                 tree.root_node,
@@ -10819,6 +10822,42 @@ class CodeParser:
                     _depth=_depth + 1,
                 )
         return True
+
+    def _merge_elixir_clauses(
+        self, nodes: list[NodeInfo], edges: list[EdgeInfo],
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Give each multi-clause Elixir function one node spanning its clauses.
+
+        Each clause is its own ``def``, but they share one qualified name and
+        the graph keeps one node per name, so the last clause overwrote the
+        others: the earlier lines belonged to no function and a change there
+        was missed. Calls in every clause already name the shared function as
+        their source, so only the node and its CONTAINS edge need merging. The
+        first clause keeps its parameters: a head with defaults comes first.
+        See: #979
+        """
+        first_clauses: dict[str, NodeInfo] = {}
+        merged_nodes: list[NodeInfo] = []
+        for node in nodes:
+            if node.kind not in ("Function", "Test"):
+                merged_nodes.append(node)
+                continue
+            first = first_clauses.setdefault(self._node_qualified(node), node)
+            if first is node:
+                merged_nodes.append(node)
+                continue
+            first.line_start = min(first.line_start, node.line_start)
+            first.line_end = max(first.line_end, node.line_end)
+
+        contained: set[tuple[str, str]] = set()
+        merged_edges: list[EdgeInfo] = []
+        for edge in edges:
+            if edge.kind == "CONTAINS":
+                if (edge.source, edge.target) in contained:
+                    continue
+                contained.add((edge.source, edge.target))
+            merged_edges.append(edge)
+        return merged_nodes, merged_edges
 
     @staticmethod
     def _is_nix_flake_file(file_path: str) -> bool:
