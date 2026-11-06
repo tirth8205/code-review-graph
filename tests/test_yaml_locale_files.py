@@ -3,7 +3,7 @@
 A translation catalogue repeats the same keys once per language. On sidekiq,
 ``web/locales/*.yml`` gave 3,147 of the graph's 3,336 ``YamlPath`` nodes, and those
 rows crowded real symbols out of search, where the ``kind`` filter ran only after
-the fetch limit had already cut the hits.
+the fetch limit had already cut the hits. Introduced by PR #1150.
 """
 
 from __future__ import annotations
