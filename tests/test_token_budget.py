@@ -251,7 +251,9 @@ BUDGETS: dict[str, dict[str, Any]] = {
         "worst_max": 50_000,
     },
     "query_graph_tool": {
-        "default": {"pattern": "callers_of", "target": "helper_0_0_0"},
+        # A partial name, so this pins the cost of an ambiguous answer. The
+        # full name ``helper_0_0_0`` now resolves to its one symbol.
+        "default": {"pattern": "callers_of", "target": "helper_0_0"},
         "worst": {
             "pattern": "file_summary", "target": "pkg0/mod0.py",
             "max_results": HUGE,

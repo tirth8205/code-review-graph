@@ -2773,6 +2773,14 @@ class GraphStore:
         sql = f"SELECT COUNT(*) FROM nodes WHERE {where}"  # nosec B608
         return int(self._conn.execute(sql, params).fetchone()[0])
 
+    def get_nodes_by_name(self, name: str) -> list[GraphNode]:
+        """Return every node with exactly this name, by qualified name."""
+        rows = self._conn.execute(
+            "SELECT * FROM nodes WHERE name = ? ORDER BY qualified_name",
+            (name,),
+        ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
     # --- Impact / Graph traversal ---
 
     def _impact_seed_qns(self, changed_files: list[str]) -> set[str]:
