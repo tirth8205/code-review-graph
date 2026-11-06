@@ -668,6 +668,29 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+#: Exit code for "another writer holds the lock; nothing was done".
+#:
+#: ``EX_TEMPFAIL`` from sysexits.h rather than 1: the condition is temporary
+#: and expected, so a hook or script can tell it apart from a real failure
+#: (bad config, corrupt database) without parsing the message, while still
+#: seeing a non-zero status the way the SQLite busy timeout used to report it.
+EXIT_TEMPFAIL = getattr(os, "EX_TEMPFAIL", 75)
+
+
+def _exit_if_contended(result: dict) -> None:
+    """Stop when another writer already owns this repository's graph.
+
+    The process holding the lock is writing the same graph, so this invocation
+    has nothing left to do. ``EXIT_TEMPFAIL`` says so precisely: non-zero, so a
+    caller cannot mistake a skip for success, but distinct from the exit code
+    of an actual failure.
+    """
+    if result.get("status") != "contended":
+        return
+    print(f"Skipped: {result.get('summary', 'another write is running')}", file=sys.stderr)
+    sys.exit(EXIT_TEMPFAIL)
+
+
 def _warn_failed_files(result: dict) -> None:
     """Report files that failed to parse; their previous graph rows are kept."""
     failed = result.get("errors") or []
@@ -1028,6 +1051,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(build_cmd)
+    build_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -1072,6 +1102,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    update_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -1088,6 +1125,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(pp_cmd)
+    pp_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build, update or postprocess is already running for this "
+             "repository, wait for it to finish instead of skipping.",
+    )
 
     # embed
     embed_cmd = sub.add_parser(
@@ -1944,8 +1987,10 @@ def _dispatch() -> None:
                 communities=not getattr(args, "no_communities", False),
                 fts=not getattr(args, "no_fts", False),
                 repo_root=str(repo_root),
+                wait_for_lock=getattr(args, "wait", False),
                 **embedding_refresh_kwargs,
             )
+            _exit_if_contended(result)
             parts = []
             if result.get("flows_detected"):
                 parts.append(f"{result['flows_detected']} flows")
@@ -2106,10 +2151,12 @@ def _dispatch() -> None:
                     full_rebuild=True,
                     repo_root=str(repo_root),
                     postprocess=pp,
+                    wait_for_lock=getattr(args, "wait", False),
                     **embedding_refresh_kwargs,
                 )
             finally:
                 logging.disable(previous_disable)
+            _exit_if_contended(result)
             parsed = result.get("files_parsed", 0)
             nodes = result.get("total_nodes", 0)
             edges = result.get("total_edges", 0)
@@ -2138,6 +2185,7 @@ def _dispatch() -> None:
                     repo_root=str(repo_root),
                     base=args.base,
                     postprocess=pp,
+                    wait_for_lock=getattr(args, "wait", False),
                     **embedding_refresh_kwargs,
                 )
             except RuntimeError as exc:
@@ -2145,6 +2193,7 @@ def _dispatch() -> None:
                 sys.exit(1)
             finally:
                 logging.disable(previous_disable)
+            _exit_if_contended(result)
             if result.get("status") == "error":
                 print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
                 sys.exit(1)
