@@ -1,4 +1,4 @@
-"""``forget``, ``embed`` and ``watch`` obey the write lock too. See: #1073
+"""``forget``, ``embed`` and ``watch`` obey the write lock too. See: #1073, #1156
 
 ``build``, ``update`` and ``postprocess`` already stood down for each other. The
 other three writers ignored the lock, so one could rewrite a graph that a build
