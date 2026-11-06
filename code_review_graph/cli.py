@@ -53,6 +53,7 @@ from typing import Iterable, TypedDict
 from .errors import CodeReviewGraphError, is_lock_error
 from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
 from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
+from .stdio import configure_utf8_stdio as _configure_utf8_stdio
 
 logger = logging.getLogger(__name__)
 
@@ -101,21 +102,6 @@ def _supports_color() -> bool:
     if not hasattr(sys.stdout, "isatty"):
         return False
     return sys.stdout.isatty()
-
-
-def _configure_utf8_stdio() -> None:
-    """Allow Unicode CLI decoration on streams using a legacy encoding."""
-    for stream in (sys.stdout, sys.stderr):
-        encoding = getattr(stream, "encoding", None)
-        if not encoding or encoding.lower().replace("-", "") == "utf8":
-            continue
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            continue
-        try:
-            reconfigure(encoding="utf-8")
-        except (OSError, ValueError):
-            pass
 
 
 def _print_banner() -> None:
