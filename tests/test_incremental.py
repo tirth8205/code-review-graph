@@ -10,14 +10,21 @@ import pytest
 
 import code_review_graph.constants as constants_module
 import code_review_graph.incremental as incremental_module
+import code_review_graph.tools as tools_pkg
 from code_review_graph.constants import discovery_timeout
+from code_review_graph.daemon import DaemonConfig, WatchDaemon, WatchRepo
+from code_review_graph.errors import ChangeDiscoveryError
+from code_review_graph.event_resolver import _clear_derived_event_data
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import (
+    _can_batch_store,
     _create_watch_handler,
     _decode_name_status_paths,
+    _get_code_parser_cls,
     _is_binary,
     _load_ignore_patterns,
     _parse_single_file,
+    _prewarm_parser_probes,
     _should_ignore,
     _single_hop_dependents,
     discover_review_changes,
@@ -34,7 +41,10 @@ from code_review_graph.incremental import (
     start_watch_thread,
     watch,
 )
-from code_review_graph.errors import ChangeDiscoveryError
+from code_review_graph.python_resolver import resolve_python_imports
+from code_review_graph.spring_resolver import resolve_spring_di_calls
+from code_review_graph.temporal_resolver import resolve_temporal_calls
+from code_review_graph.tools.build import _compute_summaries
 
 
 class TestParseExecutorSelection:
@@ -2311,3 +2321,43 @@ class TestUntrackedScope:
         assert get_staged_and_unstaged(tmp_path) == [
             "brandnew/a.py", "pkg/newmod.py", "src/a.py", "weird/",
         ]
+
+
+class TestIncrementalDirectHelpers:
+    def test_incremental_and_build_helpers_direct(self, tmp_path: Path):
+        parser_cls = _get_code_parser_cls()
+        assert incremental_module.__getattr__("CodeParser") is parser_cls
+        with pytest.raises(AttributeError):
+            incremental_module.__getattr__("nonexistent_attr")
+
+        assert callable(tools_pkg.__getattr__("build_or_update_graph"))
+        with pytest.raises(AttributeError):
+            tools_pkg.__getattr__("nonexistent_tool")
+
+        parser = parser_cls(tmp_path)
+        _prewarm_parser_probes(parser, ["a.py", "b.ts"])
+
+        store = GraphStore(tmp_path / "inc.db")
+        try:
+            assert _can_batch_store(store, parser) is True
+            deps = _single_hop_dependents(store, "/nonexistent/a.py")
+            assert deps == set()
+
+            _compute_summaries(store)
+            assert _clear_derived_event_data(store) == (0, 0)
+            assert resolve_python_imports(store)["files_indexed"] == 0
+            assert isinstance(resolve_spring_di_calls(store), dict)
+            assert isinstance(resolve_temporal_calls(store), dict)
+        finally:
+            store.close()
+
+        daemon = WatchDaemon(
+            config=DaemonConfig(repos=[]),
+            config_path=tmp_path / "watch.toml",
+        )
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = subprocess.CompletedProcess(
+                args=["crg"], returncode=0, stdout="", stderr=""
+            )
+            daemon._initial_build(WatchRepo(path=str(tmp_path), alias="demo"))
+            assert mock_run.called

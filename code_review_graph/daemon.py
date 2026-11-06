@@ -33,7 +33,7 @@ else:
     except ImportError:
         tomllib = None  # type: ignore[assignment]
 
-from .constants import crg_home, env_float
+from .constants import crg_home, env_float, release_os_memory
 
 logger = logging.getLogger(__name__)
 
@@ -1652,3 +1652,4 @@ class WatchDaemon:
                 result.returncode,
                 result.stderr.strip(),
             )
+        release_os_memory()

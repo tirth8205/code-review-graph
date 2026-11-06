@@ -192,19 +192,11 @@ def detect_entry_points(
         if node.extra.get("verilog_kind"):
             continue
 
-        is_entry = False
-
-        # True root: no one calls this function.
-        if node.qualified_name not in called_qnames:
-            is_entry = True
-
-        # Framework decorator match.
-        if _has_framework_decorator(node):
-            is_entry = True
-
-        # Conventional name match.
-        if _matches_entry_name(node):
-            is_entry = True
+        is_entry = (
+            node.qualified_name not in called_qnames
+            or _has_framework_decorator(node)
+            or _matches_entry_name(node)
+        )
 
         if is_entry and node.qualified_name not in seen_qn:
             entry_points.append(node)
@@ -418,9 +410,11 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
         conn.execute("DELETE FROM flows")
 
         count = 0
+        membership_rows: list[tuple[int, int, int]] = []
         for flow in flows:
-            path_json = json.dumps(flow.get("path", []))
-            conn.execute(
+            node_ids = flow.get("path", [])
+            path_json = json.dumps(node_ids)
+            cursor = conn.execute(
                 """INSERT INTO flows
                    (name, entry_point_id, depth, node_count, file_count,
                     criticality, path_json)
@@ -435,17 +429,18 @@ def store_flows(store: GraphStore, flows: list[dict]) -> int:
                     path_json,
                 ),
             )
-            flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-            # Insert memberships.
-            node_ids = flow.get("path", [])
-            for position, node_id in enumerate(node_ids):
-                conn.execute(
-                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                    "VALUES (?, ?, ?)",
-                    (flow_id, node_id, position),
-                )
+            flow_id = cursor.lastrowid
+            membership_rows.extend(
+                (flow_id, node_id, position)
+                for position, node_id in enumerate(node_ids)
+            )
             count += 1
+        if membership_rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                "VALUES (?, ?, ?)",
+                membership_rows,
+            )
 
         conn.commit()
     except BaseException:
@@ -549,35 +544,44 @@ def incremental_trace_flows(
     # 6. INSERT new flows without clearing unrelated ones
     # ------------------------------------------------------------------
     count = 0
-    for flow in new_flows:
-        path_json = json.dumps(flow.get("path", []))
-        conn.execute(
-            """INSERT INTO flows
-               (name, entry_point_id, depth, node_count, file_count,
-                criticality, path_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                flow["name"],
-                flow["entry_point_id"],
-                flow["depth"],
-                flow["node_count"],
-                flow["file_count"],
-                flow["criticality"],
-                path_json,
-            ),
-        )
-        flow_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-        node_ids = flow.get("path", [])
-        for position, node_id in enumerate(node_ids):
-            conn.execute(
-                "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
-                "VALUES (?, ?, ?)",
-                (flow_id, node_id, position),
-            )
-        count += 1
-
-    conn.commit()
+    if new_flows:
+        store._begin_immediate()
+        try:
+            membership_rows: list[tuple[int, int, int]] = []
+            for flow in new_flows:
+                node_ids = flow.get("path", [])
+                path_json = json.dumps(node_ids)
+                cursor = conn.execute(
+                    """INSERT INTO flows
+                       (name, entry_point_id, depth, node_count, file_count,
+                        criticality, path_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        flow["name"],
+                        flow["entry_point_id"],
+                        flow["depth"],
+                        flow["node_count"],
+                        flow["file_count"],
+                        flow["criticality"],
+                        path_json,
+                    ),
+                )
+                flow_id = cursor.lastrowid
+                membership_rows.extend(
+                    (flow_id, node_id, position)
+                    for position, node_id in enumerate(node_ids)
+                )
+                count += 1
+            if membership_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO flow_memberships (flow_id, node_id, position) "
+                    "VALUES (?, ?, ?)",
+                    membership_rows,
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
     return count
 
 

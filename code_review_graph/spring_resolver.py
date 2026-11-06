@@ -114,10 +114,18 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
     # -----------------------------------------------------------------------
-    calls_rows = conn.execute(
-        "SELECT id, source_qualified, target_qualified, extra, file_path "
-        "FROM edges WHERE kind = 'CALLS'"
-    ).fetchall()
+    java_file_list = sorted(java_files)
+    calls_rows = []
+    for start in range(0, len(java_file_list), 450):
+        batch = java_file_list[start : start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        calls_rows.extend(
+            conn.execute(
+                "SELECT id, source_qualified, target_qualified, extra, file_path "
+                f"FROM edges WHERE kind = 'CALLS' AND file_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
 
     resolved = 0
 
@@ -194,7 +202,7 @@ def resolve_spring_di_calls(store: GraphStore) -> dict:
         )
 
     if resolved:
-        conn.commit()
+        store.commit()
 
     logger.info("Spring DI resolver: resolved %d CALLS edges in %d Java files",
                 resolved, len(java_files))

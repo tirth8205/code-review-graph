@@ -10,6 +10,8 @@ from pathlib import Path, PureWindowsPath
 import pytest
 
 import code_review_graph.constants as constants_module
+import code_review_graph.graph as graph_module
+from code_review_graph.analysis import find_bridge_nodes
 from code_review_graph.errors import GraphStoreError
 from code_review_graph.graph import (
     CorruptGraphDatabaseError,
@@ -1581,3 +1583,110 @@ class TestUnusableDatabaseRecovery:
         assert not _has_incompatible_schema(
             db, sqlite3.OperationalError("no such column: file_path")
         )
+
+
+class TestGraphDirectHelpersAndBatching:
+    def test_graph_store_batch_memory_and_resolution_direct(self, tmp_path: Path):
+        assert constants_module.normalize_file_path(r"a\b\c.py") == "a/b/c.py"
+        constants_module.release_os_memory()
+
+        assert graph_module.__getattr__("NodeInfo") is NodeInfo
+        assert hasattr(graph_module.__getattr__("nx"), "DiGraph")
+        with pytest.raises(AttributeError):
+            graph_module.__getattr__("nonexistent_symbol")
+
+        store = GraphStore(tmp_path / "direct.db")
+        try:
+            f_a = NodeInfo(
+                kind="File", name="/test/a.py", file_path="/test/a.py",
+                line_start=1, line_end=20, language="python",
+            )
+            fn_a = NodeInfo(
+                kind="Function", name="fn_a", file_path="/test/a.py",
+                line_start=2, line_end=10, language="python",
+            )
+            f_b = NodeInfo(
+                kind="File", name="/test/b.py", file_path="/test/b.py",
+                line_start=1, line_end=20, language="python",
+            )
+            fn_b = NodeInfo(
+                kind="Function", name="fn_b", file_path="/test/b.py",
+                line_start=2, line_end=10, language="python",
+            )
+            f_t = NodeInfo(
+                kind="File", name="/test/test_b.py", file_path="/test/test_b.py",
+                line_start=1, line_end=20, language="python",
+            )
+            test_b = NodeInfo(
+                kind="Test", name="test_fn_b", file_path="/test/test_b.py",
+                line_start=2, line_end=10, language="python", is_test=True,
+            )
+            edges_b = [
+                EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source="/test/b.py",
+                    target="/test/a.py",
+                    file_path="/test/b.py",
+                    line=1,
+                ),
+                EdgeInfo(
+                    kind="CALLS",
+                    source="/test/b.py::fn_b",
+                    target="fn_a",
+                    file_path="/test/b.py",
+                    line=5,
+                ),
+            ]
+            edges_t = [
+                EdgeInfo(
+                    kind="TESTED_BY",
+                    source="/test/b.py::fn_b",
+                    target="/test/test_b.py::test_fn_b",
+                    file_path="/test/test_b.py",
+                    line=4,
+                ),
+            ]
+            store.store_file_batch([
+                ("/test/a.py", [f_a, fn_a], [], "hash_a"),
+                ("/test/b.py", [f_b, fn_b], edges_b, "hash_b"),
+                ("/test/test_b.py", [f_t, test_b], edges_t, "hash_t"),
+            ])
+
+            hashes = store.get_file_hashes()
+            assert hashes["/test/a.py"] == "hash_a"
+            assert hashes["/test/b.py"] == "hash_b"
+
+            ctx = store._get_bare_endpoint_context(store._conn)
+            assert "fn_a" in ctx[0]
+
+            resolved_count = store._resolve_bare_endpoints("CALLS", "target_qualified")
+            assert resolved_count == 1
+
+            refreshed = store.refresh_target_resolution()
+            assert refreshed >= 1
+
+            impact = store.get_impact_radius_sql(["/test/a.py"], max_depth=2)
+            assert any(n.name == "fn_b" for n in impact["impacted_nodes"])
+
+            routes = store.get_caller_test_routes(["/test/a.py::fn_a"])
+            assert "/test/a.py::fn_a" in routes
+
+            unresolved = store.count_unresolved_call_sites({"fn_a"})
+            assert unresolved == 0
+
+            nxg = store._build_networkx_graph()
+            assert nxg.number_of_nodes() >= 3
+
+            bridges = find_bridge_nodes(store, top_n=5)
+            assert isinstance(bridges, list)
+
+            node_row = store._conn.execute("SELECT * FROM nodes LIMIT 1").fetchone()
+            edge_row = store._conn.execute("SELECT * FROM edges LIMIT 1").fetchone()
+            assert store._row_to_node(node_row).name
+            assert store._row_to_edge(edge_row).kind
+
+            store._invalidate_cache()
+            store.shrink_memory(clear_nx_cache=True)
+            assert store._nxg_cache is None
+        finally:
+            store.close()

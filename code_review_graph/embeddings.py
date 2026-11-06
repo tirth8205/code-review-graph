@@ -12,6 +12,7 @@ Supports multiple providers:
 from __future__ import annotations
 
 import hashlib
+import heapq
 import logging
 import os
 import re
@@ -26,6 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import __version__ as _crg_version
+from .constants import release_os_memory
 from .graph import GraphNode, GraphStore, node_to_dict
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,13 @@ LOCAL_DEFAULT_MODEL = "all-MiniLM-L6-v2"
 # torch DLL / OpenMP init runs inside an executor thread).
 _MODEL_CACHE: dict[str, Any] = {}
 _MODEL_INIT_LOCK = threading.RLock()
+
+
+def clear_model_cache() -> None:
+    """Release cached sentence-transformer models and return memory to OS."""
+    with _MODEL_INIT_LOCK:
+        _MODEL_CACHE.clear()
+    release_os_memory()
 
 
 def prewarm_local_embeddings(model_name: str | None = None) -> None:
@@ -1171,6 +1180,8 @@ class EmbeddingStore:
             isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA cache_size=-2000")
+        self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.executescript(_EMBEDDINGS_SCHEMA)
 
         # Migration for existing DBs missing the provider column
@@ -1191,7 +1202,12 @@ class EmbeddingStore:
         self.close()
 
     def close(self) -> None:
+        try:
+            self._conn.execute("PRAGMA shrink_memory")
+        except sqlite3.Error:
+            pass
         self._conn.close()
+        release_os_memory()
 
     def embed_nodes(self, nodes: list[GraphNode], batch_size: int = 64) -> int:
         """Compute and store embeddings for a list of nodes."""
@@ -1244,21 +1260,13 @@ class EmbeddingStore:
 
         return embedded
 
-    def search(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
-        """Search for nodes by semantic similarity."""
-        if not self.provider:
-            return []
-
-        provider_name = self.provider.name
-        query_vec = self.provider.embed_query(query)
-
-        # Process in chunks, only matching current provider
-        scored: list[tuple[str, float]] = []
-        cursor = self._conn.execute(
-            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
-            (provider_name,),
-        )
-        chunk_size = 500
+    @staticmethod
+    def _iter_scores(
+        cursor: sqlite3.Cursor,
+        query_vec: list[float],
+        chunk_size: int = 500,
+    ):
+        """Stream (qualified_name, similarity) pairs from a cursor in chunks."""
         while True:
             rows = cursor.fetchmany(chunk_size)
             if not rows:
@@ -1266,10 +1274,25 @@ class EmbeddingStore:
             for row in rows:
                 vec = _decode_vector(row["vector"])
                 sim = _cosine_similarity(query_vec, vec)
-                scored.append((row["qualified_name"], sim))
+                yield (row["qualified_name"], sim)
 
-        scored.sort(key=lambda x: x[1], reverse=True)
-        return scored[:limit]
+    def search(self, query: str, limit: int = 20) -> list[tuple[str, float]]:
+        """Search for nodes by semantic similarity."""
+        if not self.provider or limit <= 0:
+            return []
+
+        provider_name = self.provider.name
+        query_vec = self.provider.embed_query(query)
+
+        cursor = self._conn.execute(
+            "SELECT qualified_name, vector FROM embeddings WHERE provider = ?",
+            (provider_name,),
+        )
+        return heapq.nlargest(
+            limit,
+            self._iter_scores(cursor, query_vec),
+            key=lambda x: x[1],
+        )
 
     def remove_node(self, qualified_name: str) -> None:
         self._conn.execute(

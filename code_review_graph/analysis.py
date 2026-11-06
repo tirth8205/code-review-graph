@@ -109,6 +109,8 @@ def find_bridge_nodes(
         key=lambda x: float(x.get("betweenness", 0)),  # type: ignore[arg-type,return-value]
         reverse=True,
     )
+    del nxg, bc
+    store.shrink_memory(clear_nx_cache=True)
     return results[:top_n]
 
 

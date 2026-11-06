@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from code_review_graph.constants import normalize_file_path, release_os_memory
 from code_review_graph.embeddings import (
+    _MODEL_CACHE,
     LOCAL_DEFAULT_MODEL,
     EmbeddingStore,
     GoogleEmbeddingProvider,
@@ -22,6 +24,7 @@ from code_review_graph.embeddings import (
     _encode_vector,
     _is_localhost_url,
     _node_to_text,
+    clear_model_cache,
     get_provider,
 )
 from code_review_graph.graph import GraphNode
@@ -1644,3 +1647,50 @@ class TestGetProviderOpenAI:
             get_provider("openai")
         captured = capsys.readouterr()
         assert "cloud" in captured.err.lower()
+
+
+class TestEmbeddingCacheAndScoreStreaming:
+    def test_clear_model_cache_empties_cached_models(self):
+        sentinel = object()
+        _MODEL_CACHE["dummy-test-model"] = sentinel
+        try:
+            assert "dummy-test-model" in _MODEL_CACHE
+            clear_model_cache()
+            assert _MODEL_CACHE == {}
+        finally:
+            _MODEL_CACHE.pop("dummy-test-model", None)
+
+    def test_iter_scores_streams_chunked_cosine_scores(self, tmp_path):
+        db = tmp_path / "embeddings.db"
+        with patch("code_review_graph.embeddings.get_provider", return_value=None):
+            store = EmbeddingStore(db)
+        try:
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("a.py::alpha", _encode_vector([1.0, 0.0]), "h1", "mock"),
+            )
+            store._conn.execute(
+                "INSERT INTO embeddings (qualified_name, vector, text_hash, provider) "
+                "VALUES (?, ?, ?, ?)",
+                ("b.py::beta", _encode_vector([0.0, 1.0]), "h2", "mock"),
+            )
+            store._conn.commit()
+            cursor = store._conn.execute(
+                "SELECT qualified_name, vector FROM embeddings WHERE provider = ? "
+                "ORDER BY qualified_name",
+                ("mock",),
+            )
+            scored = list(store._iter_scores(cursor, [1.0, 0.0], chunk_size=1))
+            assert len(scored) == 2
+            assert scored[0][0] == "a.py::alpha"
+            assert scored[0][1] == pytest.approx(1.0)
+            assert scored[1][0] == "b.py::beta"
+            assert scored[1][1] == pytest.approx(0.0)
+        finally:
+            store.close()
+
+    def test_constants_normalize_and_release_memory_helpers(self, tmp_path):
+        norm = normalize_file_path(tmp_path / "sub" / ".." / "file.py")
+        assert norm.endswith("/file.py")
+        assert release_os_memory() is None

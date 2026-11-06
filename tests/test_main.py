@@ -818,3 +818,37 @@ class TestApplyToolFilter:
         crg_main._apply_tool_filter(" query_graph_tool , semantic_search_nodes_tool ")
         remaining = await self._tool_names()
         assert remaining == {"query_graph_tool", "semantic_search_nodes_tool"}
+
+
+class TestMainLazyAttrsAndPromptsDirect:
+    def test_resolve_attr_getattr_and_prompts_direct(self, monkeypatch, tmp_path):
+        assert callable(crg_main._resolve_attr("get_docs_section"))
+        assert callable(crg_main.__getattr__("review_changes_prompt"))
+        assert crg_main.__getattr__("GraphStore") is not None
+        with pytest.raises(AttributeError):
+            crg_main.__getattr__("nonexistent_main_attr")
+
+        res = asyncio.run(
+            crg_main._offload(
+                "unit_test_tool",
+                lambda: {"status": "ok"},
+                None,
+                provenance=False,
+            )
+        )
+        assert res["status"] == "ok"
+
+        docs_res = crg_main.get_docs_section_tool("usage")
+        assert isinstance(docs_res, dict)
+
+        monkeypatch.setattr(
+            crg_main, "list_repos_func", lambda: {"repos": []}, raising=False
+        )
+        repos_res = crg_main.list_repos_tool()
+        assert repos_res == {"repos": []}
+
+        assert isinstance(crg_main.review_changes(base="HEAD~1"), list)
+        assert isinstance(crg_main.architecture_map(), list)
+        assert isinstance(crg_main.debug_issue(description="bug"), list)
+        assert isinstance(crg_main.onboard_developer(), list)
+        assert isinstance(crg_main.pre_merge_check(base="HEAD~1"), list)

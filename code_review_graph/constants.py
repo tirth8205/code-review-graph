@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 
 logger = logging.getLogger(__name__)
 
@@ -323,3 +323,59 @@ IMPORT_SCOPE_PACKAGE = "package"
 IMPORT_SCOPE_TREE = "tree"
 
 IMPORT_SCOPES = (IMPORT_SCOPE_PACKAGE, IMPORT_SCOPE_TREE)
+
+
+# ---------------------------------------------------------------------------
+# Path identity & memory reclamation helpers
+# ---------------------------------------------------------------------------
+
+def normalize_file_path(path: "str | os.PathLike[str]") -> str:
+    """Return *path* as a forward-slash (POSIX) string for graph identity.
+
+    ``file_path`` values and the path component of qualified names are graph
+    identity: they must be separator-stable across operating systems so a
+    graph built on Windows produces the same identifiers as one built on
+    Linux/macOS, and so consumers that reconstruct identifiers from ``Path``
+    objects always agree with the parser. See issue #774.
+
+    Only apply this to file *paths* — never to symbol names: PHP namespace
+    identifiers (``App\\Domain\\Job``) legitimately contain backslashes.
+    """
+    if isinstance(path, str):
+        return path.replace("\\", "/") if "\\" in path else path
+    if isinstance(path, PurePath):
+        return path.as_posix()
+    return str(path).replace("\\", "/")
+
+
+_MALLOC_TRIM_FN: object | None = None
+_MALLOC_TRIM_PROBED = False
+
+
+def release_os_memory() -> None:
+    """Run garbage collection and return free heap pages to the OS where supported.
+
+    Python's pymalloc and glibc's ptmalloc retain freed arenas in the process
+    address space after large graph builds, AST parses, or NetworkX/embedding
+    operations. Calling ``malloc_trim(0)`` on Linux returns unused heap pages
+    to the kernel, directly lowering resident memory (RSS).
+    """
+    global _MALLOC_TRIM_FN, _MALLOC_TRIM_PROBED
+    import gc
+    import sys
+
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        if not _MALLOC_TRIM_PROBED:
+            _MALLOC_TRIM_PROBED = True
+            try:
+                import ctypes
+
+                _MALLOC_TRIM_FN = ctypes.CDLL("libc.so.6").malloc_trim
+            except Exception:
+                _MALLOC_TRIM_FN = None
+        if callable(_MALLOC_TRIM_FN):
+            try:
+                _MALLOC_TRIM_FN(0)
+            except Exception as exc:
+                logger.debug("malloc_trim(0) failed: %s", exc)

@@ -8,10 +8,13 @@ import pytest
 import code_review_graph.communities as communities_module
 from code_review_graph.communities import (
     IGRAPH_AVAILABLE,
+    _build_adjacency,
     _compute_cohesion,
     _compute_cohesion_batch,
     _detect_file_based,
+    _detect_leiden,
     _generate_community_name,
+    _reassign_test_nodes,
     detect_communities,
     get_architecture_overview,
     get_communities,
@@ -223,8 +226,8 @@ class TestCommunities:
         # Add many TESTED_BY cross-community edges (well above the threshold of 10)
         for i in range(20):
             self.store.upsert_edge(EdgeInfo(
-                kind="TESTED_BY", source=f"auth.py::login",
-                target=f"db.py::query", file_path="auth.py", line=i + 100,
+                kind="TESTED_BY", source="auth.py::login",
+                target="db.py::query", file_path="auth.py", line=i + 100,
             ))
         self.store.commit()
 
@@ -1008,3 +1011,45 @@ class TestCommunityPrReconciliation:
                 member_to_community[production_node.qualified_name]
                 == member_to_community[test_node.qualified_name]
             )
+
+
+class TestCommunityHelpersDirect:
+    def test_build_adjacency_and_cohesion_batch_direct(self):
+        e1 = _community_edge(1, "pkg/a.py::f1", "pkg/a.py::f2")
+        e2 = _community_edge(2, "pkg/a.py::f2", "pkg/b.py::g1")
+        adj = _build_adjacency([e1, e2])
+        assert "pkg/a.py::f2" in adj["pkg/a.py::f1"]
+        assert "pkg/b.py::g1" in adj["pkg/a.py::f2"]
+
+        cohesions = _compute_cohesion_batch(
+            [{"pkg/a.py::f1", "pkg/a.py::f2"}, {"pkg/b.py::g1"}],
+            [e1, e2],
+        )
+        assert cohesions[0] == pytest.approx(0.5)
+        assert cohesions[1] == pytest.approx(0.0)
+
+    def test_detect_leiden_and_reassign_test_nodes_direct(self):
+        prod1 = _community_node(1, "pkg/a.py::f1")
+        prod2 = _community_node(2, "pkg/a.py::f2")
+        test1 = _community_node(3, "tests/test_a.py::test_f1", kind="Test", is_test=True)
+        nodes = [prod1, prod2, test1]
+        edges = [
+            _community_edge(1, prod1.qualified_name, prod2.qualified_name),
+            _community_edge(
+                2, prod1.qualified_name, test1.qualified_name, kind="TESTED_BY"
+            ),
+        ]
+        idx_to_node = {i: n for i, n in enumerate(nodes)}
+        qn_to_idx = {n.qualified_name: i for i, n in enumerate(nodes)}
+        reassigned = _reassign_test_nodes(
+            [[0, 1], [2]], idx_to_node, qn_to_idx, edges
+        )
+        assert [0, 1, 2] in reassigned
+
+        empty_res = _detect_leiden([], [], min_size=2)
+        assert empty_res == []
+        leiden_res = _detect_leiden(nodes, edges, min_size=1)
+        if IGRAPH_AVAILABLE:
+            assert len(leiden_res) >= 1
+        else:
+            assert leiden_res == []

@@ -1,11 +1,17 @@
 """Tests for the Tree-sitter parser module."""
 
+import ast
 import tempfile
 from pathlib import Path
 
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
-from code_review_graph.parser import CodeParser
+from code_review_graph.parser import (
+    CodeParser,
+    _clear_parser_probe_cache,
+    _python_type_checking_aliases,
+    _PythonUnreachableCallVisitor,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -414,7 +420,10 @@ class Plain:
             module_scope_calls = [e for e in calls if e.source == tmp.as_posix()]
             assert any(
                 "helper" in e.target for e in module_scope_calls
-            ), f"Expected module-scope CALLS edge to helper(); got: {[(e.source, e.target) for e in calls]}"
+            ), (
+                "Expected module-scope CALLS edge to helper(); "
+                f"got: {[(e.source, e.target) for e in calls]}"
+            )
         finally:
             tmp.unlink()
 
@@ -446,7 +455,10 @@ class Plain:
             calls = [e for e in edges if e.kind == "CALLS"]
             assert any(
                 "do_work" in e.target and e.source == tmp.as_posix() for e in calls
-            ), f"Expected notebook CALLS edge to do_work(); got: {[(e.source, e.target) for e in calls]}"
+            ), (
+                "Expected notebook CALLS edge to do_work(); "
+                f"got: {[(e.source, e.target) for e in calls]}"
+            )
         finally:
             tmp.unlink()
 
@@ -1930,7 +1942,6 @@ class TestValueReferences:
         """REFERENCES edges should have resolved (qualified) targets for local funcs."""
         nodes, edges = self.parser.parse_file(FIXTURES / "sample_map_dispatch.ts")
         refs = [e for e in edges if e.kind == "REFERENCES"]
-        file_path = (FIXTURES / "sample_map_dispatch.ts").as_posix()
         # At least some targets should be fully qualified
         qualified_refs = [e for e in refs if "::" in e.target]
         assert len(qualified_refs) > 0
@@ -2654,3 +2665,40 @@ class TestTypeScriptTypeDeclarations:
                 and e.target == f"{types.resolve().as_posix()}::Finding"
                 for e in edges
             )
+
+
+class TestParserCacheAndUnreachableVisitorDirect:
+    def test_clear_caches_and_unreachable_visitor_direct(self):
+        parser = CodeParser()
+        parser.clear_caches(release_memory=False)
+        _clear_parser_probe_cache()
+
+        src = (
+            "from typing import TYPE_CHECKING\n"
+            "import typing as t\n"
+            "if TYPE_CHECKING:\n"
+            "    dead_call()\n"
+            "class C:\n"
+            "    def f(self):\n"
+            "        for x in [1]:\n"
+            "            with ctx():\n"
+            "                try:\n"
+            "                    live_call()\n"
+            "                except Exception:\n"
+            "                    err_call()\n"
+        )
+        tree = ast.parse(src)
+        tc_names, tc_mods = _python_type_checking_aliases(tree)
+        assert "TYPE_CHECKING" in tc_names
+        assert "t" in tc_mods
+
+        visitor = _PythonUnreachableCallVisitor(tc_names, tc_mods)
+        visitor.visit_Module(tree)
+        if_node = next(n for n in tree.body if isinstance(n, ast.If))
+        cls_node = next(n for n in tree.body if isinstance(n, ast.ClassDef))
+        fn_node = next(n for n in cls_node.body if isinstance(n, ast.FunctionDef))
+        visitor.visit_If(if_node)
+        visitor.visit_ClassDef(cls_node)
+        visitor._visit_function(fn_node)
+        visitor._visit_statements(tree.body, dead=False)
+        assert (4, 4) in visitor.positions
