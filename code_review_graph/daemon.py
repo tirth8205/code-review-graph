@@ -898,17 +898,28 @@ def reap_orphaned_watchers(
 ) -> list[dict[str, Any]]:
     """Terminate every orphaned watcher and forget the state that named them.
 
+    Only called with no daemon running, so every watcher the state names is
+    finished by the end of this, including those already dead. Their health
+    files go too. A watcher killed outright cannot clear its own, which is every
+    watcher on Windows: ``stop`` ends the daemon with ``TerminateProcess`` and the
+    Job Object takes the children with it, so no shutdown code runs. A file left
+    behind reads as a stalled watcher forever.
+
     Returns the entries that were signalled, so the caller can report them.
     """
+    state = load_state(state_path)
     orphans = find_orphaned_watchers(state_path)
     for orphan in orphans:
         pid = int(orphan["pid"])
         logger.info(
             "Reaping orphaned watcher for '%s' (PID %d)", orphan["alias"], pid
         )
-        clear_watch_health(orphan["path"])
         _signal_until_dead(pid, timeout=timeout)
-    if orphans:
+    # After the signals: a watcher still running could publish again.
+    for entry in state.values():
+        if isinstance(entry, dict) and entry.get("path"):
+            clear_watch_health(str(entry["path"]))
+    if state:
         clear_state(state_path)
     return orphans
 

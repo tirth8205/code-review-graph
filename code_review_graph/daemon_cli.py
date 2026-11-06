@@ -135,6 +135,7 @@ def _handle_stop(_args: argparse.Namespace) -> None:
         if not _process_already_gone(exc):
             raise
         clear_pid()
+        _reap_watchers_left_behind()
         print("Daemon stopped (process already gone).")
         return
 
@@ -169,15 +170,24 @@ def _handle_stop(_args: argparse.Namespace) -> None:
         print(f"Error: Daemon PID {pid} is still running; refusing to clear its PID file.")
         sys.exit(1)
 
-    # The daemon terminates its own children on SIGTERM, but a daemon that had
-    # to be SIGKILLed above did not get the chance.
+    _reap_watchers_left_behind()
+    print("Daemon stopped.")
+
+
+def _reap_watchers_left_behind() -> None:
+    """Finish what a daemon that was killed could not.
+
+    The daemon terminates its own children on SIGTERM, but one that had to be
+    SIGKILLed did not get the chance, and on Windows ``os.kill`` is always
+    ``TerminateProcess``, so its shutdown code never runs at all.
+    """
+    from .daemon import reap_orphaned_watchers
+
     for orphan in reap_orphaned_watchers():
         print(
             f"Stopped watcher for '{orphan['alias']}' (PID {orphan['pid']}) "
             "that outlived the daemon."
         )
-
-    print("Daemon stopped.")
 
 
 def _handle_restart(args: argparse.Namespace) -> None:
