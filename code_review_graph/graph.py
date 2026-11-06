@@ -1016,6 +1016,24 @@ class GraphStore:
             raise
         self._invalidate_cache()
 
+    def store_file_edges(self, file_path: str, edges: list[EdgeInfo]) -> None:
+        """Atomically replace a file's edges and keep its node rows.
+
+        For a file whose bytes did not change. Its symbols are the same, and
+        flows and communities point at their node ids, so those ids must stay.
+        """
+        self._begin_immediate()
+        try:
+            self._conn.execute(
+                "DELETE FROM edges WHERE file_path = ?", (normalize_file_path(file_path),)
+            )
+            self._insert_edges(edges, time.time())
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._invalidate_cache()
+
     def _replace_file_data(
         self, file_path: str, nodes: list[NodeInfo], edges: list[EdgeInfo], fhash: str = ""
     ) -> None:
@@ -1076,32 +1094,37 @@ class GraphStore:
                 """,
                 node_rows,
             )
-        if edges:
-            # upsert_edge() collapsed duplicate call sites (same kind, source,
-            # target, file, line) into a single row carrying the *last*
-            # extra/confidence values. Replicate that collapse in Python so a
-            # plain INSERT batch is safe — the file's previous rows were
-            # deleted above and an identical edge cannot come from another
-            # file (file_path is part of the identity).
-            edge_by_site: dict[tuple[str, str, str, str, int], tuple] = {}
-            for edge in edges:
-                extra_dict = edge.extra if edge.extra else {}
-                confidence = float(extra_dict.get("confidence", 1.0))
-                confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
-                extra = json.dumps(extra_dict)
-                site = (edge.kind, edge.source, edge.target, edge.file_path, edge.line)
-                edge_by_site[site] = (
-                    edge.kind, edge.source, edge.target, edge.file_path, edge.line,
-                    extra, confidence, confidence_tier, now,
-                )
-            self._conn.executemany(
-                """INSERT INTO edges
-                   (kind, source_qualified, target_qualified, file_path, line, extra,
-                    confidence, confidence_tier, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                list(edge_by_site.values()),
-            )
+        self._insert_edges(edges, now)
         self._invalidate_cache()
+
+    def _insert_edges(self, edges: list[EdgeInfo], now: float) -> None:
+        """Insert one file's edges; its previous edge rows are already deleted."""
+        if not edges:
+            return
+        # upsert_edge() collapsed duplicate call sites (same kind, source,
+        # target, file, line) into a single row carrying the *last*
+        # extra/confidence values. Replicate that collapse in Python so a
+        # plain INSERT batch is safe — the file's previous rows were
+        # deleted above and an identical edge cannot come from another
+        # file (file_path is part of the identity).
+        edge_by_site: dict[tuple[str, str, str, str, int], tuple] = {}
+        for edge in edges:
+            extra_dict = edge.extra if edge.extra else {}
+            confidence = float(extra_dict.get("confidence", 1.0))
+            confidence_tier = str(extra_dict.get("confidence_tier", "EXTRACTED"))
+            extra = json.dumps(extra_dict)
+            site = (edge.kind, edge.source, edge.target, edge.file_path, edge.line)
+            edge_by_site[site] = (
+                edge.kind, edge.source, edge.target, edge.file_path, edge.line,
+                extra, confidence, confidence_tier, now,
+            )
+        self._conn.executemany(
+            """INSERT INTO edges
+               (kind, source_qualified, target_qualified, file_path, line, extra,
+                confidence, confidence_tier, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            list(edge_by_site.values()),
+        )
 
     def set_metadata(self, key: str, value: str) -> None:
         self._conn.execute(
