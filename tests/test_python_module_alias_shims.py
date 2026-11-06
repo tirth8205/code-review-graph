@@ -19,7 +19,9 @@ stays unresolved.
 
 from __future__ import annotations
 
+import ast
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -544,13 +546,23 @@ def test_symlink_outside_the_repository_is_never_read(tmp_path, monkeypatch, cal
     assert reads == []
 
 
-def test_module_too_deep_for_ast_keeps_the_file_as_the_module(repo, tmp_path):
+def test_module_too_deep_for_ast_keeps_the_file_as_the_module(repo, tmp_path, monkeypatch):
     """Importers keep their edges when the imported file defeats ``ast.parse``."""
     shim = _write(
         repo, "deep.py",
         SHIM.format(module="app.services.billing")
         + "x = " + "+".join(["1"] * 60000) + "\n",
     )
+    if sys.version_info < (3, 11):
+        # Python 3.10 accepts this chain, so the failure has to be forced there.
+        real_parse = ast.parse
+
+        def too_deep(source, *args, **kwargs):
+            if "1+1+1" in str(source):
+                raise RecursionError("maximum recursion depth exceeded")
+            return real_parse(source, *args, **kwargs)
+
+        monkeypatch.setattr(ast, "parse", too_deep)
     caller = _write(repo, "caller.py", "import deep\n\n\ndef go():\n    deep.charge(1)\n")
     parser = CodeParser(repo_root=repo)
     _, edges = parser.parse_file(caller)

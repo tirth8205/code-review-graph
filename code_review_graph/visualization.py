@@ -737,7 +737,8 @@ __SIDECAR_SCRIPT__
   .legend-item { display: flex; align-items: center; gap: 10px; padding: 2px 0; cursor: default; }
   .legend-item[data-edge-kind] { cursor: pointer; user-select: none; }
   .legend-item[data-edge-kind].dimmed { opacity: 0.3; }
-  .legend-item svg { flex-shrink: 0; }
+  /* The page-wide svg rule would stretch these icons to the legend's width. */
+  .legend-item svg { flex-shrink: 0; width: 16px; height: 16px; }
   .legend-line { width: 24px; height: 0; flex-shrink: 0; border-top-width: 2px; }
   .l-calls    { border-top: 2px solid #3fb950; }
   .l-imports  { border-top: 2px dashed #f0883e; }

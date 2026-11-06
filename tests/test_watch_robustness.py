@@ -1227,7 +1227,7 @@ class TestWatchLoop:
             row[0] for row in store._conn.execute("SELECT qualified_name FROM nodes")
         )
         baseline_updated = store.get_metadata("last_updated")
-        assert baseline_files and all(str(other) in path for path in baseline_files)
+        assert baseline_files and all(other.as_posix() in path for path in baseline_files)
 
         batch_waiting = threading.Event()
         debouncers: list[threading.Thread] = []
