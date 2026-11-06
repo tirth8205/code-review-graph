@@ -88,6 +88,9 @@
 
 ### Fixed
 
+- `.cjs` files are indexed as JavaScript and `.kts` files as Kotlin, as `.mjs`
+  and `.kt` already were. Every build skipped them, so their functions, imports
+  and calls were missing from the graph and read as if they did not exist.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
