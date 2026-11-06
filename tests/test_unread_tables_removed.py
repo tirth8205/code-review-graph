@@ -5,7 +5,7 @@ every full postprocess and never read, and their rows kept pointing at deleted
 nodes. ``idx_nodes_qualified`` repeated the UNIQUE index on
 ``nodes.qualified_name``; ``idx_edges_source`` and ``idx_edges_target`` are the
 leading columns of ``idx_edges_source_kind`` and ``idx_edges_target_kind``.
-See: #1059
+See: #1059, #1162
 """
 
 from __future__ import annotations
