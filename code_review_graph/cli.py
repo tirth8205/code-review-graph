@@ -732,42 +732,186 @@ def _warn_failed_files(result: dict) -> None:
 
 
 def _open_graph_store(db_path: Path, command: str):
-    """Open the graph store, recovering from an unusable database file.
+    """Open a store; CLI builds request recovery inside their write lock."""
+    from .tools._common import _open_graph_store as open_store
 
-    A restored CI cache can hold a truncated or half-written ``graph.db``,
-    and it can just as easily hold a valid SQLite file whose tables are the
-    wrong shape. SQLite refuses either one and the command used to die with a
-    traceback, which is why ``action.yml``'s ``update || build`` fallback
-    could not recover: the full build failed for exactly the same reason.
-    ``build`` rewrites the graph from scratch, so there the bad file is
-    discarded and the build proceeds.
+    return open_store(db_path, command)
 
-    Every other command re-raises, and ``main`` prints the one actionable
-    line the error already carries. That is the whole difference between the
-    two paths, and it is worth stating why the reporting is not duplicated
-    here: a second message would compete with the first, and one of them
-    would drift.
 
-    ``build`` discards only what ``CorruptGraphDatabaseError`` names, and
-    that class is deliberately narrow. A contended database, a read-only
-    checkout, a foreign SQLite file and a graph from a newer release all
-    reach ``main`` as themselves, because deleting any of those would destroy
-    a graph, or data, that is not broken.
+def _ensure_project_marker(repo_root: Path) -> None:
+    """Let a plain directory pass tool validation, without opening graph.db.
+
+    ``build``, ``update`` and ``postprocess`` all accept one, and each now
+    reaches the tools before anything has created the data directory.
     """
-    from .graph import CorruptGraphDatabaseError, GraphStore, discard_corrupt_database
+    if repo_root.is_dir() and not any(
+        (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
+    ):
+        from .incremental import _create_data_dir
+        _create_data_dir(repo_root / ".code-review-graph")
 
-    try:
-        return GraphStore(db_path)
-    except CorruptGraphDatabaseError as exc:
-        if command != "build":
-            raise
-        logger.warning(
-            "Graph database at %s is unusable (%s); discarding it and "
-            "building from scratch.",
-            db_path, exc.reason,
+
+def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
+    """Run writers before the generic CLI store initialization."""
+    from .incremental import assert_graph_serves_root, get_db_path
+
+    _ensure_project_marker(repo_root)
+    if args.command == "build":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
         )
-        discard_corrupt_database(db_path)
-        return GraphStore(db_path)
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=True,
+                recover_corrupt=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        parsed = result.get("files_parsed", 0)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            print(
+                f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
+                f"(postprocess={pp})"
+            )
+            if result.get("errors"):
+                print(f"Errors: {len(result['errors'])}")
+
+    elif args.command == "update":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
+        )
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        if result.get("status") == "error":
+            print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+            sys.exit(1)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            if result.get("build_type") == "full":
+                # No usable incremental base (fresh/legacy graph, or the
+                # last-synced commit was lost to a rewrite/shallow clone),
+                # so the update fell back to a full rebuild.
+                parsed = result.get("files_parsed", 0)
+                print(
+                    f"Full rebuild (no usable incremental base): "
+                    f"{parsed} files, {nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+            else:
+                updated = result.get("files_updated", 0)
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+        _warn_failed_files(result)
+
+        # --brief: append a one-line change-impact summary with the same
+        # estimated context-savings approximation that detect-changes uses.
+        # Same baseline (changed files vs analysis response), so the two
+        # commands are directly comparable.
+        if getattr(args, "brief", False) and not args.quiet:
+            from .changes import analyze_changes
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+                format_context_savings_panel,
+            )
+            from .incremental import discover_review_changes
+
+            # Reuse the base the update actually resolved to (args.base is
+            # None by default now, which get_changed_files cannot accept),
+            # then apply the same merge-base rule as detect-changes so a
+            # branch ref scopes the summary to this branch's own commits.
+            changed, brief_base = discover_review_changes(
+                repo_root, result.get("base_resolved") or "HEAD~1"
+            )
+            if changed:
+                from .locking import WriteLock
+
+                db_path = get_db_path(repo_root, read_only=True)
+                brief_lock = WriteLock(db_path)
+                if not brief_lock.acquire(blocking=True):
+                    from .tools.build import _write_skipped_response
+                    _exit_if_contended(_write_skipped_response(db_path, brief_lock.holder_pid()))
+                store = None
+                try:
+                    store = _open_graph_store(db_path, "update")
+                    assert_graph_serves_root(repo_root, store)
+                    impact = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=brief_base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        impact,
+                        original_tokens=original_tokens,
+                    )
+                    summary = impact.get("summary", "")
+                    if summary:
+                        print(summary)
+                    verified = None
+                    if getattr(args, "verify", False):
+                        from .context_savings import verify_with_tiktoken
+                        verified = verify_with_tiktoken(
+                            repo_root, changed, impact,
+                        )
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        impact.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=impact,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
+                finally:
+                    try:
+                        if store is not None:
+                            store.close()
+                    finally:
+                        brief_lock.release()
 
 
 def main() -> None:
@@ -2048,40 +2192,36 @@ def _dispatch() -> None:
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
-        db_path = get_db_path(repo_root)
-        store = _open_graph_store(db_path, args.command)
-        try:
-            from .tools.build import run_postprocess
+        _ensure_project_marker(repo_root)
+        from .tools.build import run_postprocess
 
-            result = run_postprocess(
-                flows=not getattr(args, "no_flows", False),
-                communities=not getattr(args, "no_communities", False),
-                fts=not getattr(args, "no_fts", False),
-                repo_root=str(repo_root),
-                wait_for_lock=getattr(args, "wait", False),
-                **embedding_refresh_kwargs,
+        result = run_postprocess(
+            flows=not getattr(args, "no_flows", False),
+            communities=not getattr(args, "no_communities", False),
+            fts=not getattr(args, "no_fts", False),
+            repo_root=str(repo_root),
+            wait_for_lock=getattr(args, "wait", False),
+            **embedding_refresh_kwargs,
+        )
+        _exit_if_contended(result)
+        parts = []
+        if result.get("flows_detected"):
+            parts.append(f"{result['flows_detected']} flows")
+        if result.get("communities_detected"):
+            parts.append(f"{result['communities_detected']} communities")
+        if result.get("fts_indexed"):
+            parts.append(f"{result['fts_indexed']} FTS entries")
+        print(f"Post-processing: {', '.join(parts) or 'done'}")
+        if result.get("build_incomplete"):
+            # Post-processing rebuilt derived data for the nodes that are
+            # stored, which is not the same as a repaired graph: the build
+            # that stored them never finished, so files are still missing.
+            print(
+                "Build state: INCOMPLETE - the last build stopped before "
+                "every file was stored, so files are still missing from "
+                "the graph. Post-processing cannot add them. Run "
+                "'code-review-graph build' to rebuild."
             )
-            _exit_if_contended(result)
-            parts = []
-            if result.get("flows_detected"):
-                parts.append(f"{result['flows_detected']} flows")
-            if result.get("communities_detected"):
-                parts.append(f"{result['communities_detected']} communities")
-            if result.get("fts_indexed"):
-                parts.append(f"{result['fts_indexed']} FTS entries")
-            print(f"Post-processing: {', '.join(parts) or 'done'}")
-            if result.get("build_incomplete"):
-                # Post-processing rebuilt derived data for the nodes that are
-                # stored, which is not the same as a repaired graph: the build
-                # that stored them never finished, so files are still missing.
-                print(
-                    "Build state: INCOMPLETE - the last build stopped before "
-                    "every file was stored, so files are still missing from "
-                    "the graph. Post-processing cannot add them. Run "
-                    "'code-review-graph build' to rebuild."
-                )
-        finally:
-            store.close()
         return
 
     if args.command == "embed":
@@ -2144,6 +2284,10 @@ def _dispatch() -> None:
     if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
+    if args.command in ("build", "update"):
+        _handle_build_update(args, repo_root, embedding_refresh_kwargs)
+        return
+
     if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
@@ -2205,145 +2349,6 @@ def _dispatch() -> None:
                     file_path = item.get("relative_path") or item.get("file", "?")
                     line = item.get("line", "?")
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
-
-        elif args.command == "build":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=True,
-                    repo_root=str(repo_root),
-                    postprocess=pp,
-                    wait_for_lock=getattr(args, "wait", False),
-                    **embedding_refresh_kwargs,
-                )
-            finally:
-                logging.disable(previous_disable)
-            _exit_if_contended(result)
-            parsed = result.get("files_parsed", 0)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                print(
-                    f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
-                    f"(postprocess={pp})"
-                )
-                if result.get("errors"):
-                    print(f"Errors: {len(result['errors'])}")
-
-        elif args.command == "update":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=False,
-                    repo_root=str(repo_root),
-                    base=args.base,
-                    postprocess=pp,
-                    wait_for_lock=getattr(args, "wait", False),
-                    **embedding_refresh_kwargs,
-                )
-            except RuntimeError as exc:
-                print(f"Error: {exc}", file=sys.stderr)
-                sys.exit(1)
-            finally:
-                logging.disable(previous_disable)
-            _exit_if_contended(result)
-            if result.get("status") == "error":
-                print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
-                sys.exit(1)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                if result.get("build_type") == "full":
-                    # No usable incremental base (fresh/legacy graph, or the
-                    # last-synced commit was lost to a rewrite/shallow clone),
-                    # so the update fell back to a full rebuild.
-                    parsed = result.get("files_parsed", 0)
-                    print(
-                        f"Full rebuild (no usable incremental base): "
-                        f"{parsed} files, {nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-                else:
-                    updated = result.get("files_updated", 0)
-                    print(
-                        f"Incremental: {updated} files updated, "
-                        f"{nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-            _warn_failed_files(result)
-
-            # --brief: append a one-line change-impact summary with the same
-            # estimated context-savings approximation that detect-changes uses.
-            # Same baseline (changed files vs analysis response), so the two
-            # commands are directly comparable.
-            if getattr(args, "brief", False) and not args.quiet:
-                from .changes import analyze_changes
-                from .context_savings import (
-                    attach_context_savings,
-                    estimate_file_tokens,
-                    format_context_savings_panel,
-                )
-                from .incremental import discover_review_changes
-
-                # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept),
-                # then apply the same merge-base rule as detect-changes so a
-                # branch ref scopes the summary to this branch's own commits.
-                changed, brief_base = discover_review_changes(
-                    repo_root, result.get("base_resolved") or "HEAD~1"
-                )
-                if changed:
-                    impact = analyze_changes(
-                        store,
-                        changed,
-                        repo_root=str(repo_root),
-                        base=brief_base,
-                    )
-                    original_tokens = estimate_file_tokens(repo_root, changed)
-                    attach_context_savings(
-                        impact,
-                        original_tokens=original_tokens,
-                    )
-                    summary = impact.get("summary", "")
-                    if summary:
-                        print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
 
         elif args.command == "status":
             from .build_state import BUILD_IN_PROGRESS, read_build_state

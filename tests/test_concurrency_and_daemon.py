@@ -2283,6 +2283,71 @@ class TestSingleFlightWriteLock:
     their own pool, load average 44 on 18 cores.
     """
 
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork workers")
+    def test_killed_build_releases_lock_while_forked_parsers_live(self, tmp_path: Path) -> None:
+        """Fork children must neither retain nor unlock the build's flock."""
+        repo = _make_repo(tmp_path / "repo", 40)
+        workers = tmp_path / "workers"
+        workers.mkdir()
+        env = _isolated_env(
+            tmp_path / "home", CRG_PARSE_EXECUTOR="process", CRG_SERIAL_PARSE="",
+            CRG_PARSE_WORKERS="2",
+        )
+        script = """
+import multiprocessing, os, sys, time
+from pathlib import Path
+from code_review_graph.parser import CodeParser
+from code_review_graph.tools.build import build_or_update_graph
+
+multiprocessing.set_start_method("fork", force=True)
+def paused_parse(self, *args, **kwargs):
+    (Path(sys.argv[2]) / str(os.getpid())).touch()
+    time.sleep(120)
+    raise RuntimeError("test worker was not cleaned up")
+CodeParser.parse_bytes = paused_parse
+build_or_update_graph(full_rebuild=True, repo_root=sys.argv[1], postprocess="none")
+"""
+        log = tmp_path / "build.log"
+        with log.open("w") as output:
+            holder = subprocess.Popen(
+                [sys.executable, "-c", script, str(repo), str(workers)],
+                env=env, start_new_session=True, stdout=output, stderr=output,
+            )
+        probe = WriteLock(_db_path(repo))
+        try:
+            assert _wait_for(
+                lambda: len(list(workers.iterdir())) >= 2 or holder.poll() is not None,
+                timeout=30,
+            ), log.read_text()
+            assert len(list(workers.iterdir())) >= 2, log.read_text()
+            # Children must not unlock the parent's description or erase its PID.
+            assert not probe.acquire()
+            assert probe.holder_pid() == holder.pid
+            holder.kill()
+            holder.wait(timeout=10)
+            for marker in workers.iterdir():
+                os.kill(int(marker.name), 0)  # workers still alive after parent death
+            assert probe.acquire(), "forked parsers retained the dead build's lock"
+            probe.release()
+            recovered = _crg(
+                "update", "--repo", str(repo), "--skip-flows",
+                env={**env, "CRG_SERIAL_PARSE": "1"},
+            )
+            assert recovered.returncode == 0, recovered.stderr
+            assert _counts(_db_path(repo))["files"] == 40
+            assert _integrity(_db_path(repo)) == "ok"
+        finally:
+            probe.release()
+            # These workers remain paused until cleanup, even after parent death.
+            for marker in workers.iterdir():
+                try:
+                    os.kill(int(marker.name), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if holder.poll() is None:
+                holder.kill()
+            holder.wait(timeout=10)
+
     def test_the_lock_lives_in_the_data_directory(self, tmp_path: Path) -> None:
         """Scoped per repository, and moved with the database when it moves.
 

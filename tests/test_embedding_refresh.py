@@ -391,17 +391,13 @@ class TestRefreshWithoutVectors:
         finally:
             graph.close()
 
-    def test_run_postprocess_reports_skip(self, tmp_path):
+    def test_run_postprocess_reports_skip(self, tmp_path, monkeypatch):
         graph = _graph_without_vectors(tmp_path, empty_table=False)
         db_path = graph.db_path
         graph.close()
-        with (
-            patch("code_review_graph.embeddings.get_provider") as get_provider,
-            patch(
-                "code_review_graph.tools.build._get_store",
-                side_effect=lambda root: (GraphStore(db_path), tmp_path),
-            ),
-        ):
+        (tmp_path / ".git").mkdir()
+        monkeypatch.setenv("CRG_DATA_DIR", str(db_path.parent))
+        with patch("code_review_graph.embeddings.get_provider") as get_provider:
             result = run_postprocess(
                 repo_root=str(tmp_path),
                 embedding_provider="local",
@@ -700,6 +696,7 @@ class TestRefreshWiring:
 
         build.assert_called_once_with(
             full_rebuild=True,
+            recover_corrupt=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="full",
             wait_for_lock=False,

@@ -594,6 +594,14 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
             return legacy_db
         return new_db
 
+    _prepare_db_path(repo_root, new_db)
+    return new_db
+
+
+def _prepare_db_path(repo_root: Path, new_db: Path) -> None:
+    """Prepare an already resolved database path, under the writer's lock."""
+    _create_data_dir(new_db.parent)
+
     # Migrate legacy database if present (only meaningful when the
     # legacy file sits at the repo root — if CRG_DATA_DIR is set we
     # skip the migration because there's no relationship between the
@@ -606,8 +614,6 @@ def get_db_path(repo_root: Path, *, read_only: bool = False) -> Path:
         side = repo_root / f".code-review-graph.db{suffix}"
         if side.exists():
             side.unlink()
-
-    return new_db
 
 
 def ensure_repo_gitignore_excludes_crg(repo_root: Path) -> str:

@@ -190,8 +190,12 @@
   (`wait_for_lock`) blocks until the in-flight write finishes, for callers that
   want the work done rather than skipped; two repositories never block each
   other; and the fixed lock path lets external tooling take the same lock. The
-  kernel releases it when the holder dies, so a killed or timed-out run never
-  wedges the repository.
+  lock covers schema initialization, legacy migration and CLI recovery too.
+  Forked parse workers close inherited lock handles, so killing their parent
+  releases the lock even while workers remain alive. A filesystem without
+  `flock` support logs a warning and runs unlocked rather than reporting a
+  competing writer. Invoke protected CRG commands directly; external `flock`
+  wrappers are for other writers.
 - An explicit embedding refresh (`--embedding-provider` with
   `--embedding-model`, or the `embedding_provider` and `embedding_model`
   arguments of `build_or_update_graph_tool` and `run_postprocess_tool`) on a

@@ -2248,9 +2248,10 @@ class TestBuildPostprocessResolvesBareEndpoints:
     """Every explicit build/postprocess path applies safe endpoint resolution."""
 
     def setup_method(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.db_path = Path(self.tmp.name)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db_path = self.repo / ".code-review-graph" / "graph.db"
+        self.db_path.parent.mkdir()
         self.store = GraphStore(self.db_path)
         app_file = "/repo/src/app.py"
         test_file = "/repo/tests/test_app.py"
@@ -2292,7 +2293,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
             self.store.close()
         except Exception:
             pass
-        self.db_path.unlink(missing_ok=True)
+        self.tmp.cleanup()
 
     @staticmethod
     def _tested_by_source(store: GraphStore) -> str:
@@ -2320,19 +2321,15 @@ class TestBuildPostprocessResolvesBareEndpoints:
         assert "bare_edges_resolved" not in result
         assert self._tested_by_source(self.store) == "parse"
 
-    def test_manual_run_postprocess_resolves(self, monkeypatch):
+    def test_manual_run_postprocess_resolves(self):
         import code_review_graph.tools.build as build_module
 
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         assert result["bare_edges_resolved"] == 1
@@ -2352,7 +2349,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
             reopened.close()
 
     def test_manual_run_postprocess_clears_the_marker_after_a_repair(
-        self, monkeypatch
+        self
     ):
         """A build that stored every file and died is what this command repairs.
 
@@ -2364,16 +2361,12 @@ class TestBuildPostprocessResolvesBareEndpoints:
         from code_review_graph.tools.build import BUILD_COMPLETE, BUILD_STATE_KEY
 
         self.store.set_metadata(BUILD_STATE_KEY, POSTPROCESS_PENDING)
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         assert result["status"] == "ok"
@@ -2381,7 +2374,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
         assert self._stored_build_state() == BUILD_COMPLETE
 
     def test_manual_run_postprocess_keeps_the_marker_when_files_are_missing(
-        self, monkeypatch
+        self
     ):
         """Derived data over a graph missing files is not a complete graph.
 
@@ -2393,16 +2386,12 @@ class TestBuildPostprocessResolvesBareEndpoints:
         from code_review_graph.tools.build import BUILD_IN_PROGRESS, BUILD_STATE_KEY
 
         self.store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         # It still repairs what it can, and reports what it could not.

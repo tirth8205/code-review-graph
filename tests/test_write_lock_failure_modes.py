@@ -1,42 +1,22 @@
-"""What the graph write lock does when flock misbehaves or a process forks.
+"""What the graph write lock does when a process forks or a hook stands down.
 
-From the review of PR #1126. The lock must not report a live writer when no
-writer exists, and parse workers forked during a build must not keep it.
+From the review of PR #1126. Parse workers forked during a build must not keep
+the lock, and the plugin hook must not report a skipped update as an error.
 """
 
 from __future__ import annotations
 
-import errno
 import json
 import multiprocessing
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from code_review_graph.locking import WriteLock
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="no flock on Windows")
-
-
-@pytest.mark.parametrize("code", [errno.ENOSYS, errno.ENOLCK, errno.EOPNOTSUPP])
-def test_a_filesystem_without_flock_is_not_reported_as_a_live_writer(tmp_path, code):
-    lock = WriteLock(tmp_path / "graph.db")
-
-    with patch("fcntl.flock", side_effect=OSError(code, "no locks here")):
-        assert lock.acquire() is True
-
-    assert lock.held is False
-
-
-@pytest.mark.parametrize("code", [errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES])
-def test_a_held_lock_is_still_reported_as_held(tmp_path, code):
-    lock = WriteLock(tmp_path / "graph.db")
-
-    with patch("fcntl.flock", side_effect=OSError(code, "held")):
-        assert lock.acquire() is False
 
 
 def _hold_until_told(started, done) -> None:

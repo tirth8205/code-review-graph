@@ -271,6 +271,7 @@ class TestBuildUpdateCommands:
 
         mock_build.assert_called_once_with(
             full_rebuild=True,
+            recover_corrupt=True,
             repo_root=str(Path("repo-root").resolve()),
             postprocess="none",
             wait_for_lock=False,
