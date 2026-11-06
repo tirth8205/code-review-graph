@@ -3112,3 +3112,159 @@ class TestJsGeneratorFunctions:
         sources = {e.target: e.source for e in edges if e.kind == "CALLS"}
         assert sources["visit"] == f"{path.as_posix()}::walk"
         assert sources["setup"] == path.as_posix()
+
+
+class TestTypeScriptAbstractClasses:
+    """TS/TSX ``abstract class`` declarations are graph nodes, like concrete ones.
+
+    Tree-sitter gives an abstract class its own node type,
+    ``abstract_class_declaration``, and ``_CLASS_TYPES`` listed only
+    ``class_declaration``. An abstract base therefore contributed no Class node
+    and no Function nodes for its concrete methods, so shared behaviour hosted on
+    a base class was invisible to the graph even though every subclass was
+    indexed. See: #1031
+    """
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    BASE_SOURCE = (
+        "export abstract class BaseService {\n"
+        "  abstract fetch(id: string): string;\n\n"
+        "  describe(): string {\n"
+        "    return 'base';\n"
+        "  }\n"
+        "}\n"
+    )
+
+    IMPL_SOURCE = (
+        "import { BaseService } from './base';\n\n"
+        "export class RealService extends BaseService {\n"
+        "  fetch(id: string): string {\n"
+        "    return id;\n"
+        "  }\n"
+        "}\n"
+    )
+
+    def _project(self, root: Path) -> tuple[Path, Path]:
+        base = root / "base.ts"
+        base.write_text(self.BASE_SOURCE, encoding="utf-8")
+        impl = root / "impl.ts"
+        impl.write_text(self.IMPL_SOURCE, encoding="utf-8")
+        return base, impl
+
+    def test_abstract_class_becomes_a_node(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base, _ = self._project(Path(tmp_dir))
+
+            nodes, _ = self.parser.parse_file(base)
+
+            classes = {n.name for n in nodes if n.kind == "Class"}
+            assert "BaseService" in classes
+
+    def test_concrete_method_of_an_abstract_class_is_contained_by_it(self):
+        """The class node is what gives its methods a parent, so a missing
+        abstract class also loses the methods hanging off it."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            base, _ = self._project(Path(tmp_dir))
+
+            nodes, edges = self.parser.parse_file(base)
+
+            describe = [
+                n for n in nodes if n.kind == "Function" and n.name == "describe"
+            ]
+            assert len(describe) == 1
+            assert any(
+                e.kind == "CONTAINS"
+                and e.source == f"{base.as_posix()}::BaseService"
+                and e.target == f"{base.as_posix()}::BaseService.describe"
+                for e in edges
+            )
+
+    def test_abstract_class_in_tsx_becomes_a_node(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            panel = Path(tmp_dir) / "panel.tsx"
+            panel.write_text(
+                "export abstract class BasePanel {\n"
+                "  abstract title(): string;\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            nodes, _ = self.parser.parse_file(panel)
+
+            assert "BasePanel" in {n.name for n in nodes if n.kind == "Class"}
+
+    def test_abstract_base_is_reachable_in_a_built_graph(self):
+        """Blast radius: the base and its concrete method are addressable by
+        qualified name once the whole project is built, not just the subclass."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base, impl = self._project(root)
+            base_qn = f"{base.resolve().as_posix()}::BaseService"
+            impl_qn = f"{impl.resolve().as_posix()}::RealService"
+
+            with GraphStore(root / "graph.db") as store:
+                built = full_build(root, store)
+                assert built["errors"] == []
+
+                assert store.get_node(base_qn) is not None
+                assert store.get_node(f"{base_qn}.describe") is not None
+                assert store.get_node(impl_qn) is not None
+
+    def test_abstract_method_is_a_node_and_catches_this_calls(self):
+        """``this.step()`` in the base must land on a real node, not a phantom."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            for name in ("base.ts", "panel.tsx"):
+                path = Path(tmp_dir) / name
+                path.write_text(
+                    "export abstract class Base {\n"
+                    "  abstract step(): void;\n"
+                    "  run() { this.step(); }\n"
+                    "}\n",
+                    encoding="utf-8",
+                )
+
+                nodes, edges = self.parser.parse_file(path)
+
+                step = [n for n in nodes if n.name == "step"]
+                assert [n.kind for n in step] == ["Function"]
+                assert step[0].parent_name == "Base"
+                assert step[0].extra["abstract"] is True
+                assert any(
+                    e.kind == "CALLS"
+                    and e.source == f"{path.as_posix()}::Base.run"
+                    and e.target == f"{path.as_posix()}::Base.step"
+                    for e in edges
+                )
+
+    def test_subclass_method_called_through_abstract_base_is_not_dead(self):
+        """Indexing the base bound ``this.step()`` to it, so the override check
+        has to find the abstract declaration or the override reads as unused."""
+        from code_review_graph.refactor import find_dead_code
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            (root / "shapes.ts").write_text(
+                "export abstract class Middle {\n"
+                "  abstract step(): void;\n"
+                "  abstract unused(): void;\n"
+                "  run() { this.step(); }\n"
+                "}\n"
+                "export class Leaf extends Middle {\n"
+                "  step() {}\n"
+                "  unused() {}\n"
+                "  orphan() {}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            with GraphStore(root / "graph.db") as store:
+                assert full_build(root, store)["errors"] == []
+                dead = {d["qualified_name"] for d in find_dead_code(store, root=root)}
+
+            shapes = f"{(root / 'shapes.ts').as_posix()}"
+            assert f"{shapes}::Leaf.step" not in dead
+            # A signature has no body to delete; its implementations stay reportable.
+            assert f"{shapes}::Middle.unused" not in dead
+            assert f"{shapes}::Leaf.orphan" in dead

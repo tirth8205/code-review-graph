@@ -1216,11 +1216,11 @@ _CLASS_TYPES: dict[str, list[str]] = {
     # *.d.ts) contributes zero symbol nodes and its blast radius collapses to
     # whole-file IMPORTS_FROM fan-out. See: #737
     "typescript": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "tsx": [
-        "class_declaration", "class",
+        "class_declaration", "abstract_class_declaration", "class",
         "interface_declaration", "type_alias_declaration", "enum_declaration",
     ],
     "go": ["type_declaration"],
@@ -1318,12 +1318,14 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
         "function_declaration",
         "generator_function_declaration",
         "method_definition",
+        "abstract_method_signature",
         "arrow_function",
     ],
     "tsx": [
         "function_declaration",
         "generator_function_declaration",
         "method_definition",
+        "abstract_method_signature",
         "arrow_function",
     ],
     "go": ["function_declaration", "method_declaration"],
@@ -14044,6 +14046,8 @@ class CodeParser:
                 )
         if julia_qualifier:
             method_extra["julia_module_qualifier"] = julia_qualifier
+        if child.type == "abstract_method_signature":
+            method_extra["abstract"] = True
         if language == "java" and deco_list:
             endpoint_count = self._emit_spring_endpoint_nodes(
                 child,
