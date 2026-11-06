@@ -282,6 +282,21 @@ BUDGETS: dict[str, dict[str, Any]] = {
         # the caller's own value is the ceiling.
         "worst_max": 40_000,
     },
+    # A route is one answer, so neither max_results nor the minimal cap cuts it.
+    # What bounds it is _MAX_ROUTE_HOPS rows. This walks one helper chain across
+    # the fixture, the longest route it holds.
+    "query_graph_tool:path_to": {
+        "tool": "query_graph_tool",
+        "default": {
+            "pattern": "path_to", "target": "helper_0_0_5", "to": "helper_0_0_0",
+        },
+        "worst": {
+            "pattern": "path_to", "target": "helper_0_0_5", "to": "helper_0_0_0",
+            "max_results": HUGE,
+        },
+        "default_max": 2_000,
+        "worst_max": 2_000,
+    },
     "get_review_context_tool": {
         "default": {"changed_files": "LEAF"},
         "worst": {

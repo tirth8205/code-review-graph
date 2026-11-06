@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +33,7 @@ from ..incremental import (
     discover_review_changes,
     get_db_path,
 )
-from ..parser import normalize_file_path
+from ..parser import is_test_file, normalize_file_path
 from ..search import hybrid_search
 from ..uncertainty import (
     empty_impact_confidence,
@@ -108,6 +109,7 @@ _QUERY_PATTERNS = {
     "endpoints_for": "Find endpoints handled by a method",
     "consumers_of": "Find classes that consume a Spring configuration property",
     "file_summary": "Get a summary of all nodes in a file",
+    "path_to": "Find how a given symbol or file reaches another",
 }
 
 _JAVA_FQN_PART = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -242,6 +244,275 @@ def _rank_disambiguation_candidates(
         return rank, node.qualified_name
 
     return [node_to_dict(node) for node in sorted(candidates, key=score)]
+
+
+# How sure a hop is, strongest first. Stored edge confidence is 1.0 on every edge
+# (#984), so it cannot name a weak hop; how the hop was bound can.
+_HOP_CERTAINTY = ("direct", "unique_name", "shared_name")
+_HOP_DIRECT, _HOP_UNIQUE_NAME, _HOP_SHARED_NAME = range(len(_HOP_CERTAINTY))
+
+# TESTED_BY stays out: "A is tested by a test that calls B" is no route from A to B.
+_ROUTE_EDGE_KINDS = frozenset({
+    "CALLS", "REFERENCES", "INHERITS", "IMPLEMENTS", "IMPORTS_FROM", "CONTAINS",
+})
+_NAME_MATCH_EDGE_KINDS = frozenset({"CALLS", "REFERENCES", "INHERITS", "IMPLEMENTS"})
+# A bare name more symbols than this share says nothing about any one of them.
+_MAX_NAME_MATCH_CANDIDATES = 10
+_MAX_ROUTE_VISITS = 200_000
+_MAX_ROUTE_HOPS = 30
+
+
+class _RouteGraph:
+    """The graph as hops. Bare-name targets are worked out only when reached."""
+
+    def __init__(self, store: GraphStore) -> None:
+        self.nodes: dict[str, GraphNode] = {}
+        self.by_name: dict[str, list[GraphNode]] = defaultdict(list)
+        for node in store.get_all_nodes(exclude_files=False):
+            self.nodes[node.qualified_name] = node
+            self.by_name[node.name].append(node)
+        self._edges_from: dict[str, list[GraphEdge]] = defaultdict(list)
+        for edge in store.get_all_edges():
+            if edge.kind in _ROUTE_EDGE_KINDS:
+                self._edges_from[edge.source_qualified].append(edge)
+        self._hops: dict[str, list[tuple[str, int, GraphEdge]]] = {}
+
+    def _name_matches(self, edge: GraphEdge, source: GraphNode) -> list[GraphNode]:
+        """The nodes a bare edge target could mean, by the rules callers_of uses."""
+        name = edge.target_qualified
+        if name in _BUILTIN_CALL_NAMES or "::" in name:
+            return []
+        languages = _compatible_edge_languages(source.language) if source.language else None
+        matches = [
+            candidate
+            for candidate in self.by_name.get(name, ())
+            if not candidate.is_test
+            and candidate.kind != "File"
+            and (languages is None or candidate.language in languages)
+            and GraphStore.receiver_evidence_admits(edge.extra, candidate)
+        ]
+        return matches if len(matches) <= _MAX_NAME_MATCH_CANDIDATES else []
+
+    def _edge_hops(
+        self, edge: GraphEdge, source: GraphNode,
+    ) -> list[tuple[str, int, GraphEdge]]:
+        target = edge.target_qualified
+        if target in self.nodes:
+            return [(target, _HOP_DIRECT, edge)]
+        if edge.kind not in _NAME_MATCH_EDGE_KINDS:
+            return []
+        for key in ("ambiguous_targets", "unresolved_targets"):
+            named = edge.extra.get(key)
+            if isinstance(named, list):
+                # The resolver declined to pick: these are its candidates.
+                return [
+                    (candidate, _HOP_SHARED_NAME, edge)
+                    for candidate in named
+                    if isinstance(candidate, str) and candidate in self.nodes
+                ]
+        matches = self._name_matches(edge, source)
+        certainty = _HOP_UNIQUE_NAME if len(matches) == 1 else _HOP_SHARED_NAME
+        return [(match.qualified_name, certainty, edge) for match in matches]
+
+    def hops_from(self, qualified_name: str) -> list[tuple[str, int, GraphEdge]]:
+        """Every hop out of a node, in a fixed order, strongest first."""
+        if qualified_name not in self._hops:
+            source = self.nodes[qualified_name]
+            hops: list[tuple[str, int, GraphEdge]] = []
+            for edge in self._edges_from.get(qualified_name, ()):
+                hops.extend(self._edge_hops(edge, source))
+            hops.sort(key=lambda hop: (hop[1], hop[0], hop[2].line))
+            self._hops[qualified_name] = hops
+        return self._hops[qualified_name]
+
+    def _search(
+        self, source: str, target: str, weakest_allowed: int,
+    ) -> list[tuple[str, str, int, GraphEdge]] | None:
+        came_from: dict[str, tuple[str, int, GraphEdge] | None] = {source: None}
+        queue = deque([source])
+        visits = 0
+        while queue and visits < _MAX_ROUTE_VISITS:
+            visits += 1
+            current = queue.popleft()
+            for next_name, certainty, edge in self.hops_from(current):
+                if certainty > weakest_allowed or next_name in came_from:
+                    continue
+                came_from[next_name] = (current, certainty, edge)
+                if next_name == target:
+                    route: list[tuple[str, str, int, GraphEdge]] = []
+                    step = next_name
+                    while (entry := came_from[step]) is not None:
+                        route.append((entry[0], step, entry[1], entry[2]))
+                        step = entry[0]
+                    return route[::-1]
+                queue.append(next_name)
+        return None
+
+    def route(
+        self, source: str, target: str,
+    ) -> list[tuple[str, str, int, GraphEdge]] | None:
+        """The route whose weakest hop is strongest; the shortest of those.
+
+        Trying each level in turn means a longer route through bound edges is
+        preferred to a shorter one that guesses at a name.
+        """
+        for weakest_allowed in range(len(_HOP_CERTAINTY)):
+            route = self._search(source, target, weakest_allowed)
+            if route is not None:
+                return route
+        return None
+
+
+def _route_endpoint_candidates(
+    store: GraphStore, root: Path, graph: _RouteGraph, name: str,
+) -> tuple[list[GraphNode], int]:
+    """Return the nodes *name* could mean and how many there are in all."""
+    for key in (name, normalize_file_path(root / name)):
+        if key in graph.nodes:
+            return [graph.nodes[key]], 1
+    exact = graph.by_name.get(name, [])
+    real = [
+        candidate
+        for candidate in exact
+        if not candidate.is_test and not is_test_file(candidate.file_path, root)
+    ]
+    candidates = sorted(real or exact, key=lambda node: node.qualified_name)
+    if candidates:
+        return candidates, len(candidates)
+    if java_candidates := _java_fqn_candidates(store, name):
+        return java_candidates, len(java_candidates)
+    if "." in name:
+        tail = store.search_nodes_by_qualified_tail(
+            name, limit=_MAX_DOTTED_TARGET_CANDIDATES,
+        )
+        if tail:
+            return tail, store.count_nodes_by_qualified_tail(name)
+    return store.search_nodes(name, limit=20), store.count_search_nodes(name)
+
+
+def _unresolved_route_endpoint(
+    store: GraphStore,
+    root: Path,
+    name: str,
+    which: str,
+    candidates: list[GraphNode],
+    count: int,
+    minimal: bool,
+) -> dict[str, Any]:
+    """Say which end of a route could not be pinned down, and why."""
+    if not candidates:
+        response: dict[str, Any] = {
+            "status": "not_found",
+            "endpoint": which,
+            "summary": f"No node found matching {which} '{name}'.",
+        }
+        note = empty_query_confidence(store, root, "path_to", name, None)
+        if note:
+            response["confidence"] = note
+        return response
+    ranked = _rank_disambiguation_candidates(candidates[:20], name)
+    if minimal:
+        ranked = [
+            {key: row[key] for key in ("qualified_name", "kind")} for row in ranked[:5]
+        ]
+    response = {
+        "status": "ambiguous",
+        "endpoint": which,
+        "summary": (
+            f"{which} '{name}' matches {count} node(s). "
+            "Re-run with a qualified_name from candidates."
+        ),
+        "candidates": ranked,
+        "candidate_count": count,
+        "candidates_truncated": count > len(ranked),
+        "hint": f"Use a qualified_name from candidates as {which}.",
+    }
+    if not minimal:
+        response["disambiguation"] = ranked
+    return response
+
+
+def _query_route(
+    store: GraphStore, root: Path, target: str, to: str, minimal: bool,
+) -> dict[str, Any]:
+    """Answer ``path_to``: how *target* reaches *to*, and how sure that is."""
+    graph = _RouteGraph(store)
+    ends: list[GraphNode] = []
+    for name, which in ((target, "target"), (to, "to")):
+        candidates, count = _route_endpoint_candidates(store, root, graph, name)
+        if len(candidates) != 1:
+            return _unresolved_route_endpoint(
+                store, root, name, which, candidates, count, minimal,
+            )
+        ends.append(candidates[0])
+    start, finish = ends
+    root_prefix = f"{normalize_file_path(root)}/"
+
+    def label(node: GraphNode) -> str:
+        """A short name: a File node's name is its whole path."""
+        return _sanitize_name(
+            node.name.removeprefix(root_prefix) if node.kind == "File" else node.name,
+        )
+
+    response: dict[str, Any] = {
+        "status": "ok",
+        "pattern": "path_to",
+        "target": start.qualified_name,
+        "to": finish.qualified_name,
+        "description": _QUERY_PATTERNS["path_to"],
+        "result_count": 0,
+        "results_omitted": 0,
+        "results": [],
+    }
+    if start.qualified_name == finish.qualified_name:
+        response["summary"] = "target and to are the same node, so there are no hops."
+        return response
+
+    route = graph.route(start.qualified_name, finish.qualified_name)
+    if route is None:
+        response["summary"] = (
+            f"No route from '{label(start)}' to '{label(finish)}' through calls, "
+            "references, inheritance, imports or containment. Callbacks and dynamic "
+            "dispatch are not in the graph, so this does not prove there is none."
+        )
+        if graph.route(finish.qualified_name, start.qualified_name) is not None:
+            response["reverse_route_exists"] = True
+            response["summary"] += " There is a route the other way: swap target and to."
+        note = empty_query_confidence(store, root, "path_to", target, start)
+        if note:
+            response["confidence"] = note
+        return response
+
+    def hop_row(source: str, destination: str, certainty: int, edge: GraphEdge) -> dict[str, Any]:
+        if minimal:
+            return {
+                "from": label(graph.nodes[source]),
+                "to": label(graph.nodes[destination]),
+                "kind": edge.kind,
+                "line": edge.line,
+                "certainty": _HOP_CERTAINTY[certainty],
+            }
+        return {
+            "from": _sanitize_name(source),
+            "to": _sanitize_name(destination),
+            "kind": edge.kind,
+            "file_path": edge.file_path,
+            "line": edge.line,
+            "certainty": _HOP_CERTAINTY[certainty],
+        }
+
+    weakest = max(route, key=lambda hop: hop[2])
+    weakest_name = _HOP_CERTAINTY[weakest[2]]
+    response["result_count"] = len(route)
+    response["results_omitted"] = max(0, len(route) - _MAX_ROUTE_HOPS)
+    response["results"] = [hop_row(*hop) for hop in route[:_MAX_ROUTE_HOPS]]
+    response["certainty"] = weakest_name
+    response["weakest_hop"] = hop_row(*weakest)
+    response["summary"] = (
+        f"'{label(start)}' reaches '{label(finish)}' in {len(route)} hop(s); "
+        f"weakest hop: {weakest_name}."
+    )
+    return response
 
 
 def get_impact_radius(
@@ -492,6 +763,7 @@ def query_graph(
     detail_level: str = "standard",
     max_results: int = 100,
     resolution: str = RESOLUTION_ALL,
+    to: str | None = None,
 ) -> dict[str, Any]:
     """Run a predefined graph query.
 
@@ -500,7 +772,7 @@ def query_graph(
                  imports_of, importers_of, children_of, tests_for, inheritors_of,
                  triggers_of, triggered_by, publishers_of, listeners_of,
                  handlers_of, endpoints_for, consumers_of, advises, advised_by,
-                 file_summary.
+                 file_summary, path_to.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -510,6 +782,8 @@ def query_graph(
             certain the edge's target attribution is. "all" (default) keeps
             both, "direct" keeps only calls bound to an indexed node, and
             "unresolved" keeps only the bare-name matches.
+        to: For path_to, the node, qualified name or file to reach. A route is one
+            answer, so max_results and the minimal cap do not cut it.
 
     Returns:
         Matching nodes and their aligned edges, with total and omitted counts.
@@ -537,6 +811,13 @@ def query_graph(
             }
 
         minimal = detail_level == "minimal"
+        if pattern == "path_to":
+            if not to:
+                return {
+                    "status": "error",
+                    "error": "path_to needs to: the node or file to reach.",
+                }
+            return _query_route(store, root, target, to, minimal)
         response_limit = min(max_results, 5) if minimal else max_results
         results: list[dict[str, Any]] = []
         edges_out: list[dict[str, Any]] = []
