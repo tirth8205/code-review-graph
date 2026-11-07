@@ -363,14 +363,6 @@ def test_incremental_update_leaves_no_dangling_flow_memberships(tmp_path):
     assert dangling == 0
 
 
-@pytest.mark.xfail(
-    reason=(
-        "incremental_detect_communities matches nodes.file_path (absolute) "
-        "against incremental_update's changed_files (repo-relative), so it "
-        "always finds zero affected communities and skips"
-    ),
-    strict=False,
-)
 def test_reparsed_nodes_keep_a_community_assignment(tmp_path):
     import sqlite3
 
