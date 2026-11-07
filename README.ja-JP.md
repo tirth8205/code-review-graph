@@ -68,14 +68,17 @@ code-review-graph build                # parse the codebase
   <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
 </p>
 
-1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` のいずれかを渡します。
+1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes`、`dsh` のいずれかを渡します。
 
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
+code-review-graph install --platform dsh --dsh-profile web
 ```
 
 設定ファイルの場所は [docs/USAGE.md](docs/USAGE.md#supported-platforms) にあります。Python 3.10+ が必要です。
+
+DeepSeek Harness は[ネイティブ DSH バンドル](docs/DSH.md)を使用し、インタラクティブな Web/Desktop グラフサイドバーとファイルシステム経由のリファクタリングを提供します。分離されたエンジンは `npx dsh-code-review-graph@0.1.2 prepare` で明示的に準備してください。Desktop へのインストールはアプリケーションのネイティブプラグインマネージャーが担当します。
 
 `uninstall` は Git または SVN の作業ツリーから CRG が書いたファイルとエントリを取り除き、ほかの MCP サーバー、フック、スキル、JSONC のコメントはそのまま残します。ツリー内のどこからでも実行できます。共有設定ファイルはアトミックに置き換えるので、書き込みに失敗しても元のファイルは壊れません。
 
@@ -446,7 +449,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 個の MCP ツール</strong></summary>
+<summary><strong>31 個の MCP ツール</strong></summary>
 <br>
 
 グラフを構築すると、アシスタントはこれらを使います。
@@ -585,7 +588,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### ツールの絞り込み
 
-CRG は既定で 30 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
+CRG は既定で 31 個の MCP ツールを公開します。サーバーを一部に限定するには、`--tools` か `CRG_TOOLS` 環境変数を使います。
 
 ```bash
 # CLI flag

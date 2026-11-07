@@ -23,7 +23,7 @@ Claude Code is one supported client among several.
 │  ┌────────────────────────────────────────────┐              │
 │  │      MCP Server (stdio or localhost HTTP)  │              │
 │  │                                            │              │
-│  │  30 MCP tools + 5 MCP prompts              │              │
+│  │  31 MCP tools + 5 MCP prompts              │              │
 │  │  ├── Core: build, impact, query, review,   │              │
 │  │  │   search, traverse, embed, stats, docs  │              │
 │  │  ├── Flows: list, get, affected            │              │

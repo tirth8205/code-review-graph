@@ -68,14 +68,17 @@ code-review-graph build                # parse the codebase
   <img src="diagrams/diagram8_supported_platforms.png" alt="一次安装，覆盖所有平台：检测 Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI 和 Hermes Agent" width="85%" />
 </p>
 
-只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy` 或 `hermes` 之一：
+只配置一个平台时，给 `--platform` 传入 `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` 或 `dsh` 之一：
 
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
+code-review-graph install --platform dsh --dsh-profile web
 ```
 
 配置文件的位置列在 [docs/USAGE.md](docs/USAGE.md#supported-platforms) 中。需要 Python 3.10+。
+
+DeepSeek Harness 使用[原生 DSH bundle](docs/DSH.md)，包含交互式 Web/Desktop 图谱侧边栏和基于文件系统的重构。请用 `npx dsh-code-review-graph@0.1.2 prepare` 显式准备其隔离引擎；Desktop 安装由应用自带的原生插件管理器负责。
 
 `uninstall` 会从 Git 或 SVN 工作树中移除 CRG 自己写入的文件和配置项，不动其他 MCP 服务器、钩子、技能和 JSONC 注释。在工作树内的任意位置运行即可。共享配置文件采用原子替换，写入失败时原文件保持完整。
 
@@ -446,7 +449,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 个 MCP 工具</strong></summary>
+<summary><strong>31 个 MCP 工具</strong></summary>
 <br>
 
 图谱构建完成后，助手会使用这些工具。
@@ -585,7 +588,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 工具过滤
 
-CRG 默认暴露 30 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
+CRG 默认暴露 31 个 MCP 工具。要把服务器限制到一个子集，使用 `--tools` 或 `CRG_TOOLS` 环境变量：
 
 ```bash
 # CLI flag
