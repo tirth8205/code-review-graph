@@ -1077,7 +1077,8 @@ def install_platform_configs(
 
     for key, plat in platforms_to_install.items():
         if plat["format"] == "native-bundle":
-            from .dsh import config_path as dsh_config_path, configure
+            from .dsh import config_path as dsh_config_path
+            from .dsh import configure
             if configure(dsh_config_path(repo_root, dsh_profile), install=True, dry_run=dry_run):
                 _record_configured(key, plat)
             continue
