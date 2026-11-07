@@ -10,7 +10,10 @@ from code_review_graph import refactor
 def pending(monkeypatch, files):
     monkeypatch.setitem(refactor._pending_refactors, "dsh-test", {
         "created_at": time.time(),
-        "edits": [{"file": str(path), "old": "old", "new": "new"} for path in files],
+        # Real previews always carry the line a name sits on; #1107's
+        # whole-word apply requires it.
+        "edits": [{"file": str(path), "line": 1, "old": "old", "new": "new"}
+                  for path in files],
     })
 
 
