@@ -669,3 +669,189 @@ class TestMetadataPreservation:
         assert extra["source_context"] == "stdlib_call"
         assert extra["external"] is True
         assert extra["resolution_basis"] == "zls"
+
+
+class TestExternalMirrorSync:
+    """When a call is marked external, the TESTED_BY mirror's extra must
+    be refreshed so it does not carry stale receiver_binding metadata."""
+
+    def test_external_marking_updates_mirror_extra(self, store, zig_repo):
+        root, caller, _target = zig_repo
+        _seed_unresolved_call(
+            store, caller, caller,
+            extra={
+                "receiver": "std",
+                "receiver_binding": "unknown",
+                "source_context": "stdlib_call",
+            },
+        )
+        sdk = Path("/opt/zig/lib/std/Build.zig")
+        client = _FakeClient({(str(caller), 3, 6): (str(sdk), 1)})
+
+        enrich_zls_calls(store, root, client=client)
+
+        # CALLS edge: marked external, target stays bare
+        call = _rows(store, "CALLS")[0]
+        call_extra = json.loads(call["extra"])
+        assert call_extra["external"] is True
+
+        # Mirror: source_qualified stays bare (target did not move), but
+        # extra must reflect the external resolution.
+        mirror = _rows(store, "TESTED_BY")[0]
+        mirror_extra = json.loads(mirror["extra"])
+        assert mirror["source_qualified"] == "doIt", (
+            "external marking must not move the mirror's source"
+        )
+        assert mirror_extra.get("external") is True, (
+            "mirror extra must be refreshed to reflect external resolution"
+        )
+        assert mirror_extra.get("resolution_basis") == "zls"
+
+    def test_external_mirror_counts_in_stats(self, store, zig_repo):
+        root, caller, _target = zig_repo
+        _seed_unresolved_call(store, caller, caller)
+        sdk = Path("/opt/zig/lib/std/Build.zig")
+        client = _FakeClient({(str(caller), 3, 6): (str(sdk), 1)})
+
+        stats = enrich_zls_calls(store, root, client=client)
+
+        assert stats.get("external_mirror_edges", 0) >= 1, (
+            "external mirror updates should be counted in stats"
+        )
+
+
+class TestMultiSegmentReceiverMetadata:
+    """Multi-segment receivers (self.map.foo(), T.inner.run()) must carry
+    receiver_class metadata that narrows ZLS's search, rather than being
+    silently dropped as fully unknown."""
+
+    def test_self_field_call_preserves_enclosing_class(self, tmp_path):
+        """``self.map.foo()`` should record enclosing_class as a hint."""
+        from code_review_graph.parser import CodeParser
+
+        root = tmp_path
+        f = root / "main.zig"
+        f.write_text(
+            'const std = @import("std");\n'
+            "pub const Server = struct {\n"
+            "    map: std.AutoHashMap(i32, i32),\n"
+            "    pub fn init(self: *Server) void {\n"
+            "        self.map.put(1, 2);\n"
+            "    }\n"
+            "};\n",
+            encoding="utf-8",
+        )
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(f)
+        calls = [e for e in edges if e.kind == "CALLS" and e.target == "put"]
+        assert calls, "self.map.put() must produce a CALLS edge"
+        extra = calls[0].extra
+        assert extra.get("receiver_binding") == "unknown", (
+            "field type is not visible to tree-sitter"
+        )
+        assert extra.get("receiver_class") == "Server", (
+            "enclosing class must be preserved as a hint for ZLS"
+        )
+        assert extra.get("receiver") == "self.map"
+
+    def test_type_inner_call_binds_innermost(self, tmp_path):
+        """``T.inner.run()`` should bind to ``inner`` (the innermost
+        container), not to ``T`` whose methods do not include ``run``."""
+        from code_review_graph.parser import CodeParser
+
+        root = tmp_path
+        f = root / "main.zig"
+        f.write_text(
+            "pub const Outer = struct {\n"
+            "    pub const Inner = struct {\n"
+            "        pub fn run() void {}\n"
+            "    };\n"
+            "};\n"
+            "pub fn caller() void {\n"
+            "    Outer.Inner.run();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(f)
+        calls = [e for e in edges if e.kind == "CALLS" and e.target == "run"]
+        assert calls, "Outer.Inner.run() must produce a CALLS edge"
+        extra = calls[0].extra
+        assert extra.get("receiver_binding") == "class", (
+            "when T is a defined type, the nesting chain is syntactically visible"
+        )
+        assert extra.get("receiver_class") == "Inner", (
+            "innermost segment should be the class, not the outer container"
+        )
+
+    def test_type_direct_call_binds_to_type(self, tmp_path):
+        """``T.foo()`` (two segments) should bind to ``T`` as class."""
+        from code_review_graph.parser import CodeParser
+
+        root = tmp_path
+        f = root / "main.zig"
+        f.write_text(
+            "pub const Config = struct {\n"
+            "    pub fn default() Config { return .{}; }\n"
+            "};\n"
+            "pub fn caller() void {\n"
+            "    _ = Config.default();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(f)
+        calls = [e for e in edges if e.kind == "CALLS" and e.target == "default"]
+        assert calls, "Config.default() must produce a CALLS edge"
+        extra = calls[0].extra
+        assert extra.get("receiver_binding") == "class", (
+            "T.foo() is a direct static method call"
+        )
+        assert extra.get("receiver_class") == "Config"
+
+
+class TestRead1FrameReader:
+    """The frame reader must use read1() for non-blocking pipe reads."""
+
+    def test_read1_is_preferred_when_available(self):
+        """When the stream has read1(), it is used instead of read()."""
+        data = io.BytesIO()
+        data.write(
+            b"Content-Length: 2\r\n\r\n{}"
+            b"Content-Length: 2\r\n\r\n{}"
+        )
+        data.seek(0)
+
+        q: queue.Queue = queue.Queue()
+        _frame_reader(data, q)
+
+        msg1 = q.get(timeout=1)
+        msg2 = q.get(timeout=1)
+        sentinel = q.get(timeout=1)
+        assert msg1 == {}
+        assert msg2 == {}
+        assert sentinel is None
+
+    def test_stream_without_read1_falls_back_to_read(self):
+        """Objects without read1 (e.g. raw BytesIO in tests) still work."""
+
+        class _NoRead1:
+            def __init__(self, data: bytes):
+                self._buf = data
+                self._pos = 0
+
+            def read(self, n=-1):
+                if self._pos >= len(self._buf):
+                    return b""
+                chunk = self._buf[self._pos:self._pos + max(n, 0)]
+                self._pos += len(chunk)
+                return chunk
+
+        stream = _NoRead1(b"Content-Length: 2\r\n\r\n{}")
+        q: queue.Queue = queue.Queue()
+        _frame_reader(stream, q)
+
+        msg = q.get(timeout=1)
+        sentinel = q.get(timeout=1)
+        assert msg == {}
+        assert sentinel is None

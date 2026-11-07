@@ -1946,6 +1946,8 @@ class GraphStore:
         moved_to: dict[tuple[str, str], set[str]] = {}
         #: (bare target, file_path) -> extra for the mirror the parser minted
         mirror_extra_by_key: dict[tuple[str, str], dict] = {}
+        #: (bare target, file_path) -> extra for external-only updates
+        external_extra_by_key: dict[tuple[str, str], dict] = {}
         for resolution in resolutions:
             extra = dict(resolution.extra)
             for key in _SUPERSEDED_TARGET_METADATA:
@@ -1955,13 +1957,24 @@ class GraphStore:
                 (resolution.target_qualified, serialized, resolution.edge_id),
             )
             old = old_targets.get(resolution.edge_id) or ""
-            if (
-                resolution.target_qualified is None
-                or "::" in old
-                or "::" not in resolution.target_qualified
-            ):
-                continue
             file_path = old_files.get(resolution.edge_id, "")
+            if "::" in old:
+                # Already resolved — no mirror to move.
+                continue
+            if resolution.target_qualified is None:
+                # External marking: the target stays, but the extra changes
+                # (external: True, resolution_basis, ...).  The mirror's
+                # extra was copied from the CALLS edge at parse time, so it
+                # must be refreshed here to stay in sync.  The mirror's
+                # source_qualified does not change because the bare target
+                # is still the target.
+                if not extra.get("external"):
+                    continue
+                external_key = (old, file_path)
+                external_extra_by_key.setdefault(external_key, extra)
+                continue
+            if "::" not in resolution.target_qualified:
+                continue
             mirror_key = (old, file_path)
             moved_to.setdefault(mirror_key, set()).add(resolution.target_qualified)
             mirror_extra_by_key.setdefault(mirror_key, extra)
@@ -1984,6 +1997,21 @@ class GraphStore:
             ).fetchall():
                 mirror_updates.append((target, serialized, row["id"]))
 
+        # External-only updates: the mirror's source_qualified stays (the
+        # bare target is unchanged), but its extra must be refreshed so the
+        # mirror does not carry stale receiver_binding/uncertainty metadata
+        # about a call that is now known to be external.
+        external_mirror_updates: list[tuple[str, int]] = []
+        for (bare_target, file_path), extra in external_extra_by_key.items():
+            serialized = json.dumps(extra, sort_keys=True)
+            for row in self._conn.execute(
+                "SELECT id FROM edges "
+                "WHERE kind = 'TESTED_BY' AND source_qualified = ? "
+                "AND file_path = ?",
+                (bare_target, file_path),
+            ).fetchall():
+                external_mirror_updates.append((serialized, row["id"]))
+
         self._begin_immediate()
         try:
             call_sql = (
@@ -2001,6 +2029,14 @@ class GraphStore:
                 self._conn.executemany(
                     mirror_sql, mirror_updates[start:start + _UPDATE_BATCH]
                 )
+            # External-only mirror updates: source_qualified stays, only
+            # extra is refreshed.
+            ext_mirror_sql = "UPDATE edges SET extra = ? WHERE id = ?"
+            for start in range(0, len(external_mirror_updates), _UPDATE_BATCH):
+                self._conn.executemany(
+                    ext_mirror_sql,
+                    external_mirror_updates[start:start + _UPDATE_BATCH],
+                )
             self._classify_target_resolution()
             self._conn.commit()
         except BaseException:
@@ -2011,6 +2047,7 @@ class GraphStore:
             "call_edges": len(call_updates),
             "mirror_edges": len(mirror_updates),
             "ambiguous_mirrors": ambiguous,
+            "external_mirror_edges": len(external_mirror_updates),
         }
 
     def count_edges_by_resolution(self, kind: str = "CALLS") -> dict[str, int]:

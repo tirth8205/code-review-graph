@@ -9910,6 +9910,9 @@ class CodeParser:
         suffix_children = list(rhs_suffix.children)
 
         # @import("path") -> IMPORTS_FROM edge
+        # Also handles ``@import("path").field``: the alias binds to the
+        # module (not the field), because the field's container is the module
+        # and it is the module that decides external vs. project.
         if (
             len(suffix_children) >= 2
             and suffix_children[0].type == "BUILTINIDENTIFIER"
@@ -9921,15 +9924,20 @@ class CodeParser:
                 resolved = self._resolve_module_to_file(
                     target, file_path, language,
                 )
-                # Keep the alias so ``util.helper()`` can later be bound to
-                # the imported file instead of staying a bare call name.
+                # ``@import("std").heap`` aliases the std module, not a
+                # project file: the alias is the import target so that
+                # ``heap.alloc()`` resolves the same way ``std.heap.alloc()``
+                # would.  A field suffix on a project file (``@import(
+                # "./a.zig").A``) still aliases the file, and the receiver
+                # evidence walker uses ``module_class`` to reach inside it.
+                alias_value = resolved if resolved else target
                 self._zig_import_aliases.setdefault(file_path, {})[var_name] = (
-                    resolved if resolved else target
+                    alias_value
                 )
                 edges.append(EdgeInfo(
                     kind="IMPORTS_FROM",
                     source=file_path,
-                    target=resolved if resolved else target,
+                    target=alias_value,
                     file_path=file_path,
                     line=decl.start_point[0] + 1,
                 ))
@@ -10176,6 +10184,15 @@ class CodeParser:
         share a name with a std helper; deciding from the name marked it
         external before any binding was consulted, so neither the bare-name
         resolver nor ZLS was ever asked about it.
+
+        Multi-segment receivers (``self.map.foo()``, ``T.inner.run()``) are
+        walked segment by segment.  The first segment that names a known
+        binding (``self``, an import alias, or a defined type) anchors the
+        call; later segments narrow the container but their type is only
+        known to ZLS, so the edge is marked ``unknown`` with the anchor's
+        class recorded as a hint.  This is not a guess — it is the strongest
+        statement the syntax alone supports, and it keeps the call in the
+        ZLS candidate set instead of hiding it behind a premature ``external``.
         """
         extra: dict = {}
         if not receiver:
@@ -10186,11 +10203,23 @@ class CodeParser:
         if root == self._ZIG_UNKNOWN_RECEIVER:
             extra["receiver_binding"] = "unknown"
             return extra
-        if root == "self" and len(receiver) == 1 and enclosing_class:
-            extra["receiver_binding"] = "class"
-            extra["receiver_class"] = enclosing_class
+
+        # --- self: the enclosing struct is always the anchor ---
+        if root == "self" and enclosing_class:
+            if len(receiver) == 1:
+                # ``self.foo()`` — a method call on the enclosing struct.
+                extra["receiver_binding"] = "class"
+                extra["receiver_class"] = enclosing_class
+            else:
+                # ``self.map.foo()`` — a call on a field of the enclosing
+                # struct.  The field's type is not visible to tree-sitter,
+                # but the enclosing class is still the strongest anchor
+                # available, and recording it gives ZLS a narrower search.
+                extra["receiver_binding"] = "unknown"
+                extra["receiver_class"] = enclosing_class
             return extra
 
+        # --- import alias: ``alias.foo()`` or ``alias.container.foo()`` ---
         alias = self._zig_import_aliases.get(file_path, {}).get(root)
         if alias is not None:
             if alias.endswith(".zig"):
@@ -10212,20 +10241,33 @@ class CodeParser:
                 extra["receiver_binding"] = "external"
             return extra
 
+        # --- defined type: ``T.foo()`` or ``T.inner.foo()`` ---
         if root in self._zig_defined_types.get(file_path, ()):
-            # ``T.inner.run()`` is a call on ``inner``. Binding it to ``T``
-            # would attribute it to a method ``T`` does not have.
-            extra["receiver_binding"] = "class"
-            extra["receiver_class"] = receiver[-1]
+            if len(receiver) == 1:
+                # ``T.foo()`` — a static method on a container defined here.
+                extra["receiver_binding"] = "class"
+                extra["receiver_class"] = root
+            else:
+                # ``T.inner.run()`` — ``T`` is a container defined in this
+                # file, so ``inner`` is a member of ``T`` (another container).
+                # Bind to the innermost segment so ``run`` is attributed to
+                # ``inner``, not to ``T`` whose own ``run`` is a different
+                # function.  This is a syntactic fact about the nesting, not
+                # a type inference: the receiver chain spells out the path.
+                extra["receiver_binding"] = "class"
+                extra["receiver_class"] = receiver[-1]
             return extra
+
+        # --- std/builtin/root: always external ---
         if root in ("std", "builtin", "root"):
             extra["external"] = True
             extra["external_module"] = root
             extra["receiver_binding"] = "external"
             return extra
-        # A receiver this file says nothing about (``self.map.foo()``). The
-        # call does have a receiver, so the bare-name fallback must not fire;
-        # saying so explicitly is what keeps the read path honest about it.
+
+        # --- unrecognised receiver (a local variable, a parameter, ...) ---
+        # The call does have a receiver, so the bare-name fallback must not
+        # fire; saying so explicitly is what keeps the read path honest.
         extra["receiver_binding"] = "unknown"
         return extra
 

@@ -313,6 +313,12 @@ def _frame_reader(stream, out: "queue.Queue[Optional[dict]]") -> None:
     request deadline: ``_request`` waits on the queue with its own timeout.
     ``None`` is the end-of-stream sentinel, which is how a crashed server
     turns into "no answer" instead of an infinite wait.
+
+    Uses ``read1()`` instead of ``read()`` so a single ``read`` syscall
+    returns immediately with whatever data is available, instead of blocking
+    until the buffer is full.  This matters on Windows, where ``subprocess``
+    pipes are wrapped in a ``BufferedReader`` whose ``read(n)`` will wait
+    for ``n`` bytes even when the server has already sent a complete frame.
     """
     buffer = bytearray()
     try:
@@ -320,7 +326,15 @@ def _frame_reader(stream, out: "queue.Queue[Optional[dict]]") -> None:
             frame = _extract_frame(buffer)
             if frame is None:
                 try:
-                    chunk = stream.read(_ZLS_READ_SIZE)
+                    # ``read1`` returns at most one underlying raw read,
+                    # so a short frame does not stall waiting for the
+                    # buffer to fill.  Fall back to ``read`` for objects
+                    # that do not provide ``read1`` (e.g. ``io.BytesIO``
+                    # in tests, which already returns all available data).
+                    if hasattr(stream, "read1"):
+                        chunk = stream.read1(_ZLS_READ_SIZE)
+                    else:
+                        chunk = stream.read(_ZLS_READ_SIZE)
                 except OSError:
                     break
                 if not chunk:
@@ -331,6 +345,8 @@ def _frame_reader(stream, out: "queue.Queue[Optional[dict]]") -> None:
                 out.put(json.loads(frame.decode("utf-8", errors="replace")))
             except (UnicodeDecodeError, json.JSONDecodeError):
                 logger.debug("Discarding malformed ZLS frame")
+    except Exception:  # noqa: BLE001 - the reader must never crash silently
+        logger.debug("ZLS frame reader terminated unexpectedly", exc_info=True)
     finally:
         out.put(None)
 
@@ -809,6 +825,7 @@ def enrich_zls_calls(
     applied = store.apply_call_resolutions(resolutions)
     stats["mirrors"] = applied["mirror_edges"]
     stats["ambiguous_mirrors"] = applied["ambiguous_mirrors"]
+    stats["external_mirror_edges"] = applied.get("external_mirror_edges", 0)
     if stats["resolved"] or stats["external"]:
         # A marker, not a memo: the next update rewrites these edges from
         # source and the only way it can warn about that is by knowing the
