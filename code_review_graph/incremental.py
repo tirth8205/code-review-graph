@@ -1731,14 +1731,20 @@ def _reconcile_stale_files(
                 relative = str(path.relative_to(repo_root))
             except ValueError:
                 continue
+            # A stored spelling can sit under a parent that now links outside
+            # the repository.  Reject it before any source read: reconciliation
+            # must not open (or keep) a file the graph would refuse to index.
+            source = _source_path(repo_root, path)
+            if source is None:
+                continue
             if (
-                path.is_file()
-                and not path.is_symlink()
+                not path.is_symlink()
+                and source.is_file()
                 and not _should_ignore(relative, ignore_patterns)
-                and parser.detect_language(path) is not None
+                and parser.detect_language(source) is not None
                 and (
                     (known_text is not None and stored_file in known_text)
-                    or not _is_binary(path)
+                    or not _is_binary(source)
                 )
             ):
                 current_paths.add(stored_file)
