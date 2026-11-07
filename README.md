@@ -68,11 +68,12 @@ code-review-graph build                # parse the codebase
   <img src="diagrams/diagram8_supported_platforms.png" alt="One install, every platform: detects Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, and Hermes Agent" width="85%" />
 </p>
 
-To configure one platform, pass `--platform` with one of `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, or `hermes`:
+To configure one platform, pass `--platform` with one of `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes`, or `dsh`:
 
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
+code-review-graph install --platform dsh --dsh-profile web
 ```
 
 Config file locations are listed in [docs/USAGE.md](docs/USAGE.md#supported-platforms). Requires Python 3.10+.
@@ -84,6 +85,11 @@ to the bundled read-only CLI when MCP is unavailable; a missing, empty, or
 stale graph never triggers an implicit build or update. WSL and Windows Codex
 runtimes have separate `CODEX_HOME` directories and tool inventories, so
 install and refresh the runtime that will execute the task.
+
+DeepSeek Harness uses the [native DSH bundle](docs/DSH.md), including an interactive
+Web/Desktop graph sidebar and filesystem-mediated refactors. Prepare its isolated
+engine explicitly with `npx dsh-code-review-graph@0.1.2 prepare`; Desktop installation
+belongs to the application's native plugin manager.
 
 `uninstall` removes CRG-owned files and entries from a Git or SVN working tree and leaves other MCP servers, hooks, skills and JSONC comments alone. Run it from anywhere inside the tree. Shared config files are replaced atomically, so a failed write leaves the original intact.
 
@@ -457,7 +463,7 @@ See [docs/COMMANDS.md](docs/COMMANDS.md#standalone-daemon-cli-crg-daemon) for th
 </details>
 
 <details>
-<summary><strong>30 MCP tools</strong></summary>
+<summary><strong>31 MCP tools</strong></summary>
 <br>
 
 The assistant uses these once the graph is built.
@@ -596,7 +602,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### Tool Filtering
 
-CRG exposes 30 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
+CRG exposes 31 MCP tools by default. To limit the server to a subset, use `--tools` or the `CRG_TOOLS` environment variable:
 
 ```bash
 # CLI flag

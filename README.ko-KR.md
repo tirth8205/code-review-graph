@@ -68,14 +68,17 @@ code-review-graph build                # parse the codebase
   <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent를 감지" width="85%" />
 </p>
 
-플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` 중 하나를 넘기세요.
+플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes`, `dsh` 중 하나를 넘기세요.
 
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
+code-review-graph install --platform dsh --dsh-profile web
 ```
 
 설정 파일 위치는 [docs/USAGE.md](docs/USAGE.md#supported-platforms)에 있습니다. Python 3.10+가 필요합니다.
+
+DeepSeek Harness는 [네이티브 DSH 번들](docs/DSH.md)을 사용하며, 대화형 Web/Desktop 그래프 사이드바와 파일 시스템 기반 리팩터링을 제공합니다. 격리된 엔진은 `npx dsh-code-review-graph@0.1.2 prepare`로 명시적으로 준비하세요. Desktop 설치는 애플리케이션의 네이티브 플러그인 관리자가 담당합니다.
 
 `uninstall`은 Git 또는 SVN 작업 트리에서 CRG가 만든 파일과 항목을 제거하고, 다른 MCP 서버, 훅, 스킬, JSONC 주석은 건드리지 않습니다. 트리 안 어디에서든 실행할 수 있습니다. 공유 설정 파일은 원자적으로 교체되므로 쓰기가 실패해도 원본은 그대로 남습니다.
 
@@ -446,7 +449,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>MCP 도구 30개</strong></summary>
+<summary><strong>MCP 도구 31개</strong></summary>
 <br>
 
 그래프를 만들고 나면 어시스턴트가 이 도구들을 씁니다.
@@ -585,7 +588,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### 도구 필터링
 
-CRG는 기본으로 MCP 도구 30개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
+CRG는 기본으로 MCP 도구 31개를 노출합니다. 서버를 일부로 제한하려면 `--tools`나 `CRG_TOOLS` 환경 변수를 쓰세요.
 
 ```bash
 # CLI flag

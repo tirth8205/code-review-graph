@@ -10,6 +10,8 @@ tables counting once, NULL ``extra`` rows, ordering/dedup guarantees of
 import time
 from unittest.mock import patch
 
+import pytest
+
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import _reconcile_stale_files, full_build
 from code_review_graph.parser import EdgeInfo, NodeInfo
@@ -173,6 +175,53 @@ class TestOrphanPurgeBoundaries:
             stale = _reconcile_stale_files(repo, store)
             assert stale == [outside]
             assert store.get_nodes_by_file(outside) == []
+        finally:
+            store.close()
+
+    def test_probe_mode_rejects_file_below_symlinked_ancestor_outside_repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        escaped = outside / "escaped.py"
+        escaped.write_text("def escaped():\n    pass\n", encoding="utf-8")
+        linked = repo / "linked"
+        try:
+            linked.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
+        stored = str(linked / "escaped.py")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            store.store_file_nodes_edges(
+                stored,
+                [
+                    NodeInfo(
+                        kind="File",
+                        name="escaped.py",
+                        file_path=stored,
+                        line_start=1,
+                        line_end=2,
+                        language="python",
+                    )
+                ],
+                [],
+                "hash",
+            )
+            store.commit()
+
+            # Reconciliation must drop the entry without opening it: the
+            # parent directory now resolves outside the repository.
+            with patch(
+                "code_review_graph.incremental._is_binary",
+                side_effect=AssertionError("read a file outside the repository"),
+            ):
+                stale = _reconcile_stale_files(repo, store)
+
+            assert stale == [stored]
+            assert store.get_nodes_by_file(stored) == []
         finally:
             store.close()
 

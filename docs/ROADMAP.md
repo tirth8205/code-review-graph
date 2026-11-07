@@ -27,7 +27,7 @@ Releases after v2.3.6 are listed in [CHANGELOG.md](../CHANGELOG.md).
 - Demo GIF (`diagrams/context-savings-demo.gif`) showing both CLI surfaces and `--verify`
 
 ### v2.3.4
-- 30 MCP tools and 5 MCP prompts
+- 31 MCP tools and 5 MCP prompts
 - Estimated context-savings metadata for review, impact, detect-changes and compact architecture responses
 - Compact architecture overview by default
 - Bounded change analysis for large diffs (`CRG_MAX_CHANGED_FUNCS`, `CRG_MAX_TRANSITIVE_FRONTIER`, `CRG_TOOL_TIMEOUT`)

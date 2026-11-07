@@ -33,6 +33,7 @@ import platform as platform_module
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -249,9 +250,23 @@ EXPECTATIONS: dict[str, PlatformExpectation] = {
         entry_type="stdio",
         expects_cwd=True,
     ),
+    "dsh": PlatformExpectation(
+        key="dsh",
+        scope="home",
+        relative_config=".dsh/profiles/web/package.json",
+        server_key="dsh.profile.bundles",
+        fmt="native-bundle",
+        entry_type=None,
+        expects_cwd=False,
+    ),
 }
 
 PLATFORM_KEYS = sorted(EXPECTATIONS)
+
+# The native-bundle platforms do not write an MCP server entry; their manifest
+# is driven by the DSH CLI and has its own lifecycle assertions below.
+NATIVE_BUNDLE_KEYS = ("dsh",)
+MCP_PLATFORM_KEYS = sorted(set(PLATFORM_KEYS) - set(NATIVE_BUNDLE_KEYS))
 
 # Instruction files each single-platform install is expected to write, as a
 # cross-check on ``skills._PLATFORM_INSTRUCTION_FILES``.
@@ -333,6 +348,7 @@ HOME_SUBDIRS = (
     ".kiro",
     ".copilot",
     ".config/opencode",
+    ".dsh/profiles/web",
     str(Path(_zed_relative()).parent),
 )
 
@@ -357,16 +373,58 @@ class Sandbox:
 
 @pytest.fixture
 def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
-    """A scratch git repository plus a throwaway HOME and HERMES_HOME."""
+    """A scratch git repository plus a throwaway HOME, HERMES_HOME and DSH_HOME."""
     base = tmp_path_factory.mktemp("lifecycle").resolve()
     home = base / "home"
     repo = base / "repo"
     hermes_home = home / ".hermes"
-    for directory in (home, repo):
+    dsh_home = home / ".dsh"
+    for directory in (home, repo, dsh_home):
         directory.mkdir(parents=True, exist_ok=True)
     for relative in HOME_SUBDIRS:
         (home / relative).mkdir(parents=True, exist_ok=True)
     hermes_home.mkdir(parents=True, exist_ok=True)
+
+    # A real ``dsh`` CLI would install the released bundle; this stub keeps the
+    # lifecycle test offline while still exercising the production call site:
+    # skills.install_platform_configs -> dsh.configure -> subprocess.
+    bin_dir = base / "bin"
+    bin_dir.mkdir()
+    dsh_impl = base / "dsh_impl.py"
+    dsh_impl.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "profile = args[args.index('--profile') + 1]\n"
+        "action = args[args.index('--profile') + 2]\n"
+        "package = args[args.index('--profile') + 3]\n"
+        "bundle, _, version = package.partition('@')\n"
+        "path = Path(os.environ['DSH_HOME']) / 'profiles' / profile / 'package.json'\n"
+        "path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "manifest = json.loads(path.read_text()) if path.exists() else {}\n"
+        "deps = manifest.setdefault('dependencies', {})\n"
+        "profiles = manifest.setdefault('dsh', {}).setdefault('profile', {})\n"
+        "bundles = profiles.setdefault('bundles', [])\n"
+        "if action == 'add':\n"
+        "    deps[bundle] = version or '0.0.0'\n"
+        "    if bundle not in bundles:\n"
+        "        bundles.append(bundle)\n"
+        "elif action == 'remove':\n"
+        "    deps.pop(bundle, None)\n"
+        "    if bundle in bundles:\n"
+        "        bundles.remove(bundle)\n"
+        "else:\n"
+        "    raise SystemExit(2)\n"
+        "path.write_text(json.dumps(manifest, indent=2) + '\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    dsh_wrapper = bin_dir / "dsh"
+    dsh_wrapper.write_text(
+        "#!/bin/sh\n"
+        f'exec "{sys.executable}" "{dsh_impl}" "$@"\n',
+        encoding="utf-8",
+    )
+    dsh_wrapper.chmod(0o755)
 
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.email", "t@example.invalid"], cwd=repo, check=True)
@@ -378,6 +436,8 @@ def sandbox(tmp_path_factory, monkeypatch) -> Sandbox:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("CRG_HOME", str(home / ".code-review-graph"))
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setattr(Path, "home", lambda: home)
 
     return Sandbox(repo=repo, home=home, hermes_home=hermes_home)
@@ -616,7 +676,7 @@ def content_traces(before: dict[Path, bytes],
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step1_install_writes_the_expected_config(sandbox: Sandbox, key: str) -> None:
     expect = EXPECTATIONS[key]
     config = sandbox.config_path(key)
@@ -687,7 +747,7 @@ def test_step1_install_writes_the_expected_config(sandbox: Sandbox, key: str) ->
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step2_second_install_is_byte_identical(sandbox: Sandbox, key: str) -> None:
     expect = EXPECTATIONS[key]
     config = sandbox.config_path(key)
@@ -741,7 +801,7 @@ def test_step2_second_install_is_byte_identical(sandbox: Sandbox, key: str) -> N
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step3_preexisting_user_config_survives(sandbox: Sandbox, key: str) -> None:
     expect = EXPECTATIONS[key]
     config = sandbox.config_path(key)
@@ -799,7 +859,7 @@ HUSK_XFAIL = (
 GIT_HOOK_PLATFORMS = ("claude", "codex", "qoder")
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step4a_uninstall_removes_the_registration_and_keeps_user_settings(
     sandbox: Sandbox, key: str
 ) -> None:
@@ -857,7 +917,7 @@ def test_step4a_uninstall_removes_the_registration_and_keeps_user_settings(
                 else []
             ),
         )
-        for k in PLATFORM_KEYS
+        for k in MCP_PLATFORM_KEYS
     ],
 )
 def test_step4b_uninstall_leaves_no_file_still_holding_our_content(
@@ -917,7 +977,7 @@ def test_step4b_qoder_uninstall_removes_every_skill_file_install_wrote(
 @pytest.mark.parametrize(
     "key",
     [pytest.param(k, marks=[pytest.mark.xfail(strict=True, reason=HUSK_XFAIL)])
-     for k in PLATFORM_KEYS],
+     for k in MCP_PLATFORM_KEYS],
 )
 def test_step4c_uninstall_leaves_no_empty_config_husk(sandbox: Sandbox, key: str) -> None:
     """A config file the installer created should not outlive the uninstall."""
@@ -979,7 +1039,7 @@ def test_step4d_uninstall_keeps_git_commit_working(sandbox: Sandbox, key: str) -
     _record("step4d_git_hook", key, 3)
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step4e_platform_scoped_unbind_covers_every_platform(
     sandbox: Sandbox, key: str
 ) -> None:
@@ -1007,11 +1067,129 @@ def test_step4e_platform_scoped_unbind_covers_every_platform(
 
 
 # ---------------------------------------------------------------------------
+# Native-bundle lifecycle: DSH writes a profile manifest through its CLI, not
+# an MCP server entry, so it has its own assertions instead of the generic
+# entry-shaped steps above.
+# ---------------------------------------------------------------------------
+
+
+def _read_dsh_manifest(config: Path) -> dict:
+    return json.loads(config.read_text(encoding="utf-8"))
+
+
+def _seed_dsh_manifest(config: Path) -> None:
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        json.dumps(
+            {
+                "dependencies": {"other-bundle": "1.0.0"},
+                "dsh": {"profile": {"bundles": ["other-bundle"]}},
+                "theme": "dark",
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_step1_install_writes_the_native_dsh_bundle(sandbox: Sandbox) -> None:
+    from code_review_graph import dsh
+
+    config = sandbox.config_path("dsh")
+    assert not config.exists(), f"{config} existed before install; sandbox is not clean"
+
+    run_install(sandbox, "dsh")
+
+    manifest = _read_dsh_manifest(config)
+    checks = 0
+    assert manifest["dependencies"][dsh.BUNDLE] == dsh.BUNDLE_VERSION
+    checks += 1
+    assert dsh.BUNDLE in manifest["dsh"]["profile"]["bundles"]
+    checks += 1
+    _record("step1_native_bundle", "dsh", checks)
+
+
+def test_step2_second_native_dsh_install_is_byte_identical(sandbox: Sandbox) -> None:
+    config = sandbox.config_path("dsh")
+    run_install(sandbox, "dsh")
+    first = config.read_bytes()
+
+    run_install(sandbox, "dsh")
+
+    assert config.read_bytes() == first, f"dsh: {config} changed on the second install"
+    _record("step2_native_bundle", "dsh", 1)
+
+
+def test_step3_native_dsh_preserves_unrelated_profile_fields(sandbox: Sandbox) -> None:
+    from code_review_graph import dsh
+
+    config = sandbox.config_path("dsh")
+    _seed_dsh_manifest(config)
+
+    run_install(sandbox, "dsh")
+
+    manifest = _read_dsh_manifest(config)
+    checks = 0
+    assert manifest["dependencies"]["other-bundle"] == "1.0.0"
+    checks += 1
+    assert manifest["theme"] == "dark"
+    checks += 1
+    assert dsh.BUNDLE in manifest["dependencies"]
+    checks += 1
+    assert dsh.BUNDLE in manifest["dsh"]["profile"]["bundles"]
+    checks += 1
+    _record("step3_native_bundle", "dsh", checks)
+
+
+def test_step4a_native_dsh_uninstall_keeps_user_fields(sandbox: Sandbox) -> None:
+    from code_review_graph import dsh
+
+    config = sandbox.config_path("dsh")
+    _seed_dsh_manifest(config)
+    run_install(sandbox, "dsh")
+
+    report = run_uninstall(sandbox)
+
+    manifest = _read_dsh_manifest(config)
+    checks = 0
+    assert dsh.BUNDLE not in manifest["dependencies"]
+    checks += 1
+    assert dsh.BUNDLE not in manifest["dsh"]["profile"]["bundles"]
+    checks += 1
+    assert manifest["dependencies"] == {"other-bundle": "1.0.0"}
+    checks += 1
+    assert manifest["theme"] == "dark"
+    checks += 1
+    assert not report.errors, f"dsh: uninstall reported errors {report.errors}"
+    checks += 1
+    _record("step4a_native_bundle", "dsh", checks)
+
+
+def test_step4e_native_dsh_scoped_unbind(sandbox: Sandbox) -> None:
+    from code_review_graph import dsh
+
+    config = sandbox.config_path("dsh")
+    run_install(sandbox, "dsh")
+
+    report = run_uninstall(sandbox, platforms=["dsh"])
+
+    manifest = _read_dsh_manifest(config)
+    checks = 0
+    assert dsh.BUNDLE not in manifest["dependencies"]
+    checks += 1
+    touched = " ".join(report.edited_paths + report.removed_paths)
+    assert str(config) in touched, f"dsh: the unbind report never mentions {config}: {touched!r}"
+    checks += 1
+    _record("step4e_native_bundle", "dsh", checks)
+
+
+# ---------------------------------------------------------------------------
 # Step 5: reinstalling over an older release's entry replaces it.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", PLATFORM_KEYS)
+@pytest.mark.parametrize("key", MCP_PLATFORM_KEYS)
 def test_step5_stale_config_entry_is_replaced(sandbox: Sandbox, key: str) -> None:
     """An entry a previous release wrote is replaced, not treated as current.
 
@@ -1182,8 +1360,8 @@ def test_platform_list_does_not_drift() -> None:
     cli_surface = _cli_platform_keys()
     expected = set(EXPECTATIONS)
 
-    assert len(installer) == 16, (
-        f"the installer now supports {len(installer)} platforms, not 16: "
+    assert len(installer) == 17, (
+        f"the installer now supports {len(installer)} platforms, not 17: "
         f"{sorted(installer)}"
     )
 
@@ -1211,7 +1389,7 @@ def test_platform_list_does_not_drift() -> None:
 
     # The uninstall sweep iterates skills.PLATFORMS, so drift can only appear as
     # a format it cannot handle. Name any such platform explicitly.
-    handled_formats = {"toml", "yaml", "object", "array"}
+    handled_formats = {"toml", "yaml", "object", "array", "native-bundle"}
     unsweepable = sorted(
         name
         for name, spec in skills.PLATFORMS.items()
@@ -1249,11 +1427,16 @@ def test_zz_canary_every_step_ran_against_every_platform() -> None:
         pytest.skip("lifecycle steps were deselected; nothing to verify")
 
     expected_coverage = {
-        "step1_install": set(PLATFORM_KEYS),
-        "step2_idempotent": set(PLATFORM_KEYS),
-        "step3_preserves_user_config": set(PLATFORM_KEYS),
-        "step4a_uninstall": set(PLATFORM_KEYS),
-        "step4e_unbind_sweep": set(PLATFORM_KEYS),
+        "step1_install": set(MCP_PLATFORM_KEYS),
+        "step2_idempotent": set(MCP_PLATFORM_KEYS),
+        "step3_preserves_user_config": set(MCP_PLATFORM_KEYS),
+        "step4a_uninstall": set(MCP_PLATFORM_KEYS),
+        "step4e_unbind_sweep": set(MCP_PLATFORM_KEYS),
+        "step1_native_bundle": set(NATIVE_BUNDLE_KEYS),
+        "step2_native_bundle": set(NATIVE_BUNDLE_KEYS),
+        "step3_native_bundle": set(NATIVE_BUNDLE_KEYS),
+        "step4a_native_bundle": set(NATIVE_BUNDLE_KEYS),
+        "step4e_native_bundle": set(NATIVE_BUNDLE_KEYS),
     }
     problems = []
     for step, platforms in expected_coverage.items():

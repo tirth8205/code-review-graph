@@ -68,14 +68,17 @@ code-review-graph build                # parse the codebase
   <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI और Hermes Agent को पहचानता है" width="85%" />
 </p>
 
-सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy` या `hermes` में से कोई एक दें:
+सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` या `dsh` में से कोई एक दें:
 
 ```bash
 code-review-graph install --platform cursor
 code-review-graph install --platform codebuddy
+code-review-graph install --platform dsh --dsh-profile web
 ```
 
 कॉन्फ़िग फ़ाइलों के स्थान [docs/USAGE.md](docs/USAGE.md#supported-platforms) में सूचीबद्ध हैं। Python 3.10+ चाहिए।
+
+DeepSeek Harness [नेटिव DSH बंडल](docs/DSH.md) का उपयोग करता है, जिसमें इंटरैक्टिव Web/Desktop ग्राफ़ साइडबार और फ़ाइल-सिस्टम आधारित रिफ़ैक्टरिंग शामिल है। इसका अलग इंजन `npx dsh-code-review-graph@0.1.2 prepare` से स्पष्ट रूप से तैयार करें; Desktop इंस्टॉलेशन ऐप के नेटिव प्लगइन मैनेजर का काम है।
 
 `uninstall` किसी Git या SVN वर्किंग ट्री से CRG की अपनी फ़ाइलें और प्रविष्टियाँ हटाता है और दूसरे MCP सर्वर, हुक, स्किल तथा JSONC टिप्पणियाँ जैसी की तैसी छोड़ देता है। इसे ट्री के भीतर कहीं से भी चलाया जा सकता है। साझा कॉन्फ़िग फ़ाइलें एटॉमिक तरीके से बदली जाती हैं, इसलिए लिखने में विफलता होने पर मूल फ़ाइल सुरक्षित रहती है।
 
@@ -446,7 +449,7 @@ alias = "project-b"
 </details>
 
 <details>
-<summary><strong>30 MCP टूल</strong></summary>
+<summary><strong>31 MCP टूल</strong></summary>
 <br>
 
 ग्राफ़ बन जाने के बाद असिस्टेंट इनका उपयोग करता है।
@@ -585,7 +588,7 @@ code-review-graph embed --provider voyage --model voyage-code-3
 
 #### टूल फ़िल्टरिंग
 
-CRG डिफ़ॉल्ट रूप से 30 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
+CRG डिफ़ॉल्ट रूप से 31 MCP टूल दिखाता है। सर्वर को एक उपसमूह तक सीमित करने के लिए `--tools` या `CRG_TOOLS` पर्यावरण चर का उपयोग करें:
 
 ```bash
 # CLI flag

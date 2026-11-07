@@ -2029,7 +2029,12 @@ class TestWatchReconciliation:
         target = tmp_path / "target.py"
         target.write_text("def target():\n    pass\n")
         linked_file = tmp_path / "linked.py"
-        linked_file.symlink_to(target)
+        try:
+            linked_file.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
         real_dir = tmp_path / "real"
         real_dir.mkdir()
         (real_dir / "inside.py").write_text("def inside():\n    pass\n")
@@ -2054,7 +2059,12 @@ class TestWatchReconciliation:
         outside_file = outside / "escaped.py"
         outside_file.write_text("def escaped():\n    pass\n")
         linked_dir = tmp_path / "linked"
-        linked_dir.symlink_to(outside, target_is_directory=True)
+        try:
+            linked_dir.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
         store = GraphStore(tmp_path / "graph.db")
         callback = MagicMock()
         handler = _create_watch_handler(tmp_path, store, callback)

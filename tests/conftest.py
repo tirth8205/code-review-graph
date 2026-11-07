@@ -44,6 +44,12 @@ def isolated_crg_home(tmp_path_factory, monkeypatch):
     # Tests that exercise the Codex default patch Path.home() to a temporary
     # directory; clear an external override so it cannot escape that scope.
     monkeypatch.delenv("CODEX_HOME", raising=False)
+    # The DSH installer resolves its profile from ``DSH_HOME``, falling back to
+    # ``~/.dsh``. ``dsh.config_path()`` prefers that variable over a patched
+    # ``Path.home()``, so a suite that only fakes the home would still write
+    # the developer's real web-profile manifest. Pin it here, before any DSH
+    # lookup, exactly as the Hermes variable above.
+    monkeypatch.setenv("DSH_HOME", str(tmp_path_factory.mktemp("dsh-home")))
     return home
 
 

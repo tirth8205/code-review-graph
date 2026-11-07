@@ -185,6 +185,7 @@ class TestLongRunningToolsAreAsync:
         "get_architecture_overview_tool",
         "refactor_tool",
         "apply_refactor_tool",
+        "get_refactor_edit_plan_tool",
         "get_wiki_page_tool",
         "get_hub_nodes_tool",
         "get_bridge_nodes_tool",

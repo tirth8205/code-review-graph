@@ -550,7 +550,7 @@ def d7():
 
     # Right annotation: what gets called
     els.append(R(rx, y-5, 380, 75, bg="#fff4e6", fs="solid", sc=ORG, op=60))
-    els.append(T(rx+15, y+5, "30 tools available:", 14, sc=ORG))
+    els.append(T(rx+15, y+5, "31 tools available:", 14, sc=ORG))
     els.append(T(rx+15, y+25, "detect_changes \u2192 get_review_context\n\u2192 get_impact_radius \u2192 query_graph", 13, sc=ORG))
 
     els.append(A(sx+bw/2, y+bh+5, [[0,0],[0,30]], sc=ORG))
