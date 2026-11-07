@@ -41,6 +41,11 @@ def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real config. Re-point it inside this fake home so the Hermes platform
     # is exercised within the user-scope boundary uninstall enforces.
     monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    # DSH prefers DSH_HOME over Path.home(); re-point it inside the fake home
+    # so native-bundle writes stay inside the user-scope boundary this suite
+    # is exercising (the shared autouse fixture already keeps it out of the
+    # real profile).
+    monkeypatch.setenv("DSH_HOME", str(home / ".dsh"))
     return home
 
 
