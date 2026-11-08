@@ -6643,9 +6643,12 @@ class CodeParser:
             for node in nodes
             if node.language == "go" and "go_receiver" in node.extra
         }
+        # A dot in a member's parent scope proves nesting for Python and for
+        # the languages that accumulate the lexical scope chain (#934); Ruby
+        # and Julia always dot, so they are handled by their own rules below.
         disambiguated_leaves = {
             node.parent_name.rsplit(".", 1)[-1] for node in nodes
-            if node.language == "python" and node.parent_name
+            if node.language in ("python", "csharp") and node.parent_name
             and "." in node.parent_name and node.kind in ("Function", "Test")
         }
         # Every nested Ruby class has a dotted scope, so a dot proves nothing
@@ -6661,7 +6664,7 @@ class CodeParser:
         )
         disambiguated_scopes = {
             node.parent_name for node in nodes
-            if node.language in ("python", "ruby") and node.parent_name
+            if node.language in ("python", "ruby", "csharp") and node.parent_name
             and node.kind in ("Function", "Test")
             and node.parent_name.rsplit(".", 1)[-1] in disambiguated_leaves
         }
@@ -14637,10 +14640,13 @@ class CodeParser:
         )
         nodes.append(node)
 
-        # CONTAINS edge
+        # CONTAINS edge: a nested class is contained by its enclosing class,
+        # which is always emitted as a node on the same scope chain (#934).
+        # Python's collision-only identities are addressed by their own
+        # container below, so they keep the file-level edge here.
         class_container = (
             self._qualify(enclosing_class, file_path, None)
-            if language == "julia" and enclosing_class
+            if enclosing_class and language not in ("python", "cpp")
             else file_path
         )
         edges.append(EdgeInfo(
@@ -14682,16 +14688,25 @@ class CodeParser:
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
-        # Recurse into class body
+        # Recurse into class body. Descend with the full accumulated scope
+        # chain (``Parent.Name``), not the bare leaf name: the class node is
+        # keyed ``_qualify(name, file, class_parent)``, so passing the leaf
+        # leaves nested members qualifying to ``file::Name.member`` while the
+        # container node is ``file::Parent.Name`` — two same-named nested
+        # classes collapse their methods onto one node, deep nesting keeps
+        # only one level, and CONTAINS edges point at containers that were
+        # never emitted (#934). Ruby already recursed this way; Julia joins
+        # through its own helper.
         if language == "julia":
             recursive_class = self._julia_scope_join(enclosing_class, name)
-        elif language == "ruby" and class_parent:
-            # The class node is keyed ``_qualify(name, file, class_parent)``,
-            # i.e. ``file::Parent.Name``. Descend with that same scope string so
-            # its methods qualify to ``file::Parent.Name.method`` and the
-            # CONTAINS edge points at a node that exists. Passing the bare leaf
-            # leaves every class with a parent_name pointing its methods at a
-            # ``file::Name`` container that was never emitted.
+        elif language in ("python", "cpp"):
+            # Python keeps its legacy leaf spelling unless a same-leaf class
+            # actually collides; ``_index_ambiguous_method_scopes`` carries
+            # the full chain for exactly those methods (#999). C++ pins
+            # legacy nested-class keys while its namespace-aware function
+            # scopes stay complete (test_cpp_overload_identity).
+            recursive_class = name
+        elif class_parent:
             recursive_class = f"{class_parent}.{name}"
         else:
             recursive_class = name
