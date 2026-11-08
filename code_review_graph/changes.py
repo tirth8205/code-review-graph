@@ -295,8 +295,9 @@ def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
     ranges: dict[str, list[tuple[int, int]]] = {}
     current_file: str | None = None
 
-    # Match "@@ ... +start,count @@" or "@@ ... +start @@"
-    hunk_pattern = re.compile(r"^@@ .+? \+(\d+)(?:,(\d+))? @@")
+    # Match "@@ -old[,oldcount] +new[,newcount] @@": both sides are captured,
+    # because a pure-deletion hunk (+new,0) needs the old-side count.
+    hunk_pattern = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
     for line in diff_text.splitlines():
         file_match = _POST_IMAGE_HEADER.match(line)
@@ -306,11 +307,17 @@ def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
 
         hunk_match = hunk_pattern.match(line)
         if hunk_match and current_file is not None:
-            start = int(hunk_match.group(1))
-            count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
+            old_count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
+            start = int(hunk_match.group(3))
+            count = int(hunk_match.group(4)) if hunk_match.group(4) else 1
             if count == 0:
-                # Pure deletion hunk (no lines added); still note the position.
-                end = start
+                # Pure deletion hunk (no lines added). The removed lines leave
+                # a hole in the new coordinates: it opens at *start* and is
+                # *old_count* lines long. The zero-width (start, start) range
+                # sat one line above every node that shifted up into the
+                # vacated space (``node.line_start <= end`` failed by one), so
+                # deletion-only diffs mapped to no nodes at all.
+                end = start + old_count
             else:
                 end = start + count - 1
             ranges.setdefault(current_file, []).append((start, end))

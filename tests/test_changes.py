@@ -141,8 +141,40 @@ class TestChanges:
         )
         result = _parse_unified_diff(diff)
         assert "del.py" in result
-        # Count=0 means deletion, start=end
-        assert result["del.py"][0] == (10, 10)
+        # The deletion leaves a hole old_count lines wide starting at start.
+        assert result["del.py"][0] == (10, 13)
+
+    def test_parse_unified_diff_pure_deletion_off_by_one_header(self):
+        """A real-world pure-deletion header maps to the vacated span.
+
+        git numbers a deletion-only hunk by the last surviving old line
+        (``-395,96`` removed old lines 395-490) and the first new coordinate
+        past the hole (``+394,0``). The range must therefore span
+        ``(new_start, new_start + old_count)`` -- ``(394, 394)`` misses every
+        node that shifted up into the vacated space by exactly one line.
+        """
+        diff = (
+            "--- a/decode.py\n"
+            "+++ b/decode.py\n"
+            "@@ -395,96 +394,0 @@\n"
+            "-    def removed():\n"
+            "-        pass\n"
+        )
+        result = _parse_unified_diff(diff)
+        assert "decode.py" in result
+        assert result["decode.py"][0] == (394, 490)
+
+    def test_parse_unified_diff_pure_deletion_implicit_old_count(self):
+        """A single-line deletion with omitted old count spans one line."""
+        diff = (
+            "--- a/x.py\n"
+            "+++ b/x.py\n"
+            "@@ -7 +7,0 @@\n"
+            "-    gone\n"
+        )
+        result = _parse_unified_diff(diff)
+        assert "x.py" in result
+        assert result["x.py"][0] == (7, 8)
 
     def test_parse_unified_diff_multiple_files(self):
         """Parses a diff spanning two files."""
