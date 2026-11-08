@@ -50,6 +50,39 @@ _MCP_STDIO_ACTIVE = False
 _PARSE_WORKER_STATE = threading.local()
 
 
+def _windows_console_handle(fileno: int) -> bool:
+    """Return True when ``fileno`` is a real Windows console.
+
+    On Windows, ``isatty()`` is True for any character device, including the
+    ``NUL`` device that ``subprocess`` uses for ``stdin=DEVNULL`` and that
+    Node uses for ``stdio: "ignore"``. Only a console handle accepts
+    ``GetConsoleMode``, so that call tells the two apart.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(fileno)
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):
+        return False
+
+
+def _stdin_is_interactive() -> bool:
+    """Return True only when stdin is an interactive terminal."""
+    try:
+        if not sys.stdin.isatty():
+            return False
+        if sys.platform == "win32":
+            return _windows_console_handle(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+    return True
+
+
 def _select_executor_kind() -> str:
     """Return 'process' or 'thread' for parallel parsing.
 
@@ -58,7 +91,10 @@ def _select_executor_kind() -> str:
     platform, where ``ProcessPoolExecutor`` workers can inherit the transport
     pipe/socket and prevent EOF shutdown. The older Windows non-TTY fallback
     remains for direct integrations that predate the explicit transport flag
-    (issues #46, #136, PR #615).
+    (issues #46, #136, PR #615). On Windows, stdin redirected from the
+    ``NUL`` device counts as non-interactive even though ``isatty()`` is
+    True for it, because a caller that kills such a run leaves its pool
+    workers behind as orphans.
 
     Override explicitly with ``CRG_PARSE_EXECUTOR={process,thread}``.
 
@@ -72,7 +108,7 @@ def _select_executor_kind() -> str:
         return explicit
     if _MCP_STDIO_ACTIVE:
         return "thread"
-    if sys.platform == "win32" and not sys.stdin.isatty():
+    if sys.platform == "win32" and not _stdin_is_interactive():
         return "thread"
     return "process"
 
