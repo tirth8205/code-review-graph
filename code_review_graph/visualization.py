@@ -528,16 +528,15 @@ def export_graph_data(
     # Preload community_id mapping from DB (column may not exist in old schemas)
     community_map = store.get_all_community_ids()
 
-    for file_path in store.get_all_files():
-        for gnode in store.get_nodes_by_file(file_path):
-            if gnode.qualified_name in seen_qn:
-                continue
-            seen_qn.add(gnode.qualified_name)
-            d = node_to_dict(gnode)
-            d["params"] = gnode.params
-            d["return_type"] = gnode.return_type
-            d["community_id"] = community_map.get(gnode.qualified_name)
-            nodes.append(d)
+    for gnode in store.iter_file_nodes():
+        if gnode.qualified_name in seen_qn:
+            continue
+        seen_qn.add(gnode.qualified_name)
+        d = node_to_dict(gnode)
+        d["params"] = gnode.params
+        d["return_type"] = gnode.return_type
+        d["community_id"] = community_map.get(gnode.qualified_name)
+        nodes.append(d)
 
     name_index = _build_name_index(nodes, seen_qn)
 

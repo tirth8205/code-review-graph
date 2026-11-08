@@ -280,6 +280,10 @@
 
 ### Fixed
 
+- Full graph exports and seeded full-read fallbacks read file-scoped nodes in
+  one query instead of one query per indexed file, preserving virtual-node
+  scope and ambiguous-target order (#1165). Ordinary seeded views use the
+  targeted reads added in #1178.
 - The docs match the code again. `docs/`, the reference `get_docs_section_tool`
   serves, `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`, the Copilot
   instructions, two skills and the VS Code README now cover what the last two

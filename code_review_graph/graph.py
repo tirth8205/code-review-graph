@@ -71,6 +71,17 @@ logger = logging.getLogger(__name__)
 # instead of one per row (issue #721).
 _UPDATE_BATCH = 50_000
 
+# Include orphaned nodes and edge-owned paths, but exclude virtual-only paths.
+# Invalid JSON must remain visible to reconciliation rather than break it.
+_FILE_PATHS_QUERY = (
+    "SELECT file_path FROM nodes "
+    "WHERE extra IS NULL "
+    "OR json_valid(extra) = 0 "
+    "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1 "
+    "UNION "
+    "SELECT file_path FROM edges"
+)
+
 # These are the canonical language values stored for the JavaScript ecosystem.
 # JSX files are stored as ``javascript`` and Astro files as ``typescript`` by
 # ``EXTENSION_TO_LANGUAGE``; TSX keeps its own grammar name. Nodes from an HTML
@@ -2165,6 +2176,19 @@ class GraphStore:
         for row in rows:
             yield self._row_to_node(row)
 
+    def iter_file_nodes(self) -> Iterator[GraphNode]:
+        """Yield the file inventory's nodes in file and insertion order.
+
+        Matches get_all_files() followed by get_nodes_by_file(), without a
+        separate query per file. Order matters for ambiguous export targets.
+        """
+        rows = self._conn.execute(
+            f"SELECT * FROM nodes WHERE file_path IN ({_FILE_PATHS_QUERY}) "
+            "ORDER BY file_path, id"
+        )
+        for row in rows:
+            yield self._row_to_node(row)
+
     def get_all_nodes(self, exclude_files: bool = True) -> list[GraphNode]:
         """Return all nodes, optionally excluding File nodes."""
         if exclude_files:
@@ -4227,15 +4251,7 @@ class GraphStore:
         # get_all_files. json_valid gates the extraction, and the truthiness
         # comparison keeps extra='{"virtual": false}' visible instead of
         # making the node immortal to reconciliation (#864).
-        rows = self._conn.execute(
-            "SELECT file_path FROM nodes "
-            "WHERE extra IS NULL "
-            "OR json_valid(extra) = 0 "
-            "OR COALESCE(json_extract(extra, '$.virtual'), 0) != 1 "
-            "UNION "
-            "SELECT file_path FROM edges "
-            "ORDER BY file_path"
-        ).fetchall()
+        rows = self._conn.execute(_FILE_PATHS_QUERY + " ORDER BY file_path").fetchall()
         return [r["file_path"] for r in rows]
 
     def get_file_hashes(self) -> dict[str, str]:
