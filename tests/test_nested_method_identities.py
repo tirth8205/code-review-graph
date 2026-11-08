@@ -654,3 +654,78 @@ end
     assert 'thing.rb::Outer.Thing.confirm' in {
         e.target for e in edges if e.kind == 'CALLS' and e.source == caller
     }
+
+
+# ---------------------------------------------------------------------------
+# Generalized nested scope chains for the remaining languages (#934)
+# ---------------------------------------------------------------------------
+
+CSHARP_SAME_LEAF = '''namespace App;
+
+public class Alpha
+{
+    public class Same
+    {
+        public string Run() { return Helper(); }
+        private string Helper() { return "alpha"; }
+    }
+}
+
+public class Beta
+{
+    public class Same
+    {
+        public string Run() { return Helper(); }
+        private string Helper() { return "beta"; }
+    }
+}
+'''
+
+
+def test_csharp_same_leaf_classes_keep_methods_in_their_enclosing_scope(tmp_path):
+    """Two same-named nested classes must not collapse their methods (#934)."""
+    path = Path('S.cs')
+    nodes, edges = CodeParser().parse_bytes(path, CSHARP_SAME_LEAF.encode())
+    with GraphStore(tmp_path / 'graph.db') as store:
+        store.store_file_nodes_edges(path.as_posix(), nodes, edges)
+        methods = [n for n in store.get_nodes_by_file(path.as_posix()) if n.kind == 'Function']
+        assert {n.qualified_name for n in methods} == {
+            f'{path}::{scope}.Same.{method}'
+            for scope in ['Alpha', 'Beta'] for method in ['Run', 'Helper']
+        }
+        for scope in ['Alpha', 'Beta']:
+            run = f'{path}::{scope}.Same.Run'
+            assert {e.target_qualified for e in store.get_edges_by_source(run)
+                    if e.kind == 'CALLS'} == {f'{path}::{scope}.Same.Helper'}
+            assert any(e.source_qualified == f'{path}::{scope}.Same'
+                       for e in store.get_edges_by_target(run) if e.kind == 'CONTAINS')
+
+
+def test_csharp_deep_nesting_keeps_the_full_scope_chain():
+    """Three levels of nesting must retain every level, not just one (#934)."""
+    parser, nodes, edges = _parse('Deep.cs', '''namespace App;
+public class A { public class B { public class C { public void M() { } } } }
+''')
+    qualified = {parser._node_qualified(n) for n in nodes if n.kind != 'File'}
+    assert qualified == {
+        'Deep.cs::A', 'Deep.cs::A.B', 'Deep.cs::A.B.C', 'Deep.cs::A.B.C.M',
+    }
+    # The containment tree follows the same chain: each class is contained by
+    # its enclosing class, and the method by the innermost class.
+    assert _contains_sources(edges, 'Deep.cs::A.B') == {'Deep.cs::A'}
+    assert _contains_sources(edges, 'Deep.cs::A.B.C') == {'Deep.cs::A.B'}
+    assert _contains_sources(edges, 'Deep.cs::A.B.C.M') == {'Deep.cs::A.B.C'}
+
+
+def test_csharp_single_nested_class_carries_full_scope():
+    """A lone nested class still qualifies by its full chain (#934)."""
+    parser, nodes, _ = _parse('One.cs', '''namespace App;
+public class Outer
+{
+    public class Inner
+    {
+        public void Handle() { }
+    }
+}
+''')
+    assert _methods(parser, nodes) == {'One.cs::Outer.Inner.Handle'}
