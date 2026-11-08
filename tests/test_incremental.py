@@ -2,7 +2,9 @@
 
 import hashlib
 import io
+import os
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch  # noqa: F401 – used in tests
 
@@ -57,6 +59,56 @@ class TestParseExecutorSelection:
         monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: False)
 
         assert incremental_module._select_executor_kind() == "process"
+
+    def test_windows_nul_stdin_uses_threads(self, monkeypatch):
+        # NUL is a character device, so isatty() is True, but it is no console.
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(incremental_module.sys.stdin, "fileno", lambda: 0)
+        monkeypatch.setattr(
+            incremental_module, "_windows_console_handle", lambda fileno: False,
+        )
+
+        assert incremental_module._select_executor_kind() == "thread"
+
+    def test_windows_console_stdin_keeps_process_default(self, monkeypatch):
+        monkeypatch.delenv("CRG_PARSE_EXECUTOR", raising=False)
+        monkeypatch.setattr(
+            incremental_module, "_MCP_STDIO_ACTIVE", False, raising=False,
+        )
+        monkeypatch.setattr(incremental_module.sys, "platform", "win32")
+        monkeypatch.setattr(incremental_module.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(incremental_module.sys.stdin, "fileno", lambda: 0)
+        monkeypatch.setattr(
+            incremental_module, "_windows_console_handle", lambda fileno: True,
+        )
+
+        assert incremental_module._select_executor_kind() == "process"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows NUL device only")
+    def test_real_nul_stdin_is_not_interactive_on_windows(self):
+        script = (
+            "import sys; "
+            "from code_review_graph import incremental as m; "
+            "print(sys.stdin.isatty(), m._stdin_is_interactive(), "
+            "m._select_executor_kind())"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "CRG_PARSE_EXECUTOR"}
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+            timeout=60,
+        )
+
+        assert result.stdout.split() == ["True", "False", "thread"]
 
     def test_explicit_process_override_wins_in_stdio_mcp(self, monkeypatch):
         monkeypatch.setenv("CRG_PARSE_EXECUTOR", "process")
