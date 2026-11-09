@@ -10,8 +10,6 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build, incremental_update
 from code_review_graph.parser import CodeParser, EdgeInfo
@@ -575,10 +573,6 @@ def test_forget_leaves_csharp_referrers_bound_like_a_fresh_build(tmp_path):
         assert expected_flows
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="watch drops created .csproj events, so ownership is not rebound (audit of #964)",
-)
 def test_watch_new_csproj_rebinds_like_an_update(tmp_path):
     from watchdog.events import FileCreatedEvent
 
@@ -599,3 +593,38 @@ def test_watch_new_csproj_rebinds_like_an_update(tmp_path):
         handler.raise_if_failed()
         # ``update`` with the same change unbinds: ownership is now ambiguous.
         assert _calls(store, tmp_path) == [("Caller.cs::C.Go", "Service::Run")]
+
+
+def test_watch_csproj_delete_rebinds_and_refreshes_flows(tmp_path):
+    from watchdog.events import FileCreatedEvent, FileDeletedEvent
+
+    from code_review_graph.incremental import _create_watch_handler
+    from code_review_graph.postprocessing import run_post_processing
+
+    _write(tmp_path, {
+        "One.csproj": "<Project />",
+        "Imports.cs": "global using Other;",
+        "Caller.cs": "class C { void Go() { Service.Run(); } }",
+        "Service.cs": _SERVICE,
+    })
+    postprocessed = []
+
+    def on_files_updated(store):
+        postprocessed.append(True)
+        return run_post_processing(store)
+
+    with _store(tmp_path) as store:
+        full_build(tmp_path, store)
+        run_post_processing(store)
+        handler = _create_watch_handler(tmp_path, store, on_files_updated)
+        (tmp_path / "Two.csproj").write_text("<Project />", encoding="utf-8")
+        handler.process([FileCreatedEvent(str(tmp_path / "Two.csproj"))])
+        handler.raise_if_failed()
+        assert _calls(store, tmp_path) == [("Caller.cs::C.Go", "Service::Run")]
+        # The rebind parsed nothing, yet flows must follow the new edges.
+        assert postprocessed and store.get_metadata("csharp_flows_dirty") is None
+        (tmp_path / "Two.csproj").unlink()
+        handler.process([FileDeletedEvent(str(tmp_path / "Two.csproj"))])
+        handler.raise_if_failed()
+        assert _calls(store, tmp_path) == [("Caller.cs::C.Go", "Service.cs::Other.Service.Run")]
+        assert len(postprocessed) == 2

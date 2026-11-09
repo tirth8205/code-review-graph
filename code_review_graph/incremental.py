@@ -2483,7 +2483,7 @@ def incremental_update(
     hcl_changed = any(rp.endswith((".tf", ".hcl")) for rp in all_files)
     hcl_stats = _run_hcl_resolver(store) if hcl_changed else None
     scoped_changed = any(
-        rp.endswith((".php", ".rs", ".cs", ".csproj"))
+        rp.endswith((".php", ".rs", ".cs")) or _is_csharp_project(rp)
         for rp in set(all_files) | set(stale_files) | missing_paths
     )
     scoped_stats = _run_scoped_resolver(store, repo_root) if scoped_changed else None
@@ -3458,6 +3458,11 @@ class _WatchSupervisor:
             pass
 
 
+def _is_csharp_project(relative_path: str) -> bool:
+    """A ``.csproj`` decides C# project ownership, so it rebinds calls (#964)."""
+    return relative_path.lower().endswith(".csproj")
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
@@ -3638,9 +3643,13 @@ def _create_watch_handler(
             else:
                 if source is not None and event.event_type in {"deleted", "moved"}:
                     paths.add(source)
-                elif source is not None and self._parseable_file(source):
+                elif source is not None and (
+                    self._parseable_file(source) or _is_csharp_project(source)
+                ):
                     paths.add(source)
-                if destination is not None and self._parseable_file(destination):
+                if destination is not None and (
+                    self._parseable_file(destination) or _is_csharp_project(destination)
+                ):
                     paths.add(destination)
             return paths
 
@@ -3665,7 +3674,12 @@ def _create_watch_handler(
                         )
                         _raise_watch_update_errors(result, "incremental update")
                         files_updated += result["files_updated"]
-                    if files_updated > 0 and on_files_updated is not None:
+                    if on_files_updated is not None and (
+                        files_updated > 0
+                        # A project file change parses nothing but can rebind
+                        # C# calls in unchanged files; the binder marks flows.
+                        or (changed_files and store.get_metadata("csharp_flows_dirty") == "1")
+                    ):
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)
                 except BaseException as exc:
