@@ -278,6 +278,37 @@ def test_gaps_section_ranks_test_gaps_by_what_depends_on_them(graph):
     assert qn["validate"] not in {h["qualified_name"] for h in section["hotspots"]}
 
 
+def test_gap_with_a_name_longer_than_the_report_keeps_its_counts(tmp_path):
+    # The report cuts names to 256 characters; the counts must still come
+    # from the real node, not from a lookup by the cut name.
+    from code_review_graph.flows import store_flows
+
+    store = GraphStore(str(tmp_path / "graph.db"))
+    try:
+        path = tmp_path / "long.py"
+        target = _node(store, "f" * 300, path, "python", line=1)
+        for i in range(2):
+            caller = _node(store, f"caller_{i}", tmp_path / f"c{i}.py", "python", line=1)
+            _edge(store, "CALLS", caller, target, tmp_path / f"c{i}.py")
+        store.commit()
+        node = store.get_node(target)
+        store_flows(store, [{
+            "name": "flow", "entry_point_id": node.id, "depth": 0, "node_count": 1,
+            "file_count": 1, "criticality": 0.5, "path": [node.id],
+        }])
+        report = analyze_changes(store, [str(path)], changed_ranges={str(path): [(1, 6)]})
+        section = build_change_details(
+            store, report, ("gaps",), changed_files=[str(path)],
+        )["gaps"]
+    finally:
+        store.close()
+    assert len(target) > 256
+    hot = section["hotspots"][0]
+    assert hot["qualified_name"] == target[:256]
+    assert hot["callers"] == 2
+    assert hot["flows"] == 1
+
+
 def test_graph_section_reports_provenance(graph):
     store = graph[0]
     section = _details(graph)["graph"]

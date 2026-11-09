@@ -126,7 +126,7 @@ def build_change_details(
         elif name == "impact":
             details[name] = _impact(store, report, by_id, changed_files)
         elif name == "gaps":
-            details[name] = _gaps(store, report)
+            details[name] = _gaps(store, report, changed)
         elif name == "graph":
             details[name] = _graph(store)
         else:
@@ -400,9 +400,17 @@ def _impact(
     }
 
 
-def _gaps(store: GraphStore, report: dict[str, Any]) -> dict[str, Any]:
+def _gaps(
+    store: GraphStore, report: dict[str, Any], changed: list[GraphNode],
+) -> dict[str, Any]:
     gaps = [g for g in report.get("test_gaps") or [] if isinstance(g, dict)]
-    nodes = {
+    # A gap's name in the report is cut to 256 characters, so a lookup by it
+    # misses a longer name. Every gap is a changed symbol: match it to the
+    # changed node by the cut name, file and line, and query by the real name.
+    own = {
+        (_sanitize_name(n.qualified_name), n.file_path, n.line_start): n for n in changed
+    }
+    by_name = {
         n.qualified_name: n
         for n in store.get_nodes_by_qualified_names(
             str(g.get("qualified_name") or "") for g in gaps
@@ -410,8 +418,9 @@ def _gaps(store: GraphStore, report: dict[str, Any]) -> dict[str, Any]:
     }
     rows = []
     for gap in gaps:
-        qualified_name = str(gap.get("qualified_name") or "")
-        node = nodes.get(qualified_name)
+        shown = str(gap.get("qualified_name") or "")
+        node = own.get((shown, gap.get("file"), gap.get("line_start"))) or by_name.get(shown)
+        qualified_name = node.qualified_name if node is not None else shown
         rows.append({
             "qualified_name": _sanitize_name(qualified_name),
             "file_path": gap.get("file"),
