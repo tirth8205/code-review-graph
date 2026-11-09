@@ -1098,7 +1098,10 @@ def store_communities(
 
 
 def get_communities(
-    store: GraphStore, sort_by: str = "size", min_size: int = 0
+    store: GraphStore,
+    sort_by: str = "size",
+    min_size: int = 0,
+    members_by_community: dict[int, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve stored communities from the database.
 
@@ -1106,6 +1109,8 @@ def get_communities(
         store: The GraphStore instance.
         sort_by: Column to sort by ("size", "cohesion", "name").
         min_size: Minimum community size to include.
+        members_by_community: Members to report for each community id, for a
+            caller that only wants some of them. Saves one query per community.
 
     Returns:
         List of community dicts.
@@ -1127,10 +1132,14 @@ def get_communities(
     communities: list[dict[str, Any]] = []
     for row in rows:
         # Fetch member qualified names for this community
-        member_qns = [
-            _sanitize_name(qn)
-            for qn in store.get_community_member_qns(row["id"])
-        ]
+        member_qns = (
+            [
+                _sanitize_name(qn)
+                for qn in store.get_community_member_qns(row["id"])
+            ]
+            if members_by_community is None
+            else members_by_community.get(row["id"], [])
+        )
 
         communities.append({
             "id": row["id"],

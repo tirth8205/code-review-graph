@@ -259,6 +259,16 @@
   NestJS monorepo whose services import `src/...`, 1,849 import edges stayed
   bare strings, `importers_of` for one service found 14 of its 35 importers,
   and calls on its injected services fell back to name matching.
+- A seeded `visualize` view (`--seed-symbol`, `--seed-file`, `--seed-flow`)
+  reads only the part of the graph around its seed (#1145). It used to load
+  every node, one query per file, and the whole edge table before cutting the
+  view down to `--max-nodes`, so a two-node view of a large graph cost as much
+  as the whole graph. It now reads a few columns of each node, which name
+  lookup needs, counts edges from the indexes, and loads only the edges that
+  touch the view. On this repository's graph a one-symbol view went from 380
+  SQL statements to 20 and from 120 MB to 13 MB at peak, with the same output
+  byte for byte. A path query still reads the whole graph, since a route can
+  run anywhere, and so does a view that reaches most of a large graph.
 - Imports of sibling packages in npm, yarn and pnpm workspaces resolve to the
   package's source files (#1030). A specifier such as `@acme/shared` or
   `@acme/sdk/browser` names a package-manager link, not a
