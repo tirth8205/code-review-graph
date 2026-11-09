@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-code-review-graph is a local-first knowledge graph for code review. It parses a repository with Tree-sitter (plus targeted fallbacks), stores nodes and edges in SQLite, updates the graph incrementally from Git changes, and serves compact context over MCP and the CLI to AI coding tools. Supported platforms are the entries in `PLATFORMS` in `skills.py`: Claude Code, Codex, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen Code, Kiro, Qoder, GitHub Copilot, GitHub Copilot CLI, Hermes Agent and CodeBuddy Code.
+code-review-graph is a local-first knowledge graph for code review. It parses a repository with Tree-sitter (plus targeted fallbacks), stores nodes and edges in SQLite, updates the graph incrementally from Git changes, and serves compact context over MCP and the CLI to AI coding tools. Supported platforms are the entries in `PLATFORMS` in `skills.py`: Claude Code, Codex, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen Code, Kiro, Qoder, GitHub Copilot, GitHub Copilot CLI, Hermes Agent and CodeBuddy Code.
 
 ## Graph Tool Usage (Token-Efficient)
 

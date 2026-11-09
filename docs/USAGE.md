@@ -23,7 +23,6 @@ code-review-graph install --platform codex
 code-review-graph install --platform cursor
 code-review-graph install --platform claude-code
 code-review-graph install --platform codebuddy
-code-review-graph install --platform mimo
 ```
 
 ### Supported Platforms
@@ -38,7 +37,7 @@ code-review-graph install --platform mimo
 | Zed | `zed` | `~/Library/Application Support/Zed/settings.json` (macOS) or `~/.config/zed/settings.json` |
 | Continue | `continue` | `~/.continue/config.json` |
 | OpenCode | `opencode` | `opencode.jsonc` (preferred) or `opencode.json` |
-| MiMo Code | `mimo` | `.mimocode/mimocode.jsonc` (when present), otherwise `.mimocode/mimocode.json` |
+| MiMo Code | `mimo` | `.mimocode/mimocode.jsonc` if it exists, otherwise `.mimocode/mimocode.json` |
 | Antigravity | `antigravity` | `~/.gemini/antigravity/mcp_config.json` |
 | Gemini CLI | `gemini-cli` | `.gemini/settings.json` |
 | Qwen Code | `qwen` | `~/.qwen/settings.json` |
@@ -61,6 +60,11 @@ The CodeBuddy layout follows its documentation for
 [hooks](https://www.codebuddy.ai/docs/cli/hooks). Hook commands resolve the
 repository at runtime, so committed settings do not contain one developer's
 checkout path.
+
+MiMo Code reads `.mimocode/mimocode.json` and then `.mimocode/mimocode.jsonc`.
+`install` adds the server to the `.jsonc` file if there is one, and to the
+`.json` file if not, and keeps other servers, settings and comments.
+`uninstall` removes it from both.
 
 ### Git pre-commit hook
 
@@ -89,11 +93,6 @@ separate `CODEX_HOME` directories and tool inventories, so install CRG in the
 runtime that will actually run the task and restart/refresh that runtime.
 Codex runs the installed hooks only after you mark them as trusted in Codex; until then the
 graph does not update on its own there.
-
-MiMo Code uses a project-local configuration. The installer adds a local MCP
-server command under its top-level `mcp` object without modifying other servers
-or settings. When a project already has `.mimocode/mimocode.jsonc`, it updates
-that file in preference to `.mimocode/mimocode.json`.
 
 ## Core Workflow
 

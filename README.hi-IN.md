@@ -65,10 +65,10 @@ code-review-graph build                # parse the codebase
 `install` यह पहचानता है कि आपके पास कौन-कौन से AI कोडिंग टूल हैं, हर एक के लिए MCP सर्वर प्रविष्टि लिखता है, जहाँ प्लेटफ़ॉर्म समर्थन करता है वहाँ हुक और स्किल लगाता है, और प्लेटफ़ॉर्म की नियम फ़ाइल में ग्राफ़ संबंधी निर्देश जोड़ता है। Poetry या uv प्रोजेक्ट परिवेश में MCP प्रविष्टि `poetry run` या `uv run` का उपयोग करती है, PATH पर `uvx` होने पर `uvx code-review-graph serve` का, और बाकी स्थितियों में मौजूदा Python इंटरप्रेटर का। उसके बाद एडिटर या टूल को फिर से शुरू करें।
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI और Hermes Agent को पहचानता है" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="एक इंस्टॉल, हर प्लेटफ़ॉर्म: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI और Hermes Agent को पहचानता है" width="85%" />
 </p>
 
-सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy` या `hermes` में से कोई एक दें:
+सिर्फ़ एक प्लेटफ़ॉर्म सेट करने के लिए `--platform` के साथ `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy` या `hermes` में से कोई एक दें:
 
 ```bash
 code-review-graph install --platform cursor

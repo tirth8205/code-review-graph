@@ -209,6 +209,12 @@
   escaped to a lone surrogate, such as `"\ud800"`, is left out; before, a
   YAML one stopped the whole build. Run `build` to add JSON to a graph you
   already have.
+- MiMo Code is a supported platform (#593, PR #688 by @Aditya-Tripuraneni).
+  `install --platform mimo` adds the server under `mcp` in
+  `.mimocode/mimocode.jsonc` if that file exists, otherwise in
+  `.mimocode/mimocode.json`, and writes the graph instructions to `AGENTS.md`.
+  Other servers, settings and comments are kept. MiMo reads both files, so
+  `uninstall` removes the entry from both.
 
 ### Changed
 
@@ -1359,11 +1365,6 @@
 - Added a post-index Python import resolver using unique module suffixes, so
   `src/` layouts produce canonical `CALLS` and `TESTED_BY` edges while duplicate
   package candidates remain explicitly unresolved (#720).
-- Added MiMo Code as an MCP install target. `code-review-graph install
-  --platform mimo` writes the project-local `.mimocode/mimocode.json` (or an
-  existing `.mimocode/mimocode.jsonc`) using MiMo's local command-array schema,
-  preserves existing configuration, and is removed by the symmetric uninstall
-  workflow.
 
 ## [2.3.7] - 2026-07-18
 

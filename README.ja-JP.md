@@ -65,10 +65,10 @@ code-review-graph build                # parse the codebase
 `install` は導入済みの AI コーディングツールを検出し、それぞれに MCP サーバーのエントリを書き込み、プラットフォームが対応していればフックとスキルを入れ、プラットフォームのルールファイルにグラフの説明を追加します。MCP エントリは、Poetry や uv のプロジェクト環境では `poetry run` または `uv run` を、PATH に `uvx` があれば `uvx code-review-graph serve` を、それ以外では現在の Python インタプリタを使います。実行後はエディタやツールを再起動してください。
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="一度のインストールで全プラットフォーム対応: Codex、Claude Code、CodeBuddy Code、Cursor、Windsurf、Zed、Continue、OpenCode、MiMo Code、Antigravity、Gemini CLI、Qwen、Qoder、Kiro、GitHub Copilot、GitHub Copilot CLI、Hermes Agent を検出" width="85%" />
 </p>
 
-1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` のいずれかを渡します。
+1 つのプラットフォームだけを設定するには、`--platform` に `codex`、`claude-code`、`cursor`、`windsurf`、`zed`、`continue`、`opencode`、`mimo`、`antigravity`、`gemini-cli`、`qwen`、`kiro`、`qoder`、`copilot`、`copilot-cli`、`codebuddy`、`hermes` のいずれかを渡します。
 
 ```bash
 code-review-graph install --platform cursor

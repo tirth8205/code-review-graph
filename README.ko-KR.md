@@ -65,10 +65,10 @@ code-review-graph build                # parse the codebase
 `install`은 설치된 AI 코딩 도구를 찾아 각각에 MCP 서버 항목을 쓰고, 플랫폼이 지원하면 훅과 스킬을 설치하며, 플랫폼의 규칙 파일에 그래프 안내를 추가합니다. MCP 항목은 Poetry나 uv 프로젝트 환경에서는 `poetry run` 또는 `uv run`을, PATH에 `uvx`가 있으면 `uvx code-review-graph serve`를, 그 밖에는 현재 Python 인터프리터를 사용합니다. 실행 후 편집기나 도구를 다시 시작하세요.
 
 <p align="center">
-  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent를 감지" width="85%" />
+  <img src="diagrams/diagram8_supported_platforms.png" alt="한 번의 설치로 모든 플랫폼 지원: Codex, Claude Code, CodeBuddy Code, Cursor, Windsurf, Zed, Continue, OpenCode, MiMo Code, Antigravity, Gemini CLI, Qwen, Qoder, Kiro, GitHub Copilot, GitHub Copilot CLI, Hermes Agent를 감지" width="85%" />
 </p>
 
-플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` 중 하나를 넘기세요.
+플랫폼 하나만 설정하려면 `--platform`에 `codex`, `claude-code`, `cursor`, `windsurf`, `zed`, `continue`, `opencode`, `mimo`, `antigravity`, `gemini-cli`, `qwen`, `kiro`, `qoder`, `copilot`, `copilot-cli`, `codebuddy`, `hermes` 중 하나를 넘기세요.
 
 ```bash
 code-review-graph install --platform cursor
