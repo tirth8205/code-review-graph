@@ -127,6 +127,12 @@ plain name, and `extra.claimed_endpoint` keeps the qualified form, so the edge r
 if that node appears. Until then, a name match on that edge counts only for a method of the
 class the qualified form named.
 
+A call to a method a class inherits goes to the ancestor that declares it. When the parser
+wrote `<path>::Leaf.handle` and only `Alpha` declares `handle`, the target becomes
+`Alpha.handle` and `extra.inherited_endpoint` keeps `<path>::Leaf.handle`, so every pass
+checks the move again. When the bare-name resolver binds a call this way, `extra.inherited_through`
+names the class the call went through. Both are `INFERRED`.
+
 | Kind | Source -> target | Notes |
 |---|---|---|
 | CALLS | caller -> called function | Target may be a bare name until a resolver qualifies it; `target_resolution` records which |

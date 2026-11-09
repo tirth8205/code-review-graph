@@ -2818,6 +2818,20 @@ def _php_docblock_marks_test(node) -> bool:
     )
 
 
+def _php_namespaces(root_node) -> list[str]:
+    """Namespaces a PHP file declares at its top level, in source order."""
+    namespaces: list[str] = []
+    for child in root_node.children:
+        if child.type != "namespace_definition":
+            continue
+        for part in child.children:
+            if part.type == "namespace_name":
+                name = part.text.decode("utf-8", errors="replace").strip("\\")
+                if name and name not in namespaces:
+                    namespaces.append(name)
+    return namespaces
+
+
 def _csharp_namespaces(root_node) -> list[str]:
     """Return all namespaces declared in a C# compilation unit.
 
@@ -3601,6 +3615,12 @@ class CodeParser:
             ns_list = _csharp_namespaces(tree.root_node)
             if ns_list:
                 file_extra["csharp_namespaces"] = ns_list
+        # PHP: a class in the same namespace needs no ``use``, so the namespace
+        # is the evidence for which ``Base`` an ``extends Base`` means.
+        if language == "php":
+            php_namespaces = _php_namespaces(tree.root_node)
+            if php_namespaces:
+                file_extra["php_namespaces"] = php_namespaces
         nodes.append(NodeInfo(
             kind="File",
             name=file_path_str,
@@ -7046,6 +7066,12 @@ class CodeParser:
         "python", "kotlin", "java", "javascript", "typescript", "tsx", "php",
         "csharp",
     })
+    # Languages whose declared receiver type is kept on the edge even when this
+    # file cannot say where the type is declared: a Java class in the same
+    # package needs no import. The graph-wide resolver finds the class.
+    _UNRESOLVED_TYPE_LANGUAGES = frozenset({
+        "java", "kotlin", "javascript", "typescript", "tsx",
+    })
     _TRANSPARENT_TYPE_WRAPPERS = frozenset({"Annotated", "Optional", "Type"})
     _NON_RECEIVER_TYPE_NAMES = frozenset({
         "Array", "Collection", "Dict", "Iterable", "List", "Map", "Mapping",
@@ -7061,7 +7087,7 @@ class CodeParser:
         file_path: str,
         import_map: dict[str, str],
         defined_names: set[str],
-    ) -> dict[tuple[int, str, str], tuple[str, str, str]]:
+    ) -> dict[tuple[int, str, str], tuple[Optional[str], str, str]]:
         """Collect evidence-backed targets for calls on typed receivers.
 
         The result is keyed by source line, receiver, and method so the normal
@@ -7086,7 +7112,30 @@ class CodeParser:
             "php": {"compound_statement"},
             "csharp": {"block"},
         }.get(language, set())
-        targets: dict[tuple[int, str, str], tuple[str, str, str]] = {}
+        targets: dict[tuple[int, str, str], tuple[Optional[str], str, str]] = {}
+        declared_type_parameters: list[set[str]] = []
+
+        def type_parameters() -> set[str]:
+            """Every generic parameter name declared in the file, read once."""
+            if not declared_type_parameters:
+                names: set[str] = set()
+                stack = [root]
+                while stack:
+                    current = stack.pop()
+                    if current.type == "type_parameter":
+                        name_node = next(
+                            (
+                                child for child in current.named_children
+                                if child.type in ("type_identifier", "identifier")
+                            ),
+                            None,
+                        )
+                        if name_node is not None:
+                            names.add(name_node.text.decode("utf-8", errors="replace"))
+                        continue
+                    stack.extend(current.children)
+                declared_type_parameters.append(names)
+            return declared_type_parameters[0]
 
         def walk(
             node,
@@ -7168,9 +7217,26 @@ class CodeParser:
                             import_map,
                             defined_names,
                         )
+                        key = (node.start_point[0] + 1, receiver, method)
                         if target:
-                            key = (node.start_point[0] + 1, receiver, method)
                             targets[key] = (target, type_name, evidence)
+                        elif (
+                            evidence == "typed_receiver"
+                            and language in self._UNRESOLVED_TYPE_LANGUAGES
+                        ):
+                            # The declared type is known though its file is
+                            # not. Keep it, so the resolver can tell ``pet``'s
+                            # ``getName`` from any other ``getName``. A type
+                            # parameter (``T``) or Java's ``var`` names no class.
+                            base_type = self._base_type_name(type_name)
+                            if (
+                                base_type
+                                and base_type != "var"
+                                and base_type not in type_parameters()
+                            ):
+                                targets[key] = (
+                                    None, base_type, "typed_receiver_unresolved",
+                                )
 
             for child in node.children:
                 walk(child, bindings, class_fields, depth + 1)
@@ -7511,7 +7577,7 @@ class CodeParser:
     @staticmethod
     def _apply_typed_call_targets(
         edges: list[EdgeInfo],
-        targets: dict[tuple[int, str, str], tuple[str, str, str]],
+        targets: dict[tuple[int, str, str], tuple[Optional[str], str, str]],
         language: str,
     ) -> list[EdgeInfo]:
         if not targets:
@@ -7529,7 +7595,10 @@ class CodeParser:
                     "receiver_resolution": evidence_kind,
                 })
                 resolved_target = target
-                if evidence_kind == "constructed_receiver" or language == "csharp":
+                if target is None:
+                    # Only the type is known; the target stays as written.
+                    resolved_target = edge.target
+                elif evidence_kind == "constructed_receiver" or language == "csharp":
                     # Keep PHP/C# parse-only CALLS output backward-compatible
                     # (bare method target) while preserving the receiver
                     # class scope for the graph-wide resolver.
@@ -14551,6 +14620,12 @@ class CodeParser:
             "interface_declaration", "type_alias_declaration",
         ):
             extra["typescript_kind"] = child.type
+        # A PHP interface or trait is not a superclass: a method it declares is
+        # not what ``$this->m()`` runs through ``extends``.
+        if language == "php" and child.type in (
+            "interface_declaration", "trait_declaration",
+        ):
+            extra["php_kind"] = child.type.split("_", 1)[0]
         if language == "swift":
             if child.type == "class_declaration":
                 _swift_keywords = {"class", "struct", "enum", "actor", "extension"}
@@ -16693,6 +16768,10 @@ class CodeParser:
             first_text = children[0].text.decode("utf-8", errors="replace")
             if first_text != method_name:
                 receiver_name = first_text
+        elif method_name and children[0].type == "this" and children[1].type == ".":
+            # ``this.ping()``: the object's own class, or the ancestor that
+            # declares ``ping``.
+            receiver_name = "this"
 
         return method_name, receiver_name
 

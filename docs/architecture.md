@@ -62,6 +62,7 @@ All modules live in `code_review_graph/`.
 | `incremental.py` | File collection and ignore rules, git/SVN change detection, full and incremental builds, post-build resolvers |
 | `postprocessing.py` | `run_post_processing()`: endpoint resolution, signatures, FTS sync, flows, communities, embedding refresh |
 | `python_resolver.py`, `jedi_resolver.py`, `tsconfig_resolver.py`, `workspace_resolver.py`, `spring_resolver.py`, `event_resolver.py`, `temporal_resolver.py`, `rescript_resolver.py`, `hcl_resolver.py`, `scoped_resolver.py` | Post-build cross-file resolution |
+| `inheritance.py` | Which class a name means, and which ancestor declares an inherited method |
 | `flows.py` | Execution flow detection and criticality scoring |
 | `communities.py` | Leiden community detection (igraph) with a file-based fallback |
 | `search.py` | Hybrid search: FTS5 BM25 plus vector similarity |
