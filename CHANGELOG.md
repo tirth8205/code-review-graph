@@ -70,8 +70,10 @@
   `kind="JsonPath"`, a `$` path or a `.json` name, and JSON rows no longer
   take the places code needs: six `translation.json` files had pushed
   `appWithTranslation` out of the hits for "translation" on next-i18next.
-  `detect_changes_tool` reports `changed_json_paths`. Run `build` to add JSON
-  to a graph you already have.
+  `detect_changes_tool` reports `changed_json_paths`. A JSON or YAML key
+  escaped to a lone surrogate, such as `"\ud800"`, is left out; before, a
+  YAML one stopped the whole build. Run `build` to add JSON to a graph you
+  already have.
 
 ### Changed
 

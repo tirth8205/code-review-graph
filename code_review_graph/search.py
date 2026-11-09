@@ -742,12 +742,15 @@ def _fts_search(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 50,
+    skip_json: bool = False,
 ) -> list[tuple[int, float]]:
     """Run an FTS5 BM25 search against the nodes_fts table.
 
     Tries each expression from :func:`build_fts_queries` in turn and returns
     the first non-empty result, so the precise reading of a query wins and
-    the widened one is only a fallback.
+    the widened one is only a fallback. With *skip_json*, JSON rows are left
+    out, so an expression that matches only JSON falls through as it did
+    before JSON was indexed.
 
     Returns list of ``(node_id, bm25_score)`` tuples. The BM25 score is
     negated so higher = better (FTS5 returns negative BM25).
@@ -765,10 +768,18 @@ def _fts_search(
     # The weights are floats formatted from a module constant, never from the
     # query, so there is no user-controlled text in this statement. The MATCH
     # expression itself stays a bound parameter.
-    sql = (  # nosec B608
-        f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
-        "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
-    )
+    if skip_json:
+        sql = (  # nosec B608
+            f"SELECT nodes_fts.rowid, bm25(nodes_fts, {weights}) AS score "
+            "FROM nodes_fts JOIN nodes ON nodes.id = nodes_fts.rowid "
+            "WHERE nodes_fts MATCH ? AND nodes.language IS NOT 'json' "
+            "ORDER BY score LIMIT ?"
+        )
+    else:
+        sql = (  # nosec B608
+            f"SELECT rowid, bm25(nodes_fts, {weights}) AS score FROM nodes_fts "
+            "WHERE nodes_fts MATCH ? ORDER BY score LIMIT ?"
+        )
     for expression in expressions:
         try:
             rows = conn.execute(sql, (expression, limit)).fetchall()
@@ -900,33 +911,35 @@ def _fts_search_past_json(
     results: list[tuple[int, float]],
     limit: int,
 ) -> list[tuple[int, float]]:
-    """Widen an FTS window by the JSON rows in it, so they leave code its places.
+    """Add the best other matches when JSON rows take places in a full window.
 
     On next-i18next, six ``translation.json`` files filled the window for
     "translation" and pushed ``appWithTranslation`` out of the results. The
-    window grows until it holds *limit* other rows or the matches run out, in
-    a few bounded steps.
+    other rows are fetched on their own, up to *limit* of them, and merged in
+    by score, so no number of JSON rows ahead of the code can hide it.
     """
-    for _ in range(4):
-        if len(results) < limit:
-            return results
-        ids = [node_id for node_id, _ in results]
-        json_rows = 0
-        for start in range(0, len(ids), 450):
-            batch = ids[start:start + 450]
-            placeholders = ",".join("?" for _ in batch)
-            json_rows += conn.execute(
-                "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
-                f"AND id IN ({placeholders})",
-                batch,
-            ).fetchone()[0]
-        if len(results) - json_rows >= limit:
-            return results
-        wider = _fts_search(conn, query, limit=limit + json_rows)
-        if len(wider) <= len(results):
-            return results
-        results = wider
-    return results
+    if len(results) < limit:
+        return results
+    ids = [node_id for node_id, _ in results]
+    json_rows = 0
+    for start in range(0, len(ids), 450):
+        batch = ids[start:start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        json_rows += conn.execute(
+            "SELECT count(*) FROM nodes WHERE language = 'json' "  # nosec B608
+            f"AND id IN ({placeholders})",
+            batch,
+        ).fetchone()[0]
+    if not json_rows:
+        return results
+    seen = set(ids)
+    others = [
+        row for row in _fts_search(conn, query, limit=limit, skip_json=True)
+        if row[0] not in seen
+    ]
+    if not others:
+        return results
+    return sorted(results + others, key=lambda row: row[1], reverse=True)
 
 
 def hybrid_search(
@@ -988,8 +1001,8 @@ def hybrid_search(
     )
 
     # JSON rows rank below code (``_JSON_RANK_PENALTY``), so they must not use
-    # up the window that code would otherwise fill.
-    if fts_results and kind is None and not _has_json_intent(query, kind):
+    # up the window that code would otherwise fill, whatever the kind filter.
+    if fts_results and not _has_json_intent(query, kind):
         fts_results = _fts_search_past_json(conn, query, fts_results, fetch_limit)
 
     # ------ Phase 2: Merge via RRF or fallback ------

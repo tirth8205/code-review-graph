@@ -173,6 +173,31 @@ def test_escaped_keys_are_read():
 
 
 @pytest.mark.parametrize(
+    ("name", "source"),
+    [
+        ("config.json", b'{"\\ud800": 1, "ok": 2, "smile\\ud83d\\ude00": 3}'),
+        ("config.yml", b'"\\ud800": 1\nok: 2\n"smile\\U0001F600": 3\n'),
+    ],
+)
+def test_a_key_sqlite_cannot_store_is_skipped(tmp_path, name, source):
+    """A lone surrogate such as ``\\ud800`` is not UTF-8, so SQLite refused the
+    whole build. That key is left out; a real emoji stays."""
+    root = tmp_path.resolve()
+    (root / ".git").mkdir()
+    (root / name).write_bytes(source)
+    store = GraphStore(get_db_path(root))
+    try:
+        full_build(root, store)
+        names = {node.name for node in store.get_nodes_by_file(str(root / name))}
+    finally:
+        store.close()
+
+    assert "$.ok" in names
+    assert '$["smile\U0001f600"]' in names
+    assert not any("\ud800" in node_name for node_name in names)
+
+
+@pytest.mark.parametrize(
     "source",
     [
         b"",
@@ -495,7 +520,11 @@ def _build_search_repo(tmp_path: Path, locales: int = 0) -> Path:
         {"name": "app", "dependencies": {"cookie": "1.0.0", "cookie-signature": "1.0.0"}},
         indent=2,
     ))
-    for language in ["de", "en", "fr", "it", "ja", "nl"][:locales]:
+    languages = [
+        "de", "en", "fr", "it", "ja", "nl", "es", "pt", "ru", "zh",
+        "ko", "pl", "sv", "da", "fi", "nb", "cs", "tr", "uk", "el",
+    ]
+    for language in languages[:locales]:
         folder = root / "public" / "locales" / language
         folder.mkdir(parents=True)
         (folder / "translation.json").write_text('{"title": "x"}')
@@ -542,6 +571,35 @@ def test_json_files_do_not_use_up_the_search_window(tmp_path):
         store.close()
 
     assert [row["name"] for row in rows] == ["appWithTranslation"]
+
+
+def test_many_json_files_do_not_use_up_the_search_window(tmp_path):
+    """Widening the window a few times still stopped at 15 rows for limit=1."""
+    root = _build_search_repo(tmp_path, locales=20)
+    store = GraphStore(get_db_path(root))
+    try:
+        rows = hybrid_search(store, "translation", limit=1, repo_root=root)
+    finally:
+        store.close()
+
+    assert [row["name"] for row in rows] == ["appWithTranslation"]
+
+
+def test_a_file_search_looks_past_json_files(tmp_path):
+    """``kind="File"`` is not a request for JSON, so JSON files must not fill it."""
+    root = _build_search_repo(tmp_path, locales=20)
+    code = root / "src" / "lib" / "client" / "runtime" / "translation.js"
+    code.parent.mkdir(parents=True)
+    code.write_text("export const translation = 1;\n")
+    store = GraphStore(get_db_path(root))
+    try:
+        full_build(root, store)
+        run_post_processing(store)
+        rows = hybrid_search(store, "translation", kind="File", limit=1, repo_root=root)
+    finally:
+        store.close()
+
+    assert [row["file_path"] for row in rows] == [normalize_file_path(code)]
 
 
 # ---------------------------------------------------------------------------

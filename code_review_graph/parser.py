@@ -3166,8 +3166,17 @@ _JSON_DATA_DIR_NAMES = frozenset({
 })
 
 
+def _is_storable_key(key: str) -> bool:
+    """Whether SQLite can store *key*: an escaped lone surrogate is not UTF-8."""
+    try:
+        key.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _json_key(key_node: Any) -> Optional[str]:
-    """Return a key's text with its escapes read, or None if it is not a string."""
+    """Return a key's text with its escapes read, or None if it cannot be a path."""
     if key_node is None or key_node.type != "string":
         return None
     raw = key_node.text.decode("utf-8", errors="replace")
@@ -3175,7 +3184,7 @@ def _json_key(key_node: Any) -> Optional[str]:
         key = json.loads(raw)
     except ValueError:
         key = raw[1:-1]
-    return key if isinstance(key, str) else None
+    return key if isinstance(key, str) and _is_storable_key(key) else None
 
 
 def _yaml_scalar(node: object) -> Optional[str]:
@@ -9595,7 +9604,7 @@ class CodeParser:
             identity_occurrences: dict[str, int] = {}
             for key_node, value_node in pairs:
                 raw_key = _yaml_scalar(key_node)
-                if raw_key is None:
+                if raw_key is None or not _is_storable_key(raw_key):
                     unsupported_key_count += 1
                     consume_skipped_aliases(key_node)
                     consume_skipped_aliases(value_node)
