@@ -12,12 +12,12 @@ Build or incrementally update the knowledge graph for this repository.
 
 1. Call `list_graph_stats_tool`. If `last_updated` is null, the graph has never been built.
 2. For a first build, or when the argument is `full`, call `build_or_update_graph_tool(full_rebuild=True)`. Otherwise call `build_or_update_graph_tool()` for an incremental update.
-3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`.
+3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`. `contended` means another build of this repository is running; retry once it finishes.
 
 ## When to Use
 
 - First set-up of a repository, or after a branch switch or large refactor.
-- When the graph looks stale. Hooks installed by `code-review-graph install` run an update after each edit and before each commit, so manual builds are rarely needed.
+- When the graph looks stale. Hooks installed by `code-review-graph install` run an update after each edit, before each commit and after a branch switch, merge or rebase, so manual builds are rarely needed.
 
 ## Notes
 

@@ -12,10 +12,10 @@ Visualize code dependencies, blast radius, and review context from your code gra
 - **Query Graph** -- Run semantic queries (callers, callees, imports, inheritance, tests) with 8 patterns
 - **Find Large Functions** -- Identify functions or classes exceeding a line-count threshold
 - **Interactive Graph** -- Force-directed D3.js visualization of your code dependencies
-- **Live Search** -- Fuzzy search across your entire code graph with instant results
+- **Live Search** -- Search symbol names across your code graph as you type
 - **Compute Embeddings** -- Generate vector embeddings for semantic search
 - **Watch Mode** -- Continuous graph updates as you work
-- **Auto-Update** -- Graph rebuilds in the background when you save files
+- **Auto-Update** -- Graph updates in the background when you save files
 
 ## Quick Start
 
@@ -66,12 +66,12 @@ The graph database is stored locally at `.code-review-graph/graph.db` and update
 
 | Setting | Default | Description |
 |---|---|---|
-| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to use the bundled version or one found on `PATH`. |
+| `codeReviewGraph.cliPath` | `""` | Path to the CLI binary. Leave empty to use `code-review-graph` from `PATH`. |
 | `codeReviewGraph.autoUpdate` | `true` | Auto-update the graph on file save. |
 | `codeReviewGraph.blastRadiusDepth` | `2` | Max traversal depth for blast radius (1--10). |
 | `codeReviewGraph.graphTheme` | `"auto"` | Graph color theme: `auto`, `light`, or `dark`. |
 | `codeReviewGraph.graph.maxNodes` | `500` | Max nodes in the graph visualization (10--5000). |
-| `codeReviewGraph.graph.defaultEdges` | All except CONTAINS | Edge types shown by default. |
+| `codeReviewGraph.graph.defaultEdges` | `CALLS`, `IMPORTS_FROM`, `INHERITS`, `IMPLEMENTS`, `TESTED_BY`, `DEPENDS_ON` | Edge types shown by default. |
 | `codeReviewGraph.treeView.showFiles` | `true` | Show file nodes in the tree view. |
 | `codeReviewGraph.treeView.showClasses` | `true` | Show class nodes in the tree view. |
 | `codeReviewGraph.treeView.showFunctions` | `true` | Show function nodes in the tree view. |
