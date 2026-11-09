@@ -8,6 +8,7 @@ from pathlib import Path, PurePath
 from typing import Any
 
 from ..changes import (  # noqa: F401
+    DiffRanges,
     analyze_changes,
     compute_risk_score,
     is_test_gap_exempt,
@@ -49,6 +50,8 @@ _MAX_REVIEW_SOURCE_LINES = 800
 _MAX_LINES_PER_FILE = 500
 _MAX_CHANGED_FUNCTIONS = 100
 _MAX_DETECT_SOURCE_LINES = 600
+# Symbols a diff deleted, each with up to three users: ~180 tokens a row.
+_MAX_REMOVED_SYMBOLS = 25
 
 # The source budget above used to be spent first come first served over the
 # changed-file list, which is the order Git happened to emit. One
@@ -1036,11 +1039,12 @@ def detect_changes_func(
         # to be non-empty, so an unreadable line-level diff costs precision,
         # not honesty. analyze_changes records the degradation.
         diff_ranges = parse_diff_ranges(str(root), base)
-        # Remap to absolute paths so they match graph file_paths.
-        abs_ranges: dict[str, list[tuple[int, int]]] = {}
-        for rel_path, ranges in diff_ranges.items():
-            abs_path = normalize_file_path(root / rel_path)
-            abs_ranges[abs_path] = ranges
+        # Remap to absolute paths so they match graph file_paths. The
+        # remapped ranges keep the old side of any pure-deletion hunk, which
+        # is what lets analyze_changes name the symbols a diff removed.
+        if not isinstance(diff_ranges, DiffRanges):
+            diff_ranges = DiffRanges(diff_ranges)
+        abs_ranges = diff_ranges.remapped(root)
 
         analysis = analyze_changes(
             store,
@@ -1096,6 +1100,7 @@ def detect_changes_func(
                 "changed_file_count": len(changed_files),
                 "changed_yaml_path_count": len(analysis.get("changed_yaml_paths", [])),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
+                "removed_symbol_count": analysis.get("removed_symbols_total", 0),
                 "review_priorities": top_priorities,
                 # Minimal mode still has to say when the score it reports is
                 # missing the change-frequency term.
@@ -1121,8 +1126,17 @@ def detect_changes_func(
                 analysis.get("changed_yaml_paths", []),
                 max_results, _MAX_CHANGED_FUNCTIONS,
             )
+            removed, _, removed_cut = _bounded(
+                analysis.get("removed_symbols", []),
+                max_results, _MAX_REMOVED_SYMBOLS,
+            )
+            # The analysis looks up users for a bounded number of removed
+            # symbols, so its own total is the honest one.
+            removed_total = analysis.get("removed_symbols_total", len(removed))
+            removed_cut = removed_cut or removed_total > len(removed)
             any_cut = (
                 funcs_cut or gaps_cut or flows_cut or files_cut or yaml_paths_cut
+                or removed_cut
                 or bool(analysis.get("yaml_paths_truncated"))
             )
             summary = analysis.get("summary", "")
@@ -1132,7 +1146,12 @@ def detect_changes_func(
                     f"{len(funcs)} of {funcs_total} changed function(s), "
                     f"{len(yaml_paths)} of {yaml_paths_total} changed YAML path(s), "
                     f"{len(gaps)} of {gaps_total} test gap(s), "
-                    f"{len(flows)} of {flows_total} flow(s) shown"
+                    f"{len(flows)} of {flows_total} flow(s)"
+                    + (
+                        f", {len(removed)} of {removed_total} removed symbol(s)"
+                        if removed_total else ""
+                    )
+                    + " shown"
                 )
             result = {
                 "status": "ok",
@@ -1146,6 +1165,8 @@ def detect_changes_func(
                 "changed_yaml_paths_total": yaml_paths_total,
                 "test_gaps": gaps,
                 "test_gaps_total": gaps_total,
+                "removed_symbols": removed,
+                "removed_symbols_total": removed_total,
                 "affected_flows": _project(flows, _DETECT_FLOW_FIELDS),
                 "affected_flows_total": flows_total,
                 "truncated": any_cut,

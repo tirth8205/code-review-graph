@@ -178,6 +178,20 @@ def _indexed_docstring(extra: dict[str, Any] | None) -> str | None:
     return summary or None
 
 
+def qualified_name_of(node: NodeInfo) -> str:
+    """The qualified name the store gives a parsed node.
+
+    Exposed so code that parses a file without storing it (the old side of a
+    diff, for one) names its symbols exactly as the graph does.
+    """
+    if node.kind == "File":
+        return node.file_path
+    identity_name = node.identity_name or node.name
+    if node.parent_name:
+        return f"{node.file_path}::{node.parent_name}.{identity_name}"
+    return f"{node.file_path}::{identity_name}"
+
+
 def _bridge_qualified_name(qualified_name: str) -> str:
     """Return *qualified_name* with its file-path component POSIX-normalized.
 
@@ -3929,12 +3943,7 @@ class GraphStore:
             return g
 
     def _make_qualified(self, node: NodeInfo) -> str:
-        if node.kind == "File":
-            return node.file_path
-        identity_name = node.identity_name or node.name
-        if node.parent_name:
-            return f"{node.file_path}::{node.parent_name}.{identity_name}"
-        return f"{node.file_path}::{identity_name}"
+        return qualified_name_of(node)
 
     def _row_to_node(self, row: sqlite3.Row) -> GraphNode:
         return GraphNode(

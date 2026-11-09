@@ -532,6 +532,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 影響範囲分析の探索の深さ | `2` |
 | `CRG_MAX_BFS_DEPTH` | グラフ探索の最大の深さ | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 1 回の変更レポートで分析する変更関数の最大数 | `500` |
+| `CRG_MAX_DELETION_FILES` | 差分で削除された関数とクラスを挙げるために、1 回の変更レポートで旧版を読むファイルの最大数 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 推移的な呼び出し元・呼び出し先の展開における最大フロンティア数 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | テストのない変更シンボルについて、テスト済みの呼び出し元を探して `CALLS` を遡るホップ数。カバレッジではなく注記として報告されます | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | そのテスト済み呼び出し元を探す際に調べる呼び出し元の最大数 | `500` |

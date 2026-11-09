@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,15 @@ from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .constants import env_float, env_int
 from .errors import ChangeDiscoveryError
 from .flows import get_affected_flows
-from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
-from .parser import is_test_file, normalize_file_path
+from .graph import (
+    GraphEdge,
+    GraphNode,
+    GraphStore,
+    _sanitize_name,
+    node_to_dict,
+    qualified_name_of,
+)
+from .parser import CodeParser, NodeInfo, is_test_file, normalize_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -254,13 +262,14 @@ def _unquote_c_path(quoted: str) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def _diff_header_path(rest: str) -> str | None:
-    """Extract the post-image path from the text after ``+++ ``.
+def _diff_header_path(rest: str, prefix: str = "b/") -> str | None:
+    """Extract the path from the text after ``+++ `` (or ``--- ``).
 
     Git writes the path three ways, and only the plainest one is a bare
     ``b/path``: it appends a TAB when the path contains a space, and
     C-quotes the whole ``"b/path"`` when it contains a non-ASCII or control
-    byte. Returns None for ``/dev/null``, the post-image of a deleted file.
+    byte. Returns None for ``/dev/null``, the post-image of a deleted file
+    (and the pre-image of a new one). *prefix* is ``"a/"`` for ``--- ``.
     """
     rest = rest.rstrip("\r")
     if rest.startswith('"'):
@@ -270,8 +279,8 @@ def _diff_header_path(rest: str) -> str | None:
         # The trailing TAB is a separator, never part of the path: git emits
         # one only when the path itself contains a space.
         path = rest.split("\t", 1)[0]
-    if path.startswith("b/"):
-        path = path[2:]
+    if path.startswith(prefix):
+        path = path[len(prefix):]
         return path or None
     return None
 
@@ -285,37 +294,148 @@ def _diff_header_path(rest: str) -> str | None:
 _POST_IMAGE_HEADER = re.compile(
     r'^\+\+\+ (/dev/null|"b/(?:[^"\\]|\\.)*"|b/.*)$'
 )
+# The pre-image header, in the same spellings. A deleted line whose text
+# starts with "-- a/" also reads "--- a/...", so this one only counts when the
+# next line is a post-image header, which is how git always writes the pair.
+_PRE_IMAGE_HEADER = re.compile(
+    r'^--- (/dev/null|"a/(?:[^"\\]|\\.)*"|a/.*)$'
+)
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
-def _parse_unified_diff(diff_text: str) -> dict[str, list[tuple[int, int]]]:
+@dataclass(frozen=True)
+class PureDeletion:
+    """One hunk that removed lines and added none.
+
+    ``old_start``/``old_end`` are the removed lines in the old file.
+    ``anchor`` is the new-side line the hole now follows (0 at the top of
+    the file): the code on either side of it is code the hunk never touched.
+    """
+
+    old_start: int
+    old_end: int
+    anchor: int
+
+
+@dataclass
+class FileDeletions:
+    """The pure-deletion hunks of one file, and where to read its old side."""
+
+    old_path: str
+    hunks: list[PureDeletion] = field(default_factory=list)
+
+
+class DiffRanges(dict):
+    """``{path: [(start, end), ...]}`` of new-side lines, plus pure deletions.
+
+    It is the plain mapping every caller already reads, unchanged: a hunk
+    that only deletes still appears as its zero-width ``(anchor, anchor)``
+    position, which is where a source snippet should look. That position
+    must not be used to say which code changed -- the lines on either side of
+    a hole are lines the diff left alone -- so ``deletions`` keeps the old
+    side of those hunks for :func:`analyze_changes`, and
+    :meth:`edit_ranges` gives the mapping without them.
+
+    A deleted file has no new side, and is left out of both, as before: once
+    it is gone its importers' calls lose their target, so the graph can no
+    longer say who used what was in it.
+    """
+
+    def __init__(
+        self,
+        ranges: dict[str, list[tuple[int, int]]] | None = None,
+        deletions: dict[str, FileDeletions] | None = None,
+    ) -> None:
+        super().__init__(ranges or {})
+        self.deletions: dict[str, FileDeletions] = deletions or {}
+
+    def edit_ranges(self) -> dict[str, list[tuple[int, int]]]:
+        """The ranges of hunks that added lines, pure deletions taken out."""
+        edits: dict[str, list[tuple[int, int]]] = {}
+        for path, ranges in self.items():
+            kept = list(ranges)
+            held = self.deletions.get(path)
+            for hunk in held.hunks if held else ():
+                # One position per pure deletion, and only one: a real
+                # one-line edit can share the spelling.
+                position = (hunk.anchor, hunk.anchor)
+                if position in kept:
+                    kept.remove(position)
+            if kept:
+                edits[path] = kept
+        return edits
+
+    def remapped(self, root: str | Path) -> DiffRanges:
+        """Re-key on the graph's absolute paths, keeping the old-side paths.
+
+        Diff keys are forward-slash paths relative to the repository root,
+        while the graph stores absolute normalized paths. ``old_path`` stays
+        relative: it is what ``git show`` is asked for.
+        """
+        root_path = Path(root)
+        return DiffRanges(
+            {normalize_file_path(root_path / k): v for k, v in self.items()},
+            {
+                normalize_file_path(root_path / k): v
+                for k, v in self.deletions.items()
+            },
+        )
+
+
+def _parse_unified_diff(diff_text: str) -> DiffRanges:
     """Parse unified diff output into file -> line-range mappings.
 
-    Handles the ``@@ -old,count +new,count @@`` hunk header format.
+    Handles the ``@@ -old,count +new,count @@`` hunk header format. The
+    result is a plain mapping of new-side ranges that also carries the old
+    side of every pure-deletion hunk; see :class:`DiffRanges`.
     """
     ranges: dict[str, list[tuple[int, int]]] = {}
+    deletions: dict[str, FileDeletions] = {}
     current_file: str | None = None
+    old_file: str | None = None
 
-    # Match "@@ ... +start,count @@" or "@@ ... +start @@"
-    hunk_pattern = re.compile(r"^@@ .+? \+(\d+)(?:,(\d+))? @@")
-
-    for line in diff_text.splitlines():
+    lines = diff_text.splitlines()
+    for index, line in enumerate(lines):
         file_match = _POST_IMAGE_HEADER.match(line)
         if file_match:
             current_file = _diff_header_path(file_match.group(1))
+            if index == 0 or not _PRE_IMAGE_HEADER.match(lines[index - 1]):
+                # No pre-image header for this file: its old side has the
+                # same path, not the previous file's.
+                old_file = current_file
+            continue
+        pre_match = _PRE_IMAGE_HEADER.match(line)
+        if pre_match and index + 1 < len(lines) and _POST_IMAGE_HEADER.match(
+            lines[index + 1]
+        ):
+            old_file = _diff_header_path(pre_match.group(1), "a/")
             continue
 
-        hunk_match = hunk_pattern.match(line)
-        if hunk_match and current_file is not None:
-            start = int(hunk_match.group(1))
-            count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
-            if count == 0:
-                # Pure deletion hunk (no lines added); still note the position.
-                end = start
-            else:
-                end = start + count - 1
-            ranges.setdefault(current_file, []).append((start, end))
+        hunk_match = _HUNK_HEADER.match(line)
+        if not hunk_match or current_file is None:
+            continue
+        old_start = int(hunk_match.group(1))
+        old_count = int(hunk_match.group(2)) if hunk_match.group(2) else 1
+        start = int(hunk_match.group(3))
+        count = int(hunk_match.group(4)) if hunk_match.group(4) else 1
+        if count == 0:
+            # Pure deletion: nothing was added, so the new side is only the
+            # line the hole follows. Still note that position, for the
+            # callers that show source, and keep the removed lines.
+            end = start
+            held = deletions.get(current_file)
+            if held is None:
+                held = deletions[current_file] = FileDeletions(
+                    old_path=old_file or current_file,
+                )
+            held.hunks.append(
+                PureDeletion(old_start, old_start + old_count - 1, start)
+            )
+        else:
+            end = start + count - 1
+        ranges.setdefault(current_file, []).append((start, end))
 
-    return ranges
+    return DiffRanges(ranges, deletions)
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +732,276 @@ def map_changes_to_nodes(
 
 
 # ---------------------------------------------------------------------------
+# 3b. Pure deletions: what survived, what was removed, who still uses it
+# ---------------------------------------------------------------------------
+
+# The kinds reported as changed functions. A pure deletion is judged on these
+# from the old side; every other kind keeps the plain position rule.
+_CODE_KINDS = ("Function", "Test", "Class")
+# Old files read for one analysis: one ``git show`` and one parse each. Past
+# the cap a file falls back to the new-side rule and the summary says so.
+_MAX_DELETION_FILES = env_int("CRG_MAX_DELETION_FILES", 100)
+# Removed symbols whose users are looked up, a few indexed queries each.
+_MAX_REMOVED_SYMBOLS = 200
+# Users listed per removed symbol; ``used_by_total`` keeps the full count.
+# Each costs ~45 tokens, and every MCP response lists up to 25 symbols.
+_MAX_REMOVED_USERS_SHOWN = 3
+_SELF_RECEIVERS = frozenset({"self", "this", "cls"})
+
+
+@dataclass
+class _DeletionReview:
+    changed: list[GraphNode] = field(default_factory=list)
+    removed: list[dict[str, Any]] = field(default_factory=list)
+    removed_total: int = 0
+    files_not_read: int = 0
+
+
+def _nodes_in_file(store: GraphStore, file_path: str) -> list[GraphNode]:
+    """The file's nodes, with the same suffix fallback as map_changes_to_nodes."""
+    nodes = store.get_nodes_by_file(file_path)
+    if not nodes:
+        for matched in store.get_files_matching(file_path):
+            nodes.extend(store.get_nodes_by_file(matched))
+    return nodes
+
+
+def _old_side_nodes(
+    parser: CodeParser,
+    repo_root: str,
+    base: str,
+    old_path: str,
+    parse_path: str,
+) -> list[tuple[str, NodeInfo]] | None:
+    """Parse the file as it was at *base*, or None when that cannot be done.
+
+    The old bytes are parsed as if they lived at *parse_path*, the path the
+    graph knows the file by now, so their qualified names compare directly
+    with the stored ones even across a rename. None means "unknown": git
+    could not produce the old file, or the parser does not read its language.
+    """
+    if not _SAFE_GIT_REF.match(base):
+        return None
+    try:
+        shown = subprocess.run(
+            ["git", "show", f"{base}:{old_path}"],
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            cwd=repo_root,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("git show failed for %s: %s", old_path, exc)
+        return None
+    if shown.returncode != 0:
+        return None
+    try:
+        nodes, _ = parser.parse_bytes(Path(parse_path), shown.stdout)
+    except Exception as exc:
+        # Any parser fault means "unknown". The parser covers dozens of
+        # grammars, and the update path treats a failure in any of them the
+        # same way: log it and carry on.
+        logger.warning("Could not parse the old side of %s: %s", old_path, exc)
+        return None
+    if not nodes:
+        return None
+    return [
+        (qualified_name_of(node), node)
+        for node in nodes
+        if node.kind in _CODE_KINDS
+        and not node.extra.get("verilog_kind")
+        and node.line_start
+        and node.line_end
+    ]
+
+
+def _bare_call_reaches(edge: GraphEdge, removed: GraphNode) -> bool:
+    """Can this unqualified call be a call to *removed*?
+
+    Once a symbol is gone, the calls that named it only through their own
+    file or a module or class receiver are re-parsed with nothing to resolve
+    to, so they keep only the bare name. The name alone is not enough:
+    ``handle.close()`` is a file's close, not ``Box.close``. Receiver
+    evidence is held to the resolver's own rule, wherever the call is.
+    Without any, only a call in the symbol's own file counts: a plain call
+    for a top-level function, or one from inside the class for a method.
+    """
+    extra = edge.extra or {}
+    if "ambiguous_targets" in extra or "unresolved_targets" in extra:
+        return False
+    if "receiver_binding" in extra:
+        return GraphStore.receiver_evidence_admits(extra, removed)
+    if normalize_file_path(edge.file_path) != removed.file_path:
+        return False
+    if not removed.parent_name:
+        return "receiver" not in extra
+    own_class = f"{removed.file_path}::{removed.parent_name}."
+    return (
+        extra.get("receiver") in _SELF_RECEIVERS or "receiver" not in extra
+    ) and edge.source_qualified.startswith(own_class)
+
+
+def _removed_symbol_users(
+    store: GraphStore, qualified_name: str, info: NodeInfo,
+) -> list[dict[str, Any]]:
+    """Every node the graph still records as using a removed symbol."""
+    users: dict[str, dict[str, Any]] = {}
+
+    def add(source: str, relation: str, line: int) -> None:
+        if source in users or source == qualified_name:
+            return
+        node = store.get_node(source)
+        if node is None:
+            return
+        # The qualified name carries the file; repeating it doubles the cost.
+        users[source] = {
+            "name": _sanitize_name(node.name),
+            "qualified_name": _sanitize_name(node.qualified_name),
+            "line": line,
+            "relation": relation,
+        }
+
+    for edge in store.get_edges_by_target(qualified_name):
+        if edge.kind != "CONTAINS":
+            add(edge.source_qualified, edge.kind, edge.line)
+    # TESTED_BY points from the production symbol to its test.
+    for edge in store.get_edges_by_source(qualified_name):
+        if edge.kind == "TESTED_BY":
+            add(edge.target_qualified, edge.kind, edge.line)
+    removed = GraphNode(
+        id=0, kind=info.kind, name=info.name, qualified_name=qualified_name,
+        file_path=info.file_path, line_start=info.line_start,
+        line_end=info.line_end, language=info.language,
+        parent_name=info.parent_name, params=info.params,
+        return_type=info.return_type, is_test=info.is_test, file_hash=None,
+        extra=info.extra,
+    )
+    for edge in store.search_edges_by_target_name(info.name, kind="CALLS"):
+        if _bare_call_reaches(edge, removed):
+            add(edge.source_qualified, edge.kind, edge.line)
+    return sorted(
+        users.values(), key=lambda u: (u["qualified_name"], u["line"] or 0),
+    )
+
+
+def _review_pure_deletions(
+    store: GraphStore,
+    deletions: dict[str, FileDeletions],
+    repo_root: str | None,
+    base: str,
+) -> _DeletionReview:
+    """Judge pure-deletion hunks from the old side of the diff.
+
+    For each code symbol of the old file whose lines a hunk removed:
+
+    * gone from the graph -> removed, reported with whatever still uses it;
+    * still there, and the hunk took only part of it -> changed;
+    * still there, but the hunk took all of it -> it was defined twice or
+      moved within the file, and the lines that added it say so.
+
+    Code around a hole that lost no lines is never marked. When the old side
+    cannot be read the rule falls back to the new side alone: a symbol is
+    changed only when surviving lines of it sit on both sides of the hole.
+    That misses a deleted tail, but it never marks an untouched neighbour.
+    """
+    review = _DeletionReview()
+    parser: CodeParser | None = None
+    files_read = 0
+    candidates: list[tuple[str, NodeInfo]] = []
+    for file_path, held in deletions.items():
+        current = _nodes_in_file(store, file_path)
+        if not current:
+            # The graph does not know this file, so it cannot say what
+            # survived; guessing would report every symbol as removed.
+            continue
+        old_nodes: list[tuple[str, NodeInfo]] | None = None
+        if repo_root is not None and files_read < _MAX_DELETION_FILES:
+            files_read += 1
+            if parser is None:
+                parser = CodeParser(Path(repo_root))
+            old_nodes = _old_side_nodes(
+                parser, repo_root, base, held.old_path, file_path,
+            )
+        if old_nodes is None:
+            review.files_not_read += 1
+            review.changed.extend(
+                node for node in current
+                if node.kind in _CODE_KINDS
+                and node.line_start is not None
+                and node.line_end is not None
+                and any(
+                    node.line_start <= hunk.anchor < node.line_end
+                    for hunk in held.hunks
+                )
+            )
+            continue
+        survivors = {node.qualified_name: node for node in current}
+        for qualified_name, info in old_nodes:
+            hit = [
+                hunk for hunk in held.hunks
+                if info.line_start <= hunk.old_end
+                and info.line_end >= hunk.old_start
+            ]
+            if not hit:
+                continue
+            survivor = survivors.get(qualified_name)
+            if survivor is None:
+                candidates.append((qualified_name, info))
+            elif not any(
+                hunk.old_start <= info.line_start
+                and info.line_end <= hunk.old_end
+                for hunk in hit
+            ):
+                review.changed.append(survivor)
+
+    review.removed_total = len(candidates)
+    for qualified_name, info in candidates[:_MAX_REMOVED_SYMBOLS]:
+        users = _removed_symbol_users(store, qualified_name, info)
+        review.removed.append({
+            "name": _sanitize_name(info.name),
+            "qualified_name": _sanitize_name(qualified_name),
+            "kind": info.kind,
+            "file": info.file_path,
+            "old_line_start": info.line_start,
+            "old_line_end": info.line_end,
+            "used_by": users[:_MAX_REMOVED_USERS_SHOWN],
+            "used_by_total": len(users),
+        })
+    # What still uses a removed symbol is what may break, so it leads.
+    review.removed.sort(
+        key=lambda r: (-r["used_by_total"], r["file"], r["old_line_start"]),
+    )
+    return review
+
+
+def _removed_summary_lines(review: _DeletionReview) -> list[str]:
+    """Summary lines for removed symbols: how many, and which are still used."""
+    if not review.removed_total:
+        return []
+    lines = [f"  - {review.removed_total} removed function(s)/class(es)"]
+    still_used = [r for r in review.removed if r["used_by_total"]]
+    if still_used:
+        named = []
+        for entry in still_used[:5]:
+            # "File.convert", not "convert": two users can share a name.
+            users = ", ".join(_symbol_part(u["qualified_name"]) for u in entry["used_by"])
+            more = entry["used_by_total"] - len(entry["used_by"])
+            named.append(
+                f"{_symbol_part(entry['qualified_name'])} (by {users}"
+                f"{f' +{more} more' if more else ''})"
+            )
+        lines.append(f"  - Removed but still used: {'; '.join(named)}")
+    return lines
+
+
+def _symbol_part(qualified_name: str) -> str:
+    """``path::Class.name`` -> ``Class.name``; a file node -> its file name."""
+    if "::" in qualified_name:
+        return qualified_name.split("::", 1)[1]
+    return qualified_name.rsplit("/", 1)[-1]
+
+
+# ---------------------------------------------------------------------------
 # 4. compute_risk_score
 # ---------------------------------------------------------------------------
 
@@ -728,6 +1118,14 @@ def analyze_changes(
         could not be read and the scores therefore exclude the
         change-frequency term, or ``"off"`` when it was not requested).
 
+        ``removed_symbols`` lists the functions and classes a pure-deletion
+        hunk took out of a file that still exists, read from the old side of
+        the diff, each with ``old_line_start``/``old_line_end``, up to three
+        ``used_by`` entries (callers, subclasses, importers and tests the
+        graph still records) and ``used_by_total``; ``removed_symbols_total``
+        is the untruncated count. A removed symbol is never in
+        ``changed_functions``, and neither is the untouched code around it.
+
         Each ``test_gaps`` entry carries ``coverage``: ``"none"`` when no test
         reaches the symbol at all, or ``"indirect"`` when one only reaches it
         through a caller -- those entries also carry ``covered_via``,
@@ -760,10 +1158,9 @@ def analyze_changes(
             logger.warning("%s; scoring whole files instead", exc)
             ranges_unavailable = str(exc)
             raw_ranges = {}
-        changed_ranges = {
-            normalize_file_path(root_path / key): ranges
-            for key, ranges in raw_ranges.items()
-        }
+        if not isinstance(raw_ranges, DiffRanges):
+            raw_ranges = DiffRanges(raw_ranges)
+        changed_ranges = raw_ranges.remapped(root_path)
 
     # The affected-flows lookup and the no-ranges fallback match
     # changed_files against nodes.file_path, which stores absolute
@@ -779,7 +1176,33 @@ def analyze_changes(
         ]
 
     # Map changes to nodes.
-    if changed_ranges:
+    deletions: dict[str, FileDeletions] = (
+        changed_ranges.deletions if isinstance(changed_ranges, DiffRanges) else {}
+    )
+    deletion_review = _DeletionReview()
+    if deletions and isinstance(changed_ranges, DiffRanges):
+        # A pure deletion has no new lines, and the lines around the hole are
+        # lines it never touched (PR #1167 reported the case). Code symbols
+        # are judged from the old side instead; other kinds, such as YAML
+        # paths, keep the plain position rule.
+        changed_nodes = map_changes_to_nodes(store, changed_ranges.edit_ranges())
+        seen_qns = {node.qualified_name for node in changed_nodes}
+        deletion_review = _review_pure_deletions(
+            store, deletions, repo_root, base,
+        )
+        positions = {
+            path: [(hunk.anchor, hunk.anchor) for hunk in held.hunks]
+            for path, held in deletions.items()
+        }
+        positional = [
+            node for node in map_changes_to_nodes(store, positions)
+            if node.kind not in _CODE_KINDS
+        ]
+        for node in [*positional, *deletion_review.changed]:
+            if node.qualified_name not in seen_qns:
+                seen_qns.add(node.qualified_name)
+                changed_nodes.append(node)
+    elif changed_ranges:
         changed_nodes = map_changes_to_nodes(store, changed_ranges)
     else:
         # Fallback: all nodes in changed files.
@@ -947,6 +1370,7 @@ def analyze_changes(
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
         *([f"  - {len(changed_yaml_paths)} changed YAML path(s)"] if changed_yaml_paths else []),
+        *_removed_summary_lines(deletion_review),
         f"  - {affected['total']} affected flow(s)",
         gap_line,
         f"  - Overall risk score: {overall_risk:.2f}",
@@ -1002,6 +1426,12 @@ def analyze_changes(
             "  - Warning: line-level diff unavailable, whole files scored "
             f"({ranges_unavailable})"
         )
+    if deletion_review.files_not_read:
+        summary_parts.append(
+            f"  - Note: the old version of {deletion_review.files_not_read} "
+            "file(s) could not be read, so code deleted there is not listed "
+            "as removed (CRG_MAX_DELETION_FILES sets how many files are read)"
+        )
     if churn_status == CHURN_UNAVAILABLE:
         # Say it in the summary, not only in a log line nobody reads: the
         # scores below are missing a term worth up to 0.15, and a reviewer
@@ -1028,6 +1458,11 @@ def analyze_changes(
         "test_gaps_total": len(test_gaps),
         "test_gaps_uncovered": uncovered_count,
         "test_gaps_indirect": indirect_count,
+        # Symbols the diff deleted outright, each with what still uses it.
+        # They are not in ``changed_functions``: nothing of them is left to
+        # score, and the code around the hole did not change.
+        "removed_symbols": deletion_review.removed,
+        "removed_symbols_total": deletion_review.removed_total,
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
         "yaml_paths_truncated": yaml_paths_truncated,

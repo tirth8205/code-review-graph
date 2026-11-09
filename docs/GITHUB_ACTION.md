@@ -99,6 +99,8 @@ action maps the score to levels:
   affected flows and test gaps.
 - **Risk-scored changes**: a table of the top 10 changed symbols by risk,
   with `file:line` location and whether the symbol has a test.
+- **Removed symbols**: up to 10 functions or classes the pull request
+  deleted, where they were, and what the graph says still uses them.
 - **Affected execution flows**: up to 5 entry-point flows the change
   touches, ordered by criticality, with node and file counts.
 - **Test gaps**: up to 5 changed functions with no direct test coverage.

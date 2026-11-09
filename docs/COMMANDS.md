@@ -297,6 +297,16 @@ Embedded flows carry per-flow metadata only; use `get_affected_flows_tool` for
 step detail. `changed_functions_total`, `test_gaps_total` and `affected_flows_total`
 report the untruncated counts. Responses may include estimated `context_savings` metadata.
 
+When the diff only deletes lines, the code around the gap did not change, so it
+is not listed as changed. The old version of the file is read instead: a
+function or class that lost some lines is listed as changed, and one that is
+gone is listed in `removed_symbols` (at most 25; `removed_symbols_total` has the
+full count) with up to three of the callers, subclasses, importers or tests that
+still use it (`used_by_total` has the full count). The summary names the ones
+still in use, and minimal mode reports `removed_symbol_count`. Up to 100 files
+are read per call (`CRG_MAX_DELETION_FILES`); the summary says when a file could
+not be read. A deleted file is not covered.
+
 #### `refactor_tool`
 ```
 mode: str = "rename"         # "rename", "dead_code", or "suggest"

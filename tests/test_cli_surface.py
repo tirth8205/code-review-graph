@@ -1174,6 +1174,7 @@ NUMERIC_ENV_VARS: tuple[NumericVar, ...] = (
     NumericVar("CRG_WATCH_HEALTH_INTERVAL", ("status",), "5"),
     NumericVar("CRG_MAX_UNWATCHED_TRACKED", ("status",), "64"),
     NumericVar("CRG_MAX_CHANGED_FUNCS", ("detect-changes", "--brief"), "100"),
+    NumericVar("CRG_MAX_DELETION_FILES", ("detect-changes", "--brief"), "20"),
     NumericVar("CRG_MAX_TRANSITIVE_FRONTIER", ("detect-changes", "--brief"), "20"),
     NumericVar("CRG_CHURN_WINDOW_DAYS", ("detect-changes", "--brief", "--churn"), "30"),
     NumericVar("CRG_CHURN_TIMEOUT", ("detect-changes", "--brief", "--churn"), "10"),

@@ -532,6 +532,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 影响半径分析的搜索深度 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 图谱遍历的最大深度 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 单份变更报告中分析的最大变更函数数 | `500` |
+| `CRG_MAX_DELETION_FILES` | 单份变更报告中读取旧版本的最大文件数，用于列出差异删除的函数和类 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 传递性调用者/被调用者扩展的最大前沿规模 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 为没有测试的变更符号向上回溯 `CALLS` 寻找已测试调用者的跳数。仅作为提示报告，不计为覆盖率 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 寻找该已测试调用者时检查的调用者数量上限 | `500` |

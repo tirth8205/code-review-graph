@@ -51,6 +51,7 @@ from typing import Any
 
 import pytest
 
+from code_review_graph import changes as changes_mod
 from code_review_graph import main as crg_main
 from code_review_graph.graph import GraphStore
 from code_review_graph.incremental import full_build
@@ -732,6 +733,11 @@ MAX_CEILINGS = {
     "review._MAX_REVIEW_SOURCE_LINES": (review._MAX_REVIEW_SOURCE_LINES, 800),
     "review._MAX_LINES_PER_FILE": (review._MAX_LINES_PER_FILE, 500),
     "review._MAX_CHANGED_FUNCTIONS": (review._MAX_CHANGED_FUNCTIONS, 100),
+    # Symbols a diff removed, and the users listed for each. Their cost is
+    # measured in tests/test_pure_deletion_review.py, which needs a real git
+    # history that this fixture does not have.
+    "review._MAX_REMOVED_SYMBOLS": (review._MAX_REMOVED_SYMBOLS, 25),
+    "changes._MAX_REMOVED_USERS_SHOWN": (changes_mod._MAX_REMOVED_USERS_SHOWN, 3),
     "review._MAX_AFFECTED_FLOWS_STANDARD": (
         review._MAX_AFFECTED_FLOWS_STANDARD, 25,
     ),

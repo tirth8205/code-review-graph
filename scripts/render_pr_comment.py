@@ -221,6 +221,41 @@ def _flows_section(flows: list[dict[str, Any]], max_flows: int) -> list[str]:
     return lines
 
 
+def _removed_section(
+    removed: list[dict[str, Any]], total: int, max_rows: int = 10,
+) -> list[str]:
+    """Symbols the diff deleted, and what the graph says still uses them."""
+    lines = [
+        "### Removed symbols",
+        "",
+        "| Symbol | Was at | Still used by |",
+        "| :--- | :--- | :--- |",
+    ]
+    for entry in removed[:max_rows]:
+        name = entry.get("qualified_name") or entry.get("name") or "?"
+        location = md_escape(relativize_path(entry.get("file") or "?"))
+        if entry.get("old_line_start"):
+            location += f":{entry['old_line_start']}"
+        users = [
+            md_escape(relativize_path(u.get("qualified_name") or u.get("name") or "?"), 80)
+            for u in entry.get("used_by") or []
+        ]
+        users_total = entry.get("used_by_total")
+        if not isinstance(users_total, int):
+            users_total = len(users)
+        if users_total:
+            cell = ", ".join(users)
+            if users_total > len(users):
+                cell += f" +{users_total - len(users)} more"
+        else:
+            cell = "nothing found"
+        lines.append(f"| {md_escape(relativize_path(name))} | {location} | {cell} |")
+    if total > min(len(removed), max_rows):
+        lines.append("")
+        lines.append(f"...and {total - min(len(removed), max_rows)} more removed symbol(s).")
+    return lines
+
+
 def _dedup_gaps(gaps: list[dict[str, Any]], max_gaps: int) -> list[dict[str, Any]]:
     seen: set[str] = set()
     shown: list[dict[str, Any]] = []
@@ -372,6 +407,13 @@ def render_markdown(
                 priorities, gap_names, max_functions, indirect_names, truncated
             )
         )
+    removed = report.get("removed_symbols") or []
+    if removed:
+        removed_total = report.get("removed_symbols_total")
+        if not isinstance(removed_total, int):
+            removed_total = len(removed)
+        lines.append("")
+        lines.extend(_removed_section(removed, removed_total))
     if flows:
         lines.append("")
         lines.extend(_flows_section(flows, max_flows))
