@@ -2012,3 +2012,60 @@ class TestUnusableDatabaseRecovery:
         assert not _has_incompatible_schema(
             db, sqlite3.OperationalError("no such column: file_path")
         )
+
+
+class TestQualifiedNameCollisionLifecycle:
+    """Review fixes for same-file qualified-name collisions (#585, PR #715)."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.tmp.close()
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    @staticmethod
+    def _render(path, line_start, params=None, line_end=None, is_test=False):
+        return NodeInfo(
+            kind="Test" if is_test else "Function", name="render", file_path=path,
+            line_start=line_start,
+            line_end=line_end if line_end is not None else line_start + 2,
+            language="python", params=params, is_test=is_test,
+        )
+
+    def _call(self, caller_file, name, target, line=2):
+        self.store.store_file_nodes_edges(
+            caller_file,
+            [NodeInfo(kind="Function", name=name, file_path=caller_file,
+                      line_start=line - 1, line_end=line + 1, language="python")],
+            [EdgeInfo(kind="CALLS", source=f"{caller_file}::{name}", target=target,
+                      file_path=caller_file, line=line)],
+        )
+
+    def _identity_at(self, path, line_start):
+        return next(
+            node.qualified_name for node in self.store.get_nodes_by_file(path)
+            if node.line_start == line_start
+        )
+
+    def test_backslash_spelling_keeps_the_shrink_survivor_identity(self):
+        """Windows callers pass ``C:\\t\\target.py``; rows are stored as
+        ``C:/t/target.py``. Planning must look old rows up by the stored spelling
+        or the survivor re-keys to the bare name and its caller dangles.
+        """
+        posix = "C:/t/target.py"
+        windows = "C:\\t\\target.py"
+        self.store.store_file_nodes_edges(
+            windows, [self._render(posix, 10, "(a)"), self._render(posix, 20, "(b)")], [],
+        )
+        survivor = self._identity_at(posix, 20)
+        assert survivor != f"{posix}::render"
+        self._call("C:/t/caller.py", "go", survivor)
+
+        self.store.store_file_nodes_edges(windows, [self._render(posix, 21, "(b)")], [])
+
+        assert [n.qualified_name for n in self.store.get_nodes_by_file(posix)] == [survivor]
+        callers = self.store.get_edges_by_target(survivor)
+        assert [e.source_qualified for e in callers] == ["C:/t/caller.py::go"]

@@ -1014,6 +1014,9 @@ class GraphStore:
         When definitions are semantically identical, the closest source location
         preserves identity across harmless shifts, growth, and shrink transitions.
         """
+        # Rows are stored under the POSIX spelling; a Windows caller passes
+        # backslashes, which would find no previous identities at all.
+        file_path = normalize_file_path(file_path)
         old_rows = self._conn.execute(
             "SELECT id, kind, name, qualified_name, file_path, line_start, "
             "line_end, language, parent_name, params, return_type, modifiers, "
@@ -1349,7 +1352,7 @@ class GraphStore:
         normalized = normalize_file_path(file_path)
         # Same-file definitions that share a base qualified name keep their
         # own rows (#585). Plan identities before the old rows are deleted.
-        identities = self._plan_file_identities(file_path, nodes)
+        identities = self._plan_file_identities(normalized, nodes)
         self._conn.execute("DELETE FROM nodes WHERE file_path = ?", (normalized,))
         self._conn.execute("DELETE FROM edges WHERE file_path = ?", (normalized,))
 
