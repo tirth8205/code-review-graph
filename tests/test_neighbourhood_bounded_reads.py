@@ -1,10 +1,10 @@
 """A seeded view reads around its seed, and answers exactly as a full read would.
 
 ``export_graph_data`` used to load every node, file by file, and the whole edge
-table before cutting down to a two-node neighbourhood, which on a graph of two
-million edges ran past a 45 second deadline. Bare-name edges make this easy to
-get subtly wrong: an edge from an unrelated file can resolve onto the seed, so
-the comparisons here are byte for byte against the full read. See #1145.
+table before cutting down to a two-node neighbourhood (#1145, fixed in #1178).
+Bare-name edges make this easy to get subtly wrong: an edge from an unrelated
+file can resolve onto the seed, so the comparisons here are byte for byte
+against the full read.
 """
 
 from __future__ import annotations
