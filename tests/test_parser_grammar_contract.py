@@ -190,7 +190,8 @@ def test_csharp_record_struct_still_extracted_as_class(tmp_path):
     classes = {n.name for n in nodes if n.kind == "Class"}
     assert {"Money", "Point", "Person"} <= classes
     twice = [n for n in nodes if n.kind == "Function" and n.name == "Twice"]
-    assert len(twice) == 1 and twice[0].parent_name == "Point"
+    # C# parent names carry the namespace (#964).
+    assert len(twice) == 1 and twice[0].parent_name == "App.Point"
 
 
 def test_objc_category_still_extracted_as_class(tmp_path):
