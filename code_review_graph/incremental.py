@@ -95,8 +95,50 @@ _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 CSHARP_IDENTITY_VERSION = "5"  # Namespace/call context, static and generic-arity evidence.
 _CSHARP_IDENTITY_METADATA_KEY = "csharp_identity_version"
 _CSHARP_PENDING_METADATA_KEY = "csharp_identity_pending_files"
+# Nested class members take the full scope chain (#934). A graph built before
+# holds leaf-scoped identities for them, and an importer re-parsed with
+# unchanged bytes keeps its node rows, so its new edges would name nodes that
+# do not exist. Files with nested classes reparse once instead.
+NESTED_SCOPE_IDENTITY_VERSION = "1"
+_NESTED_SCOPE_METADATA_KEY = "nested_scope_identity_version"
+_NESTED_SCOPE_PENDING_KEY = "nested_scope_identity_pending_files"
+# Python, C++ and Julia keep their own nested spellings; Ruby already took the
+# chain (#1087) and C# has its own gate above.
+_NESTED_SCOPE_UNCHANGED_LANGUAGES = ("python", "cpp", "julia", "ruby", "csharp")
 _CPP_IDENTITY_PENDING_KEY = "cpp_identity_pending"
 _DEPENDENTS_PENDING_KEY = "dependents_reparse_pending"
+
+
+def _load_pending_paths(store: GraphStore, key: str) -> set[str]:
+    """Repo-relative paths a metadata *key* holds for the next update to retry."""
+    try:
+        files = json.loads(store.get_metadata(key) or "[]")
+    except (TypeError, ValueError):
+        return set()
+    if not isinstance(files, list):
+        return set()
+    return {
+        path for path in files
+        if isinstance(path, str)
+        and path
+        and not Path(path).is_absolute()
+        and ".." not in Path(path).parts
+    }
+
+
+def _nested_scope_files(store: GraphStore, repo_root: Path) -> set[str]:
+    """Files whose nested class members held leaf-scoped identities before #934."""
+    placeholders = ",".join("?" for _ in _NESTED_SCOPE_UNCHANGED_LANGUAGES)
+    rows = store._conn.execute(
+        "SELECT DISTINCT file_path FROM nodes WHERE kind = 'Class' "  # nosec B608
+        f"AND parent_name IS NOT NULL AND language NOT IN ({placeholders})",
+        _NESTED_SCOPE_UNCHANGED_LANGUAGES,
+    )
+    return {
+        Path(row[0]).relative_to(repo_root).as_posix()
+        for row in rows
+        if Path(row[0]).is_relative_to(repo_root)
+    }
 
 
 def _load_dependents_pending(store: GraphStore) -> set[str]:
@@ -2045,6 +2087,9 @@ def full_build(
         VERIFIED_FILE_COUNT_KEY, "0" if errors else str(len(store.get_all_files()))
     )
     _store_cpp_identity_pending(store, cpp_errors)
+    # A failed file holds no rows, so nothing of the old nested scope remains.
+    store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+    store.set_metadata(_NESTED_SCOPE_PENDING_KEY, "[]")
     # Record the attempted C# format and retry only failed files. Holding the
     # entire version gate open for one bad file repeats a full build (#944).
     store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
@@ -2175,6 +2220,16 @@ def incremental_update(
             )
             if Path(row[0]).is_relative_to(repo_root)
         )
+    nested_upgrade = (
+        store.get_metadata(_NESTED_SCOPE_METADATA_KEY) != NESTED_SCOPE_IDENTITY_VERSION
+    )
+    pending_nested = _load_pending_paths(store, _NESTED_SCOPE_PENDING_KEY)
+    if nested_upgrade:
+        pending_nested |= _nested_scope_files(store, repo_root)
+        if not pending_nested:
+            # Nothing holds the old spelling, so there is nothing to migrate.
+            store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+            nested_upgrade = False
     content_mismatches: list[str] = []
     current_hashes: dict[str, str] = {}
     known_text: set[str] | None = None
@@ -2192,7 +2247,10 @@ def incremental_update(
         dict.fromkeys(
             [
                 _relative_update_input(repo_root, p)
-                for p in [*changed_files, *content_mismatches, *sorted(pending_csharp)]
+                for p in [
+                    *changed_files, *content_mismatches,
+                    *sorted(pending_csharp), *sorted(pending_nested),
+                ]
             ]
         )
     )
@@ -2238,7 +2296,9 @@ def incremental_update(
         # A path with no rows has no stored hash to compare, and may be a large
         # file the graph never indexes, so it is not read here.
         existing = store.get_nodes_by_file(full_path)
-        if existing:
+        # A nested-scope upgrade renames this file's members, so whoever
+        # resolved a call to the old names must be re-resolved too.
+        if existing and rel_path not in pending_nested:
             try:
                 current_hash = current_hashes.get(normalize_file_path(rel_path))
                 if current_hash is None:
@@ -2307,6 +2367,7 @@ def incremental_update(
             existing_nodes = store.get_nodes_by_file(str(abs_path))
             if (
                 rel_path not in pending_csharp
+                and rel_path not in pending_nested
                 and rel_path not in remaining_identity
                 and fhash is not None
                 and existing_nodes
@@ -2444,6 +2505,12 @@ def incremental_update(
     )
 
     files_updated = parsed_files + removed_files
+    if nested_upgrade or pending_nested:
+        failed = {error["file"] for error in errors}
+        store.set_metadata(_NESTED_SCOPE_METADATA_KEY, NESTED_SCOPE_IDENTITY_VERSION)
+        store.set_metadata(
+            _NESTED_SCOPE_PENDING_KEY, json.dumps(sorted(pending_nested & failed)),
+        )
     if csharp_upgrade or pending_csharp or any(p.endswith(".cs") for p in all_files):
         store.set_metadata(_CSHARP_IDENTITY_METADATA_KEY, CSHARP_IDENTITY_VERSION)
         store.set_metadata(_CSHARP_PENDING_METADATA_KEY, json.dumps(sorted(
