@@ -76,6 +76,65 @@ _COLLISION_IDENTITY_RE = re.compile(
     r"^(?P<base>.+):S[0-9a-f]{12}(?::(?:[2-9]|[1-9][0-9]+))?$",
 )
 
+# A call to a name two same-file definitions share, with nothing at the call
+# to choose one, is not bound to the first of them (#585, #586). It is stored
+# the way an unbound target is: the plain name, every definition listed as a
+# candidate, an AMBIGUOUS tier. The identity the parser wrote stays under this
+# key, so the edge binds again once only one definition is left.
+_COLLISION_ENDPOINT_KEY = "collision_endpoint"
+_COLLISION_AMBIGUOUS_TIER = "AMBIGUOUS"
+_COLLISION_AMBIGUOUS_SCORE = 0.4
+_COLLISION_CALL_KINDS = ("CALLS", "REFERENCES")
+_COLLISION_CANDIDATE_LIMIT = 20
+_AMBIGUITY_KEYS = (
+    "ambiguous_targets", "ambiguous_target_count", "ambiguous_targets_truncated",
+    "unresolved_targets", "unresolved_target_count", "unresolved_targets_truncated",
+)
+
+
+def _load_collision_extra(raw: Optional[str]) -> dict:
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _plain_collision_name(qualified: str) -> str:
+    """The name the source wrote: ``a.py::Shapes.area`` -> ``area``."""
+    symbol = qualified.partition("::")[2] or qualified
+    return re.split(r"::|\.", symbol)[-1]
+
+
+def _ambiguous_collision_extra(extra: dict, base: str, candidates: list[str]) -> dict:
+    """*extra* for an edge that could mean any of *candidates*."""
+    # The unsuffixed definition first, then a stable order, so a re-store and
+    # a settle pass write the same list.
+    candidates = sorted(candidates, key=lambda candidate: (candidate != base, candidate))
+    marked = {key: value for key, value in extra.items() if key not in _AMBIGUITY_KEYS}
+    marked.update({
+        "ambiguous_targets": candidates[:_COLLISION_CANDIDATE_LIMIT],
+        "ambiguous_target_count": len(candidates),
+        "ambiguous_targets_truncated": len(candidates) > _COLLISION_CANDIDATE_LIMIT,
+        _COLLISION_ENDPOINT_KEY: base,
+        "confidence": _COLLISION_AMBIGUOUS_SCORE,
+        "confidence_tier": _COLLISION_AMBIGUOUS_TIER,
+    })
+    return marked
+
+
+def _bound_collision_extra(extra: dict) -> dict:
+    """*extra* once its collision has gone and one definition is left."""
+    bound = {
+        key: value for key, value in extra.items()
+        if key not in _AMBIGUITY_KEYS and key != _COLLISION_ENDPOINT_KEY
+    }
+    if bound.get("confidence_tier") == _COLLISION_AMBIGUOUS_TIER:
+        bound.pop("confidence_tier")
+        if bound.get("confidence") == _COLLISION_AMBIGUOUS_SCORE:
+            bound.pop("confidence")
+    return bound
+
 
 # Bound on the order-preserving pairing below, in DP steps:
 # (shorter list) x (size difference + 1) squared. Past it, pairs are taken in
@@ -1228,64 +1287,190 @@ class GraphStore:
         return self._conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     def _resolve_stored_identity(self, qualified_name: str) -> str:
-        """Resolve a bare edge endpoint to one lone historical suffix.
+        """Resolve a bare edge endpoint to one lone historical suffix."""
+        candidates = self._stored_identity_candidates(qualified_name)
+        return candidates[0] if len(candidates) == 1 else qualified_name
+
+    def _stored_identity_candidates(self, qualified_name: str) -> list[str]:
+        """Every stored definition a base edge endpoint can mean.
 
         Only a qualified (``path::symbol``) name can be a collision base. The
         index range seek is tried first because it is almost always empty;
-        the exact lookup runs only when exactly one suffixed row exists.
+        the exact lookup runs only when a suffixed row exists. A name with no
+        collision rows is returned alone, whether or not it has a node.
         """
         if "::" not in qualified_name:
-            return qualified_name
+            return [qualified_name]
         lower = f"{qualified_name}:S"
         upper = f"{qualified_name}:T"
-        rows = self._conn.execute(
-            "SELECT qualified_name FROM nodes "
-            "WHERE qualified_name >= ? AND qualified_name < ? "
-            "ORDER BY qualified_name",
-            (lower, upper),
-        )
-        matches = []
-        for row in rows:
-            candidate = row["qualified_name"]
-            if not self._is_collision_identity(qualified_name, candidate):
-                continue
-            matches.append(candidate)
-            if len(matches) == 2:
-                break
-        if len(matches) == 1 and self._conn.execute(
+        matches = [
+            row["qualified_name"]
+            for row in self._conn.execute(
+                "SELECT qualified_name FROM nodes "
+                "WHERE qualified_name >= ? AND qualified_name < ? "
+                "ORDER BY qualified_name",
+                (lower, upper),
+            )
+            if self._is_collision_identity(qualified_name, row["qualified_name"])
+        ]
+        if not matches:
+            return [qualified_name]
+        if self._conn.execute(
             "SELECT 1 FROM nodes WHERE qualified_name = ?", (qualified_name,),
-        ).fetchone() is None:
-            return matches[0]
-        return qualified_name
+        ).fetchone() is not None:
+            return [qualified_name, *matches]
+        return matches
 
     def _resolve_edge_identities(
         self,
         edge: EdgeInfo,
         local_prefix: str | None = None,
-        cache: dict[str, str] | None = None,
+        cache: dict[str, list[str]] | None = None,
     ) -> EdgeInfo:
-        """Apply :meth:`_resolve_stored_identity` to both edge endpoints.
+        """Settle both edge endpoints against the stored collision identities.
 
         Endpoints under *local_prefix* (``"<file>::"``) belong to the file
         being stored, whose identities the caller has already aligned.
         """
+        # The endpoint that names what was called: an unevidenced one on a
+        # name several definitions share lists them all (#585).
+        called = (
+            1 if edge.kind in _COLLISION_CALL_KINDS
+            else 0 if edge.kind == "TESTED_BY" else None
+        )
         resolved: list[str] = []
-        for endpoint in (edge.source, edge.target):
+        extra = edge.extra
+        for index, endpoint in enumerate((edge.source, edge.target)):
             if local_prefix is not None and endpoint.startswith(local_prefix):
                 resolved.append(endpoint)
-            elif cache is None:
-                resolved.append(self._resolve_stored_identity(endpoint))
+                continue
+            if cache is None:
+                candidates = self._stored_identity_candidates(endpoint)
             else:
                 if endpoint not in cache:
-                    cache[endpoint] = self._resolve_stored_identity(endpoint)
-                resolved.append(cache[endpoint])
+                    cache[endpoint] = self._stored_identity_candidates(endpoint)
+                candidates = cache[endpoint]
+            if len(candidates) == 1:
+                resolved.append(candidates[0])
+            elif index == called:
+                resolved.append(_plain_collision_name(endpoint))
+                extra = _ambiguous_collision_extra(extra or {}, endpoint, candidates)
+            else:
+                resolved.append(endpoint)
         source, target = resolved
         if source == edge.source and target == edge.target:
             return edge
         return EdgeInfo(
             kind=edge.kind, source=source, target=target,
-            file_path=edge.file_path, line=edge.line, extra=edge.extra,
+            file_path=edge.file_path, line=edge.line, extra=extra,
         )
+
+    def _settle_collision_endpoints(self) -> int:
+        """Keep every edge into a duplicated name honest after a store pass.
+
+        A file is stored on its own, so a call from another file can be written
+        before, or after, the duplicates it names: bound to the first
+        definition, or left on a collision that has since gone. Settled here:
+        an unevidenced ``CALLS``/``REFERENCES`` target, or ``TESTED_BY`` source,
+        on a name several definitions share lists them all instead (#585); one
+        whose duplicates are gone binds to the definition left. A recursive
+        call is evidence and keeps its binding.
+
+        Returns the number of edges changed.
+        """
+        conn = self._conn
+        identities: dict[str, list[str]] = {}
+        for (qualified,) in conn.execute(
+            "SELECT qualified_name FROM nodes WHERE qualified_name GLOB '*:S[0-9a-f]*'"
+        ):
+            match = _COLLISION_IDENTITY_RE.fullmatch(qualified)
+            if match:
+                identities.setdefault(match.group("base"), []).append(qualified)
+
+        known: dict[str, list[str]] = {}
+
+        def current(base: str) -> list[str]:
+            if base not in known:
+                found = sorted(identities.get(base, []))
+                exists = conn.execute(
+                    "SELECT 1 FROM nodes WHERE qualified_name = ?", (base,),
+                ).fetchone()
+                known[base] = [base, *found] if exists else found
+            return known[base]
+
+        updates: list[tuple[str, str, str, float, str, str | None, int]] = []
+
+        def settle(row: sqlite3.Row, column: str, extra: dict, base: str) -> None:
+            candidates = current(base)
+            endpoint = row[column]
+            if len(candidates) > 1:
+                new_endpoint = _plain_collision_name(base)
+                new_extra = _ambiguous_collision_extra(extra, base, candidates)
+                score, tier, resolution = (
+                    _COLLISION_AMBIGUOUS_SCORE, _COLLISION_AMBIGUOUS_TIER, "unresolved",
+                )
+            elif len(candidates) == 1:
+                new_endpoint = candidates[0]
+                new_extra = _bound_collision_extra(extra)
+                score, tier, resolution = 1.0, "EXTRACTED", "direct"
+            else:
+                # Every definition went; what is left is an ordinary bare name.
+                new_endpoint = _plain_collision_name(base)
+                new_extra = _bound_collision_extra(extra)
+                score, tier, resolution = 1.0, "EXTRACTED", "unresolved"
+            if new_endpoint == endpoint and new_extra == extra:
+                return
+            updates.append((
+                column, new_endpoint, json.dumps(new_extra), score, tier,
+                resolution if row["kind"] in _COLLISION_CALL_KINDS else None,
+                row["id"],
+            ))
+
+        endpoints = (
+            *((kind, "target_qualified", "source_qualified") for kind in _COLLISION_CALL_KINDS),
+            ("TESTED_BY", "source_qualified", "target_qualified"),
+        )
+        handled: set[int] = set()
+        for row in conn.execute(
+            "SELECT id, kind, source_qualified, target_qualified, extra FROM edges "
+            "WHERE extra LIKE ?",
+            (f'%"{_COLLISION_ENDPOINT_KEY}"%',),
+        ).fetchall():
+            extra = _load_collision_extra(row["extra"])
+            base = extra.get(_COLLISION_ENDPOINT_KEY)
+            column = next((c for k, c, _ in endpoints if k == row["kind"]), None)
+            if isinstance(base, str) and column is not None:
+                handled.add(row["id"])
+                settle(row, column, extra, base)
+        for base in identities:
+            for kind, column, other in endpoints:
+                # Only fixed column names reach the SQL text.
+                for row in conn.execute(
+                    "SELECT id, kind, source_qualified, target_qualified, extra "  # nosec B608
+                    f"FROM edges WHERE kind = ? AND {column} = ? AND {other} != ?",
+                    (kind, base, base),
+                ).fetchall():
+                    if row["id"] not in handled:
+                        settle(row, column, _load_collision_extra(row["extra"]), base)
+
+        if not updates:
+            return 0
+        self._begin_immediate()
+        try:
+            for column in ("source_qualified", "target_qualified"):
+                rows = [update[1:] for update in updates if update[0] == column]
+                conn.executemany(
+                    f"UPDATE edges SET {column} = ?, extra = ?, confidence = ?, "  # nosec B608
+                    "confidence_tier = ?, target_resolution = COALESCE(?, target_resolution) "
+                    "WHERE id = ?",
+                    rows,
+                )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        self._invalidate_cache()
+        return len(updates)
 
     def remove_file_data(self, file_path: str) -> None:
         """Remove all nodes and edges associated with a file."""
@@ -1576,7 +1761,7 @@ class GraphStore:
         in other files can need the index lookup, once per distinct name.
         """
         local_prefix = f"{file_path}::"
-        cache: dict[str, str] = {}
+        cache: dict[str, list[str]] = {}
         return [
             self._resolve_edge_identities(
                 self._align_edge_with_collisions(edge, collisions)
@@ -1618,11 +1803,14 @@ class GraphStore:
                          file_path=edge.file_path, line=edge.line, extra=edge.extra),
                 collisions,
             )
-            if call.source == edge.target and call.target == edge.source:
+            if (
+                call.source == edge.target and call.target == edge.source
+                and call.extra is edge.extra
+            ):
                 return edge
             return EdgeInfo(
                 kind=edge.kind, source=call.target, target=call.source,
-                file_path=edge.file_path, line=edge.line, extra=edge.extra,
+                file_path=edge.file_path, line=edge.line, extra=call.extra,
             )
         source = edge.source
         source_candidates = collisions.get(source, [])
@@ -1648,10 +1836,24 @@ class GraphStore:
             ]
             if len(starting_targets) == 1:
                 target = starting_targets[0]
-        elif edge.source == edge.target and source != edge.source:
+        elif edge.source == edge.target and any(
+            source == qualified for _, _, qualified in target_candidates
+        ):
             # A recursive call inside a collided definition resolves to that
-            # definition rather than the canonical first occurrence.
+            # definition, the one whose lines hold the call.
             target = source
+        elif target_candidates and edge.kind in _COLLISION_CALL_KINDS:
+            # Nothing at the call says which definition it means, and the
+            # first one is no better a guess than the rest.
+            return EdgeInfo(
+                kind=edge.kind, source=source,
+                target=_plain_collision_name(edge.target),
+                file_path=edge.file_path, line=edge.line,
+                extra=_ambiguous_collision_extra(
+                    edge.extra or {}, edge.target,
+                    [qualified for _, _, qualified in target_candidates],
+                ),
+            )
 
         if source == edge.source and target == edge.target:
             return edge
@@ -2489,6 +2691,7 @@ class GraphStore:
         except BaseException:
             self._conn.rollback()
             raise
+        self._settle_collision_endpoints()
         return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
 
     def count_edges_by_resolution(self, kind: str = "CALLS") -> dict[str, int]:

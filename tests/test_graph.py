@@ -20,6 +20,27 @@ from code_review_graph.incremental import full_build
 from code_review_graph.parser import EdgeInfo, NodeInfo
 
 
+def _assert_callers_survive(store, identities, base):
+    """Each suffixed duplicate keeps its caller across a re-index. A caller that
+    named the base gives no evidence for either definition, so it lists every
+    duplicate instead of claiming the first one (#585, #586)."""
+    for identity in identities:
+        assert store.get_node(identity) is not None
+        callers = store.get_edges_by_target(identity)
+        if identity == base:
+            assert callers == []
+        else:
+            assert len(callers) == 1
+            assert store.get_node(callers[0].source_qualified) is not None
+    if base in identities:
+        [ambiguous] = [
+            edge for edge in store.get_all_edges()
+            if edge.kind == "CALLS" and edge.target_qualified == "render"
+        ]
+        assert set(ambiguous.extra["ambiguous_targets"]) == set(identities)
+        assert store.get_node(ambiguous.source_qualified) is not None
+
+
 class TestGraphStore:
     def setup_method(self):
         self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -483,11 +504,7 @@ class TestGraphStore:
             for node in self.store.get_nodes_by_file(target_file)
         }
         assert shifted_qns == original_qns
-        for qualified_name in original_qns:
-            callers = self.store.get_edges_by_target(qualified_name)
-            assert self.store.get_node(qualified_name) is not None
-            assert len(callers) == 1
-            assert self.store.get_node(callers[0].source_qualified) is not None
+        _assert_callers_survive(self.store, original_qns, f"{target_file}::render")
 
     def test_reindex_collision_shrink_preserves_survivor_identity_and_caller(self):
         target_file = "/test/target.py"
@@ -637,10 +654,9 @@ class TestGraphStore:
             for node in self.store.get_nodes_by_file(target_file)
         }
         assert reordered == original_qns
-        for qualified_name in original_qns.values():
-            callers = self.store.get_edges_by_target(qualified_name)
-            assert len(callers) == 1
-            assert self.store.get_node(callers[0].target_qualified) is not None
+        _assert_callers_survive(
+            self.store, set(original_qns.values()), f"{target_file}::render",
+        )
 
     def test_reindex_unique_signature_and_line_change_keeps_bare_identity(self):
         target_file = "/test/target.py"
@@ -727,7 +743,9 @@ class TestGraphStore:
         assert self.store.get_node(callers[0].source_qualified) == disambiguated
         assert self.store.get_node(callees[0].target_qualified) == disambiguated
 
-    def test_ambiguous_call_target_keeps_canonical_identity(self):
+    def test_unevidenced_cross_file_call_lists_every_duplicate(self):
+        """A caller naming the base cannot say which duplicate it means, so it
+        claims neither (#586): plain name, every candidate, AMBIGUOUS 0.4."""
         target_file = "/test/target.py"
         base_qualified = f"{target_file}::render"
         nodes = [
@@ -737,10 +755,7 @@ class TestGraphStore:
                      line_start=20, line_end=24, language="python"),
         ]
         self.store.store_file_nodes_edges(target_file, nodes, [])
-        disambiguated = next(
-            node for node in self.store.get_nodes_by_file(target_file)
-            if node.qualified_name != base_qualified
-        )
+        identities = {n.qualified_name for n in self.store.get_nodes_by_file(target_file)}
         caller = NodeInfo(
             kind="Function", name="call_render", file_path="/test/caller.py",
             line_start=1, line_end=3, language="python",
@@ -752,8 +767,14 @@ class TestGraphStore:
 
         self.store.store_file_nodes_edges("/test/caller.py", [caller], [edge])
 
-        assert len(self.store.get_edges_by_target(base_qualified)) == 1
-        assert self.store.get_edges_by_target(disambiguated.qualified_name) == []
+        for identity in identities:
+            assert self.store.get_edges_by_target(identity) == []
+        [stored] = self.store.get_edges_by_source("/test/caller.py::call_render")
+        assert stored.target_qualified == "render"
+        assert stored.extra["ambiguous_targets"][0] == base_qualified
+        assert set(stored.extra["ambiguous_targets"]) == identities
+        assert stored.confidence == 0.4
+        assert stored.confidence_tier == "AMBIGUOUS"
 
     def test_unresolved_identity_lookup_uses_qualified_name_index_range(self):
         statements = []
@@ -2179,9 +2200,7 @@ class TestQualifiedNameCollisionLifecycle:
 
         assert self._identity_at(path, 12) == edited
         assert self._identity_at(path, 22) == unchanged
-        for identity in (edited, unchanged):
-            [caller] = self.store.get_edges_by_target(identity)
-            assert self.store.get_node(caller.target_qualified) is not None
+        _assert_callers_survive(self.store, {edited, unchanged}, f"{path}::render")
 
     def test_every_edited_duplicate_keeps_its_identity_in_order(self):
         path = "/test/target.py"
@@ -2345,15 +2364,11 @@ class TestQualifiedNameCollisionLifecycle:
         assert sorted(n.line_start for n in found) == [10, 20]
         assert self.store.count_nodes_by_qualified_tail("Handler.process") == 2
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="#586/#585: an unevidenced call still binds to the first duplicate, "
-        "so a later overload that is called looks uncalled",
-    )
     def test_a_called_later_overload_is_not_dead_code(self, tmp_path):
         """Staging collapses ``area(int)`` and ``area(int, int)`` into one called
         node. Keeping both rows must not leave the second one without callers:
-        ``rect()`` calls it, yet every call is bound to the first overload.
+        ``rect()`` calls it, and nothing at either call picks an overload, so
+        both calls list both and neither overload is claimed (#586).
         """
         from code_review_graph.refactor import find_dead_code
 
@@ -2373,3 +2388,130 @@ class TestQualifiedNameCollisionLifecycle:
             assert len(overloads) == 2
             dead = {d["qualified_name"] for d in find_dead_code(store)}
         assert not {n.qualified_name for n in overloads} & dead
+
+
+class TestUnevidencedCallsToDuplicates:
+    """A call that cannot choose between same-file duplicates claims neither
+    (#585, as #586 was refused for); one with evidence keeps its binding."""
+
+    SHAPES = (
+        "public class Shapes {\n"
+        "    public int area(int side) { return side * side; }\n"
+        "    public int area(int w, int h) { return w * h; }\n"
+        "    public int rect() { return area(2, 3); }\n"
+        "}\n"
+    )
+
+    def test_same_file_call_lists_both_overloads_and_claims_neither(self, tmp_path):
+        from code_review_graph.tools.query import query_graph
+
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "Shapes.java").write_text(self.SHAPES, encoding="utf-8")
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            full_build(tmp_path, store)
+            overloads = sorted(
+                n.qualified_name for n in store.get_nodes_by_file(
+                    (tmp_path / "Shapes.java").as_posix(),
+                ) if n.name == "area"
+            )
+            [call] = [
+                e for e in store.get_all_edges()
+                if e.kind == "CALLS" and e.source_qualified.endswith("Shapes.rect")
+            ]
+            assert call.target_qualified == "area"
+            assert sorted(call.extra["ambiguous_targets"]) == overloads
+            assert (call.confidence, call.confidence_tier) == (0.4, "AMBIGUOUS")
+            assert call.target_resolution == "unresolved"
+        for overload in overloads:
+            result = query_graph("callers_of", overload, str(tmp_path))
+            assert result["status"] == "ok"
+            assert result["results"] == []
+        callees = query_graph(
+            "callees_of", f"{(tmp_path / 'Shapes.java').as_posix()}::Shapes.rect",
+            str(tmp_path),
+        )
+        [row] = callees["results"]
+        assert row["resolution"] == "ambiguous"
+        assert len(row["candidates"]) == 2
+
+    def test_a_test_calling_a_duplicate_is_not_claimed_by_either(self, tmp_path):
+        target = "/repo/app.py"
+        test_file = "/repo/test_app.py"
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(target, [
+                NodeInfo(kind="Function", name="render", file_path=target,
+                         line_start=1, line_end=2, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=target,
+                         line_start=4, line_end=5, language="python", params="(x)"),
+            ], [])
+            identities = {n.qualified_name for n in store.get_nodes_by_file(target)}
+            store.store_file_nodes_edges(test_file, [
+                NodeInfo(kind="Test", name="test_render", file_path=test_file,
+                         line_start=1, line_end=2, language="python", is_test=True),
+            ], [
+                EdgeInfo(kind="CALLS", source=f"{test_file}::test_render",
+                         target=f"{target}::render", file_path=test_file, line=2),
+                EdgeInfo(kind="TESTED_BY", source=f"{target}::render",
+                         target=f"{test_file}::test_render", file_path=test_file, line=2),
+            ])
+            for identity in identities:
+                assert store.get_edges_by_source(identity) == []
+                assert store.get_edges_by_target(identity) == []
+            [mirror] = [e for e in store.get_all_edges() if e.kind == "TESTED_BY"]
+            assert mirror.source_qualified == "render"
+            assert set(mirror.extra["ambiguous_targets"]) == identities
+
+    def test_settle_pass_fixes_store_order_and_restores_a_lone_survivor(self, tmp_path):
+        """A caller stored before the duplicates binds to the bare name; the
+        settle pass makes it ambiguous. When one definition is left again, the
+        edge binds to it, though the caller's file was never re-parsed."""
+        target = "/repo/app.py"
+        caller = "/repo/main.py"
+
+        def render(line, params):
+            return NodeInfo(kind="Function", name="render", file_path=target,
+                            line_start=line, line_end=line + 1, language="python",
+                            params=params)
+
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(target, [render(1, "()")], [])
+            store.store_file_nodes_edges(caller, [
+                NodeInfo(kind="Function", name="main", file_path=caller,
+                         line_start=1, line_end=2, language="python"),
+            ], [EdgeInfo(kind="CALLS", source=f"{caller}::main",
+                         target=f"{target}::render", file_path=caller, line=2)])
+            store.refresh_target_resolution()
+            assert len(store.get_edges_by_target(f"{target}::render")) == 1
+
+            store.store_file_nodes_edges(target, [render(1, "()"), render(4, "(x)")], [])
+            store.refresh_target_resolution()
+            assert store.get_edges_by_target(f"{target}::render") == []
+            [call] = store.get_edges_by_source(f"{caller}::main")
+            assert call.target_qualified == "render"
+            assert len(call.extra["ambiguous_targets"]) == 2
+
+            store.store_file_nodes_edges(target, [render(4, "(x)")], [])
+            store.refresh_target_resolution()
+            [survivor] = store.get_nodes_by_file(target)
+            [call] = store.get_edges_by_source(f"{caller}::main")
+            assert call.target_qualified == survivor.qualified_name
+            assert "ambiguous_targets" not in call.extra
+            assert "collision_endpoint" not in call.extra
+            assert (call.confidence, call.confidence_tier) == (1.0, "EXTRACTED")
+            # Settled once; another pass changes nothing.
+            assert store._settle_collision_endpoints() == 0
+
+    def test_recursion_inside_the_first_duplicate_keeps_its_binding(self, tmp_path):
+        path = "/repo/app.py"
+        base = f"{path}::render"
+        with GraphStore(tmp_path / "graph.db") as store:
+            store.store_file_nodes_edges(path, [
+                NodeInfo(kind="Function", name="render", file_path=path,
+                         line_start=1, line_end=3, language="python"),
+                NodeInfo(kind="Function", name="render", file_path=path,
+                         line_start=5, line_end=7, language="python", params="(x)"),
+            ], [EdgeInfo(kind="CALLS", source=base, target=base, file_path=path, line=2)])
+            store.refresh_target_resolution()
+            [loop] = store.get_edges_by_target(base)
+            assert loop.source_qualified == base
+            assert "ambiguous_targets" not in loop.extra
