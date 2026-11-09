@@ -157,7 +157,7 @@ def find_import_cycles(
 
     Returns list of dicts with: name (one loop, written out), size (files in the
     group), load_time (the loop can fail as the files load; False means every
-    loop has an import inside a function), files, loop_length, and cycle (that
+    loop has an import that runs late), files, loop_length, and cycle (that
     loop's imports with their lines). Paths are relative to *repo_root* when it
     is given. Long lists are cut: size and loop_length keep the real counts.
     """

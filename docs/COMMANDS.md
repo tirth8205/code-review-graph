@@ -270,8 +270,10 @@ detail_level: str = "standard"   # "minimal" drops file paths
 An `import_cycles` row is one group of files that import each other: `size` is
 how many files, `name` and `cycle` spell out one loop with its import lines, and
 `load_time` says whether that loop can fail as the files load. `false` means every
-loop has an import inside a function. Imports that never run are left out:
-`if TYPE_CHECKING:` in Python and `import type` in TypeScript. Only imports that
+loop has an import that runs late: inside a function, a dynamic `import()` or a
+Ruby `autoload`. Imports that never run are left out: `if TYPE_CHECKING:` in
+Python and `import type` in TypeScript, and `import { type X }` unless
+`verbatimModuleSyntax` keeps it. Only imports that
 name a file are followed, so Go packages and C# namespaces are not. Graphs built
 before this release need `code-review-graph build` to tell these imports apart.
 

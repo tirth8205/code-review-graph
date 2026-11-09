@@ -7,7 +7,8 @@
 - `get_knowledge_gaps_tool` now reports `import_cycles`: groups of files that
   import each other, with one loop written out and its import lines. `load_time`
   says whether the loop can fail as the files load; `false` means every loop has
-  an import inside a function. To tell these apart, import edges now record
+  an import that runs late: inside a function, a dynamic `import()` or a Ruby
+  `autoload`. To tell these apart, import edges now record
   `extra.import_context`: `type_only`, `deferred` or `parent_package`. Run
   `code-review-graph build` once to get it on an existing graph. Part of #434.
 - Python modules that replace themselves in `sys.modules` are followed to the

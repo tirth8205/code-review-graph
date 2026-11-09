@@ -345,7 +345,7 @@ IMPORT_CONTEXT_KEY = "import_context"
 #: Never runs: ``if TYPE_CHECKING:`` in Python, ``import type`` in TypeScript.
 IMPORT_CONTEXT_TYPE_ONLY = "type_only"
 
-#: Runs late: inside a function, or a JavaScript dynamic ``import()``.
+#: Runs late: inside a function, a JavaScript dynamic ``import()``, a Ruby ``autoload``.
 IMPORT_CONTEXT_DEFERRED = "deferred"
 
 #: Python ``from . import sibling``: the edge to the package is only the route to

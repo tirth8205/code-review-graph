@@ -82,6 +82,29 @@ class TestParserMarksImportsThatDoNotRunAtLoad:
         })
         assert _context_by_target(tmp_path / "a.py")["b.py"] == IMPORT_CONTEXT_TYPE_ONLY
 
+    @pytest.mark.parametrize("guard", [
+        "from typing import TYPE_CHECKING as TC\nif TC:",
+        "TYPE_CHECKING = False\nif TYPE_CHECKING:",
+        "from typing import TYPE_CHECKING\nif not TYPE_CHECKING:\n    pass\nelse:",
+    ])
+    def test_python_type_checking_by_alias_or_branch(self, tmp_path, guard):
+        _write(tmp_path, {
+            "a.py": f"{guard}\n    from b import x\n",
+            "b.py": "x = 1\n",
+        })
+        assert _context_by_target(tmp_path / "a.py")["b.py"] == IMPORT_CONTEXT_TYPE_ONLY
+
+    @pytest.mark.parametrize("guard", [
+        "import typing\nif not typing.TYPE_CHECKING:",
+        "from typing import TYPE_CHECKING\nif not TYPE_CHECKING:",
+    ])
+    def test_python_not_type_checking_runs(self, tmp_path, guard):
+        _write(tmp_path, {
+            "a.py": f"{guard}\n    from b import x\n",
+            "b.py": "x = 1\n",
+        })
+        assert _context_by_target(tmp_path / "a.py")["b.py"] is None
+
     def test_else_of_type_checking_runs(self, tmp_path):
         _write(tmp_path, {
             "a.py": (
@@ -146,6 +169,27 @@ class TestParserMarksImportsThatDoNotRunAtLoad:
         })
         assert _context_by_target(tmp_path / "a.ts")["b.ts"] == IMPORT_CONTEXT_TYPE_ONLY
 
+    @pytest.mark.parametrize("options", [
+        '{"compilerOptions": {"verbatimModuleSyntax": true}}',
+        '{"compilerOptions": {"importsNotUsedAsValues": "preserve"}}',
+    ])
+    def test_typescript_inline_type_import_kept_by_the_compiler(self, tmp_path, options):
+        """``import { type X }`` is emitted as ``import {} from './b'``, which runs b."""
+        _write(tmp_path, {
+            "tsconfig.json": options,
+            "a.ts": "import { type X } from './b';\n",
+            "b.ts": "export type X = number;\n",
+        })
+        assert _context_by_target(tmp_path / "a.ts")["b.ts"] is None
+
+    def test_typescript_import_type_is_dropped_under_verbatim_syntax(self, tmp_path):
+        _write(tmp_path, {
+            "tsconfig.json": '{"compilerOptions": {"verbatimModuleSyntax": true}}',
+            "a.ts": "import type { X } from './b';\n",
+            "b.ts": "export type X = number;\n",
+        })
+        assert _context_by_target(tmp_path / "a.ts")["b.ts"] == IMPORT_CONTEXT_TYPE_ONLY
+
     def test_typescript_value_import_mixed_with_a_type(self, tmp_path):
         _write(tmp_path, {
             "a.ts": "import { type X, y } from './b';\n",
@@ -174,6 +218,37 @@ class TestParserMarksImportsThatDoNotRunAtLoad:
         })
         assert _context_by_target(tmp_path / "a.js")["b.js"] is None
 
+    def test_javascript_top_level_require_cites_its_own_line(self, tmp_path):
+        _write(tmp_path, {
+            "a.js": "function f() {\n  return require('./b');\n}\nconst b = require('./b');\n",
+            "b.js": "module.exports = 1;\n",
+        })
+        assert [edge.line for edge in _import_edges(tmp_path / "a.js")] == [4]
+
+    @pytest.mark.parametrize(("call", "line"), [
+        ("function f() {\n  return require('./b');\n}", 3),
+        ("export const load = () => import('./b');", 2),
+    ])
+    def test_typescript_lazy_load_after_a_type_import_is_deferred(self, tmp_path, call, line):
+        _write(tmp_path, {
+            "a.ts": f"import type {{ X }} from './b';\n{call}\n",
+            "b.ts": "export type X = number;\n",
+        })
+        edges = _import_edges(tmp_path / "a.ts")
+        assert [edge.extra.get(IMPORT_CONTEXT_KEY) for edge in edges] == [
+            IMPORT_CONTEXT_DEFERRED,
+        ]
+        assert edges[0].line == line
+
+    def test_typescript_top_level_require_after_a_type_import_runs(self, tmp_path):
+        _write(tmp_path, {
+            "a.ts": "import type { X } from './b';\nconst b = require('./b');\n",
+            "b.ts": "export type X = number;\n",
+        })
+        edges = _import_edges(tmp_path / "a.ts")
+        assert [(edge.extra.get(IMPORT_CONTEXT_KEY), edge.line) for edge in edges] == [
+            (None, 2),
+        ]
 
     def test_ruby_require_inside_a_method(self, tmp_path):
         _write(tmp_path, {
@@ -188,6 +263,16 @@ class TestParserMarksImportsThatDoNotRunAtLoad:
             "lib/b.rb": "class B\nend\n",
         })
         assert _context_by_target(tmp_path / "lib" / "a.rb") == {"b.rb": None}
+
+    def test_ruby_top_level_autoload_is_deferred(self, tmp_path):
+        """``autoload`` only loads the file when the constant is first used."""
+        _write(tmp_path, {
+            "lib/a.rb": "module A\n  autoload :B, 'a/b'\nend\n",
+            "lib/a/b.rb": "module A\n  class B\n  end\nend\n",
+        })
+        assert [
+            edge.extra.get(IMPORT_CONTEXT_KEY) for edge in _import_edges(tmp_path / "lib" / "a.rb")
+        ] == [IMPORT_CONTEXT_DEFERRED]
 
 
 class TestPackageFileDoesNotShadowTheStandardLibrary:

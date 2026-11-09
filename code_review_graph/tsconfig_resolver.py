@@ -80,6 +80,22 @@ class TsconfigResolver:
             )
             return None
 
+    def keeps_empty_imports(self, file_path: str) -> bool:
+        """Whether tsc keeps an import whose names are all ``type`` ones.
+
+        It is then emitted as ``import {} from "./b"``, which still loads ``b``.
+        """
+        try:
+            config = self._load_tsconfig_for_file(file_path)
+        except (OSError, ValueError):
+            return False
+        options = config.get("compilerOptions") if config else None
+        if not isinstance(options, dict):
+            return False
+        return options.get("verbatimModuleSyntax") is True or options.get(
+            "importsNotUsedAsValues",
+        ) in ("preserve", "error")
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

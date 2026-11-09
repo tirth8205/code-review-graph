@@ -475,6 +475,46 @@ def _python_unreachable_call_positions(
     return frozenset(visitor.positions)
 
 
+class _PythonUnreachableImportVisitor(_PythonUnreachableCallVisitor):
+    """Collect import statements in proven-dead branches, not calls."""
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+
+
+@lru_cache(maxsize=128)
+def _python_unreachable_import_positions(
+    source: bytes,
+) -> frozenset[tuple[int, int]]:
+    """Return positions of imports that never run, such as under ``if TYPE_CHECKING``.
+
+    A bare ``TYPE_CHECKING`` counts whatever it is bound to: type checkers read
+    any name spelled so as true, which is what ``TYPE_CHECKING = False`` relies on.
+    """
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return frozenset()
+    type_checking_names, typing_modules = _python_type_checking_aliases(tree)
+    visitor = _PythonUnreachableImportVisitor(
+        type_checking_names | {"TYPE_CHECKING"},
+        typing_modules,
+    )
+    visitor.visit(tree)
+    return frozenset(visitor.positions)
+
+
 # ---------------------------------------------------------------------------
 # Non-Python static dead-guard detection (tree-sitter ancestor walk).
 #
@@ -18719,22 +18759,30 @@ class CodeParser:
             return
         target = self._resolve_module_to_file(module, file_path, language) or module
         deferred = self._js_module_call_is_deferred(call_node)
+        line = call_node.start_point[0] + 1
         for edge in edges:
             if (
                 edge.kind == "IMPORTS_FROM"
                 and edge.source == file_path
                 and edge.target == target
             ):
-                if not deferred:
-                    # This call does run at load, whatever an earlier one said.
-                    edge.extra.pop(IMPORT_CONTEXT_KEY, None)
+                # One edge per target, so it says the strongest load: a call
+                # that runs beats a type-only import, and one at load beats
+                # both. It then cites the line that does that load.
+                context = edge.extra.get(IMPORT_CONTEXT_KEY)
+                if not deferred and context is not None:
+                    edge.extra.pop(IMPORT_CONTEXT_KEY)
+                    edge.line = line
+                elif deferred and context == IMPORT_CONTEXT_TYPE_ONLY:
+                    edge.extra[IMPORT_CONTEXT_KEY] = IMPORT_CONTEXT_DEFERRED
+                    edge.line = line
                 return
         edges.append(EdgeInfo(
             kind="IMPORTS_FROM",
             source=file_path,
             target=target,
             file_path=file_path,
-            line=call_node.start_point[0] + 1,
+            line=line,
             extra={IMPORT_CONTEXT_KEY: IMPORT_CONTEXT_DEFERRED} if deferred else {},
         ))
 
@@ -21731,10 +21779,13 @@ class CodeParser:
         """
         if language == "go":
             return self._extract_go_import_specs(node)
-        context = self._import_context(node, language)
+        context = self._import_context(node, language, source, file_path)
         if language == "ruby":
+            # `autoload` only loads the file when its constant is first used.
             return [
-                spec._replace(context=context)
+                spec._replace(
+                    context=IMPORT_CONTEXT_DEFERRED if spec.form == "autoload" else context,
+                )
                 for spec in self._extract_ruby_import_specs(node)
             ]
         line = node.start_point[0] + 1
@@ -21751,14 +21802,16 @@ class CodeParser:
             specs[0] = specs[0]._replace(context=IMPORT_CONTEXT_PARENT_PACKAGE)
         return specs
 
-    def _import_context(self, node, language: str) -> Optional[str]:
+    def _import_context(
+        self, node, language: str, source: bytes, file_path: Optional[str],
+    ) -> Optional[str]:
         """Say when an import statement does not run as its file loads."""
         if language == "python":
-            return self._python_import_context(node)
+            return self._python_import_context(node, source)
         if language in ("javascript", "typescript", "tsx"):
             return (
                 IMPORT_CONTEXT_TYPE_ONLY
-                if self._js_import_is_type_only(node)
+                if self._js_import_is_type_only(node, file_path)
                 else None
             )
         if language == "ruby":
@@ -21770,25 +21823,19 @@ class CodeParser:
         return None
 
     @staticmethod
-    def _python_import_context(node) -> Optional[str]:
+    def _python_import_context(node, source: bytes) -> Optional[str]:
         """``TYPE_CHECKING`` wins: such an import never runs, even in a function."""
-        context: Optional[str] = None
-        current = node
-        while current.parent is not None:
-            parent = current.parent
-            if parent.type == "function_definition":
-                context = IMPORT_CONTEXT_DEFERRED
-            elif parent.type == "if_statement":
-                condition = parent.child_by_field_name("condition")
-                consequence = parent.child_by_field_name("consequence")
-                if (
-                    condition is not None
-                    and consequence == current
-                    and condition.text.split(b".")[-1] == b"TYPE_CHECKING"
-                ):
-                    return IMPORT_CONTEXT_TYPE_ONLY
-            current = parent
-        return context
+        if (
+            (node.start_point[0] + 1, node.start_point[1])
+            in _python_unreachable_import_positions(source)
+        ):
+            return IMPORT_CONTEXT_TYPE_ONLY
+        current = node.parent
+        while current is not None:
+            if current.type == "function_definition":
+                return IMPORT_CONTEXT_DEFERRED
+            current = current.parent
+        return None
 
     def _python_names_parent_package(
         self, node, module: str, file_path: Optional[str],
@@ -21810,9 +21857,13 @@ class CodeParser:
             self._python_submodule_names(node, package_dir),
         )
 
-    @staticmethod
-    def _js_import_is_type_only(node) -> bool:
-        """``import type X`` or ``import { type A, type B }``; a value makes it real."""
+    def _js_import_is_type_only(self, node, file_path: Optional[str]) -> bool:
+        """``import type X`` or ``import { type A, type B }``; a value makes it real.
+
+        The second form is only dropped when the compiler drops unused imports.
+        Under ``verbatimModuleSyntax`` it is emitted as ``import {} from "./b"``,
+        which still runs ``b``.
+        """
         if any(child.type == "type" for child in node.children):
             return True
         for child in node.children:
@@ -21827,9 +21878,15 @@ class CodeParser:
                 spec for spec in named.named_children
                 if spec.type == "import_specifier"
             ]
-            return bool(specifiers) and all(
-                any(part.type == "type" for part in spec.children)
-                for spec in specifiers
+            return (
+                bool(specifiers)
+                and all(
+                    any(part.type == "type" for part in spec.children)
+                    for spec in specifiers
+                )
+                and not (
+                    file_path and self._tsconfig_resolver.keeps_empty_imports(file_path)
+                )
             )
         return False
 
