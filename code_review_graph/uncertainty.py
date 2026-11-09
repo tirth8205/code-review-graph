@@ -114,8 +114,8 @@ LANGUAGE_GAPS: tuple[LanguageGap, ...] = (
         languages=_JS_FAMILY,
         patterns=_IMPORT_PATTERNS,
         note=(
-            "npm-aliased import specifiers are not resolved, so importers "
-            "can be missing here (#343)"
+            "npm-aliased imports resolve only to one local package whose "
+            "version fits the alias, so importers can be missing here (#343)"
         ),
     ),
     LanguageGap(

@@ -38,6 +38,7 @@ from .constants import (
     IMPORT_SCOPE_TREE,
 )
 from .custom_languages import CustomLanguage, load_custom_languages
+from .npm_alias_resolver import NpmAliasResolver
 
 try:
     import yaml as _yaml  # type: ignore[import-untyped]
@@ -3537,6 +3538,11 @@ class CodeParser:
         self._tsconfig_resolver = TsconfigResolver()
         self._workspace_resolver = WorkspaceResolver(
             repo_root=self._repo_root, file_exists=self._file_exists_exact,
+        )
+        self._npm_alias_resolver = NpmAliasResolver(
+            self._repo_root,
+            package_resolver=self._workspace_resolver,
+            path_is_indexed=self._npm_alias_path_is_indexed,
         )
         # Per-parse cache of Dart pubspec root lookups; see #87
         self._dart_pubspec_cache: dict[tuple[str, str], Optional[Path]] = {}
@@ -19105,6 +19111,10 @@ class CodeParser:
             self._dir_entries_cache[key] = entries
         return entries
 
+    def _npm_alias_path_is_indexed(self, path: Path) -> bool:
+        """:meth:`_path_is_indexed` under this parser's repository, for aliases."""
+        return self._repo_root is None or self._path_is_indexed(path, self._repo_root)
+
     def _path_is_indexed(self, path: Path, boundary: Path) -> bool:
         """Whether a build would index *path*, so an edge may name it.
 
@@ -20196,10 +20206,19 @@ class CodeParser:
                     or self._path_is_indexed(Path(resolved), self._repo_root)
                 ):
                     return resolved
-                # Then a sibling package of an npm/yarn/pnpm workspace (#1030),
-                # but never an edge to a file the build would not index: one
-                # that is ignored, or (a CSS export, say) has no language.
-                resolved = self._workspace_resolver.resolve(module, file_path)
+                # npm dependency aliases can point at workspace source present
+                # in the scanned repository (#343). Explicit tsconfig paths
+                # remain the stronger, user-provided resolution and are tried
+                # first. When the nearest manifest declares the name as an
+                # ``npm:`` alias, npm installs that package under the name, so
+                # a workspace member that happens to share it must not answer.
+                if self._npm_alias_resolver.governs(module, file_path):
+                    resolved = self._npm_alias_resolver.resolve_alias(module, file_path)
+                # Otherwise a sibling package of an npm/yarn/pnpm workspace (#1030).
+                else:
+                    resolved = self._workspace_resolver.resolve(module, file_path)
+                # Either way never an edge to a file the build would not index:
+                # one that is ignored, or (a CSS export, say) has no language.
                 if resolved and self.detect_language(Path(resolved)) and (
                     self._repo_root is None
                     or self._path_is_indexed(Path(resolved), self._repo_root)
