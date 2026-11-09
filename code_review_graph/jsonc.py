@@ -25,6 +25,7 @@ __all__ = [
     "array_elements",
     "find_value",
     "has_comments",
+    "has_unclosed_comment",
     "object_members",
     "remove_paths",
     "removal_ranges",
@@ -84,6 +85,43 @@ def has_comments(raw: str) -> bool:
             continue
         if char == "/" and index + 1 < length and raw[index + 1] in "/*":
             return True
+        index += 1
+    return False
+
+
+def has_unclosed_comment(raw: str) -> bool:
+    """Return whether a ``/*`` outside a string in ``raw`` is never closed.
+
+    Everything after it is part of the comment, so text added to the end of
+    such a file would be ignored by whatever reads it.
+    """
+    index = 0
+    length = len(raw)
+    while index < length:
+        char = raw[index]
+        if char == '"':
+            index += 1
+            while index < length:
+                if raw[index] == "\\":
+                    index += 2
+                    continue
+                if raw[index] == '"':
+                    index += 1
+                    break
+                index += 1
+            continue
+        if char == "/" and index + 1 < length and raw[index + 1] == "/":
+            newline = raw.find("\n", index + 2)
+            if newline < 0:
+                return False
+            index = newline
+            continue
+        if char == "/" and index + 1 < length and raw[index + 1] == "*":
+            end = raw.find("*/", index + 2)
+            if end < 0:
+                return True
+            index = end + 2
+            continue
         index += 1
     return False
 

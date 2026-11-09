@@ -2216,6 +2216,10 @@ def _read_settings_for_merge(
     except (OSError, UnicodeDecodeError) as exc:
         _report_settings_left_alone(label, path, f"could not be read ({exc})")
         return None
+    if jsonc.has_unclosed_comment(raw):
+        # Our hooks would land inside the comment: written, reported, never run.
+        _report_settings_left_alone(label, path, "has a /* comment that is never closed")
+        return None
     stripped = _strip_jsonc(raw)
     if not stripped.strip():
         return raw, {}
@@ -2723,9 +2727,6 @@ def install_gemini_cli_hooks(repo_root: Path) -> Path | None:
         return None
     raw, existing = loaded
 
-    hooks_dir = settings_dir / "hooks"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-
     repo_arg = repo_root.resolve().as_posix()
     session_start_script = """\
 #!/usr/bin/env bash
@@ -2759,14 +2760,6 @@ echo '{"suppressOutput": true}'
 exit 0
 """
     update_script = update_script.replace("__CRG_REPO__", repo_arg)
-
-    session_start_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[0]
-    session_start_path.write_text(session_start_script, encoding="utf-8")
-    session_start_path.chmod(0o755)
-
-    update_path = hooks_dir / _GEMINI_CLI_HOOK_FILENAMES[1]
-    update_path.write_text(update_script, encoding="utf-8")
-    update_path.chmod(0o755)
 
     hooks_obj = existing.get("hooks", {})
 
@@ -2811,8 +2804,18 @@ exit 0
 
     existing["hooks"] = hooks_obj
     if not _write_merged_settings(settings_path, raw, existing, label):
+        # The unchanged settings may still run the scripts already there.
         return None
     logger.info("Wrote Gemini CLI hooks config: %s", settings_path)
+
+    hooks_dir = settings_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    for filename, content in zip(
+        _GEMINI_CLI_HOOK_FILENAMES, (session_start_script, update_script)
+    ):
+        script_path = hooks_dir / filename
+        script_path.write_text(content, encoding="utf-8")
+        script_path.chmod(0o755)
     return settings_path
 
 

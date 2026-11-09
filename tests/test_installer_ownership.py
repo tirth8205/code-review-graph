@@ -707,6 +707,54 @@ def test_refused_gemini_and_cursor_install_write_no_scripts(tmp_path, monkeypatc
     assert not (gemini / "hooks").exists()
 
 
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "/* settings still being edited\n",
+        '{"model": "opus"} /* settings still being edited\n',
+    ],
+)
+def test_hook_install_leaves_a_comment_that_never_closes_alone(
+    hook_writer, capsys, contents: str,
+) -> None:
+    """Anything written after an open ``/*`` would sit inside the comment, unused."""
+    install, path, repo = hook_writer
+    path.write_text(contents, encoding="utf-8")
+
+    assert install(repo) is None
+
+    assert path.read_text(encoding="utf-8") == contents
+    assert str(path) in capsys.readouterr().out
+
+
+def test_refused_gemini_install_keeps_the_scripts_it_found(tmp_path) -> None:
+    """The unchanged settings still name these scripts, so they stay as they were."""
+    gemini = tmp_path / ".gemini"
+    (gemini / "hooks").mkdir(parents=True)
+    contents = (
+        "{\n"
+        '  "hooks": {\n'
+        '    "SessionStart": [\n'
+        "      // do not reorder this\n"
+        '      {"matcher": "", "hooks": [{"command": "bash .gemini/hooks/team.sh"}]}\n'
+        "    ]\n"
+        "  }\n"
+        "}\n"
+    )
+    (gemini / "settings.json").write_text(contents, encoding="utf-8")
+    scripts = {
+        name: gemini / "hooks" / name for name in skills._GEMINI_CLI_HOOK_FILENAMES
+    }
+    for script in scripts.values():
+        script.write_text("#!/usr/bin/env bash\necho the user's own\n", encoding="utf-8")
+
+    assert skills.install_gemini_cli_hooks(tmp_path) is None
+
+    assert (gemini / "settings.json").read_text(encoding="utf-8") == contents
+    for script in scripts.values():
+        assert script.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho the user's own\n"
+
+
 def test_cursor_install_backs_up_what_it_replaces(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
     hooks = tmp_path / ".cursor" / "hooks.json"

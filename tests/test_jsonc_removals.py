@@ -419,3 +419,19 @@ def test_value_has_comments_looks_only_inside_the_value():
 
 def test_value_has_comments_ignores_slashes_in_strings():
     assert jsonc.value_has_comments('{"a": "https://x"}', ("a",)) is False
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("/* never closed", True),
+        ('{"a": 1} /* never closed\n', True),
+        ('{"a": 1} /* closed */ /* never closed', True),
+        ('{"a": 1} /* closed */\n', False),
+        ('{"a": "/* in a string"}\n', False),
+        ('{"a": 1} // a line comment /* is not a block\n', False),
+        ('{"a": 1}\n', False),
+    ],
+)
+def test_has_unclosed_comment(raw, expected):
+    assert jsonc.has_unclosed_comment(raw) is expected
