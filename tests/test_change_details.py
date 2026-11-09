@@ -389,6 +389,8 @@ def test_leiden_detection_is_recorded(tmp_path, monkeypatch):
         }]
 
     monkeypatch.setattr(communities_module, "IGRAPH_AVAILABLE", True)
+    # igraph loads on first use (#1139); pretend it loaded.
+    monkeypatch.setattr(communities_module, "_load_igraph", lambda: True)
     monkeypatch.setattr(communities_module, "_detect_leiden", fake_leiden)
     store = _two_file_graph(tmp_path)
     try:
