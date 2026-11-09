@@ -33,6 +33,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10
 
 from .config_keys import is_spring_config_path, normalize_spring_config_key
 from .constants import (
+    IMPORT_CONTEXT_DEFERRED,
+    IMPORT_CONTEXT_KEY,
+    IMPORT_CONTEXT_PARENT_PACKAGE,
+    IMPORT_CONTEXT_TYPE_ONLY,
     IMPORT_SCOPE_KEY,
     IMPORT_SCOPE_PACKAGE,
     IMPORT_SCOPE_TREE,
@@ -543,6 +547,46 @@ def _python_unreachable_call_positions(
     return frozenset(visitor.positions)
 
 
+class _PythonUnreachableImportVisitor(_PythonUnreachableCallVisitor):
+    """Collect import statements in proven-dead branches, not calls."""
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+        self.generic_visit(node)
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if self._dead:
+            self.positions.add((node.lineno, node.col_offset))
+
+
+@lru_cache(maxsize=128)
+def _python_unreachable_import_positions(
+    source: bytes,
+) -> frozenset[tuple[int, int]]:
+    """Return positions of imports that never run, such as under ``if TYPE_CHECKING``.
+
+    A bare ``TYPE_CHECKING`` counts whatever it is bound to: type checkers read
+    any name spelled so as true, which is what ``TYPE_CHECKING = False`` relies on.
+    """
+    try:
+        tree = ast.parse(source.decode("utf-8"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        return frozenset()
+    type_checking_names, typing_modules = _python_type_checking_aliases(tree)
+    visitor = _PythonUnreachableImportVisitor(
+        type_checking_names | {"TYPE_CHECKING"},
+        typing_modules,
+    )
+    visitor.visit(tree)
+    return frozenset(visitor.positions)
+
+
 # ---------------------------------------------------------------------------
 # Non-Python static dead-guard detection (tree-sitter ancestor walk).
 #
@@ -919,11 +963,15 @@ class _ImportSpec(NamedTuple):
     ``require "x"`` searches the load paths while ``require_relative "x"``
     searches the requiring file's own directory -- and it is part of the
     resolution cache key. ``None`` for the languages with a single form.
+
+    ``context`` says when the import does not run as the file loads. See
+    ``IMPORT_CONTEXT_KEY``. ``None`` means it does.
     """
 
     module: str
     line: int
     form: Optional[str] = None
+    context: Optional[str] = None
 
 
 class _GoModule(NamedTuple):
@@ -16475,13 +16523,18 @@ class CodeParser:
                 # does not index. Keep the bare module string, which is what
                 # the edge said before -- never a guessed path.
                 target, scope = spec.module, None
+            extra: dict[str, str] = {}
+            if scope:
+                extra[IMPORT_SCOPE_KEY] = scope
+            if spec.context:
+                extra[IMPORT_CONTEXT_KEY] = spec.context
             edges.append(EdgeInfo(
                 kind="IMPORTS_FROM",
                 source=file_path,
                 target=target,
                 file_path=file_path,
                 line=spec.line,
-                extra={**csharp_extra, **({IMPORT_SCOPE_KEY: scope} if scope else {})},
+                extra={**csharp_extra, **extra},
             ))
         return bool(specs)
 
@@ -19989,11 +20042,22 @@ class CodeParser:
         else:
             current = caller_dir
             while self._path_is_within(current, boundary):
-                search_roots.append(current)
+                if not self._python_folder_hides_module(module_name, current):
+                    search_roots.append(current)
                 if current == boundary:
                     break
                 current = current.parent
         return search_roots, boundary, relative
+
+    def _python_folder_hides_module(self, module: str, folder: Path) -> bool:
+        """Whether *folder* cannot be where an absolute standard library import lands.
+
+        Python 3 looks on ``sys.path``, and a package's own folder is not on it,
+        so ``pkg/typing.py`` does not answer ``import typing``.
+        """
+        return module.split(".", 1)[0] in sys.stdlib_module_names and self._file_exists_exact(
+            folder / "__init__.py",
+        )
 
     @staticmethod
     def _python_module_candidates(base: Path, has_tail: bool) -> tuple[Path, ...]:
@@ -20131,20 +20195,50 @@ class CodeParser:
         if not module:
             return
         target = self._resolve_module_to_file(module, file_path, language) or module
-        if any(
-            edge.kind == "IMPORTS_FROM"
-            and edge.source == file_path
-            and edge.target == target
-            for edge in edges
-        ):
-            return
+        deferred = self._js_module_call_is_deferred(call_node)
+        line = call_node.start_point[0] + 1
+        for edge in edges:
+            if (
+                edge.kind == "IMPORTS_FROM"
+                and edge.source == file_path
+                and edge.target == target
+            ):
+                # One edge per target, so it says the strongest load: a call
+                # that runs beats a type-only import, and one at load beats
+                # both. It then cites the line that does that load.
+                context = edge.extra.get(IMPORT_CONTEXT_KEY)
+                if not deferred and context is not None:
+                    edge.extra.pop(IMPORT_CONTEXT_KEY)
+                    edge.line = line
+                elif deferred and context == IMPORT_CONTEXT_TYPE_ONLY:
+                    edge.extra[IMPORT_CONTEXT_KEY] = IMPORT_CONTEXT_DEFERRED
+                    edge.line = line
+                return
         edges.append(EdgeInfo(
             kind="IMPORTS_FROM",
             source=file_path,
             target=target,
             file_path=file_path,
-            line=call_node.start_point[0] + 1,
+            line=line,
+            extra={IMPORT_CONTEXT_KEY: IMPORT_CONTEXT_DEFERRED} if deferred else {},
         ))
+
+    @staticmethod
+    def _js_module_call_is_deferred(call_node) -> bool:
+        """Whether a ``require``/``import()`` call runs after its file has loaded."""
+        function = call_node.child_by_field_name("function")
+        if function is not None and function.text == b"import":
+            return True
+        current = call_node.parent
+        while current is not None:
+            if current.type in (
+                "function_declaration", "function_expression", "function",
+                "arrow_function", "method_definition",
+                "generator_function", "generator_function_declaration",
+            ):
+                return True
+            current = current.parent
+        return False
 
     def _collect_js_require_names(
         self,
@@ -20561,7 +20655,9 @@ class CodeParser:
             # checkout or a site-packages copy, not this repository's module.
             current = caller_dir
             while True:
-                for candidate in candidates:
+                for candidate in (
+                    () if self._python_folder_hides_module(module, current) else candidates
+                ):
                     target = current / candidate
                     if self._file_exists_exact(target):
                         found = target.resolve()
@@ -23131,13 +23227,116 @@ class CodeParser:
         """
         if language == "go":
             return self._extract_go_import_specs(node)
+        context = self._import_context(node, language, source, file_path)
         if language == "ruby":
-            return self._extract_ruby_import_specs(node)
+            # `autoload` only loads the file when its constant is first used.
+            return [
+                spec._replace(
+                    context=IMPORT_CONTEXT_DEFERRED if spec.form == "autoload" else context,
+                )
+                for spec in self._extract_ruby_import_specs(node)
+            ]
         line = node.start_point[0] + 1
-        return [
-            _ImportSpec(module, line)
+        specs = [
+            _ImportSpec(module, line, context=context)
             for module in self._extract_import(node, language, source, file_path)
         ]
+        if (
+            language == "python"
+            and specs
+            and context != IMPORT_CONTEXT_TYPE_ONLY
+            and self._python_names_parent_package(node, specs[0].module, file_path)
+        ):
+            specs[0] = specs[0]._replace(context=IMPORT_CONTEXT_PARENT_PACKAGE)
+        return specs
+
+    def _import_context(
+        self, node, language: str, source: bytes, file_path: Optional[str],
+    ) -> Optional[str]:
+        """Say when an import statement does not run as its file loads."""
+        if language == "python":
+            return self._python_import_context(node, source)
+        if language in ("javascript", "typescript", "tsx"):
+            return (
+                IMPORT_CONTEXT_TYPE_ONLY
+                if self._js_import_is_type_only(node, file_path)
+                else None
+            )
+        if language == "ruby":
+            current = node.parent
+            while current is not None:
+                if current.type in ("method", "singleton_method"):
+                    return IMPORT_CONTEXT_DEFERRED
+                current = current.parent
+        return None
+
+    @staticmethod
+    def _python_import_context(node, source: bytes) -> Optional[str]:
+        """``TYPE_CHECKING`` wins: such an import never runs, even in a function."""
+        if (
+            (node.start_point[0] + 1, node.start_point[1])
+            in _python_unreachable_import_positions(source)
+        ):
+            return IMPORT_CONTEXT_TYPE_ONLY
+        current = node.parent
+        while current is not None:
+            if current.type == "function_definition":
+                return IMPORT_CONTEXT_DEFERRED
+            current = current.parent
+        return None
+
+    def _python_names_parent_package(
+        self, node, module: str, file_path: Optional[str],
+    ) -> bool:
+        """Whether *module* is only the route to siblings of the importing file.
+
+        ``from . import sibling`` emits an edge to the package and one to the
+        sibling. The file's own package is loaded before the file is, so the
+        package edge is no dependency, unless a name is a symbol read from it:
+        ``from . import app`` with ``app`` set in ``__init__.py`` really needs it.
+        """
+        if node.type != "import_from_statement" or not file_path:
+            return False
+        package_dir = self._python_package_dir(module, file_path)
+        if package_dir is None or package_dir not in Path(file_path).parents:
+            return False
+        names = set(self._python_imported_names(node))
+        return bool(names) and names == set(
+            self._python_submodule_names(node, package_dir),
+        )
+
+    def _js_import_is_type_only(self, node, file_path: Optional[str]) -> bool:
+        """``import type X`` or ``import { type A, type B }``; a value makes it real.
+
+        The second form is only dropped when the compiler drops unused imports.
+        Under ``verbatimModuleSyntax`` it is emitted as ``import {} from "./b"``,
+        which still runs ``b``.
+        """
+        if any(child.type == "type" for child in node.children):
+            return True
+        for child in node.children:
+            if child.type != "import_clause":
+                continue
+            if len(child.named_children) != 1:
+                return False
+            named = child.named_children[0]
+            if named.type != "named_imports":
+                return False
+            specifiers = [
+                spec for spec in named.named_children
+                if spec.type == "import_specifier"
+            ]
+            return (
+                bool(specifiers)
+                and all(
+                    any(part.type == "type" for part in spec.children)
+                    for spec in specifiers
+                )
+                and not (
+                    file_path and self._tsconfig_resolver.keeps_empty_imports(file_path)
+                )
+            )
+        return False
 
     def _extract_import(
         self,

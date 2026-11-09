@@ -392,3 +392,19 @@ def release_os_memory() -> None:
                 _MALLOC_TRIM_FN(0)
             except Exception as exc:
                 logger.debug("malloc_trim(0) failed: %s", exc)
+
+
+#: ``edges.extra`` key on an ``IMPORTS_FROM`` edge whose import does not run as
+#: the importing file loads. No key means it does. Graphs built before this key
+#: existed have none, so they read every import as a load-time one until rebuilt.
+IMPORT_CONTEXT_KEY = "import_context"
+
+#: Never runs: ``if TYPE_CHECKING:`` in Python, ``import type`` in TypeScript.
+IMPORT_CONTEXT_TYPE_ONLY = "type_only"
+
+#: Runs late: inside a function, a JavaScript dynamic ``import()``, a Ruby ``autoload``.
+IMPORT_CONTEXT_DEFERRED = "deferred"
+
+#: Python ``from . import sibling``: the edge to the package is only the route to
+#: the sibling, and a file's own package is already loaded before the file is.
+IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"

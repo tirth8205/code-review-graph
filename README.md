@@ -352,7 +352,7 @@ From the same 2026-08-02 clean-room build at the pinned SHAs above. Embedding co
 | **Interactive visualisation** | D3.js force-directed graph with search, community legend toggles and degree-scaled nodes |
 | **Hub and bridge detection** | Most-connected nodes and chokepoints (betweenness centrality) |
 | **Surprise scoring** | Unexpected coupling: cross-community, cross-language, peripheral-to-hub edges |
-| **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities |
+| **Knowledge gap analysis** | Isolated nodes, untested hotspots, thin communities, import cycles |
 | **Suggested questions** | Review questions generated from bridges, hubs and surprises |
 | **Edge confidence** | Two-tier confidence (EXTRACTED/INFERRED) with float scores on edges |
 | **Graph traversal** | BFS/DFS from any node with configurable depth and token budget |
