@@ -157,6 +157,7 @@
   `fastmcp.prompts`, which works on fastmcp 3 and 4; the old
   `fastmcp.prompts.prompt` path is gone in 4 and stopped the server from
   starting.
+- The `build-graph`, `review-delta` and `review-pr` skills are written from one source, `DOCUMENTARY_SKILLS` in `skills.py`. `scripts/generate_documentary_skills.py` rewrites them, and a test fails if a file is edited by hand (#822).
 
 ### Fixed
 

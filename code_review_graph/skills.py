@@ -1405,6 +1405,176 @@ def generate_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
     return skills_dir
 
 
+# --- Documentation-driven skills ---
+
+DOCUMENTARY_SKILLS: dict[str, dict[str, str]] = {
+    "build-graph": {
+        "description": (
+            "Build or update the code review knowledge graph. Run this first to initialize, or let "
+            "hooks keep it updated automatically."
+        ),
+        "argument_hint": "[full]",
+        "title": "Build Graph",
+        "body": (
+            "Build or incrementally update the knowledge graph for this repository.\n\n"
+            "## Steps\n\n"
+            "1. Call `list_graph_stats_tool`. If `last_updated` is null, the graph has never been "
+            "built.\n"
+            "2. For a first build, or when the argument is `full`, call "
+            "`build_or_update_graph_tool(full_rebuild=True)`. Otherwise call "
+            "`build_or_update_graph_tool()` for an incremental update.\n"
+            "3. Report the response: `status` (`ok`, `partial` or `error`) and `summary`.\n\n"
+            "## When to Use\n\n"
+            "- First set-up of a repository, or after a branch switch or large refactor.\n"
+            "- When the graph looks stale. Hooks installed by `code-review-graph install` run an "
+            "update after each edit and before each commit, so manual builds are rarely needed.\n\n"
+            "## Notes\n\n"
+            "- The database is `.code-review-graph/graph.db` in the repository root.\n"
+            "- Binary files, dependency and build directories, and patterns in "
+            "`.code-review-graphignore` are skipped.\n"
+            "- For the list of supported languages call "
+            "`get_docs_section_tool(section_name=\"languages\")`."
+        ),
+    },
+    "review-delta": {
+        "description": (
+            "Review only changes since last commit using impact analysis. Token-efficient delta "
+            "review with automatic blast-radius detection."
+        ),
+        "argument_hint": "[file or function name]",
+        "title": "Review Delta",
+        "body": (
+            "Review only the changed code and its blast radius.\n\n"
+            "## Steps\n\n"
+            "1. Call `get_minimal_context_tool(task=\"review changes\")`. If it returns `status: "
+            "not_ready`, call `build_or_update_graph_tool()` and continue.\n"
+            "2. Call `detect_changes_tool(detail_level=\"minimal\")` for risk-scored changed "
+            "functions, test gaps and affected flows. Changes come from `git diff` against "
+            "`HEAD~1`; if the argument names a file, pass it in `changed_files`.\n"
+            "3. Call `get_review_context_tool(detail_level=\"minimal\")` when you need source "
+            "snippets for the changed areas and `review_guidance` (untested functions, wide blast "
+            "radius, inheritance changes).\n"
+            "4. For each untested high-risk function, confirm with "
+            "`query_graph_tool(pattern=\"tests_for\", target=\"<function>\")`.\n"
+            "5. Use `detail_level=\"standard\"` only for a high-risk item the minimal output "
+            "leaves unclear. Do not load whole files unless a snippet is not enough.\n\n"
+            "## Report\n\n"
+            "- Summary: one line\n"
+            "- Risk: low, medium or high, from the blast radius\n"
+            "- Issues: bugs, missing tests, style\n"
+            "- Blast radius: impacted files and functions\n"
+            "- Recommendations"
+        ),
+    },
+    "review-pr": {
+        "description": (
+            "Review a PR or branch diff using the knowledge graph for full structural context. "
+            "Outputs a structured review with blast-radius analysis."
+        ),
+        "argument_hint": "[PR number or branch name]",
+        "title": "Review PR",
+        "body": (
+            "Review all commits of a pull request or branch against its base branch.\n\n"
+            "## Steps\n\n"
+            "1. Identify the changes. With a branch name run `git diff --name-only "
+            "main...<branch>`; otherwise diff the current branch against `main` (or `master`). Use "
+            "that ref as `base` below.\n"
+            "2. Call `get_minimal_context_tool(task=\"review PR\", base=\"main\")`. If it returns "
+            "`status: not_ready`, call `build_or_update_graph_tool()` and continue.\n"
+            "3. Call `detect_changes_tool(base=\"main\", detail_level=\"minimal\")` for "
+            "risk-scored changed functions, test gaps and affected flows across the whole branch.\n"
+            "4. For high-risk functions call `query_graph_tool(pattern=\"callers_of\", "
+            "target=\"<function>\")` and `query_graph_tool(pattern=\"tests_for\", "
+            "target=\"<function>\")`. Flag public API changes whose callers were not updated.\n"
+            "5. Call `get_review_context_tool(base=\"main\")` for source snippets, or "
+            "`get_impact_radius_tool(base=\"main\")` for the full dependent list, only when step 3 "
+            "leaves a high-risk item unclear.\n"
+            "6. Read the changed source of the highest-impact files first. Do not load whole files "
+            "unless the change needs it.\n\n"
+            "## Output\n\n"
+            "```\n"
+            "## PR Review: <title>\n\n"
+            "### Summary\n"
+            "<1-3 sentences>\n\n"
+            "### Risk\n"
+            "- Overall: Low / Medium / High\n"
+            "- Blast radius: <n> files, <m> functions\n"
+            "- Test coverage: <covered> of <changed> changed functions\n\n"
+            "### Files\n"
+            "#### <path>\n"
+            "- Changes: <what>\n"
+            "- Impact: <who depends on it>\n"
+            "- Issues: <bugs, style, concerns>\n\n"
+            "### Missing Tests\n"
+            "- <function> in <file>\n\n"
+            "### Recommendations\n"
+            "1. <action>\n"
+            "```\n\n"
+            "## Tips\n\n"
+            "- Use `semantic_search_nodes_tool` to find related code the PR may have missed."
+        ),
+    },
+}
+
+
+def render_documentary_skill_markdown(slug: str) -> str:
+    """Render the checked-in markdown for a documentation-driven skill.
+
+    Raises:
+        KeyError: *slug* is not one of ``DOCUMENTARY_SKILLS``.
+    """
+    try:
+        spec = DOCUMENTARY_SKILLS[slug]
+    except KeyError:
+        known = ", ".join(sorted(DOCUMENTARY_SKILLS))
+        raise KeyError(f"unknown documentary skill {slug!r} (known: {known})") from None
+    frontmatter = [
+        "---",
+        f"name: {slug}",
+        f"description: {spec['description']}",
+    ]
+    argument_hint = spec.get("argument_hint")
+    if argument_hint:
+        frontmatter.append(f'argument-hint: "{argument_hint}"')
+    frontmatter.append("---")
+    frontmatter.append("")
+    frontmatter.append(f"# {spec['title']}")
+    frontmatter.append("")
+    frontmatter.append(spec["body"])
+    frontmatter.append("")
+    return "\n".join(frontmatter)
+
+
+def generate_documentary_skills(repo_root: Path, skills_dir: Path | None = None) -> Path:
+    """Generate the documentation-driven skills under ``skills/``.
+
+    ``DOCUMENTARY_SKILLS`` is the source of these files: edit the text there,
+    then run ``scripts/generate_documentary_skills.py``.
+
+    Args:
+        repo_root: Repository root directory.
+        skills_dir: Custom skills directory. Defaults to repo_root/skills.
+
+    Returns:
+        Path to the skills directory.
+    """
+    if skills_dir is None:
+        skills_dir = repo_root / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    for slug in DOCUMENTARY_SKILLS:
+        skill_subdir = skills_dir / slug
+        skill_subdir.mkdir(parents=True, exist_ok=True)
+        skill_path = skill_subdir / "SKILL.md"
+        # LF on every platform: these files are checked in, and Windows
+        # newline translation would rewrite all three as a diff.
+        skill_path.write_text(
+            render_documentary_skill_markdown(slug), encoding="utf-8", newline="\n",
+        )
+
+    return skills_dir
+
+
 def generate_hooks_config(repo_root: Path) -> dict[str, Any]:
     """Generate Claude Code hooks configuration.
 
