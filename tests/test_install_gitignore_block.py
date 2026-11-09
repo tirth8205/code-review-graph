@@ -349,3 +349,73 @@ def test_cli_parser_accepts_the_flag_and_it_defaults_off(repo: Path) -> None:
                 cli.main()
 
     assert seen == [False, True, True]
+
+
+def test_codex_files_in_a_codex_home_inside_the_repo_are_listed(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``CODEX_HOME`` can name a folder in the work tree that is already there."""
+    codex = repo / ".codex"
+    codex.mkdir()
+    (codex / "notes.md").write_text("mine\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+
+    _install(repo, "codex", gitignore=True, dry_run=True)
+    preview = [
+        line.strip() for line in capsys.readouterr().out.splitlines() if line.startswith("    /")
+    ]
+    _install(repo, "codex", gitignore=True)
+
+    assert _status(repo) == ["?? .codex/notes.md", "?? .gitignore"]
+    assert preview == _block(repo)
+
+
+def test_a_settings_backup_made_after_the_mcp_step_is_listed(repo: Path) -> None:
+    """The MCP step writes ``.gemini/settings.json``; the hook step then backs it up."""
+    (repo / ".gemini").mkdir()
+    (repo / ".gemini" / "notes.md").write_text("mine\n", encoding="utf-8")
+
+    _install(repo, "gemini-cli", gitignore=True)
+
+    assert (repo / ".gemini" / "settings.json.bak").exists()
+    assert _status(repo) == ["?? .gemini/notes.md", "?? .gitignore"]
+
+
+def test_dry_run_keeps_the_entry_for_a_file_install_will_write_again(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _install(repo, "claude", gitignore=True)
+    before = (repo / ".gitignore").read_bytes()
+    (repo / ".mcp.json").unlink()
+    capsys.readouterr()
+
+    _install(repo, "claude", gitignore=True, dry_run=True)
+    out = capsys.readouterr().out
+
+    assert "Would drop" not in out
+    assert "already lists every file install created" in out
+    _install(repo, "claude", gitignore=True)
+    assert (repo / ".gitignore").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "original",
+    [b".code-review-graph/", b"dist/\r\n.code-review-graph/"],
+    ids=["lf", "crlf"],
+)
+def test_a_gitignore_without_a_final_newline_comes_back_byte_for_byte(
+    repo: Path, original: bytes
+) -> None:
+    (repo / ".gitignore").write_bytes(original)
+
+    _install(repo, "claude", gitignore=True)
+    first = (repo / ".gitignore").read_bytes()
+    assert _status(repo) == ["?? .gitignore"]
+    _install(repo, "claude", gitignore=True)
+    assert (repo / ".gitignore").read_bytes() == first
+    _install(repo, "gemini-cli", gitignore=True)
+    assert _status(repo) == ["?? .gitignore"]
+
+    uninstall.run(repo=repo, keep_data=True)
+
+    assert (repo / ".gitignore").read_bytes() == original

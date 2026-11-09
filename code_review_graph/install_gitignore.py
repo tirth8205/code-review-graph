@@ -22,7 +22,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePath, PurePosixPath
 
-from . import skills
+from . import codex_skill, skills
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,12 @@ def repo_files(
         spec["config_path"](repo_root)
         for spec in skills.platforms_for_target(repo_root, target).values()
     ]
+    # The MCP step runs first, so a settings file it writes is already there
+    # when the hook step backs that file up.
+    config_files = set(files)
+    # Codex writes under CODEX_HOME, which can be a folder in the work tree.
+    codex = target in ("codex", "all")
+    codex_home = codex_skill.codex_home()
 
     if with_skills:
         slugs = [name.rsplit(".", 1)[0] for name in skills._SKILLS]
@@ -102,6 +108,13 @@ def repo_files(
                 repo_root / ".qoder" / "skills" / name / "SKILL.md"
                 for name in skills.bundled_skill_names()
             )
+        if target == "codex" or (everything and skills.PLATFORMS["codex"]["detect"]()):
+            try:
+                bundled = codex_skill._iter_resource_files(codex_skill.bundled_skill_dir())
+            except OSError:  # install reports the missing bundle itself
+                bundled = {}
+            skill_dir = codex_skill.codex_skill_dir()
+            files.extend(skill_dir / name for name in (*bundled, codex_skill.MANIFEST_NAME))
 
     if with_hooks:
         settings_folders = [
@@ -114,8 +127,13 @@ def repo_files(
             settings = repo_root / folder / "settings.json"
             files.append(settings)
             # A settings file that is already there is backed up first.
-            if settings.exists():
+            if settings.exists() or settings in config_files:
                 files.append(repo_root / folder / "settings.json.bak")
+        if codex:
+            codex_hooks = codex_home / "hooks.json"
+            files.append(codex_hooks)
+            if codex_hooks.exists():
+                files.append(codex_home / "hooks.json.bak")
         if everything or target == "gemini-cli":
             files.extend(
                 repo_root / ".gemini" / "hooks" / name
@@ -301,12 +319,34 @@ def _render(entries: list[str], newline: str) -> str:
     return newline.join(body) + newline
 
 
+def _replace_block(
+    lines: list[str], start: int, end: int, entries: list[str], newline: str
+) -> str:
+    """Return the text with the block at ``start``..``end`` holding ``entries``.
+
+    No entries removes the block. A block added to a file with no final
+    newline brought the newline that ends the line before it, and leaves its
+    own last line unended to say so. Removing such a block takes that newline
+    back, so the file ends as it did before.
+    """
+    before = "".join(lines[:start])
+    owns_newline = start > 0 and end == len(lines) - 1 and not lines[end].endswith("\n")
+    if not owns_newline:
+        block = _render(entries, newline) if entries else ""
+        return before + block + "".join(lines[end + 1 :])
+    if entries:
+        return before + _render(entries, newline).removesuffix(newline)
+    previous = lines[start - 1]
+    return before[: -2 if previous.endswith("\r\n") else -1]
+
+
 def remove_block(text: str) -> tuple[str, str]:
     """Remove the block from ``text``, used by ``uninstall``.
 
     Returns the new text and ``"removed"``, ``"absent"`` or ``"edited"``. The
-    block's own lines are the only bytes removed, so the text around it comes
-    back exactly as it was. A block that was edited by hand is left alone.
+    block's own lines, and the newline it added before itself, are the only
+    bytes removed, so the text around it comes back exactly as it was. A
+    block that was edited by hand is left alone.
     """
     lines = text.splitlines(keepends=True)
     found = _find_block(lines)
@@ -315,7 +355,7 @@ def remove_block(text: str) -> tuple[str, str]:
     if isinstance(found, str):
         return text, found
     start, end = found
-    return "".join(lines[:start] + lines[end + 1 :]), "removed"
+    return _replace_block(lines, start, end, [], "\n"), "removed"
 
 
 def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
@@ -347,11 +387,17 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
         if found is not None:
             old = _block_entries(lines, *found)
             # Keep an earlier entry while its path is still there and untracked.
+            # A dry run writes nothing, so a planned path counts as there:
+            # the real run writes it again.
+            planned = _with_folders(install_plan.files) if dry_run else {}
             tracked = _tracked(repo_root, old)
             old = [
                 entry
                 for entry in old
-                if os.path.lexists(repo_root / entry.rstrip("/"))
+                if (
+                    os.path.lexists(repo_root / entry.rstrip("/"))
+                    or entry.rstrip("/") in planned
+                )
                 and not _holds_tracked(entry, tracked)
             ]
         created = _created_entries(repo_root, install_plan, dry_run)
@@ -362,14 +408,14 @@ def apply(repo_root: Path, install_plan: Plan, *, dry_run: bool) -> Result:
 
     newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
     if found is not None:
-        start, end = found
-        block = _render(entries, newline) if entries else ""
-        new_text = "".join(lines[:start]) + block + "".join(lines[end + 1 :])
+        new_text = _replace_block(lines, *found, entries, newline)
+    elif entries and text and not text.endswith("\n"):
+        # A last line without a newline has to be ended first. The block then
+        # leaves its own last line unended, so uninstall knows to take that
+        # one newline back.
+        new_text = text + newline + _render(entries, newline).removesuffix(newline)
     elif entries:
-        # A last line without a newline has to be ended first. That one
-        # newline is the only byte added outside the block.
-        prefix = newline if text and not text.endswith("\n") else ""
-        new_text = text + prefix + _render(entries, newline)
+        new_text = text + _render(entries, newline)
     else:
         new_text = text
 
