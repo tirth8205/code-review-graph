@@ -749,3 +749,15 @@ def test_deleted_callee_keeps_raw_reference_for_recreation(tmp_path):
         (tmp_path / "Other.cs").write_text(source, encoding="utf-8")
         incremental_update(tmp_path, store, changed_files=["Other.cs"])
         assert _calls(store, "C.Go")[0]["target_qualified"].endswith("::Other.Service.Run")
+
+
+@pytest.mark.parametrize("call", ["@Run();", "this.@Run();", "Run();"])
+def test_escaped_identifier_calls_bind_to_their_declaration(tmp_path, call):
+    # ``@Run`` is the verbatim spelling of ``Run``; the declaration is stored
+    # without the ``@``, so the call must be too (Copilot review of #964).
+    with _build(tmp_path, {"Case.cs":
+        "namespace App { class C { void @Run() {} void Go() { " + call + " } } }"
+    }) as store:
+        found, = _calls(store, "App.C.Go")
+        assert found["target_qualified"] == f"{tmp_path / 'Case.cs'}::App.C.Run"
+        assert "@" not in json.loads(found["extra"])["csharp_raw_target"]

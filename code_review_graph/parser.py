@@ -15486,8 +15486,11 @@ class CodeParser:
             # The spring_resolver post-pass will do the correct cross-type lookup.
             receiver_name = call_extra.get("receiver")
             if language == "csharp":
-                target = call_name
                 callee = child.child_by_field_name("function")
+                if callee is not None and callee.type == "identifier":
+                    # ``@Run()`` names ``Run``; declarations drop the ``@`` too.
+                    call_name = _csharp_name(callee) or call_name
+                target = call_name
                 call_extra.update({
                     "source_offset": child.start_byte,
                     "csharp_raw_target": call_name,
