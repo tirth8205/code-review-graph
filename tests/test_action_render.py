@@ -207,6 +207,48 @@ def test_test_gaps_section(report):
     assert "(auth/session.py:42)" in body
 
 
+def test_removed_symbols_section_names_what_still_uses_them(report):
+    """A deleted function and its live callers reach the comment."""
+    assert "### Removed symbols" not in render.render_markdown(report)
+    report = dict(report)
+    report["removed_symbols"] = [
+        {
+            "name": "format_filename",
+            "qualified_name": "src/utils.py::format_filename",
+            "file": "src/utils.py",
+            "old_line_start": 430,
+            "risk_score": 0.72,
+            "used_by": [
+                {"name": "convert", "qualified_name": "src/types.py::File.convert"},
+                {"name": "convert", "qualified_name": "src/types.py::Path.convert"},
+            ],
+            "used_by_total": 4,
+        },
+        {
+            "name": "dead",
+            "qualified_name": "src/utils.py::dead",
+            "file": "src/utils.py",
+            "old_line_start": 500,
+            "risk_score": 0.0,
+            "used_by": [],
+            "used_by_total": 0,
+        },
+    ]
+    report["removed_symbols_total"] = 3
+
+    body = render.render_markdown(report)
+
+    assert "### Removed symbols" in body
+    assert render.md_escape("src/utils.py::format_filename") in body
+    assert render.md_escape("src/utils.py") + ":430" in body
+    assert render.md_escape("src/types.py::File.convert") in body
+    assert "+2 more" in body
+    assert "nothing found" in body
+    assert "...and 1 more removed symbol(s)." in body
+    assert "| 0.72 | high | " in body
+    assert "3 removed, " in body.splitlines()[4]
+
+
 # ---------------------------------------------------------------------------
 # Indirect coverage (#1047): reached through a caller vs. no test in reach
 # ---------------------------------------------------------------------------

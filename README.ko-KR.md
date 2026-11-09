@@ -585,6 +585,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_MAX_IMPACT_DEPTH` | 영향 범위 분석의 탐색 깊이 | `2` |
 | `CRG_MAX_BFS_DEPTH` | 그래프 순회의 최대 깊이 | `15` |
 | `CRG_MAX_CHANGED_FUNCS` | 변경 보고 하나에서 분석하는 변경 함수의 최대 수 | `500` |
+| `CRG_MAX_DELETION_FILES` | diff가 삭제한 함수와 클래스를 알려 주려고 변경 보고 하나에서 이전 버전을 읽는 파일의 최대 수 | `100` |
 | `CRG_MAX_TRANSITIVE_FRONTIER` | 전이적 호출자/피호출자 확장의 최대 프런티어 크기 | `50` |
 | `CRG_CALLER_TEST_ROUTE_DEPTH` | 테스트가 없는 변경 심벌에 대해 테스트된 호출자를 찾으며 들어오는 `CALLS`를 거슬러 올라갈 홉 수. 커버리지가 아니라 참고 정보로 보고됩니다 | `2` |
 | `CRG_CALLER_TEST_ROUTE_MAX_CALLERS` | 그 테스트된 호출자를 찾는 동안 검사할 최대 호출자 수 | `500` |

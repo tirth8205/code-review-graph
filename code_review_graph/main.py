@@ -1102,8 +1102,9 @@ async def detect_changes_tool(
 
     Primary tool for code review. Maps git diffs to affected functions,
     YAML paths, flows, communities, and test coverage gaps. Returns risk
-    scores and prioritized review items. Replaces get_review_context for
-    change-aware reviews.
+    scores and prioritized review items. Functions and classes the diff
+    deleted are listed in removed_symbols with what still uses them.
+    Replaces get_review_context for change-aware reviews.
 
     Args:
         base: Git ref to diff against. Default: HEAD~1.

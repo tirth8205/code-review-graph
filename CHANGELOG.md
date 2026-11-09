@@ -509,6 +509,25 @@
   edit hook does nothing (it still never fails the edit). `install` replaces
   the hook earlier releases wrote, and `uninstall` removes it, including the
   v2.3.4 to v2.3.6 form it used to leave behind.
+- `detect-changes` and `detect_changes_tool` now report what a diff that only
+  deletes code removed, and no longer miss it or blame the code around it. A
+  hunk such as `@@ -430,42 +429,0 @@` adds no lines, so it named only the
+  line before the gap: deleting a whole function reported 0 changed functions
+  and risk 0.00, with nothing about the callers it left behind, and when the
+  gap sat right after the previous function, that untouched function was
+  listed as changed. The old version of the file is now read: a function or
+  class that lost some lines is changed, and one that is gone is listed in
+  `removed_symbols` with the callers, subclasses, importers and tests that
+  still use it, and named in the summary ("Removed but still used:
+  format_filename (risk 0.65, by FileError.__init__, File.convert, ...)").
+  The code around the gap is never marked. A removed symbol that is still
+  used breaks its callers, so it is scored like a change (the flows it was
+  in are traced again) and raises the overall risk, which `fail-on-risk`
+  reads; one nothing uses adds nothing. Deleting click's `echo` with 20
+  callers now scores 0.65, where changing it scores 0.40. The PR comment
+  gets a "Removed symbols" table. Up to 100 files are read per report (`CRG_MAX_DELETION_FILES`), and
+  the summary says when a file could not be read. A deleted file is still not
+  covered. Thanks to @decrypt-mm for reporting the case in #1167.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

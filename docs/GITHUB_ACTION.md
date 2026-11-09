@@ -84,7 +84,9 @@ To turn the review into a merge gate:
 ### Risk levels
 
 `detect-changes` produces an overall risk score from 0.0 to 1.0: the maximum
-across changed functions. `compute_risk_score` in
+across changed functions and removed functions that are still used, so
+`fail-on-risk` also stops a pull request that deletes code its callers still
+need. `compute_risk_score` in
 `code_review_graph/changes.py` adds up flow participation, community
 crossing, test coverage, security-sensitive names and caller count. The
 action maps the score to levels:
@@ -102,6 +104,9 @@ action maps the score to levels:
   affected flows and test gaps.
 - **Risk-scored changes**: a table of the top 10 changed symbols by risk,
   with `file:line` location and whether the symbol has a test.
+- **Removed symbols**: up to 10 functions or classes the pull request
+  deleted, with their risk, where they were, and what the graph says still
+  uses them.
 - **Affected execution flows**: up to 5 entry-point flows the change
   touches, ordered by criticality, with node and file counts.
 - **Test gaps**: up to 5 changed functions with no direct test coverage.
