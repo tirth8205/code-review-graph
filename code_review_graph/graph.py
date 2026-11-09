@@ -3753,7 +3753,8 @@ class GraphStore:
             placeholders = ",".join("?" for _ in batch)
             rows = self._conn.execute(  # nosec B608
                 "SELECT target_qualified FROM edges "
-                f"WHERE source_qualified IN ({placeholders})",
+                f"WHERE source_qualified IN ({placeholders}) "
+                "ORDER BY source_qualified, id",
                 batch,
             ).fetchall()
             results.extend(r["target_qualified"] for r in rows)
@@ -3770,7 +3771,8 @@ class GraphStore:
             placeholders = ",".join("?" for _ in batch)
             rows = self._conn.execute(  # nosec B608
                 "SELECT source_qualified FROM edges "
-                f"WHERE target_qualified IN ({placeholders})",
+                f"WHERE target_qualified IN ({placeholders}) "
+                "ORDER BY target_qualified, id",
                 batch,
             ).fetchall()
             results.extend(r["source_qualified"] for r in rows)

@@ -155,10 +155,15 @@ def test_edge_readers_keep_insertion_order_across_kinds(tmp_path):
         outgoing = store.get_edges_by_source("a")
         incoming = store.get_edges_by_target("a")
         among = store.get_edges_among({"a", "b", "c", "d"})
+        # The wiki counts these and keeps the top 15, so ties keep this order.
+        targets = store.get_outgoing_targets(["a"])
+        sources = store.get_incoming_sources(["a"])
 
     assert [edge.target_qualified for edge in outgoing] == ["b", "c", "d"]
     assert [edge.source_qualified for edge in incoming] == ["e", "f", "g"]
     assert [edge.target_qualified for edge in among] == ["b", "c", "d"]
+    assert targets == ["b", "c", "d"]
+    assert sources == ["e", "f", "g"]
 
 
 def test_postprocess_runs_without_them_and_reports_no_summaries(tmp_path):
