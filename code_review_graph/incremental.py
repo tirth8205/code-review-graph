@@ -156,19 +156,6 @@ logger = logging.getLogger(__name__)
 # yield no rows (generic YAML), so the inventory alone cannot say a graph is
 # partial. Zero means nothing has confirmed it yet.
 VERIFIED_FILE_COUNT_KEY = "verified_file_count"
-
-
-def _source_path(root: Path, value: str | Path) -> Path | None:
-    """Resolve a source path only when its filesystem identity stays in the repo."""
-    try:
-        path = Path(value)
-        candidate = (path if path.is_absolute() else root / path).resolve()
-        candidate.relative_to(root.resolve())
-        return candidate
-    except (ValueError, OSError, RuntimeError):
-        return None
-
-
 CPP_IDENTITY_VERSION = "1"
 _CPP_IDENTITY_METADATA_KEY = "cpp_identity_version"
 CSHARP_IDENTITY_VERSION = "5"  # Namespace/call context, static and generic-arity evidence.
@@ -1469,8 +1456,6 @@ def _find_content_mismatches(
             path = repo_root / path
         try:
             relative_path = path.relative_to(repo_root).as_posix()
-            if _source_path(repo_root, path) is None:
-                continue
             raw = path.read_bytes()
             current_hash = hashlib.sha256(raw).hexdigest()
             current_hashes[relative_path] = current_hash
@@ -2419,26 +2404,30 @@ def _reconcile_stale_files(
         ignore_patterns = _load_ignore_patterns(repo_root)
         parser = _get_code_parser_cls()(repo_root)
         current_paths = set()
+        # A stored file below a folder that is now a link (out of the
+        # repository, or not followed) is stale, and is not opened to find
+        # out: the same rule ``incremental_update`` applies to changed files.
+        followed = _load_followed_files(store)
+        linked_parents: dict[str, bool] = {}
         for stored_file in stored_files:
             path = Path(stored_file)
             try:
                 relative = str(path.relative_to(repo_root))
             except ValueError:
                 continue
-            # A stored spelling can sit under a parent that now links outside
-            # the repository.  Reject it before any source read: reconciliation
-            # must not open (or keep) a file the graph would refuse to index.
-            source = _source_path(repo_root, path)
-            if source is None:
+            parent = os.path.dirname(relative)
+            if parent not in linked_parents:
+                linked_parents[parent] = _outside_or_below_symlink(repo_root, relative)
+            if linked_parents[parent] and stored_file not in followed:
                 continue
             if (
-                not path.is_symlink()
-                and source.is_file()
+                path.is_file()
+                and not path.is_symlink()
                 and not _should_ignore(relative, ignore_patterns)
-                and parser.detect_language(source) is not None
+                and parser.detect_language(path) is not None
                 and (
                     (known_text is not None and stored_file in known_text)
-                    or not _is_binary(source)
+                    or not _is_binary(path)
                 )
             ):
                 current_paths.add(stored_file)
@@ -2682,8 +2671,6 @@ def _parse_single_file(
     rel_path, repo_root_str = args
     abs_path = Path(repo_root_str) / rel_path
     try:
-        if _source_path(Path(repo_root_str), abs_path) is None:
-            raise ValueError("Source path escapes repository root")
         raw = abs_path.read_bytes()
         fhash = hashlib.sha256(raw).hexdigest()
         parser = getattr(_PARSE_WORKER_STATE, "parser", None)
@@ -2757,8 +2744,6 @@ def full_build(
             full_path = repo_root / rel_path
             parsed: tuple[list, list, str] | None = None
             try:
-                if _source_path(repo_root, full_path) is None:
-                    raise ValueError("Source path escapes repository root")
                 source = full_path.read_bytes()
                 fhash = hashlib.sha256(source).hexdigest()
                 nodes, edges = parser.parse_bytes(full_path, source)

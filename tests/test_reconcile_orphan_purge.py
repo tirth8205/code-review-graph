@@ -7,6 +7,7 @@ tables counting once, NULL ``extra`` rows, ordering/dedup guarantees of
 ``get_all_files``, and purge behavior at scale.
 """
 
+import json
 import time
 from unittest.mock import patch
 
@@ -222,6 +223,47 @@ class TestOrphanPurgeBoundaries:
 
             assert stale == [stored]
             assert store.get_nodes_by_file(stored) == []
+        finally:
+            store.close()
+
+    def test_probe_mode_keeps_a_file_behind_a_followed_link(self, tmp_path):
+        # A folder the user asked to follow (#269) is recorded in metadata;
+        # its files stay in the graph and are read through their in-repo path.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "kept.py").write_text("def kept():\n    pass\n", encoding="utf-8")
+        linked = repo / "linked"
+        try:
+            linked.symlink_to(outside, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege unavailable")
+            raise
+        stored = str(linked / "kept.py")
+        store = GraphStore(tmp_path / "test.db")
+        try:
+            store.store_file_nodes_edges(
+                stored,
+                [
+                    NodeInfo(
+                        kind="File",
+                        name="kept.py",
+                        file_path=stored,
+                        line_start=1,
+                        line_end=2,
+                        language="python",
+                    )
+                ],
+                [],
+                "hash",
+            )
+            store.set_metadata("symlink_followed_files", json.dumps([stored]))
+            store.commit()
+
+            assert _reconcile_stale_files(repo, store) == []
+            assert store.get_nodes_by_file(stored) != []
         finally:
             store.close()
 

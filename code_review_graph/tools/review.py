@@ -34,7 +34,6 @@ from ._common import (
     _get_store,
     _resolve_graph_file_paths_with_unmatched,
     _shown_of,
-    _source_path,
     _unmatched_file_warning,
     _validate_positive_int,
 )
@@ -649,8 +648,8 @@ def get_review_context(
             snippets: dict[str, str] = {}
             followed = followed_files(store)
             for rel_path in shown_files:
-                full_path = _source_path(root, rel_path)
-                if full_path is None or not full_path.is_file():
+                full_path = root / rel_path
+                if not full_path.is_file():
                     continue
                 if not path_within_repo(root, full_path, followed):
                     # Never read outside the repository, unless through a
