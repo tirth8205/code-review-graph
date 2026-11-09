@@ -85,6 +85,14 @@
 - `find_dead_code` collects its edge evidence once, not once per function (#1082, #982).
 - Plain C headers skip the C++ parse through a prefilter (#876, #802).
 - The dev dependency range allows pytest 9 (#1140).
+- fastmcp 4 is allowed (`fastmcp>=3.2.4,<5`) and `uv.lock` pins 4.1.6 (#970).
+  fastmcp 4 brings the mcp SDK 2.x, so the server now answers
+  `server/discover` and serves clients on the 2026-07-28 protocol, which
+  issue #919 found it could not do. Older clients still use the
+  `initialize` handshake as before. The prompts import `Message` from
+  `fastmcp.prompts`, which works on fastmcp 3 and 4; the old
+  `fastmcp.prompts.prompt` path is gone in 4 and stopped the server from
+  starting.
 
 ### Fixed
 
