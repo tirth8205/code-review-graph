@@ -11,7 +11,6 @@ endpoint cannot be driven cross-origin (e.g. via DNS rebinding); see
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import os
 import sys
@@ -26,10 +25,13 @@ from fastmcp import FastMCP
 from . import __version__
 from . import incremental as _incremental
 from .constants import env_int
-from .incremental import get_db_path, start_watch_thread
+
+# The graph store and incremental module load with the server anyway (the
+# watch thread needs both), so only the tool and prompt modules are deferred.
+from .graph import GraphStore
+from .incremental import find_project_root, get_db_path, start_watch_thread
 
 if TYPE_CHECKING:
-    from .graph import GraphStore
     from .tools import (
         apply_refactor_func,
         build_or_update_graph,
@@ -103,14 +105,6 @@ _LAZY_PROMPT_NAMES = frozenset({
     "review_changes_prompt",
 })
 
-_LAZY_OTHER_ATTRS: dict[str, tuple[str, str | None]] = {
-    "_incremental": (".incremental", None),
-    "find_project_root": (".incremental", "find_project_root"),
-    "get_db_path": (".incremental", "get_db_path"),
-    "start_watch_thread": (".incremental", "start_watch_thread"),
-    "GraphStore": (".graph", "GraphStore"),
-}
-
 
 def _resolve_attr(name: str):
     g = globals()
@@ -128,13 +122,6 @@ def __getattr__(name: str):
     if name in _LAZY_PROMPT_NAMES:
         from . import prompts as _prompts_mod
         val = getattr(_prompts_mod, name)
-        globals()[name] = val
-        return val
-    target = _LAZY_OTHER_ATTRS.get(name)
-    if target is not None:
-        mod_path, attr = target
-        mod = importlib.import_module(mod_path, __package__ or "code_review_graph")
-        val = mod if attr is None else getattr(mod, attr)
         globals()[name] = val
         return val
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -262,13 +249,11 @@ async def _offload(
         # Resolve lazy attributes inside the worker: on a cold call the import
         # pulls in _common, the parser and the grammar package, which would
         # otherwise block the event loop before the timeout even starts.
-        impl_candidate = (
-            tool_name[:-5] if tool_name.endswith("_tool") else tool_name
-        )
-        for _cand in (impl_candidate, f"{impl_candidate}_func", tool_name):
-            if _cand in _LAZY_TOOL_NAMES and _cand not in globals():
-                _resolve_attr(_cand)
-                break
+        # Module __getattr__ never serves a bare global lookup, so every lazy
+        # name the tool body reads must be in globals() before it runs.
+        for name in getattr(getattr(work, "__code__", None), "co_names", ()):
+            if name in _LAZY_TOOL_NAMES and name not in globals():
+                _resolve_attr(name)
         if provenance:
             return _resolve_attr("with_provenance")(work(), root)
         return work()
@@ -1573,13 +1558,12 @@ def main(
         port: Port when using HTTP (required for HTTP; set by CLI).
     """
     global _default_repo_root
-    root = Path(repo_root) if repo_root else _resolve_attr("find_project_root")()
+    root = Path(repo_root) if repo_root else find_project_root()
     _default_repo_root = str(root)
     _apply_tool_filter(tools)
 
-    inc_mod = _resolve_attr("_incremental")
-    previous_stdio_state = inc_mod._MCP_STDIO_ACTIVE
-    inc_mod._MCP_STDIO_ACTIVE = transport == "stdio"
+    previous_stdio_state = _incremental._MCP_STDIO_ACTIVE
+    _incremental._MCP_STDIO_ACTIVE = transport == "stdio"
     watch_store: GraphStore | None = None
     watch_thread: threading.Thread | None = None
     watch_stop = threading.Event()

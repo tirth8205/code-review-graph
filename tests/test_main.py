@@ -828,7 +828,6 @@ class TestMainLazyAttrsAndPromptsDirect:
     def test_resolve_attr_getattr_and_prompts_direct(self, monkeypatch, tmp_path):
         assert callable(crg_main._resolve_attr("get_docs_section"))
         assert callable(crg_main.__getattr__("review_changes_prompt"))
-        assert crg_main.__getattr__("GraphStore") is not None
         with pytest.raises(AttributeError):
             crg_main.__getattr__("nonexistent_main_attr")
 
