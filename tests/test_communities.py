@@ -571,51 +571,51 @@ class TestCommunities:
         """IGRAPH_AVAILABLE is a boolean."""
         assert isinstance(IGRAPH_AVAILABLE, bool)
 
-    def test_leiden_fallback_to_file_based(self):
-        """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
-        # Seed nodes with only CONTAINS edges (no CALLS/IMPORTS -- sparse graph)
+    def _seed_sparse_graph_for_fallback(self):
+        """Prepare a sparse graph containing only CONTAINS edges."""
         self.store.upsert_node(
             NodeInfo(
                 kind="File", name="a.py", file_path="a.py",
                 line_start=1, line_end=100, language="python",
             ), file_hash="a1"
         )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f1", file_path="a.py",
-                line_start=1, line_end=10, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f2", file_path="a.py",
-                line_start=11, line_end=20, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_node(
-            NodeInfo(
-                kind="Function", name="f3", file_path="a.py",
-                line_start=21, line_end=30, language="python",
-                parent_name=None,
-            ), file_hash="a1"
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f1",
-                     file_path="a.py", line=1)
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f2",
-                     file_path="a.py", line=11)
-        )
-        self.store.upsert_edge(
-            EdgeInfo(kind="CONTAINS", source="a.py", target="a.py::f3",
-                     file_path="a.py", line=21)
-        )
+
+        for name, start, end in (
+            ("f1", 1, 10),
+            ("f2", 11, 20),
+            ("f3", 21, 30),
+        ):
+            self.store.upsert_node(
+                NodeInfo(
+                    kind="Function",
+                    name=name,
+                    file_path="a.py",
+                    line_start=start,
+                    line_end=end,
+                    language="python",
+                    parent_name=None,
+                ), file_hash="a1"
+            )
+
+        for name, line in (("f1", 1), ("f2", 11), ("f3", 21)):
+            self.store.upsert_edge(
+                EdgeInfo(
+                    kind="CONTAINS",
+                    source="a.py",
+                    target=f"a.py::{name}",
+                    file_path="a.py",
+                    line=line,
+                )
+            )
+
+    def test_leiden_fallback_to_file_based(self):
+        """When Leiden produces 0 communities (all < min_size), fall back to file-based."""
+        self._seed_sparse_graph_for_fallback()
+
         # With high min_size, Leiden may produce tiny clusters that get dropped.
         # The fallback to file-based should still produce results.
         result = detect_communities(self.store, min_size=2)
+
         assert isinstance(result, list)
         assert len(result) >= 1
 
@@ -639,6 +639,72 @@ class TestCommunities:
         # Pass a file that IS part of existing communities
         result = incremental_detect_communities(self.store, ["auth.py"])
         assert result > 0
+
+    def test_community_capture_remap_survives_node_replacement(self, tmp_path):
+        """Community IDs remapped by qualified_name after node ID churn (#569)."""
+        from code_review_graph.communities import (
+            capture_community_assignments,
+            remap_community_assignments,
+        )
+        from code_review_graph.parser import NodeInfo
+
+        abs_auth = (tmp_path / "auth.py").resolve().as_posix()
+        login = NodeInfo(
+            kind="Function",
+            name="login",
+            file_path=abs_auth,
+            line_start=1,
+            line_end=5,
+            language="python",
+        )
+        logout = NodeInfo(
+            kind="Function",
+            name="logout",
+            file_path=abs_auth,
+            line_start=6,
+            line_end=10,
+            language="python",
+        )
+        old_login_id = self.store.upsert_node(login, file_hash="old")
+        self.store.upsert_node(logout, file_hash="old")
+        self.store.commit()
+        self.store._conn.execute(
+            "INSERT INTO communities (name, level, cohesion, size, "
+            "dominant_language, description) VALUES (?, 0, 1.0, 2, 'python', '')",
+            ("auth",),
+        )
+        cid = self.store._conn.execute(
+            "SELECT id FROM communities WHERE name = 'auth'"
+        ).fetchone()[0]
+        self.store._conn.execute(
+            "UPDATE nodes SET community_id = ? WHERE file_path = ?",
+            (cid, abs_auth),
+        )
+        self.store.commit()
+
+        mapping = capture_community_assignments(self.store, [abs_auth])
+        assert mapping[f"{abs_auth}::login"] == cid
+
+        self.store.remove_file_data(abs_auth)
+        self.store.commit()
+        new_login_id = self.store.upsert_node(login, file_hash="new")
+        self.store.upsert_node(logout, file_hash="new")
+        self.store.commit()
+        assert new_login_id != old_login_id
+
+        updated = remap_community_assignments(self.store, mapping)
+        assert updated >= 1
+        row = self.store._conn.execute(
+            "SELECT community_id FROM nodes WHERE qualified_name = ?",
+            (f"{abs_auth}::login",),
+        ).fetchone()
+        assert row["community_id"] == cid
+
+        # force=True redetects even when relative path alone would miss abs paths
+        count = incremental_detect_communities(
+            self.store, ["auth.py"], repo_root=tmp_path, force=True,
+        )
+        assert count >= 0
 
 
 class TestCommunityPrReconciliation:
@@ -873,8 +939,8 @@ class TestCommunityPrReconciliation:
 
         assert communities[1]["name"] == "services-invoice"
 
-    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
-    def test_oversized_split_uses_member_names_and_real_cohesion(self):
+    @staticmethod
+    def _make_oversized_split_scenario():
         nodes = [
             *[
                 _community_node(i, f"services/auth.py::auth_{name}")
@@ -885,8 +951,10 @@ class TestCommunityPrReconciliation:
                 for i, name in enumerate(("load", "save", "delete"), start=4)
             ],
         ]
+
         left = [node.qualified_name for node in nodes[:3]]
         right = [node.qualified_name for node in nodes[3:]]
+
         edges = [
             _community_edge(1, left[0], left[1]),
             _community_edge(2, left[0], left[2]),
@@ -896,6 +964,7 @@ class TestCommunityPrReconciliation:
             _community_edge(6, right[1], right[2]),
             _community_edge(7, left[0], right[0]),
         ]
+
         parent = {
             "id": 7,
             "name": "services-parent",
@@ -904,6 +973,12 @@ class TestCommunityPrReconciliation:
             "members": [node.qualified_name for node in nodes],
             "dominant_language": "python",
         }
+
+        return nodes, edges, parent, left, right
+
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_oversized_split_uses_member_names_and_real_cohesion(self):
+        nodes, edges, parent, left, right = self._make_oversized_split_scenario()
 
         split = communities_module._split_oversized(
             [parent], nodes, edges, threshold_pct=0.1, min_split_size=2
@@ -921,6 +996,7 @@ class TestCommunityPrReconciliation:
                 for edge_id in range(8, 48)
             ],
         ]
+
         duplicate_split = communities_module._split_oversized(
             [parent],
             nodes,
@@ -928,6 +1004,7 @@ class TestCommunityPrReconciliation:
             threshold_pct=0.1,
             min_split_size=2,
         )
+
         expected_partition = {
             frozenset(community["members"])
             for community in split
@@ -939,15 +1016,13 @@ class TestCommunityPrReconciliation:
 
         assert duplicate_partition == expected_partition
 
-    @pytest.mark.parametrize("bare_subjects", [False, True])
-    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
-    def test_oversized_split_keeps_tests_with_their_subjects(
-        self, bare_subjects: bool
-    ):
+    @staticmethod
+    def _make_split_scenario_with_tests(bare_subjects):
         production = [
             _community_node(i, f"src/feature.py::feature_{i}")
             for i in range(1, 5)
         ]
+
         tests = [
             _community_node(
                 i + 4,
@@ -957,9 +1032,11 @@ class TestCommunityPrReconciliation:
             )
             for i in range(1, 5)
         ]
+
         nodes = [*production, *tests]
         edges: list[GraphEdge] = []
         edge_id = 1
+
         for group in (production, tests):
             for left_idx, left_node in enumerate(group):
                 for right_node in group[left_idx + 1:]:
@@ -971,6 +1048,7 @@ class TestCommunityPrReconciliation:
                         )
                     )
                     edge_id += 1
+
         for production_node, test_node in zip(production, tests):
             edges.append(
                 _community_edge(
@@ -985,6 +1063,7 @@ class TestCommunityPrReconciliation:
                 )
             )
             edge_id += 1
+
         parent = {
             "id": 8,
             "name": "feature-parent",
@@ -994,9 +1073,21 @@ class TestCommunityPrReconciliation:
             "dominant_language": "python",
         }
 
+        return production, tests, nodes, edges, parent
+
+    @pytest.mark.parametrize("bare_subjects", [False, True])
+    @pytest.mark.skipif(not IGRAPH_AVAILABLE, reason="igraph not installed")
+    def test_oversized_split_keeps_tests_with_their_subjects(
+        self, bare_subjects: bool
+    ):
+        production, tests, nodes, edges, parent = (
+            self._make_split_scenario_with_tests(bare_subjects)
+        )
+
         split = communities_module._split_oversized(
             [parent], nodes, edges, threshold_pct=0.1, min_split_size=2
         )
+
         member_to_community = {
             member: index
             for index, community in enumerate(split)

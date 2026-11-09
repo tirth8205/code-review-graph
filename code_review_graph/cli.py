@@ -43,11 +43,17 @@ import fnmatch
 import json
 import logging
 import os
+import sqlite3
 from functools import partial
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Iterable, TypedDict
+
+from .errors import CodeReviewGraphError, is_lock_error
+from .neighbourhood import DEFAULT_DEPTH as NB_DEFAULT_DEPTH
+from .neighbourhood import DEFAULT_MAX_NODES as NB_DEFAULT_MAX_NODES
+from .stdio import configure_utf8_stdio as _configure_utf8_stdio
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +61,7 @@ logger = logging.getLogger(__name__)
 _PLATFORM_CHOICES = [
     "codex", "claude", "claude-code", "cursor", "windsurf", "zed",
     "continue", "opencode", "antigravity", "gemini-cli", "qwen", "kiro", "qoder",
-    "copilot", "copilot-cli", "codebuddy", "all",
+    "copilot", "copilot-cli", "codebuddy", "hermes", "all",
 ]
 
 
@@ -147,30 +153,43 @@ def _instruction_files_to_modify(
     """Return the list of instruction files that ``install`` would write
     or modify, given the current state of the repo and the selected
     platform target. Used for the dry-run / confirm preview (#173).
+
+    A file holding a section from an older release is listed as ``(update)``:
+    install replaces that block in place rather than leaving it stale (#314).
     """
-    from .skills import _CLAUDE_MD_SECTION_MARKER, _PLATFORM_INSTRUCTION_FILES
+    from .skills import (
+        _CLAUDE_MD_SECTION,
+        _CLAUDE_MD_SECTION_MARKER,
+        _COPILOT_SECTION,
+        _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS,
+        _PLATFORM_INSTRUCTION_FILES,
+        _upgrade_managed_block,
+    )
 
     targets: list[str] = []
 
+    def _describe(filename: str, path: Path, section: str) -> None:
+        if not path.exists():
+            targets.append(f"{filename} (new)")
+            return
+        content = path.read_text(encoding="utf-8", errors="replace")
+        if _CLAUDE_MD_SECTION_MARKER not in content:
+            targets.append(f"{filename} (append)")
+        elif _upgrade_managed_block(content, section) is not None:
+            targets.append(f"{filename} (update)")
+
     if target in ("claude", "all"):
-        claude_md = repo_root / "CLAUDE.md"
-        if claude_md.exists():
-            content = claude_md.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append("CLAUDE.md (append)")
-        else:
-            targets.append("CLAUDE.md (new)")
+        _describe("CLAUDE.md", repo_root / "CLAUDE.md", _CLAUDE_MD_SECTION)
 
     for filename, owners in _PLATFORM_INSTRUCTION_FILES.items():
         if target != "all" and target not in owners:
             continue
-        path = repo_root / filename
-        if path.exists():
-            content = path.read_text(encoding="utf-8")
-            if _CLAUDE_MD_SECTION_MARKER not in content:
-                targets.append(f"{filename} (append)")
-        else:
-            targets.append(f"{filename} (new)")
+        section = (
+            _COPILOT_SECTION
+            if filename in _PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+            else _CLAUDE_MD_SECTION
+        )
+        _describe(filename, repo_root / filename, section)
 
     return targets
 
@@ -301,26 +320,46 @@ def _handle_init(args: argparse.Namespace) -> None:
     # --no-instructions to opt out.
     skip_skills = getattr(args, "no_skills", False)
     skip_hooks = getattr(args, "no_hooks", False)
+    codex_skill_error: str | None = None
     # Legacy: --skills/--hooks/--all still accepted (no-op, everything is default)
 
     from .skills import (
         PLATFORMS,
         generate_skills,
-        inject_claude_md,
-        inject_platform_instructions,
+        inject_instruction_files,
         install_codebuddy_hooks,
         install_codebuddy_skills,
         install_codex_hooks,
+        install_codex_skill,
         install_cursor_hooks,
         install_gemini_cli_hooks,
         install_gemini_cli_skills,
         install_git_hook,
+        install_git_sync_hooks,
+        install_hermes_skills,
         install_hooks,
         install_opencode_plugin,
         install_qoder_skills,
     )
-
     if not skip_skills:
+        codex_detected = target == "codex" or (
+            target == "all" and PLATFORMS["codex"]["detect"]()
+        )
+        if codex_detected:
+            try:
+                codex_skill_dir = install_codex_skill()
+            except OSError as exc:
+                codex_skill_dir = None
+                codex_skill_error = f"Could not install Codex skill: {exc}"
+            if codex_skill_dir is None:
+                codex_skill_error = codex_skill_error or (
+                    "Codex skill installation refused existing files; check the warning above"
+                )
+                if target == "all":
+                    print(codex_skill_error, file=sys.stderr)
+            else:
+                print(f"Installed Codex skill in {codex_skill_dir}")
+
         # Claude Code skills are only relevant for Claude (or full install).
         if target in ("claude", "all"):
             skills_dir = generate_skills(repo_root)
@@ -336,6 +375,11 @@ def _handle_init(args: argparse.Namespace) -> None:
             codebuddy_skills_dir = install_codebuddy_skills(repo_root)
             print(f"Installed CodeBuddy skills in {codebuddy_skills_dir}")
 
+        # Hermes Agent discovers skills under <HERMES_HOME>/skills/.
+        if target == "hermes" or (target == "all" and PLATFORMS["hermes"]["detect"]()):
+            hermes_skills_dir = install_hermes_skills(repo_root)
+            print(f"Installed Hermes Agent skills in {hermes_skills_dir}")
+
     # Confirm before writing instruction files (#173). --yes skips the
     # prompt; --no-instructions skips the whole block.
     if not skip_instructions and instr_targets:
@@ -343,14 +387,24 @@ def _handle_init(args: argparse.Namespace) -> None:
             "Inject graph instructions into the files above?",
             default_yes=True,
         ):
-            if target in ("claude", "all"):
-                inject_claude_md(repo_root)
-            inject_platform_instructions(repo_root, target=target)
-            # Use the precomputed instr_targets list for the confirmation
-            # message; we don't need the fresh return value from
-            # inject_platform_instructions here.
-            names = [t.split(" ")[0] for t in instr_targets]
-            print(f"Injected graph instructions into: {', '.join(names)}")
+            outcomes = inject_instruction_files(repo_root, target=target)
+            for label, wording in (
+                ("created", "Injected graph instructions into"),
+                ("updated", "Updated graph instructions in"),
+            ):
+                names = [f for f, o in outcomes.items() if o == label]
+                if names:
+                    print(f"{wording}: {', '.join(names)}")
+            # A hand-edited block is never overwritten, so say which file it is
+            # rather than reporting success the user did not get (#314).
+            stale = [f for f, o in outcomes.items() if o == "conflict"]
+            if stale:
+                print(
+                    "Left edited graph instructions alone in: "
+                    f"{', '.join(stale)}. Delete the section between "
+                    "<!-- code-review-graph MCP tools --> and its closing marker "
+                    "and reinstall to pick up the current text."
+                )
         else:
             print("Skipped instruction injection (user declined).")
     elif skip_instructions:
@@ -374,6 +428,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
     if not skip_hooks and target in ("claude", "qoder", "all"):
         platforms_to_install = [target] if target != "all" else ["claude", "qoder"]
         for plat in platforms_to_install:
@@ -382,6 +438,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         git_hook = install_git_hook(repo_root)
         if git_hook:
             print(f"Installed git pre-commit hook in {git_hook}")
+        for sync_hook in install_git_sync_hooks(repo_root):
+            print(f"Installed git {sync_hook.name} hook in {sync_hook}")
 
     # Cursor hooks (user-level, only if ~/.cursor exists — matching MCP detect)
     if not skip_hooks and target in ("all", "cursor") and PLATFORMS["cursor"]["detect"]():
@@ -406,6 +464,8 @@ def _handle_init(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.warning("Could not install OpenCode plugin: %s", exc)
 
+    if codex_skill_error and target == "codex":
+        raise CodeReviewGraphError(codex_skill_error)
     print()
     print("Next steps:")
     print("  1. code-review-graph build    # build the knowledge graph")
@@ -496,6 +556,40 @@ _GRAPH_TOOL_COMMANDS = {
     "large-functions",
     "refactor",
 }
+
+
+_PATH_REPO_COMMANDS = frozenset({
+    "install",
+    "init",
+    "uninstall",
+    "build",
+    "update",
+    "postprocess",
+    "embed",
+    "watch",
+    "status",
+    "forget",
+    "visualize",
+    "wiki",
+    "detect-changes",
+    "dead-code",
+    "serve",
+    "mcp",
+    *_GRAPH_TOOL_COMMANDS,
+})
+
+
+def _canonicalize_repo_argument(args: argparse.Namespace) -> None:
+    """Canonicalize path-valued ``--repo`` arguments in place.
+
+    Commands whose ``--repo`` value is a repository *name* rather than a path
+    (eval configs and daemon log aliases) are deliberately excluded. Every
+    path consumer receives the same absolute, symlink-resolved spelling before
+    it opens a database or compares stored paths.
+    """
+    repo = getattr(args, "repo", None)
+    if args.command in _PATH_REPO_COMMANDS and repo:
+        args.repo = str(Path(repo).expanduser().resolve())
 
 
 def _find_explicit_repo_root(start: Path) -> "Path | None":
@@ -600,8 +694,383 @@ def _run_graph_tool_command(args, repo_root: Path) -> None:
     print(json.dumps(result, indent=2, default=str))
 
 
+#: Exit code for "another writer holds the lock; nothing was done".
+#:
+#: ``EX_TEMPFAIL`` from sysexits.h rather than 1: the condition is temporary
+#: and expected, so a hook or script can tell it apart from a real failure
+#: (bad config, corrupt database) without parsing the message, while still
+#: seeing a non-zero status the way the SQLite busy timeout used to report it.
+EXIT_TEMPFAIL = getattr(os, "EX_TEMPFAIL", 75)
+
+
+def _exit_if_contended(result: dict) -> None:
+    """Stop when another writer already owns this repository's graph.
+
+    The process holding the lock is writing the same graph, so this invocation
+    has nothing left to do. ``EXIT_TEMPFAIL`` says so precisely: non-zero, so a
+    caller cannot mistake a skip for success, but distinct from the exit code
+    of an actual failure.
+    """
+    if result.get("status") != "contended":
+        return
+    print(f"Skipped: {result.get('summary', 'another write is running')}", file=sys.stderr)
+    sys.exit(EXIT_TEMPFAIL)
+
+
+def _warn_failed_files(result: dict) -> None:
+    """Report files that failed to parse; their previous graph rows are kept."""
+    failed = result.get("errors") or []
+    if not failed:
+        return
+    names = ", ".join(str(item.get("file", "?")) for item in failed[:5])
+    extra = f" (+{len(failed) - 5} more)" if len(failed) > 5 else ""
+    print(
+        f"Warning: {len(failed)} file(s) failed to parse and were not updated: "
+        f"{names}{extra}",
+        file=sys.stderr,
+    )
+
+
+def _open_graph_store(db_path: Path, command: str):
+    """Open a store; CLI builds request recovery inside their write lock."""
+    from .tools._common import _open_graph_store as open_store
+
+    return open_store(db_path, command)
+
+
+def _ensure_project_marker(repo_root: Path) -> None:
+    """Let a plain directory pass tool validation, without opening graph.db.
+
+    ``build``, ``update`` and ``postprocess`` all accept one, and each now
+    reaches the tools before anything has created the data directory.
+    """
+    if repo_root.is_dir() and not any(
+        (repo_root / marker).exists() for marker in (".git", ".svn", ".code-review-graph")
+    ):
+        from .incremental import _create_data_dir
+        _create_data_dir(repo_root / ".code-review-graph")
+
+
+def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> None:
+    """Run writers before the generic CLI store initialization."""
+    from .incremental import assert_graph_serves_root, get_db_path
+
+    _ensure_project_marker(repo_root)
+    if args.command == "build":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
+        )
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=True,
+                recover_corrupt=True,
+                repo_root=str(repo_root),
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        parsed = result.get("files_parsed", 0)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            print(
+                f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
+                f"(postprocess={pp})"
+            )
+            if result.get("errors"):
+                print(f"Errors: {len(result['errors'])}")
+
+    elif args.command == "update":
+        pp = (
+            "none"
+            if getattr(args, "skip_postprocess", False)
+            else ("minimal" if getattr(args, "skip_flows", False) else "full")
+        )
+        from .tools.build import build_or_update_graph
+
+        previous_disable = logging.root.manager.disable
+        if args.quiet:
+            logging.disable(logging.INFO)
+        try:
+            result = build_or_update_graph(
+                full_rebuild=False,
+                repo_root=str(repo_root),
+                base=args.base,
+                postprocess=pp,
+                wait_for_lock=getattr(args, "wait", False),
+                **embedding_refresh_kwargs,
+            )
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            logging.disable(previous_disable)
+        _exit_if_contended(result)
+        if result.get("status") == "error":
+            print(f"Error: {result.get('summary', 'update failed')}", file=sys.stderr)
+            sys.exit(1)
+        nodes = result.get("total_nodes", 0)
+        edges = result.get("total_edges", 0)
+        if not args.quiet:
+            if result.get("build_type") == "full":
+                # No usable incremental base (fresh/legacy graph, or the
+                # last-synced commit was lost to a rewrite/shallow clone),
+                # so the update fell back to a full rebuild.
+                parsed = result.get("files_parsed", 0)
+                print(
+                    f"Full rebuild (no usable incremental base): "
+                    f"{parsed} files, {nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+            else:
+                updated = result.get("files_updated", 0)
+                print(
+                    f"Incremental: {updated} files updated, "
+                    f"{nodes} nodes, {edges} edges"
+                    f" (postprocess={pp})"
+                )
+        _warn_failed_files(result)
+
+        # --brief: append a one-line change-impact summary with the same
+        # estimated context-savings approximation that detect-changes uses.
+        # Same baseline (changed files vs analysis response), so the two
+        # commands are directly comparable.
+        if getattr(args, "brief", False) and not args.quiet:
+            from .changes import analyze_changes
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+                format_context_savings_panel,
+            )
+            from .incremental import discover_review_changes
+
+            # Reuse the base the update actually resolved to (args.base is
+            # None by default now, which get_changed_files cannot accept),
+            # then apply the same merge-base rule as detect-changes so a
+            # branch ref scopes the summary to this branch's own commits.
+            changed, brief_base = discover_review_changes(
+                repo_root, result.get("base_resolved") or "HEAD~1"
+            )
+            if changed:
+                from .locking import WriteLock
+
+                db_path = get_db_path(repo_root, read_only=True)
+                brief_lock = WriteLock(db_path)
+                if not brief_lock.acquire(blocking=True):
+                    from .tools.build import _write_skipped_response
+                    _exit_if_contended(_write_skipped_response(db_path, brief_lock.holder_pid()))
+                store = None
+                try:
+                    store = _open_graph_store(db_path, "update")
+                    assert_graph_serves_root(repo_root, store)
+                    impact = analyze_changes(
+                        store,
+                        changed,
+                        repo_root=str(repo_root),
+                        base=brief_base,
+                    )
+                    original_tokens = estimate_file_tokens(repo_root, changed)
+                    attach_context_savings(
+                        impact,
+                        original_tokens=original_tokens,
+                    )
+                    summary = impact.get("summary", "")
+                    if summary:
+                        print(summary)
+                    verified = None
+                    if getattr(args, "verify", False):
+                        from .context_savings import verify_with_tiktoken
+                        verified = verify_with_tiktoken(
+                            repo_root, changed, impact,
+                        )
+                        if verified is None:
+                            print(
+                                "Note: --verify requires tiktoken. "
+                                "Install with `pip install tiktoken`.",
+                            )
+                    panel = format_context_savings_panel(
+                        impact.get("context_savings"),
+                        original_tokens=original_tokens,
+                        response=impact,
+                        verified=verified,
+                    )
+                    if panel:
+                        print(panel)
+                finally:
+                    try:
+                        if store is not None:
+                            store.close()
+                    finally:
+                        brief_lock.release()
+
+
 def main() -> None:
-    """Main CLI entry point."""
+    """Main CLI entry point.
+
+    Two families of failure are reported here rather than raised, because
+    both of them are things the tool understands about itself.
+
+    Everything the tool can explain is raised as a
+    :class:`~code_review_graph.errors.CodeReviewGraphError` (a corrupt or
+    foreign graph, a data directory it may not write to, a VCS it could not
+    run) and printed in the house style the rest of the CLI already uses:
+    one ``Error: ...`` line on stderr, exit 1, no traceback to decode.
+
+    One of those is reported here only because nothing could be done about
+    it earlier: an unreadable graph reaches ``build`` as a rebuild (see
+    ``_open_graph_store``) and only every other command as a line.
+
+    A contended graph is separate, and stays separate: it is reported, not
+    raised, and never described as damage. The choice is deliberate:
+    ``build`` and ``update`` are run from pre-commit hooks and editor hooks
+    where blocking indefinitely would look like a hang, and retrying past
+    SQLite's five-second wait would only lengthen a hang whose real cause is
+    another process that has not finished. Failing immediately is also the
+    recoverable outcome — the VCS anchor is written only by a build that ran
+    to completion, so nothing marks the half-written graph as current and the
+    next run rebuilds it.
+
+    Anything else really is a bug and keeps its traceback.
+    """
+    try:
+        _dispatch()
+    except CodeReviewGraphError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from None
+    except sqlite3.OperationalError as exc:
+        if not is_lock_error(exc):
+            raise
+        print(
+            f"Error: another process is updating this graph ({exc}).\n"
+            "Nothing was written, and no freshness anchor was recorded, so the "
+            "graph is unchanged.\n"
+            "Wait for the other process (a watcher, a daemon, or another "
+            "code-review-graph run) to finish and try again.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+
+
+# Subparsers that _dispatch() needs after parsing, to print a subcommand's help
+# or raise a subcommand-scoped usage error. Populated by build_parser().
+_SUBCOMMANDS: dict[str, argparse.ArgumentParser] = {}
+
+
+def _is_seeded(args: argparse.Namespace) -> bool:
+    """True when the visualize invocation asks for a neighbourhood view."""
+    return bool(
+        getattr(args, "seed_symbol", None)
+        or getattr(args, "seed_file", None)
+        or getattr(args, "seed_changed", False)
+        or getattr(args, "seed_flow", None)
+        or getattr(args, "path_from", None)
+        or getattr(args, "path_to", None)
+    )
+
+
+def _check_visualize_flags(args: argparse.Namespace, fmt: str) -> None:
+    """Reject visualize flag combinations that cannot mean anything.
+
+    Every one of these used to be a silent no-op, which is the worst
+    outcome: the command succeeds, the flag is ignored, and the user
+    believes it took effect.
+    """
+    error = _SUBCOMMANDS["visualize"].error
+    seeded = _is_seeded(args)
+    tuning = [
+        name for name in ("depth", "render_depth", "max_nodes")
+        if getattr(args, name, None) is not None
+    ]
+    if getattr(args, "seed_changed_base", None) is not None and not getattr(
+        args, "seed_changed", False
+    ):
+        error("--seed-changed-base requires --seed-changed")
+    if fmt != "html":
+        if seeded:
+            error(
+                f"the seed flags build an interactive page and have no "
+                f"effect on --format {fmt}; drop the seed or use "
+                "--format html"
+            )
+        if tuning:
+            flag = "--" + tuning[0].replace("_", "-")
+            error(f"{flag} has no effect on --format {fmt}")
+        if getattr(args, "sidecar", False):
+            error(f"--sidecar has no effect on --format {fmt}")
+    if tuning and not seeded:
+        flag = "--" + tuning[0].replace("_", "-")
+        error(
+            f"{flag} only applies to a seeded view; add --seed-symbol, "
+            "--seed-file, --seed-changed, --seed-flow or "
+            "--path-from/--path-to"
+        )
+    if seeded and (getattr(args, "mode", "auto") or "auto") not in (
+        "auto", "full"
+    ):
+        error(
+            f"--mode {args.mode} aggregates the graph into bubbles, which is "
+            "the opposite of a seeded neighbourhood; use --mode full or drop "
+            "the seed"
+        )
+
+
+def _print_seed_budget(report: dict) -> None:
+    """Say what ``--max-nodes`` cost, so a trimmed view is never silent."""
+    if not report:
+        return
+    dropped = report.get("seeds_dropped", 0)
+    if dropped:
+        kept = report.get("seeds", 0)
+        requested = report.get("seeds_requested", kept + dropped)
+        print(
+            f"  --max-nodes {report.get('max_nodes')} kept the {kept} "
+            f"best-connected of {requested} seed nodes; {dropped} seeds and "
+            "every context hop were dropped"
+        )
+    elif report.get("truncated"):
+        print(
+            f"  --max-nodes {report.get('max_nodes')} trimmed the outer hops; "
+            f"every seed kept, {report.get('node_count')} nodes shipped"
+        )
+
+
+def _describe_visualization(
+    args: argparse.Namespace, vis_mode: str, depth: int
+) -> str:
+    """One-line description of what the generated page shows."""
+    if getattr(args, "path_from", None):
+        return f"path {args.path_from} -> {args.path_to}, depth {depth}"
+    seeds: list[str] = []
+    seeds.extend(getattr(args, "seed_symbol", None) or [])
+    seeds.extend(getattr(args, "seed_file", None) or [])
+    if getattr(args, "seed_changed", False):
+        seeds.append("changed files")
+    if getattr(args, "seed_flow", None):
+        seeds.append(f"flow {args.seed_flow}")
+    if seeds:
+        shown = ", ".join(seeds[:3])
+        if len(seeds) > 3:
+            shown += f", +{len(seeds) - 3} more"
+        return f"neighbourhood of {shown}, depth {depth}"
+    return vis_mode
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser.
+
+    Split out of :func:`_dispatch` so tests can assert on the flag surface
+    without executing a command.
+    """
     ap = argparse.ArgumentParser(
         prog="code-review-graph",
         description="Persistent incremental knowledge graph for code reviews",
@@ -752,6 +1221,13 @@ def main() -> None:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(build_cmd)
+    build_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # update
     update_cmd = sub.add_parser("update", help="Incremental update (only changed files)")
@@ -796,6 +1272,13 @@ def main() -> None:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(update_cmd)
+    update_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build for this repository is already running, wait for it "
+             "to finish instead of skipping. Default: report the overlap and "
+             "exit without re-parsing the same files.",
+    )
 
     # postprocess
     pp_cmd = sub.add_parser(
@@ -812,6 +1295,12 @@ def main() -> None:
         help="External directory to store graph database (useful for network shares)"
     )
     _add_embedding_refresh_args(pp_cmd)
+    pp_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If a build, update or postprocess is already running for this "
+             "repository, wait for it to finish instead of skipping.",
+    )
 
     # embed
     embed_cmd = sub.add_parser(
@@ -901,6 +1390,90 @@ def main() -> None:
         action="store_true",
         help="Start a local HTTP server to view the visualization (localhost:8765)",
     )
+    vis_group = vis_cmd.add_argument_group(
+        "neighbourhood view",
+        "Draw a neighbourhood instead of the whole repository. Seeded views "
+        "carry only the nodes within --depth hops of the seed; everything "
+        "else is left out of the payload, not dimmed.",
+    )
+    vis_group.add_argument(
+        "--seed-symbol",
+        action="append",
+        default=None,
+        metavar="SYMBOL",
+        help="Seed from a symbol (qualified name, 'file.py::name', or a bare "
+             "name). Repeatable.",
+    )
+    vis_group.add_argument(
+        "--seed-file",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="Seed from a file and its symbols; glob patterns allowed. "
+             "Repeatable.",
+    )
+    vis_group.add_argument(
+        "--seed-changed",
+        action="store_true",
+        help="Seed from the files changed against --seed-changed-base",
+    )
+    vis_group.add_argument(
+        "--seed-changed-base",
+        default=None,
+        metavar="REF",
+        help="Git ref --seed-changed diffs against (default: HEAD~1)",
+    )
+    vis_group.add_argument(
+        "--seed-flow",
+        default=None,
+        metavar="FLOW",
+        help="Seed from an execution flow (name or id); see 'flows'",
+    )
+    vis_group.add_argument(
+        "--path-from",
+        default=None,
+        metavar="SYMBOL",
+        help="Start symbol of a shortest-path query",
+    )
+    vis_group.add_argument(
+        "--path-to",
+        default=None,
+        metavar="SYMBOL",
+        help="End symbol of a shortest-path query; the path through CALLS, "
+             "IMPORTS_FROM and INHERITS is highlighted",
+    )
+    vis_group.add_argument(
+        "--depth",
+        type=int,
+        default=None,
+        metavar="K",
+        help=f"Hops of context to include around the seed "
+             f"(default: {NB_DEFAULT_DEPTH})",
+    )
+    vis_group.add_argument(
+        "--render-depth",
+        type=int,
+        default=None,
+        metavar="K",
+        help="Hops drawn before expanding on click (default: 1)",
+    )
+    vis_group.add_argument(
+        "--max-nodes",
+        type=int,
+        default=None,
+        metavar="N",
+        help=f"Hard cap on payload nodes. The outermost hop is trimmed "
+             f"first; once the outer hops are gone the seed set is trimmed "
+             f"too, so the cap always holds "
+             f"(default: {NB_DEFAULT_MAX_NODES})",
+    )
+    vis_group.add_argument(
+        "--sidecar",
+        action="store_true",
+        help="Write the payload to graph.data.js next to the page instead of "
+             "inlining it. Off by default: the default output is one "
+             "self-contained file",
+    )
     vis_cmd.add_argument(
         "--format",
         choices=["html", "json", "graphml", "cypher", "obsidian", "svg"],
@@ -950,7 +1523,7 @@ def main() -> None:
         default=None,
         help="Comma-separated benchmarks to run (token_efficiency, impact_accuracy, "
         "agent_baseline, flow_completeness, search_quality, build_performance, "
-        "multi_hop_retrieval)",
+        "multi_hop_retrieval, incremental_fidelity)",
     )
     eval_cmd.add_argument("--repo", default=None, help="Comma-separated repo config names")
     eval_cmd.add_argument("--all", action="store_true", dest="run_all", help="Run all benchmarks")
@@ -985,7 +1558,11 @@ def main() -> None:
         help="Analyze change impact against the existing graph (read-only). "
              "Does NOT re-parse files — for that, use 'update --brief'.",
     )
-    detect_cmd.add_argument("--base", default="HEAD~1", help="Git diff base (default: HEAD~1)")
+    detect_cmd.add_argument(
+        "--base",
+        default="HEAD~1",
+        help="Git diff base (branch refs use their merge base with HEAD; default: HEAD~1)",
+    )
     detect_cmd.add_argument(
         "--brief",
         action="store_true",
@@ -1011,6 +1588,8 @@ def main() -> None:
 
     # enrich (Claude Code PreToolUse hook; reads one JSON object from stdin)
     sub.add_parser("enrich", help="Enrich hook input with graph context")
+    sub.add_parser("hook-update", help="Update the graph for the hook payload cwd")
+    sub.add_parser("hook-status", help="Show graph status for the hook payload cwd")
 
     # dead-code
     dead_cmd = sub.add_parser(
@@ -1081,7 +1660,7 @@ def main() -> None:
     search_cmd.add_argument("query", help="Search string")
     search_cmd.add_argument(
         "--kind",
-        choices=["File", "Class", "Function", "Type", "Test"],
+        choices=["File", "Class", "Function", "Type", "Test", "YamlPath"],
         default=None,
     )
     search_cmd.add_argument("--limit", type=_positive_int, default=20)
@@ -1163,6 +1742,14 @@ def main() -> None:
         help="Start filesystem watch in a daemon thread while MCP server runs",
     )
     serve_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help=(
+            "Use one stdio MCP session with one child server per linked Git "
+            "worktree; requires explicit repo_root for non-primary worktrees"
+        ),
+    )
+    serve_cmd.add_argument(
         "--tools", default=None,
         help=(
             "Comma-separated list of tool names to expose "
@@ -1196,6 +1783,11 @@ def main() -> None:
         "--auto-watch",
         action="store_true",
         help="Start filesystem watch in a daemon thread while MCP server runs",
+    )
+    mcp_cmd.add_argument(
+        "--multi-worktree",
+        action="store_true",
+        help="Use one stdio MCP session with one child server per linked Git worktree",
     )
 
     # daemon
@@ -1273,6 +1865,19 @@ def main() -> None:
         help="Repository path or alias to remove",
     )
 
+    _SUBCOMMANDS.update({
+        "refactor": refactor_cmd,
+        "serve": serve_cmd,
+        "daemon": daemon_cmd,
+        "visualize": vis_cmd,
+    })
+    return ap
+
+
+def _dispatch() -> None:
+    """Parse arguments and run the requested subcommand."""
+    _configure_utf8_stdio()
+    ap = build_parser()
     args = ap.parse_args()
 
     if args.version:
@@ -1283,17 +1888,30 @@ def main() -> None:
         _print_banner()
         return
 
+    _canonicalize_repo_argument(args)
+
     if (
         args.command == "refactor"
         and args.mode == "rename"
         and (not args.old_name or not args.new_name)
     ):
-        refactor_cmd.error("rename requires --old-name and --new-name")
+        _SUBCOMMANDS["refactor"].error("rename requires --old-name and --new-name")
+
+    if args.command == "visualize":
+        # Before the graph is opened: a nonsense flag pair is a usage error,
+        # not something the user should have to build a graph to discover.
+        _check_visualize_flags(args, getattr(args, "format", "html") or "html")
 
     if args.command == "enrich":
         from .enrich import run_hook
 
         run_hook()
+        return
+
+    if args.command in {"hook-update", "hook-status"}:
+        from .hook_update import run_status_hook, run_update_hook
+
+        (run_update_hook if args.command == "hook-update" else run_status_hook)()
         return
 
     if args.command in _GRAPH_TOOL_COMMANDS:
@@ -1315,7 +1933,15 @@ def main() -> None:
                 raise SystemExit(1)
         else:
             repo_root = find_project_root()
-        db_path = get_db_path(repo_root)
+        db_path = get_db_path(repo_root, read_only=True)
+        if (
+            not db_path.exists()
+            and db_path.resolve() == (repo_root / ".code-review-graph" / "graph.db").resolve()
+            and (repo_root / ".code-review-graph.db").exists()
+        ):
+            # Preserve legacy migration without creating graph state for a
+            # repository that has never been indexed or an external data dir.
+            db_path = get_db_path(repo_root)
         if not db_path.exists():
             print(
                 f"No graph found at {db_path}. Run `code-review-graph build` first.",
@@ -1328,14 +1954,38 @@ def main() -> None:
     embedding_refresh_kwargs = _embedding_refresh_kwargs(args, ap)
 
     if args.command in ("serve", "mcp"):
-        from .main import main as serve_main
-
         auto_watch = getattr(args, "auto_watch", False)
+        multi_worktree = getattr(args, "multi_worktree", False)
         if args.command == "serve":
             if args.port is not None and not args.http:
-                serve_cmd.error("--port requires --http")
+                _SUBCOMMANDS["serve"].error("--port requires --http")
             if args.host is not None and not args.http:
-                serve_cmd.error("--host requires --http")
+                _SUBCOMMANDS["serve"].error("--host requires --http")
+        if multi_worktree:
+            if args.command == "serve" and args.http:
+                _SUBCOMMANDS["serve"].error(
+                    "--multi-worktree is only supported for stdio"
+                )
+            if os.environ.get("CRG_DATA_DIR", "").strip():
+                _SUBCOMMANDS[args.command].error(
+                    "--multi-worktree cannot be combined with CRG_DATA_DIR; "
+                    "use per-repository Registry data_dir entries instead"
+                )
+            from .multi_worktree import MultiWorktreeError, run_multi_worktree_server
+
+            try:
+                run_multi_worktree_server(
+                    repo_root=args.repo,
+                    auto_watch=auto_watch,
+                    tools=getattr(args, "tools", None),
+                )
+            except MultiWorktreeError as exc:
+                _SUBCOMMANDS[args.command].error(str(exc))
+            return
+
+        from .main import main as serve_main
+
+        if args.command == "serve":
             if args.http:
                 host = args.host if args.host is not None else "127.0.0.1"
                 port = args.port if args.port is not None else 5555
@@ -1355,7 +2005,7 @@ def main() -> None:
 
     if args.command == "daemon":
         if not args.daemon_command:
-            daemon_cmd.print_help()
+            _SUBCOMMANDS["daemon"].print_help()
             return
         from .daemon_cli import (
             _handle_add,
@@ -1520,12 +2170,19 @@ def main() -> None:
                     alias = entry.get("alias", "")
                     alias_str = f"  ({alias})" if alias else ""
                     print(f"  {entry['path']}{alias_str}")
+                    if registered_data_dir := entry.get("data_dir"):
+                        try:
+                            accessible = Path(registered_data_dir).is_dir()
+                        except OSError:
+                            accessible = False
+                        missing = " [MISSING]" if not accessible else ""
+                        print(f"    data_dir: {registered_data_dir}{missing}")
         return
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    from .graph import GraphStore
     from .incremental import (
+        assert_graph_serves_root,
         find_project_root,
         find_repo_root,
         get_db_path,
@@ -1535,28 +2192,36 @@ def main() -> None:
     if args.command == "postprocess":
         repo_root = Path(args.repo) if args.repo else find_project_root()
         _handle_data_dir_option(args, repo_root)
-        db_path = get_db_path(repo_root)
-        store = GraphStore(db_path)
-        try:
-            from .tools.build import run_postprocess
+        _ensure_project_marker(repo_root)
+        from .tools.build import run_postprocess
 
-            result = run_postprocess(
-                flows=not getattr(args, "no_flows", False),
-                communities=not getattr(args, "no_communities", False),
-                fts=not getattr(args, "no_fts", False),
-                repo_root=str(repo_root),
-                **embedding_refresh_kwargs,
+        result = run_postprocess(
+            flows=not getattr(args, "no_flows", False),
+            communities=not getattr(args, "no_communities", False),
+            fts=not getattr(args, "no_fts", False),
+            repo_root=str(repo_root),
+            wait_for_lock=getattr(args, "wait", False),
+            **embedding_refresh_kwargs,
+        )
+        _exit_if_contended(result)
+        parts = []
+        if result.get("flows_detected"):
+            parts.append(f"{result['flows_detected']} flows")
+        if result.get("communities_detected"):
+            parts.append(f"{result['communities_detected']} communities")
+        if result.get("fts_indexed"):
+            parts.append(f"{result['fts_indexed']} FTS entries")
+        print(f"Post-processing: {', '.join(parts) or 'done'}")
+        if result.get("build_incomplete"):
+            # Post-processing rebuilt derived data for the nodes that are
+            # stored, which is not the same as a repaired graph: the build
+            # that stored them never finished, so files are still missing.
+            print(
+                "Build state: INCOMPLETE - the last build stopped before "
+                "every file was stored, so files are still missing from "
+                "the graph. Post-processing cannot add them. Run "
+                "'code-review-graph build' to rebuild."
             )
-            parts = []
-            if result.get("flows_detected"):
-                parts.append(f"{result['flows_detected']} flows")
-            if result.get("communities_detected"):
-                parts.append(f"{result['communities_detected']} communities")
-            if result.get("fts_indexed"):
-                parts.append(f"{result['fts_indexed']} FTS entries")
-            print(f"Post-processing: {', '.join(parts) or 'done'}")
-        finally:
-            store.close()
         return
 
     if args.command == "embed":
@@ -1603,21 +2268,35 @@ def main() -> None:
         "wiki",
         "dead-code",
     )
-    status_data_dir = (
-        args.command == "status" and bool(getattr(args, "data_dir", None))
+    # Read-only consumers must not create graph.db / data dirs / registry
+    # entries when the graph is missing (follow-up to #777 / #782; see #803).
+    _read_only_db_cmds = frozenset({
+        "status",
+        "detect-changes",
+        "visualize",
+        "wiki",
+        "watch",
+    })
+    explicit_data_dir = bool(getattr(args, "data_dir", None))
+    read_only_explicit_data_dir = (
+        args.command in _read_only_db_cmds and explicit_data_dir
     )
-    if args.command in _data_dir_cmds and not status_data_dir:
+    if args.command in _data_dir_cmds and not read_only_explicit_data_dir:
         _handle_data_dir_option(args, repo_root)
 
-    if args.command == "status":
-        if status_data_dir:
+    if args.command in ("build", "update"):
+        _handle_build_update(args, repo_root, embedding_refresh_kwargs)
+        return
+
+    if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
+        if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
         else:
             db_path = get_db_path(repo_root, read_only=True)
         legacy_db = repo_root / ".code-review-graph.db"
         default_db = repo_root / ".code-review-graph" / "graph.db"
         if (
-            not status_data_dir
+            not read_only_explicit_data_dir
             and not db_path.exists()
             and db_path.resolve() == default_db.resolve()
             and legacy_db.exists()
@@ -1627,13 +2306,26 @@ def main() -> None:
             db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
-    if args.command in ("dead-code", "forget", "status") and not db_path.exists():
+    if (
+        args.command in ("dead-code", "forget", *_read_only_db_cmds)
+        and not db_path.exists()
+    ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
         )
         raise SystemExit(1)
-    store = GraphStore(db_path)
+    store = _open_graph_store(db_path, args.command)
+
+    try:
+        # A graph.db copied or cached from another checkout answers every
+        # question with that repository's symbols and absolute paths. The
+        # write side has refused that since #909; the read side used to
+        # accept it in silence.
+        assert_graph_serves_root(repo_root, store)
+    except BaseException:
+        store.close()
+        raise
 
     try:
         if args.command == "dead-code":
@@ -1658,138 +2350,13 @@ def main() -> None:
                     line = item.get("line", "?")
                     print(f"  [{kind}] {name}  ({file_path}:{line})")
 
-        elif args.command == "build":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=True,
-                    repo_root=str(repo_root),
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            finally:
-                logging.disable(previous_disable)
-            parsed = result.get("files_parsed", 0)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                print(
-                    f"Full build: {parsed} files, {nodes} nodes, {edges} edges "
-                    f"(postprocess={pp})"
-                )
-                if result.get("errors"):
-                    print(f"Errors: {len(result['errors'])}")
-
-        elif args.command == "update":
-            pp = (
-                "none"
-                if getattr(args, "skip_postprocess", False)
-                else ("minimal" if getattr(args, "skip_flows", False) else "full")
-            )
-            from .tools.build import build_or_update_graph
-
-            previous_disable = logging.root.manager.disable
-            if args.quiet:
-                logging.disable(logging.INFO)
-            try:
-                result = build_or_update_graph(
-                    full_rebuild=False,
-                    repo_root=str(repo_root),
-                    base=args.base,
-                    postprocess=pp,
-                    **embedding_refresh_kwargs,
-                )
-            finally:
-                logging.disable(previous_disable)
-            nodes = result.get("total_nodes", 0)
-            edges = result.get("total_edges", 0)
-            if not args.quiet:
-                if result.get("build_type") == "full":
-                    # No usable incremental base (fresh/legacy graph, or the
-                    # last-synced commit was lost to a rewrite/shallow clone),
-                    # so the update fell back to a full rebuild.
-                    parsed = result.get("files_parsed", 0)
-                    print(
-                        f"Full rebuild (no usable incremental base): "
-                        f"{parsed} files, {nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-                else:
-                    updated = result.get("files_updated", 0)
-                    print(
-                        f"Incremental: {updated} files updated, "
-                        f"{nodes} nodes, {edges} edges"
-                        f" (postprocess={pp})"
-                    )
-
-            # --brief: append a one-line change-impact summary with the same
-            # estimated context-savings approximation that detect-changes uses.
-            # Same baseline (changed files vs analysis response), so the two
-            # commands are directly comparable.
-            if getattr(args, "brief", False) and not args.quiet:
-                from .changes import analyze_changes
-                from .context_savings import (
-                    attach_context_savings,
-                    estimate_file_tokens,
-                    format_context_savings_panel,
-                )
-                from .incremental import (
-                    get_changed_files,
-                    get_staged_and_unstaged,
-                )
-
-                # Reuse the base the update actually resolved to (args.base is
-                # None by default now, which get_changed_files cannot accept).
-                brief_base = result.get("base_resolved") or "HEAD~1"
-                changed = get_changed_files(repo_root, brief_base)
-                if not changed:
-                    changed = get_staged_and_unstaged(repo_root)
-                if changed:
-                    impact = analyze_changes(
-                        store,
-                        changed,
-                        repo_root=str(repo_root),
-                        base=brief_base,
-                    )
-                    original_tokens = estimate_file_tokens(repo_root, changed)
-                    attach_context_savings(
-                        impact,
-                        original_tokens=original_tokens,
-                    )
-                    summary = impact.get("summary", "")
-                    if summary:
-                        print(summary)
-                    verified = None
-                    if getattr(args, "verify", False):
-                        from .context_savings import verify_with_tiktoken
-                        verified = verify_with_tiktoken(
-                            repo_root, changed, impact,
-                        )
-                        if verified is None:
-                            print(
-                                "Note: --verify requires tiktoken. "
-                                "Install with `pip install tiktoken`.",
-                            )
-                    panel = format_context_savings_panel(
-                        impact.get("context_savings"),
-                        original_tokens=original_tokens,
-                        response=impact,
-                        verified=verified,
-                    )
-                    if panel:
-                        print(panel)
-
         elif args.command == "status":
+            from .build_state import BUILD_IN_PROGRESS, read_build_state
+            from .tools.build import build_was_interrupted
+
             stats = store.get_stats()
+            interrupted = build_was_interrupted(store)
+            files_missing = read_build_state(store) == BUILD_IN_PROGRESS
             stored_branch = store.get_metadata("git_branch")
             stored_sha = store.get_metadata("git_head_sha")
             from .incremental import _git_branch_info, detect_vcs
@@ -1816,6 +2383,7 @@ def main() -> None:
                     "current_sha": current_sha,
                     "svn_branch": stored_svn_branch,
                     "svn_revision": stored_rev,
+                    "build_incomplete": interrupted,
                 }))
             elif not args.quiet:
                 print(f"Nodes: {stats.total_nodes}")
@@ -1823,6 +2391,23 @@ def main() -> None:
                 print(f"Files: {stats.files_count}")
                 print(f"Languages: {', '.join(stats.languages)}")
                 print(f"Last updated: {stats.last_updated or 'never'}")
+                if interrupted and files_missing:
+                    # Nothing derived can put back a file that was never
+                    # parsed, so this one names the repair that works.
+                    print(
+                        "Build state: INCOMPLETE - the last build stopped "
+                        "before every file was stored, so files are missing "
+                        "from the graph. Run 'code-review-graph build' to "
+                        "rebuild it."
+                    )
+                elif interrupted:
+                    # The nodes can all be present and the graph still be a
+                    # half-built one: search and flows are derived afterwards.
+                    print(
+                        "Build state: INCOMPLETE - the last build stopped before "
+                        "post-processing finished, so search and flows may be "
+                        "missing. Run 'code-review-graph update' to repair it."
+                    )
                 if stored_branch:
                     print(f"Built on branch: {stored_branch}")
                 if stored_sha:
@@ -1896,7 +2481,13 @@ def main() -> None:
         elif args.command == "visualize":
             from .incremental import get_data_dir
 
-            data_dir = get_data_dir(repo_root)
+            # Prefer an explicit --data-dir so read-only resolution still
+            # writes exports next to the graph without registry side-effects.
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
             fmt = getattr(args, "format", "html") or "html"
 
             if fmt == "json":
@@ -1924,18 +2515,68 @@ def main() -> None:
                 export_obsidian_vault(store, out)
                 print(f"Obsidian vault exported: {out}")
             elif fmt == "svg":
-                from .exports import export_svg
+                from .exports import MissingOptionalDependencyError, export_svg
 
                 out = data_dir / "graph.svg"
-                export_svg(store, out)
+                try:
+                    export_svg(store, out)
+                except MissingOptionalDependencyError as exc:
+                    # A missing optional dependency is a user-fixable setup
+                    # problem, not a crash: one line, no traceback, exit 1.
+                    print(f"Error: {exc}", file=sys.stderr)
+                    sys.exit(1)
                 print(f"SVG exported: {out}")
             else:
+                from .neighbourhood import SeedResolutionError
                 from .visualization import generate_html
 
                 html_path = data_dir / "graph.html"
                 vis_mode = getattr(args, "mode", "auto") or "auto"
-                generate_html(store, html_path, mode=vis_mode)
-                print(f"Visualization ({vis_mode}): {html_path}")
+                depth = getattr(args, "depth", None)
+                depth = NB_DEFAULT_DEPTH if depth is None else depth
+                max_nodes = getattr(args, "max_nodes", None)
+                max_nodes = (
+                    NB_DEFAULT_MAX_NODES if max_nodes is None else max_nodes
+                )
+                seed_files = list(getattr(args, "seed_file", None) or [])
+                if getattr(args, "seed_changed", False):
+                    from .incremental import get_changed_files
+
+                    base = args.seed_changed_base or "HEAD~1"
+                    changed = get_changed_files(repo_root, base=base)
+                    if not changed:
+                        print(
+                            f"No changed files against {base}; "
+                            "nothing to seed.",
+                            file=sys.stderr,
+                        )
+                        return
+                    seed_files.extend(changed)
+                seed_report: dict = {}
+                try:
+                    generate_html(
+                        store,
+                        html_path,
+                        mode=vis_mode,
+                        seed_symbols=getattr(args, "seed_symbol", None),
+                        seed_files=seed_files or None,
+                        seed_flow=getattr(args, "seed_flow", None),
+                        path_from=getattr(args, "path_from", None),
+                        path_to=getattr(args, "path_to", None),
+                        depth=depth,
+                        render_depth=getattr(args, "render_depth", None),
+                        max_nodes=max_nodes,
+                        report=seed_report,
+                        sidecar=getattr(args, "sidecar", False),
+                    )
+                except (SeedResolutionError, ValueError) as exc:
+                    print(f"visualize: {exc}", file=sys.stderr)
+                    sys.exit(2)
+                label = _describe_visualization(args, vis_mode, depth)
+                print(f"Visualization ({label}): {html_path}")
+                _print_seed_budget(seed_report)
+                if getattr(args, "sidecar", False):
+                    print(f"Payload sidecar: {html_path.parent / 'graph.data.js'}")
                 if getattr(args, "serve", False):
                     import functools
                     import http.server
@@ -1960,7 +2601,12 @@ def main() -> None:
             from .incremental import get_data_dir
             from .wiki import generate_wiki
 
-            wiki_dir = get_data_dir(repo_root) / "wiki"
+            if getattr(args, "data_dir", None):
+                data_dir = Path(args.data_dir).expanduser().resolve()
+                data_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                data_dir = get_data_dir(repo_root)
+            wiki_dir = data_dir / "wiki"
             result = generate_wiki(store, wiki_dir, force=args.force)
             total = result["pages_generated"] + result["pages_updated"] + result["pages_unchanged"]
             print(
@@ -1977,12 +2623,16 @@ def main() -> None:
                 attach_context_savings,
                 estimate_file_tokens,
             )
-            from .incremental import get_changed_files, get_staged_and_unstaged
+            from .incremental import discover_review_changes
 
-            base = args.base
-            changed = get_changed_files(repo_root, base)
-            if not changed:
-                changed = get_staged_and_unstaged(repo_root)
+            # discover_review_changes runs the same three steps on the
+            # short discovery budget, with require_vcs throughout: this
+            # command's exit code is a review gate, so "I could not look"
+            # must never render as "there is nothing to review" — a CI job
+            # keyed on exit 0 would wave through a pull request nobody read.
+            # ChangeDiscoveryError reaches main() and becomes one
+            # `Error: ...` line and exit 1.
+            changed, base = discover_review_changes(repo_root, args.base)
 
             if not changed:
                 print("No changes detected.")
@@ -1993,6 +2643,7 @@ def main() -> None:
                     repo_root=str(repo_root),
                     base=base,
                     include_churn=getattr(args, "churn", False),
+                    require_vcs=True,
                 )
                 original_tokens = estimate_file_tokens(repo_root, changed)
                 attach_context_savings(
