@@ -77,6 +77,67 @@ _COLLISION_IDENTITY_RE = re.compile(
 )
 
 
+# Bound on the order-preserving pairing below, in DP steps:
+# (shorter list) x (size difference + 1) squared. Past it, pairs are taken in
+# order from the start.
+_ORDERED_PAIRS_MAX_STEPS = 1_000_000
+
+
+def _ordered_pairs(new_lines: list[int], old_lines: list[int]) -> list[tuple[int, int]]:
+    """Pair two sorted line lists in order, as an edit would have moved them.
+
+    Returns ``(new_position, old_position)`` pairs covering the shorter list,
+    never crossing two pairs. Equal lengths pair one-to-one in order. When
+    definitions were added or removed, the pairing whose line offsets change
+    least is chosen: an insertion shifts everything after it by one amount,
+    so ``[10, 20]`` becoming ``[3, 16, 26]`` pairs 16 and 26, not 3 and 16.
+    """
+    if len(new_lines) == len(old_lines):
+        return [(i, i) for i in range(len(new_lines))]
+    new_is_longer = len(new_lines) > len(old_lines)
+    longer, shorter = (new_lines, old_lines) if new_is_longer else (old_lines, new_lines)
+    if not shorter:
+        return []
+    skips = len(longer) - len(shorter)
+    sign = 1 if new_is_longer else -1
+
+    def offset(i: int, j: int) -> int:
+        return (longer[i] - shorter[j]) * sign
+
+    pairs: list[tuple[int, int]] = []
+    if len(shorter) * (skips + 1) ** 2 > _ORDERED_PAIRS_MAX_STEPS:
+        pairs = [(j, j) for j in range(len(shorter))]
+    else:
+        # cost[k]: shorter[j] paired with longer[j + k]; the cost is the first
+        # offset plus every change of offset between consecutive pairs.
+        cost = [abs(offset(k, 0)) for k in range(skips + 1)]
+        back: list[list[int]] = [[-1] * (skips + 1)]
+        for j in range(1, len(shorter)):
+            step = [0] * (skips + 1)
+            choice = [0] * (skips + 1)
+            for k in range(skips + 1):
+                here = offset(j + k, j)
+                best_cost, best_k = -1, 0
+                for previous in range(k + 1):
+                    candidate = cost[previous] + abs(
+                        here - offset(j - 1 + previous, j - 1),
+                    )
+                    if best_cost < 0 or candidate < best_cost:
+                        best_cost, best_k = candidate, previous
+                step[k] = best_cost
+                choice[k] = best_k
+            back.append(choice)
+            cost = step
+        k = min(range(skips + 1), key=lambda item: (cost[item], item))
+        for j in range(len(shorter) - 1, -1, -1):
+            pairs.append((j + k, j))
+            k = back[j][k]
+        pairs.reverse()
+    if new_is_longer:
+        return pairs
+    return [(short, long_) for long_, short in pairs]
+
+
 def _compatible_edge_languages(language: str) -> tuple[str, ...]:
     """Return languages that can safely share unresolved bare edge targets."""
     normalized = language.casefold()
@@ -1058,21 +1119,35 @@ class GraphStore:
                 assigned.add(row["qualified_name"])
                 used_old_ids.add(row["id"])
 
-            pairs: list[tuple[int, int, int, sqlite3.Row]] = []
+            # Semantically identical definitions are told apart only by their
+            # order. Nearest-line pairing swaps twins once enough lines are
+            # inserted above them, so pair each signature group in order.
+            new_by_signature: dict[tuple[Any, ...], list[int]] = {}
             for index in indices:
-                signature = self._semantic_signature(nodes[index])
-                for row in candidates:
-                    if self._row_semantic_signature(row) != signature:
-                        continue
-                    distance = abs(nodes[index].line_start - row["line_start"])
-                    pairs.append((distance, index, row["id"], row))
-
-            for _, index, row_id, row in sorted(pairs):
-                if planned[index] is not None or row_id in used_old_ids:
+                if planned[index] is None:
+                    new_by_signature.setdefault(
+                        self._semantic_signature(nodes[index]), [],
+                    ).append(index)
+            old_by_signature: dict[tuple[Any, ...], list[sqlite3.Row]] = {}
+            for row in candidates:
+                if row["id"] not in used_old_ids:
+                    old_by_signature.setdefault(
+                        self._row_semantic_signature(row), [],
+                    ).append(row)
+            for signature, group in new_by_signature.items():
+                old_group = old_by_signature.get(signature)
+                if not old_group:
                     continue
-                planned[index] = row["qualified_name"]
-                assigned.add(row["qualified_name"])
-                used_old_ids.add(row_id)
+                group.sort(key=lambda i: (nodes[i].line_start, i))
+                old_group.sort(key=lambda r: (r["line_start"], r["id"]))
+                for new_pos, old_pos in _ordered_pairs(
+                    [nodes[i].line_start for i in group],
+                    [r["line_start"] for r in old_group],
+                ):
+                    row = old_group[old_pos]
+                    planned[group[new_pos]] = row["qualified_name"]
+                    assigned.add(row["qualified_name"])
+                    used_old_ids.add(row["id"])
 
             for index in indices:
                 if planned[index] is not None:

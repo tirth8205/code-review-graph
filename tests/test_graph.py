@@ -2101,3 +2101,59 @@ class TestQualifiedNameCollisionLifecycle:
         assert {n.qualified_name for n in self.store.get_nodes_by_file(path)} == {
             f"{path}::f{i}" for i in range(300)
         }
+
+    @pytest.mark.parametrize("shift", [1, 6, 30])
+    def test_identical_duplicates_keep_their_order_across_a_large_shift(self, shift):
+        """Nearest-line pairing swapped identical twins at 10 and 20 once six
+        lines were inserted above both (16 is nearer 20 than 10). Each one must
+        keep its own identity, so each caller still names the same definition.
+        """
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 20)], [],
+        )
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+        assert first != second
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10 + shift), self._render(path, 20 + shift)], [],
+        )
+
+        assert self._identity_at(path, 10 + shift) == first
+        assert self._identity_at(path, 20 + shift) == second
+
+    @pytest.mark.parametrize(("new_lines", "added"), [
+        ([16, 26, 40], 40),   # shifted by six, a third twin appended
+        ([10, 15, 20], 15),   # a third twin inserted between, nothing shifted
+        ([3, 16, 26], 3),     # a third twin inserted above both, which shift
+    ])
+    def test_identical_duplicates_keep_order_when_one_is_added(self, new_lines, added):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 20)], [],
+        )
+        first, second = self._identity_at(path, 10), self._identity_at(path, 20)
+
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, line) for line in new_lines], [],
+        )
+
+        kept = [line for line in new_lines if line != added]
+        assert [self._identity_at(path, line) for line in kept] == [first, second]
+        assert self._identity_at(path, added) not in (first, second)
+
+    def test_identical_duplicates_keep_order_when_one_is_removed(self):
+        path = "/test/target.py"
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, line) for line in (10, 20, 30)], [],
+        )
+        identities = [self._identity_at(path, line) for line in (10, 20, 30)]
+
+        # The middle twin is deleted (three lines) and the rest shift by -3.
+        self.store.store_file_nodes_edges(
+            path, [self._render(path, 10), self._render(path, 27)], [],
+        )
+
+        assert [self._identity_at(path, line) for line in (10, 27)] == [
+            identities[0], identities[2],
+        ]
