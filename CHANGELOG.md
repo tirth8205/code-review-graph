@@ -98,6 +98,22 @@
   answers it. An ambiguous answer at `minimal` is five short rows sent once.
 - `callees_of` lists calls bound to a real node before bare-name guesses, so a
   few `len` calls can no longer fill the window and hide the real callee.
+- `install` no longer wipes a hook settings file it cannot read as strict JSON.
+  One comment or trailing comma in `.claude/settings.json`, `.qoder/settings.json`,
+  `.codebuddy/settings.json`, `.gemini/settings.json`, `~/.codex/hooks.json` or
+  `~/.cursor/hooks.json` made the reader fail, and the file was overwritten with
+  nothing but our hooks and no backup, so every setting in it was lost. These
+  files are now read as JSONC, only what changed is written into a commented
+  file, and every comment stays with the setting it describes. A file that cannot
+  be merged, such as broken JSON or a `hooks` setting of the wrong shape, is left
+  byte for byte as it was and named in the output, and `install` no longer says
+  it installed those hooks. So is a file with a `/*` comment that never closes,
+  where the hooks would have landed inside the comment and never run. A refused
+  Gemini CLI install no longer rewrites the hook scripts in `.gemini/hooks/`.
+  Cursor's file now gets a `.bak` like the others.
+- Adding a member to a commented JSONC config, as `install` does for an MCP
+  entry, no longer moves a trailing comment onto the new member or drops a
+  comment from an empty object.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a
