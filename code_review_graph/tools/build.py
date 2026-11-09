@@ -799,27 +799,37 @@ def build_or_update_graph(
 
 
 def _lock_or_skip(
-    db_path: Path, wait_for_lock: bool
+    db_path: Path,
+    wait_for_lock: bool,
+    outcome: str = "skipped instead of repeating the work",
 ) -> tuple[WriteLock | None, dict[str, Any] | None]:
     """Take the graph's write lock, or build the response for standing down.
 
     Returns the held lock and ``None``, or ``None`` and the response to return.
-    Both graph-writing entry points (``build_or_update_graph`` and
-    ``run_postprocess``) share this so neither can drift from the other.
+    Every graph-writing entry point shares this so none can drift from the
+    others. *outcome* says what standing down means for the caller.
     """
     lock = WriteLock(db_path)
     if lock.acquire(blocking=wait_for_lock):
         return lock, None
-    return None, _write_skipped_response(db_path, lock.holder_pid())
+    return None, _write_skipped_response(db_path, lock.holder_pid(), outcome)
 
 
-def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, Any]:
+def _write_skipped_response(
+    db_path: Path,
+    holder_pid: int | None,
+    outcome: str = "skipped instead of repeating the work",
+) -> dict[str, Any]:
     """Describe a run that stood down because another writer owns the graph.
 
     ``contended`` rather than ``error``: nothing failed, and a caller switching
     on the existing statuses would otherwise have no way to tell a lost race
     from a broken database. The counts are present and zero so callers that
     unpack them keep working.
+
+    A second build really does repeat the first, but ``forget`` and ``embed``
+    are not covered by whatever else is running, so they pass their own
+    *outcome* rather than tell the reader the work is in hand.
     """
     holder = f"PID {holder_pid}" if holder_pid is not None else "another process"
     return {
@@ -834,10 +844,9 @@ def _write_skipped_response(db_path: Path, holder_pid: int | None) -> dict[str, 
         "total_edges": 0,
         "errors": [],
         "summary": (
-            f"Another code-review-graph build, update or postprocess is "
-            f"already running for this repository ({holder}); skipped instead "
-            f"of repeating the work. Pass wait_for_lock=True (CLI: --wait) to "
-            f"block until it finishes."
+            f"Another code-review-graph write is already running for this "
+            f"repository ({holder}); {outcome}. Pass wait_for_lock=True "
+            f"(CLI: --wait) to block until it finishes."
         ),
     }
 

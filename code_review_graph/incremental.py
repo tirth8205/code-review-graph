@@ -35,6 +35,7 @@ from .constants import (
 from .csharp_resolver import restore_csharp_references
 from .errors import ChangeDiscoveryError, GraphRootMismatchError, GraphStoreError
 from .graph import GraphStore
+from .locking import WriteLock, write_lock_path
 
 
 def _get_code_parser_cls():
@@ -2815,6 +2816,16 @@ class _WatchDebouncer(threading.Thread):
             self._events.append(event)
             self._cond.notify()
 
+    def requeue(self, events: list[Any]) -> None:
+        """Put a batch that could not be written back, ahead of newer events.
+
+        The run loop then waits out one quiet interval and hands it on again,
+        with the condition released, so a stop still gets through meanwhile.
+        """
+        with self._cond:
+            self._events[:0] = events
+            self._cond.notify()
+
     def stop(self) -> None:
         """Ask the thread to exit; events still queued are dropped, as in watchdog."""
         with self._cond:
@@ -2890,6 +2901,7 @@ _WATCH_SPLIT_MIN_DIRS = env_int("CRG_WATCH_SPLIT_MIN_DIRS", 4)
 _WATCH_HEALTH_INTERVAL = env_float("CRG_WATCH_HEALTH_INTERVAL", 10.0)
 _WATCH_STOP_TIMEOUT = 10.0
 _WATCH_TICK_SECONDS = 1.0
+_WATCH_LOCK_POLL_SECONDS = 0.25
 # A failed recursive promotion is retried no more often than this. Each attempt
 # walks the parent subtree and, on Linux, can leave a partly built inotify
 # instance behind, so retrying every tick would consume the quota it waits for.
@@ -3712,6 +3724,19 @@ def _is_csharp_project(relative_path: str) -> bool:
     return relative_path.lower().endswith(".csproj")
 
 
+def _event_only_touches(event: Any, target: Path) -> bool:
+    """True when every path *event* names is *target*, however it is spelled."""
+    paths = [
+        os.fsdecode(path)
+        for path in (event.src_path, getattr(event, "dest_path", ""))
+        if path
+    ]
+    if not paths or any(os.path.basename(path) != target.name for path in paths):
+        return False
+    wanted = os.path.normcase(os.path.realpath(target))
+    return all(os.path.normcase(os.path.realpath(path)) == wanted for path in paths)
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
@@ -3736,6 +3761,9 @@ def _create_watch_handler(
             # batches here, and startup reconciliation and post-processing in
             # watch().  The store's one connection cannot take two writers.
             self.lock = threading.Lock()
+            # The same again across processes, taken per batch: a watcher lives
+            # for days, and holding this throughout would stop every build.
+            self.write_lock = WriteLock(store.db_path)
 
         def _relative_path(self, path: str, *, apply_ignores: bool = True) -> str | None:
             candidate = Path(os.path.abspath(path))
@@ -3903,11 +3931,21 @@ def _create_watch_handler(
             return paths
 
         def process(self, events: list[FileSystemEvent]) -> None:
-            # Recorded before the work so a stalled watcher is distinguishable
-            # from a watcher whose repository is simply quiet.
-            self.last_event_at = time.time()
-            self.events_seen += len(events)
             with self.lock:
+                if not self.write_lock.acquire():
+                    # Another process is writing this graph. Never wait for it
+                    # here: the debouncer calls this with its condition held,
+                    # so waiting would stop the watcher from shutting down.
+                    logger.debug(
+                        "Watch batch for %s waits on the write lock (PID %s)",
+                        repo_root, self.write_lock.holder_pid(),
+                    )
+                    debouncer.requeue(events)
+                    return
+                # Recorded before the work so a stalled watcher is distinguishable
+                # from a watcher whose repository is simply quiet.
+                self.last_event_at = time.time()
+                self.events_seen += len(events)
                 try:
                     files_updated, newly_included = self._refresh_ignore_patterns(events)
                     changed_files = sorted(
@@ -3933,6 +3971,8 @@ def _create_watch_handler(
                         _raise_watch_postprocess_warnings(postprocess_result)
                 except BaseException as exc:
                     self.failure = exc
+                finally:
+                    self.write_lock.release()
 
         def raise_if_failed(self) -> None:
             if self.failure is not None:
@@ -3940,12 +3980,18 @@ def _create_watch_handler(
 
     processor = WatchBatchProcessor()
     debouncer = _WatchDebouncer(_DEBOUNCE_SECONDS, processor.process)
+    write_lock_file = write_lock_path(store.db_path)
 
     class GraphUpdateHandler(FileSystemEventHandler):
         def dispatch(self, event: FileSystemEvent) -> None:
             if event.event_type not in {"created", "modified", "deleted", "moved"}:
                 return
             if event.is_directory and event.event_type == "modified":
+                return
+            if _event_only_touches(event, write_lock_file):
+                # Every batch rewrites the lock file when it takes the lock. A
+                # watch on the whole repository sees that, and acting on it
+                # would take the lock again, once a debounce, for ever.
                 return
             if event.is_directory and on_directory_changed is not None:
                 on_directory_changed()
@@ -4001,6 +4047,28 @@ def _sync_watch_tree(supervisor: _WatchSupervisor, handler: Any) -> None:
         handler.dispatch(DirCreatedEvent(path))
     for path in vanished:
         handler.dispatch(DirDeletedEvent(path))
+
+
+def _wait_for_watch_write_lock(
+    lock: WriteLock,
+    supervisor: _WatchSupervisor,
+    stop_event: threading.Event | None,
+) -> bool:
+    """Take the write lock for startup, waiting out whoever holds it.
+
+    A watcher started during a build has work to do once the build ends, so it
+    waits rather than stands down, and the daemon does not see it die. It polls:
+    a blocking lock could not notice *stop_event* and would hold up an MCP
+    server's shutdown, and the heartbeat has to keep going or a healthy watcher
+    reads as stalled. Returns False if told to stop first.
+    """
+    while not lock.acquire():
+        supervisor.report_health(observer_alive=True, phase="initial-build")
+        if stop_event is None:
+            time.sleep(_WATCH_LOCK_POLL_SECONDS)
+        elif stop_event.wait(_WATCH_LOCK_POLL_SECONDS):
+            return False
+    return True
 
 
 def _install_sigterm_interrupt() -> Callable[[], None]:
@@ -4099,11 +4167,16 @@ def watch(
         with handler.serialized():
             observer.start()
             observer_started = True
-            initial = incremental_update(repo_root, store, changed_files=[])
-            _raise_watch_update_errors(initial, "initial watch reconciliation")
-            if initial["files_updated"] > 0 and on_files_updated is not None:
-                postprocess_result = on_files_updated(store)
-                _raise_watch_postprocess_warnings(postprocess_result)
+            write_lock = WriteLock(store.db_path)
+            if _wait_for_watch_write_lock(write_lock, supervisor, stop_event):
+                try:
+                    initial = incremental_update(repo_root, store, changed_files=[])
+                    _raise_watch_update_errors(initial, "initial watch reconciliation")
+                    if initial["files_updated"] > 0 and on_files_updated is not None:
+                        postprocess_result = on_files_updated(store)
+                        _raise_watch_postprocess_warnings(postprocess_result)
+                finally:
+                    write_lock.release()
     except BaseException:
         # Outside the lock, so a batch already waiting can finish; stopping the
         # debouncer joins it, and no writer outlives this call.

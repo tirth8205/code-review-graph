@@ -186,13 +186,14 @@ class TestEmbeddingNodeEnumeration:
         graph.commit()
         db_path = graph.db_path
         graph.close()
+        (tmp_path / ".code-review-graph").mkdir(exist_ok=True)
         provider = _StubProvider()
         with (
             patch("code_review_graph.embeddings.get_provider", return_value=provider),
             patch("code_review_graph.tools.docs.get_db_path", return_value=db_path),
             patch(
                 "code_review_graph.tools.docs._get_store",
-                side_effect=lambda root: (GraphStore(db_path), tmp_path),
+                side_effect=lambda root, **_kw: (GraphStore(db_path), tmp_path),
             ),
         ):
             first = embed_graph(str(tmp_path))

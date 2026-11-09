@@ -350,6 +350,13 @@
     `it "tests json output"` is not a test of `json`.
   - A Ruby or Java method called only by its tests stays a flow entry point, as
     it was when those calls did not bind.
+- `forget`, `embed` and `watch` now obey the write lock, as `build`, `update` and
+  `postprocess` already did, so none of them can rewrite a graph that a build has
+  only half written. `forget` and `embed` take it for the whole run and exit `75`
+  if another writer holds it, saying that nothing was done; both take `--wait`.
+  `embed_graph_tool` answers `status: contended`. `watch` takes it for each write
+  and lets go between them, so a running watcher never stops a build. If the lock
+  is held, a watcher keeps its changes and retries, and can still be stopped.
 - TypeScript and JavaScript imports resolve against `compilerOptions.baseUrl`
   when no `paths` pattern matches them, as `tsc` does. A tsconfig that sets
   `baseUrl` without `paths` resolved no non-relative import at all: on a

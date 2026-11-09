@@ -986,6 +986,87 @@ def _handle_build_update(args, repo_root: Path, embedding_refresh_kwargs) -> Non
                         brief_lock.release()
 
 
+def _handle_forget(args, repo_root: Path, db_path: Path, *, legacy: bool = False) -> None:
+    """Drop files from the graph. A real run holds the write lock throughout.
+
+    Another writer does not cover this work, so standing down says nothing was
+    forgotten. A dry run takes no lock, so it opens the graph read-only: a
+    writable open would upgrade an older schema. *legacy* means the graph is
+    still the old top-level ``.code-review-graph.db``; a real run moves it into
+    *db_path* only once it holds the lock, and a dry run reads it where it is.
+    """
+    from .incremental import _prepare_db_path, assert_graph_serves_root
+
+    lock = None
+    if not args.dry_run:
+        from .tools.build import _lock_or_skip
+
+        lock, contended = _lock_or_skip(
+            db_path, args.wait, outcome="nothing was forgotten",
+        )
+        if contended is not None:
+            _exit_if_contended(contended)
+    store = None
+    try:
+        if args.dry_run:
+            from .graph import GraphStore
+
+            store = GraphStore(
+                repo_root / ".code-review-graph.db" if legacy else db_path,
+                read_only=True,
+            )
+        else:
+            if legacy:
+                _prepare_db_path(repo_root, db_path)
+            store = _open_graph_store(db_path, args.command)
+        assert_graph_serves_root(repo_root, store)
+        stored_files = store.get_all_files()
+        targets = _match_files_to_forget(stored_files, args.paths, repo_root)
+        if not targets:
+            print("No parsed files matched the given path(s).")
+            print(f"The graph currently tracks {len(stored_files)} file(s).")
+            return
+        print(
+            "[dry-run] Would forget these files:"
+            if args.dry_run
+            else "Forgetting these files:"
+        )
+        for file_path in targets:
+            try:
+                display = os.path.relpath(file_path, str(repo_root))
+            except ValueError:
+                display = file_path
+            print(f"  {display}")
+        if args.dry_run:
+            print(
+                f"\n[dry-run] {len(targets)} file(s) would be removed "
+                "from the graph. No changes made."
+            )
+            return
+
+        from .forget import forget_files
+
+        summary = forget_files(store, repo_root, targets)
+        reparsed = summary.get("reparsed", [])
+        if reparsed:
+            print(
+                f"  re-resolved {len(reparsed)} referring file(s) "
+                "so no edges dangle"
+            )
+        remaining = len(stored_files) - len(targets)
+        print(
+            f"\nForgot {len(targets)} file(s); "
+            f"{remaining} file(s) remain in the graph."
+        )
+    finally:
+        try:
+            if store is not None:
+                store.close()
+        finally:
+            if lock is not None:
+                lock.release()
+
+
 def main() -> None:
     """Main CLI entry point.
 
@@ -1423,6 +1504,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="External directory to store graph database (useful for network shares)"
     )
+    embed_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If another write to this graph is running, wait for it to finish "
+             "instead of exiting without embedding.",
+    )
 
     # watch
     watch_cmd = sub.add_parser("watch", help="Watch for changes and auto-update")
@@ -1472,6 +1559,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help="External directory to store graph database (useful for network shares)"
+    )
+    forget_cmd.add_argument(
+        "--wait",
+        action="store_true",
+        help="If another write to this graph is running, wait for it to finish "
+             "instead of exiting without forgetting anything.",
     )
 
     # visualize
@@ -2346,7 +2439,9 @@ def _dispatch() -> None:
             repo_root=str(repo_root),
             model=args.model,
             provider=args.provider,
+            wait_for_lock=args.wait,
         )
+        _exit_if_contended(result)
         if result.get("status") == "error":
             logging.error(result.get("error", "embed_graph failed"))
             sys.exit(1)
@@ -2401,6 +2496,7 @@ def _dispatch() -> None:
         _handle_build_update(args, repo_root, embedding_refresh_kwargs)
         return
 
+    legacy_pending = False
     if args.command in (*_read_only_db_cmds, "dead-code", "forget"):
         if read_only_explicit_data_dir:
             db_path = Path(args.data_dir).expanduser().resolve() / "graph.db"
@@ -2415,19 +2511,27 @@ def _dispatch() -> None:
             and legacy_db.exists()
         ):
             # Preserve the established one-time legacy migration, but do not
-            # materialize graph state when neither database exists.
-            db_path = get_db_path(repo_root)
+            # materialize graph state when neither database exists. ``forget``
+            # moves it itself, once it holds the write lock.
+            if args.command == "forget":
+                legacy_pending = True
+            else:
+                db_path = get_db_path(repo_root)
     else:
         db_path = get_db_path(repo_root)
     if (
         args.command in ("dead-code", "forget", *_read_only_db_cmds)
         and not db_path.exists()
+        and not legacy_pending
     ):
         print(
             f"No graph found at {db_path}. Run `code-review-graph build` first.",
             file=sys.stderr,
         )
         raise SystemExit(1)
+    if args.command == "forget":
+        _handle_forget(args, repo_root, db_path, legacy=legacy_pending)
+        return
     store = _open_graph_store(db_path, args.command)
 
     try:
@@ -2536,46 +2640,6 @@ def _dispatch() -> None:
                         print(f"SVN branch: {stored_svn_branch}")
                     if stored_rev:
                         print(f"SVN revision at build: {stored_rev}")
-
-        elif args.command == "forget":
-            stored_files = store.get_all_files()
-            targets = _match_files_to_forget(stored_files, args.paths, repo_root)
-            if not targets:
-                print("No parsed files matched the given path(s).")
-                print(f"The graph currently tracks {len(stored_files)} file(s).")
-            else:
-                header = (
-                    "[dry-run] Would forget these files:"
-                    if args.dry_run
-                    else "Forgetting these files:"
-                )
-                print(header)
-                for file_path in targets:
-                    try:
-                        display = os.path.relpath(file_path, str(repo_root))
-                    except ValueError:
-                        display = file_path
-                    print(f"  {display}")
-                if args.dry_run:
-                    print(
-                        f"\n[dry-run] {len(targets)} file(s) would be removed "
-                        "from the graph. No changes made."
-                    )
-                else:
-                    from .forget import forget_files
-
-                    summary = forget_files(store, repo_root, targets)
-                    reparsed = summary.get("reparsed", [])
-                    if reparsed:
-                        print(
-                            f"  re-resolved {len(reparsed)} referring file(s) "
-                            "so no edges dangle"
-                        )
-                    remaining = len(stored_files) - len(targets)
-                    print(
-                        f"\nForgot {len(targets)} file(s); "
-                        f"{remaining} file(s) remain in the graph."
-                    )
 
         elif args.command == "watch":
             from .postprocessing import run_post_processing

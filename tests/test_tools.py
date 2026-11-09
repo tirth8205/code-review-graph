@@ -1443,7 +1443,7 @@ class TestEmbedGraphProviderErrors:
         (tmp_path / ".code-review-graph").mkdir()
         store = MagicMock()
         monkeypatch.setattr(
-            docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
+            docs_module, "_get_store", lambda repo_root=None, **_kw: (store, tmp_path),
         )
         result = docs_module.embed_graph(
             repo_root=str(tmp_path), provider="moonbase",
