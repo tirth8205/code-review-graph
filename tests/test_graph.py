@@ -2344,3 +2344,32 @@ class TestQualifiedNameCollisionLifecycle:
         found = self.store.search_nodes_by_qualified_tail("Handler.process")
         assert sorted(n.line_start for n in found) == [10, 20]
         assert self.store.count_nodes_by_qualified_tail("Handler.process") == 2
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#586/#585: an unevidenced call still binds to the first duplicate, "
+        "so a later overload that is called looks uncalled",
+    )
+    def test_a_called_later_overload_is_not_dead_code(self, tmp_path):
+        """Staging collapses ``area(int)`` and ``area(int, int)`` into one called
+        node. Keeping both rows must not leave the second one without callers:
+        ``rect()`` calls it, yet every call is bound to the first overload.
+        """
+        from code_review_graph.refactor import find_dead_code
+
+        (tmp_path / "Shapes.java").write_text(
+            "public class Shapes {\n"
+            "    public int area(int side) { return side * side; }\n"
+            "    public int area(int w, int h) { return w * h; }\n"
+            "    public int perimeter(int side) { return area(side) + 4 * side; }\n"
+            "    public int rect() { return area(2, 3); }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        with GraphStore(tmp_path / "graph.db") as store:
+            full_build(tmp_path, store)
+            overloads = [n for n in store.get_nodes_by_file(
+                (tmp_path / "Shapes.java").as_posix()) if n.name == "area"]
+            assert len(overloads) == 2
+            dead = {d["qualified_name"] for d in find_dead_code(store)}
+        assert not {n.qualified_name for n in overloads} & dead
