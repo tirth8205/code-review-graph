@@ -1374,6 +1374,9 @@ class GraphStore:
         Endpoints under *local_prefix* (``"<file>::"``) belong to the file
         being stored, whose identities the caller has already aligned.
         """
+        # The parser loads on first use (#1139), so the module global is unset.
+        from .parser import EdgeInfo
+
         # The endpoint that names what was called: an unevidenced one on a
         # name several definitions share lists them all (#585).
         called = (
@@ -1840,6 +1843,9 @@ class GraphStore:
         collisions: dict[str, list[tuple[int, int, str]]],
     ) -> EdgeInfo:
         """Point an edge at the colliding definition evidenced by its line."""
+        # The parser loads on first use (#1139), so the module global is unset.
+        from .parser import EdgeInfo
+
         if edge.kind == "TESTED_BY":
             # The parser mints TESTED_BY as a test's CALLS edge reversed, on
             # the same line, so align it as that call and reverse it back.
