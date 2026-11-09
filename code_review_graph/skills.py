@@ -161,14 +161,23 @@ def _opencode_config_path(repo_root: Path) -> Path:
     return repo_root / "opencode.jsonc"
 
 
-def _mimo_config_path(repo_root: Path) -> Path:
-    """Return MiMo's existing project config, preferring JSONC."""
+def _mimo_config_paths(repo_root: Path) -> tuple[Path, Path]:
+    """Return both MiMo project configs, in the order MiMo Code loads them.
+
+    MiMo reads ``.mimocode/mimocode.json`` and then ``.mimocode/mimocode.jsonc``,
+    so an entry in either file is live.
+    """
     config_dir = repo_root / ".mimocode"
-    for name in ("mimocode.jsonc", "mimocode.json"):
-        path = config_dir / name
-        if path.exists():
-            return path
-    return config_dir / "mimocode.json"
+    return config_dir / "mimocode.json", config_dir / "mimocode.jsonc"
+
+
+def _mimo_config_path(repo_root: Path) -> Path:
+    """Return the MiMo project config install writes to.
+
+    An existing ``mimocode.jsonc`` wins, because MiMo loads it last.
+    """
+    json_path, jsonc_path = _mimo_config_paths(repo_root)
+    return jsonc_path if jsonc_path.exists() else json_path
 
 
 PLATFORMS: dict[str, dict[str, Any]] = {
@@ -232,6 +241,8 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     "mimo": {
         "name": "MiMo Code",
         "config_path": _mimo_config_path,
+        # Every file install may have written. Uninstall cleans each one.
+        "config_paths": _mimo_config_paths,
         "key": "mcp",
         "detect": lambda: bool(shutil.which("mimo"))
         or (Path.home() / ".config" / "mimocode").exists(),

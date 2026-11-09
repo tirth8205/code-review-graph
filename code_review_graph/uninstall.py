@@ -1028,7 +1028,13 @@ def _process_platform_configs(
         if platforms is not None and platform_name not in platforms:
             continue
         try:
-            path = _absolute(spec["config_path"](repo_root))
+            # ``config_paths`` lists every file install may have written for a
+            # platform with more than one (MiMo Code reads two); each is swept.
+            all_paths = spec.get("config_paths")
+            candidates = (
+                all_paths(repo_root) if all_paths else (spec["config_path"](repo_root),)
+            )
+            paths = list(dict.fromkeys(_absolute(candidate) for candidate in candidates))
             key = str(spec["key"])
             format_name = str(spec["format"])
         except (KeyError, OSError, TypeError, ValueError) as exc:
@@ -1036,49 +1042,50 @@ def _process_platform_configs(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
             continue
-        destination = _scope_for_config(
-            path,
-            repo_root,
-            home,
-            (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
-        )
-        if destination is None:
-            if path.exists():
-                report.skipped_paths.append(
-                    f"{path} ({platform_name} config is outside home/repo boundary)"
-                )
-            continue
-        config_scope, boundary = destination
-        if config_scope != scope:
-            continue
-        legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
-        for entry_key in (key, *legacy_keys):
-            identity = (path, entry_key, format_name)
-            if identity in seen:
+        for path in paths:
+            destination = _scope_for_config(
+                path,
+                repo_root,
+                home,
+                (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
+            )
+            if destination is None:
+                if path.exists():
+                    report.skipped_paths.append(
+                        f"{path} ({platform_name} config is outside home/repo boundary)"
+                    )
                 continue
-            seen.add(identity)
-            if format_name == "toml":
-                _remove_toml_entry(
-                    path, entry_key, boundary, report, dry_run=dry_run
-                )
-            elif format_name == "yaml":
-                _remove_yaml_entry(
-                    path, entry_key, boundary, report, dry_run=dry_run
-                )
-            elif format_name in {"object", "array"}:
-                _remove_mcp_entry(
-                    path,
-                    key=entry_key,
-                    format_name=format_name,
-                    boundary=boundary,
-                    report=report,
-                    dry_run=dry_run,
-                )
-            else:
-                report.skipped_paths.append(
-                    f"{path} ({platform_name} has unsupported config format "
-                    f"{format_name!r})"
-                )
+            config_scope, boundary = destination
+            if config_scope != scope:
+                continue
+            legacy_keys = tuple(str(item) for item in spec.get("legacy_keys", ()))
+            for entry_key in (key, *legacy_keys):
+                identity = (path, entry_key, format_name)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                if format_name == "toml":
+                    _remove_toml_entry(
+                        path, entry_key, boundary, report, dry_run=dry_run
+                    )
+                elif format_name == "yaml":
+                    _remove_yaml_entry(
+                        path, entry_key, boundary, report, dry_run=dry_run
+                    )
+                elif format_name in {"object", "array"}:
+                    _remove_mcp_entry(
+                        path,
+                        key=entry_key,
+                        format_name=format_name,
+                        boundary=boundary,
+                        report=report,
+                        dry_run=dry_run,
+                    )
+                else:
+                    report.skipped_paths.append(
+                        f"{path} ({platform_name} has unsupported config format "
+                        f"{format_name!r})"
+                    )
 
 
 def _generated_skill_slugs() -> list[str]:
