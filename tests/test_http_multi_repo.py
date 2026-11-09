@@ -394,7 +394,8 @@ def http_server(tmp_path_factory):
 
 
 async def _session_call(server: dict, calls: list[tuple[str, dict]]) -> list[Any]:
-    async with streamable_http_client(server["url"]) as (read, write, _):
+    async with streamable_http_client(server["url"]) as streams:
+        read, write = streams[0], streams[1]
         async with ClientSession(
             read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
         ) as session:
@@ -488,7 +489,8 @@ async def test_a_call_naming_no_repo_or_an_unregistered_one_is_refused(
 
 @pytest.mark.e2e
 async def test_the_handshake_tells_the_client_to_name_a_repo(http_server) -> None:
-    async with streamable_http_client(http_server["url"]) as (read, write, _):
+    async with streamable_http_client(http_server["url"]) as streams:
+        read, write = streams[0], streams[1]
         async with ClientSession(
             read, write, read_timeout_seconds=timedelta(seconds=CALL_TIMEOUT),
         ) as session:
