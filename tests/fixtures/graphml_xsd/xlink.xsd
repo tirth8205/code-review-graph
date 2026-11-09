@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+
+<xs:schema 
+        targetNamespace="http://www.w3.org/1999/xlink" 
+
+        xmlns:xlink="http://www.w3.org/1999/xlink" 
+        xmlns:xs="http://www.w3.org/2001/XMLSchema"
+
+        elementFormDefault="qualified"
+        attributeFormDefault="unqualified"
+>
+
+<xs:attribute name="type" default="simple">
+  <xs:simpleType>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="simple"/>
+      <xs:enumeration value="extended"/>
+      <xs:enumeration value="locator"/>
+      <xs:enumeration value="arc"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:attribute>
+
+<xs:attribute name="href" type="xs:anyURI" />
+
+<xs:attribute name="role" type="xs:string" />
+
+<xs:attribute name="arcrole" type="xs:string" />
+
+<xs:attribute name="title" type="xs:string" />
+
+<xs:attribute name="show" default="embed">
+  <xs:simpleType>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="new"/>
+      <xs:enumeration value="replace"/>
+      <xs:enumeration value="embed"/>
+      <xs:enumeration value="other"/>
+      <xs:enumeration value="none"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:attribute>
+
+<xs:attribute name="actuate" default="onLoad">
+  <xs:simpleType>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="onLoad"/>
+      <xs:enumeration value="onRequest"/>
+      <xs:enumeration value="other"/>
+      <xs:enumeration value="none"/>
+    </xs:restriction>
+  </xs:simpleType>
+</xs:attribute>
+
+<xs:attribute name="from" type="xs:string" />
+
+<xs:attribute name="to" type="xs:string" />
+
+</xs:schema>

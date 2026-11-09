@@ -1,17 +1,16 @@
 """Tests for SQLite transaction robustness and nesting scenarios."""
 
-import sqlite3
-import tempfile
 import logging
+import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-from code_review_graph.graph import GraphStore
-from code_review_graph.parser import NodeInfo, EdgeInfo
 from code_review_graph.communities import store_communities
 from code_review_graph.flows import store_flows
+from code_review_graph.graph import GraphStore
+from code_review_graph.parser import NodeInfo
+
 
 @pytest.fixture
 def store():
@@ -30,14 +29,14 @@ class TestTransactionRobustness:
         store._conn.execute("BEGIN")
         store._conn.execute("INSERT INTO metadata (key, value) VALUES (?, ?)", ("test", "val"))
         assert store._conn.in_transaction
-        
-        # This should trigger the guard, rollback the uncommitted insert, and start a new transaction
+
+        # Trigger the guard, rollback the uncommitted insert, and start a new transaction
         with caplog.at_level(logging.WARNING):
             store.store_file_nodes_edges("test.py", [], [])
-            
+
         assert "Rolling back uncommitted transaction before BEGIN IMMEDIATE" in caplog.text
         assert not store._conn.in_transaction
-        
+
         # Verify the "val" was rolled back
         assert store.get_metadata("test") is None
 
@@ -46,16 +45,16 @@ class TestTransactionRobustness:
         communities = [
             {"name": "comm1", "size": 1, "members": ["node1"]}
         ]
-        
+
         # Leave a transaction open
         store._conn.execute("BEGIN")
         store._conn.execute("INSERT INTO metadata (key, value) VALUES ('leak', 'stale')")
-        
+
         # Should rollback the 'leak' and successfully store communities
         store_communities(store, communities)
-        
+
         assert store.get_metadata("leak") is None
-        
+
         # Verify communities table
         count = store._conn.execute("SELECT count(*) FROM communities").fetchone()[0]
         assert count == 1
@@ -64,19 +63,19 @@ class TestTransactionRobustness:
         """Test that store_flows is atomic and handles existing transactions."""
         flows = [
             {
-                "name": "flow1", "entry_point_id": 1, "depth": 1, 
-                "node_count": 1, "file_count": 1, "criticality": 0.5, 
+                "name": "flow1", "entry_point_id": 1, "depth": 1,
+                "node_count": 1, "file_count": 1, "criticality": 0.5,
                 "path": [1]
             }
         ]
-        
+
         # Leave a transaction open
         store._conn.execute("BEGIN")
         store._conn.execute("INSERT INTO metadata (key, value) VALUES ('leak', 'stale')")
-        
+
         # Should rollback and store flows
         store_flows(store, flows)
-        
+
         assert store.get_metadata("leak") is None
         count = store._conn.execute("SELECT count(*) FROM flows").fetchone()[0]
         assert count == 1
@@ -85,24 +84,33 @@ class TestTransactionRobustness:
         """Verify that store_file_nodes_edges rolls back if an operation fails inside."""
         # Pre-seed some data
         node_keep = NodeInfo(
-            kind="File", name="keep", file_path="keep.py", 
+            kind="File", name="keep", file_path="keep.py",
+            line_start=1, line_end=10, language="python"
+        )
+        node_fail = NodeInfo(
+            kind="File", name="fail", file_path="fail.py",
             line_start=1, line_end=10, language="python"
         )
         store.store_file_nodes_edges("keep.py", [node_keep], [])
-        
-        # Attempt to store new file but force a failure
-        node_fail = NodeInfo(
-            kind="File", name="fail", file_path="fail.py", 
-            line_start=1, line_end=10, language="python"
+        store.store_file_nodes_edges("fail.py", [node_fail], [])
+
+        # Force a failure inside the batched write path. The old test patched
+        # store.upsert_node, but _replace_file_data no longer calls it, so the
+        # patch never fired (DID NOT RAISE). Inject the failure into the new
+        # path instead: a node whose `extra` is not JSON-serializable makes
+        # _replace_file_data raise while it builds the INSERT batch (after the
+        # file's rows were deleted), and the whole transaction must roll back.
+        node_fail_bad = NodeInfo(
+            kind="File", name="fail", file_path="fail.py",
+            line_start=1, line_end=10, language="python",
+            extra={"boom": object()},
         )
-        
-        with patch.object(store, 'upsert_node', side_effect=Exception("Simulated failure")):
-            with pytest.raises(Exception, match="Simulated failure"):
-                store.store_file_nodes_edges("fail.py", [node_fail], [])
-        
-        # Verify 'fail.py' data is NOT present
-        assert len(store.get_nodes_by_file("fail.py")) == 0
-        # Verify 'keep.py' data IS still present
+        with pytest.raises(TypeError, match="JSON serializable"):
+            store.store_file_nodes_edges("fail.py", [node_fail_bad], [])
+
+        # The failed transaction was rolled back: 'fail.py' still has its
+        # original node and 'keep.py' is untouched.
+        assert len(store.get_nodes_by_file("fail.py")) == 1
         assert len(store.get_nodes_by_file("keep.py")) == 1
 
     def test_public_rollback_api(self, store):
@@ -110,7 +118,7 @@ class TestTransactionRobustness:
         store._conn.execute("BEGIN")
         store._conn.execute("INSERT INTO metadata (key, value) VALUES ('rollback', 'me')")
         assert store._conn.in_transaction
-        
+
         store.rollback()
         assert not store._conn.in_transaction
         assert store.get_metadata("rollback") is None

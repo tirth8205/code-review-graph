@@ -4,12 +4,31 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .graph import GraphStore
 
 logger = logging.getLogger(__name__)
+
+
+def _shadows_stdlib_from_a_package(
+    module: str, candidate: str, python_files: set[str],
+) -> bool:
+    """Whether *candidate* only looks like the standard library's *module*.
+
+    ``src/flask/typing.py`` ends in ``typing``, but to be what ``import typing``
+    loads, ``src/flask`` would have to be on ``sys.path``, and a package's own
+    folder is not.
+    """
+    if module.split(".", 1)[0] not in sys.stdlib_module_names:
+        return False
+    parts = candidate.replace("\\", "/").split("/")
+    if parts[-1] == "__init__.py":
+        parts.pop()
+    folder = "/".join(parts[: -(module.count(".") + 1)])
+    return f"{folder}/__init__.py" in python_files
 
 
 def resolve_python_imports(store: GraphStore) -> dict[str, int]:
@@ -57,15 +76,8 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
         "ON f.kind = 'File' AND f.file_path = e.file_path "
         "WHERE e.kind = 'IMPORTS_FROM' AND f.language = 'python'"
     ).fetchall():
-        try:
-            extra = json.loads(edge["extra"] or "{}")
-        except (TypeError, json.JSONDecodeError):
-            extra = {}
-        if not isinstance(extra, dict):
-            extra = {}
-
-        raw_module = extra.get("python_module")
-        if not isinstance(raw_module, str):
+        raw_extra = edge["extra"]
+        if not raw_extra or raw_extra == "{}":
             raw_module = edge["target_qualified"]
             if (
                 raw_module in python_file_set
@@ -74,8 +86,30 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
                 or "\\" in raw_module
             ):
                 continue
+            extra = {}
+        else:
+            try:
+                extra = json.loads(raw_extra)
+            except (TypeError, json.JSONDecodeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+            raw_module = extra.get("python_module")
+            if not isinstance(raw_module, str):
+                raw_module = edge["target_qualified"]
+                if (
+                    raw_module in python_file_set
+                    or raw_module.startswith(".")
+                    or "/" in raw_module
+                    or "\\" in raw_module
+                ):
+                    continue
 
-        candidates = sorted(modules.get(raw_module, ()))
+        candidates = [
+            candidate
+            for candidate in sorted(modules.get(raw_module, ()))
+            if not _shadows_stdlib_from_a_package(raw_module, candidate, python_file_set)
+        ]
         desired_extra = dict(extra)
         desired_extra["python_module"] = raw_module
         if len(candidates) == 1:
@@ -105,12 +139,13 @@ def resolve_python_imports(store: GraphStore) -> dict[str, int]:
         elif candidates:
             ambiguous += 1
 
-    conn.executemany(
-        "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
-        updates,
-    )
     if updates:
-        conn.commit()
+        store._begin_immediate()
+        conn.executemany(
+            "UPDATE edges SET target_qualified = ?, extra = ? WHERE id = ?",
+            updates,
+        )
+        store.commit()
         store._invalidate_cache()
 
     result = {

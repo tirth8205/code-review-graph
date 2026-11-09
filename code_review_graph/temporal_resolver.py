@@ -106,20 +106,29 @@ def resolve_temporal_calls(store: GraphStore) -> dict:
     # -----------------------------------------------------------------------
     implementors: dict[str, list[str]] = {}
     for row in conn.execute(
-        "SELECT source_qualified, target_qualified FROM edges WHERE kind = 'INHERITS'"
+        "SELECT e.source_qualified, e.target_qualified FROM edges e "
+        "JOIN nodes n ON n.qualified_name = e.source_qualified "
+        "WHERE e.kind = 'INHERITS' AND n.language IN ('java', 'kotlin', 'scala')"
     ).fetchall():
         iface = row["target_qualified"]
         impl = row["source_qualified"]
-        if any(impl.startswith(f) for f in java_files) or "::" in impl:
-            implementors.setdefault(iface, []).append(impl)
+        implementors.setdefault(iface, []).append(impl)
 
     # -----------------------------------------------------------------------
     # Resolve CALLS edges
     # -----------------------------------------------------------------------
-    calls_rows = conn.execute(
-        "SELECT id, source_qualified, target_qualified, extra, file_path "
-        "FROM edges WHERE kind = 'CALLS'"
-    ).fetchall()
+    java_file_list = sorted(java_files)
+    calls_rows = []
+    for start in range(0, len(java_file_list), 450):
+        batch = java_file_list[start : start + 450]
+        placeholders = ",".join("?" for _ in batch)
+        calls_rows.extend(
+            conn.execute(
+                "SELECT id, source_qualified, target_qualified, extra, file_path "
+                f"FROM edges WHERE kind = 'CALLS' AND file_path IN ({placeholders})",
+                batch,
+            ).fetchall()
+        )
 
     resolved = 0
 
@@ -197,7 +206,7 @@ def resolve_temporal_calls(store: GraphStore) -> dict:
         )
 
     if resolved:
-        conn.commit()
+        store.commit()
 
     logger.info("Temporal resolver: resolved %d CALLS edges in %d Java files",
                 resolved, len(java_files))

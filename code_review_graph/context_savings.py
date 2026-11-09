@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+from .context_history import CallInfo, record_call
+
 CHARS_PER_TOKEN = 4
 
 
@@ -51,14 +53,12 @@ def estimate_file_tokens(repo_root: Path, files: Iterable[str]) -> int:
     return total
 
 
-def estimate_context_savings(
-    *,
-    original_context: Any | None = None,
-    returned_context: Any | None = None,
-    original_tokens: int | None = None,
-    returned_tokens: int | None = None,
-) -> dict[str, int | bool] | None:
-    """Return tiny savings metadata, or None when no baseline is available."""
+def _token_counts(
+    original_context: Any | None,
+    returned_context: Any | None,
+    original_tokens: int | None,
+    returned_tokens: int | None,
+) -> tuple[int, int]:
     baseline = (
         original_tokens
         if original_tokens is not None
@@ -69,7 +69,10 @@ def estimate_context_savings(
         if returned_tokens is not None
         else estimate_tokens(returned_context)
     )
+    return baseline, returned
 
+
+def _savings(baseline: int, returned: int) -> dict[str, int | bool] | None:
     if baseline <= 0:
         return None
 
@@ -82,6 +85,19 @@ def estimate_context_savings(
     }
 
 
+def estimate_context_savings(
+    *,
+    original_context: Any | None = None,
+    returned_context: Any | None = None,
+    original_tokens: int | None = None,
+    returned_tokens: int | None = None,
+) -> dict[str, int | bool] | None:
+    """Return tiny savings metadata, or None when no baseline is available."""
+    return _savings(*_token_counts(
+        original_context, returned_context, original_tokens, returned_tokens,
+    ))
+
+
 def attach_context_savings(
     result: dict[str, Any],
     *,
@@ -89,16 +105,30 @@ def attach_context_savings(
     original_tokens: int | None = None,
     returned_context: Any | None = None,
     returned_tokens: int | None = None,
+    call: CallInfo | None = None,
 ) -> dict[str, Any]:
-    """Attach compact ``context_savings`` metadata when it can be estimated."""
-    estimate = estimate_context_savings(
-        original_context=original_context,
-        returned_context=result if returned_context is None else returned_context,
-        original_tokens=original_tokens,
-        returned_tokens=returned_tokens,
+    """Attach compact ``context_savings`` metadata when it can be estimated.
+
+    With *call* given, the same estimate is also appended to the opt-in
+    context history log (#813). That does nothing unless
+    ``CRG_CONTEXT_HISTORY`` is on; see ``context_history.py``.
+    """
+    baseline, returned = _token_counts(
+        original_context,
+        result if returned_context is None else returned_context,
+        original_tokens,
+        returned_tokens,
     )
+    estimate = _savings(baseline, returned)
     if estimate is not None:
         result["context_savings"] = estimate
+        if call is not None:
+            record_call(
+                call,
+                baseline=baseline,
+                returned=returned,
+                saved=int(estimate["saved_tokens"]),
+            )
     return result
 
 

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
+import io
 import json
+import os
+import pathlib
 import subprocess
 import sys
 from pathlib import Path
@@ -203,6 +207,217 @@ def test_test_gaps_section(report):
     assert "(auth/session.py:42)" in body
 
 
+def test_removed_symbols_section_names_what_still_uses_them(report):
+    """A deleted function and its live callers reach the comment."""
+    assert "### Removed symbols" not in render.render_markdown(report)
+    report = dict(report)
+    report["removed_symbols"] = [
+        {
+            "name": "format_filename",
+            "qualified_name": "src/utils.py::format_filename",
+            "file": "src/utils.py",
+            "old_line_start": 430,
+            "risk_score": 0.72,
+            "used_by": [
+                {"name": "convert", "qualified_name": "src/types.py::File.convert"},
+                {"name": "convert", "qualified_name": "src/types.py::Path.convert"},
+            ],
+            "used_by_total": 4,
+        },
+        {
+            "name": "dead",
+            "qualified_name": "src/utils.py::dead",
+            "file": "src/utils.py",
+            "old_line_start": 500,
+            "risk_score": 0.0,
+            "used_by": [],
+            "used_by_total": 0,
+        },
+    ]
+    report["removed_symbols_total"] = 3
+
+    body = render.render_markdown(report)
+
+    assert "### Removed symbols" in body
+    assert render.md_escape("src/utils.py::format_filename") in body
+    assert render.md_escape("src/utils.py") + ":430" in body
+    assert render.md_escape("src/types.py::File.convert") in body
+    assert "+2 more" in body
+    assert "nothing found" in body
+    assert "...and 1 more removed symbol(s)." in body
+    assert "| 0.72 | high | " in body
+    assert "3 removed, " in body.splitlines()[4]
+
+
+# ---------------------------------------------------------------------------
+# Indirect coverage (#1047): reached through a caller vs. no test in reach
+# ---------------------------------------------------------------------------
+
+
+def _indirect_report() -> dict:
+    """One unreached gap and one reached only through its caller."""
+    return {
+        "risk_score": 0.80,
+        "review_priorities": [
+            {
+                "qualified_name": "code_review_graph/main.py::_offload",
+                "name": "_offload",
+                "file_path": "code_review_graph/main.py",
+                "line_start": 130,
+                "risk_score": 0.62,
+                "is_test": False,
+            },
+            {
+                "qualified_name": "code_review_graph/incremental.py::orphan",
+                "name": "orphan",
+                "file_path": "code_review_graph/incremental.py",
+                "line_start": 900,
+                "risk_score": 0.55,
+                "is_test": False,
+            },
+        ],
+        "affected_flows": [],
+        "test_gaps": [
+            {
+                "name": "orphan",
+                "qualified_name": "code_review_graph/incremental.py::orphan",
+                "file": "code_review_graph/incremental.py",
+                "line_start": 900,
+                "line_end": 929,
+                "coverage": "none",
+            },
+            {
+                "name": "_offload",
+                "qualified_name": "code_review_graph/main.py::_offload",
+                "file": "code_review_graph/main.py",
+                "line_start": 130,
+                "line_end": 140,
+                "coverage": "indirect",
+                "covered_via": "code_review_graph/main.py::_run_off_loop",
+                "covered_depth": 1,
+                "covered_by": ["tests/test_main.py::test_offload"],
+            },
+        ],
+        "test_gaps_uncovered": 1,
+        "test_gaps_indirect": 1,
+    }
+
+
+def test_headline_splits_the_two_gap_kinds():
+    body = render.render_markdown(_indirect_report())
+    assert (
+        "2 test gap(s) (1 with no tested caller found, "
+        "1 reached only through a caller)"
+    ) in body
+
+
+def test_headline_never_claims_more_than_the_graph_knows():
+    """"No test in reach" is a claim about the suite; the graph reads edges.
+
+    Two symbols on the delta of #1047 are exercised by tests that load the
+    file through importlib, so no edge records it. They are correctly listed
+    as gaps, and describing them as having no test in reach was false.
+    """
+    body = render.render_markdown(_indirect_report())
+    assert "no test in reach" not in body
+    assert "That is execution" not in body
+    assert "not a record of execution" in body
+
+
+def test_indirect_gaps_get_their_own_section_naming_the_caller():
+    body = render.render_markdown(_indirect_report())
+    assert "### Test gaps" in body
+    assert "### Reached only through a caller" in body
+    gaps_at = body.index("### Test gaps")
+    indirect_at = body.index("### Reached only through a caller")
+    assert gaps_at < indirect_at
+    # The unreached one is under the first heading, not the second.
+    assert body.index(render.md_escape("incremental.py::orphan")) < indirect_at
+    assert render.md_escape("main.py::_run_off_loop") in body
+    assert "1 hop(s)" in body
+
+
+def test_tested_column_says_indirect_not_no():
+    body = render.render_markdown(_indirect_report())
+    offload_row = next(
+        line for line in body.splitlines() if "_offload" in line and "| 0.62" in line
+    )
+    assert offload_row.rstrip().endswith("| indirect |")
+    orphan_row = next(
+        line for line in body.splitlines() if "orphan" in line and "| 0.55" in line
+    )
+    assert orphan_row.rstrip().endswith("| no |")
+
+
+def test_a_report_without_coverage_keys_renders_as_before(report):
+    """Back-compat: a pre-#1047 report has no ``coverage`` field at all."""
+    body = render.render_markdown(report)
+    assert "### Test gaps" in body
+    assert "Covered only through a caller" not in body
+    assert "1 test gap(s)" in body
+    assert "no test in reach" not in body
+
+
+def test_truncated_report_uses_the_reported_counts():
+    """The gap list is bounded upstream; the split must not be recounted."""
+    payload = _indirect_report()
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    body = render.render_markdown(payload)
+    assert "60 with no tested caller found, 14 reached only through a caller" in body
+
+
+def test_truncated_headline_total_equals_its_own_parts():
+    """The total and the split have to come from the same place.
+
+    The headline used ``len(test_gaps)`` -- which every consumer bounds --
+    beside a split taken from the untruncated counts, so a bounded report
+    printed "25 test gap(s) (73 ..., 9 ...)": a number next to parts that do
+    not add up to it.
+    """
+    payload = _indirect_report()
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    headline = next(line for line in body.splitlines() if "Overall risk" in line)
+    assert "74 test gap(s)" in headline
+    assert "1 test gap(s)" not in headline
+
+
+def test_a_truncated_table_does_not_claim_a_symbol_is_tested():
+    """Absence from a bounded gap list is not evidence of having tests.
+
+    The Tested column is derived from the shipped ``test_gaps`` rows, so a
+    symbol the report itself classified as a gap rendered as "yes" once
+    truncation dropped its row -- the strongest possible overclaim.
+    """
+    payload = _indirect_report()
+    payload["test_gaps"] = []
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    rows = [line for line in body.splitlines() if line.startswith("| 0.")]
+    assert rows
+    assert not any(row.rstrip().endswith("| yes |") for row in rows)
+    assert all(row.rstrip().endswith("| ? |") for row in rows)
+
+
+def test_a_truncated_report_still_accounts_for_the_indirect_class():
+    """The headline promises the class; the body must not simply omit it."""
+    payload = _indirect_report()
+    # Only the unreached row survives truncation.
+    payload["test_gaps"] = payload["test_gaps"][:1]
+    payload["test_gaps_uncovered"] = 60
+    payload["test_gaps_indirect"] = 14
+    payload["test_gaps_total"] = 74
+    body = render.render_markdown(payload)
+    assert "14 more gap(s) are reached only through a caller" in body
+
+
 def test_token_savings_line(report):
     body = render.render_markdown(report)
     assert "**Token savings:**" in body
@@ -279,6 +494,529 @@ def test_body_size_capped():
 
 
 # ---------------------------------------------------------------------------
+# The byte budget, at the byte
+# ---------------------------------------------------------------------------
+#
+# _MAX_BODY is the cap .github/workflows/pr-review-comment.yml enforces, and
+# that workflow measures the artifact on disk -- which is the body plus the
+# newline main() writes after it. A body sized at exactly _MAX_BODY is
+# therefore a 60,001-byte file and is rejected. These tests pin the boundary
+# from both sides so the reservation cannot quietly go missing again.
+
+# Tail of the report's markdown table, in bytes, for a row whose symbol name
+# is one character: "| 0.50 | medium | m.py::a | m.py:1 | yes |" plus "\n".
+_TABLE_ROW_BYTES = 43
+
+
+def _padded_report(rows: int, tail_name_len: int) -> dict:
+    """A report whose rendered body grows one byte per unit of *tail_name_len*.
+
+    ``rows`` identical one-character rows get the body into the right
+    neighbourhood; the final row's symbol name is the fine adjustment. Both
+    stay inside ``md_escape``'s 120-character cell cap, so a name of length
+    *n* costs exactly *n* bytes.
+    """
+    def entry(name: str, line: int) -> dict:
+        return {
+            "qualified_name": f"m.py::{name}",
+            "risk_score": 0.5,
+            "file_path": "m.py",
+            "line_start": line,
+        }
+
+    priorities = [entry("a", 1) for _ in range(rows)]
+    priorities.append(entry("a" * tail_name_len, 1))
+    return {"risk_score": 0.5, "review_priorities": priorities}
+
+
+#: Every module global ``_fit_to_budget`` consults. Named rather than hard
+#: coded so lifting the budget keeps working if the cap is ever split again.
+_BUDGET_GLOBALS = ("_MAX_BODY", "_MAX_BODY_TEXT")
+
+
+def _untruncated_size(report: dict) -> int:
+    """Byte length of *report*'s body with the budget lifted out of the way."""
+    saved = {
+        name: getattr(render, name)
+        for name in _BUDGET_GLOBALS
+        if hasattr(render, name)
+    }
+    for name in saved:
+        setattr(render, name, 1 << 30)
+    try:
+        body = render.render_markdown(report, max_functions=1 << 20)
+    finally:
+        for name, value in saved.items():
+            setattr(render, name, value)
+    return len(body.encode("utf-8"))
+
+
+def report_rendering_to_exactly(target_bytes: int) -> dict:
+    """A report whose untruncated body is exactly *target_bytes* long.
+
+    Shared with ``tests/test_action_e2e.py``, which feeds the rendered
+    artifact to the privileged workflow's own validator.
+    """
+    low, high = 0, 4000
+    while low < high:
+        mid = (low + high + 1) // 2
+        if _untruncated_size(_padded_report(mid, 1)) <= target_bytes:
+            low = mid
+        else:
+            high = mid - 1
+    for tail in range(1, _TABLE_ROW_BYTES + 121):
+        report = _padded_report(low, tail)
+        if _untruncated_size(report) == target_bytes:
+            return report
+    raise AssertionError(f"could not build a report of exactly {target_bytes} bytes")
+
+
+def test_boundary_fixture_is_exact():
+    """Teeth for the two tests below: the fixture really hits the byte.
+
+    Without this, a tuner that silently landed 200 bytes short would make
+    every boundary assertion below pass vacuously.
+    """
+    for target in (render._MAX_BODY - 1, render._MAX_BODY, render._MAX_BODY + 1):
+        assert _untruncated_size(report_rendering_to_exactly(target)) == target
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_written_artifact_never_exceeds_the_consumer_cap(tmp_path, offset):
+    """One byte under the cap, exactly on it, and one byte over it.
+
+    The consumer stats the file, so the file is what is measured here.
+    """
+    target = render._MAX_BODY + offset
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report_rendering_to_exactly(target)), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    code = render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    )
+    assert code == 0
+    assert out.stat().st_size <= render._MAX_BODY, out.stat().st_size
+    assert "Powered by [code-review-graph]" in out.read_text(encoding="utf-8")
+
+
+def test_output_file_preserves_the_bytes_measured_by_the_budget(tmp_path, report):
+    """Writing a report must not add platform-specific CRLF bytes."""
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+
+    expected = render.render_markdown(report)
+    assert render.main(
+        ["--input", str(source), "--output", str(out)]
+    ) == 0
+
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# The artifact under Windows newline semantics (#1076, fixed in #1077)
+# ---------------------------------------------------------------------------
+#
+# On Windows a file opened for writing in text mode with newline=None turns
+# every "\n" into "\r\n", one extra byte per line the budget never counted.
+# POSIX CPython never translates, so on Linux and macOS the artifact is the
+# same whichever way main() writes it and the tests above cannot tell a text
+# write from a byte write. ``windows_text_writes`` reproduces the translation
+# in-process by handing newline="\r\n" -- os.linesep on Windows -- to every
+# text-mode write that left newline unset. The windows-native CI job does not
+# run this module, so this is where the Windows write path is exercised.
+
+
+def _is_text_write(mode: str) -> bool:
+    return "b" not in mode and any(flag in mode for flag in "wax+")
+
+
+@pytest.fixture()
+def windows_text_writes(monkeypatch):
+    """Make text-mode writes in this process translate newlines as Windows does."""
+    real_open = io.open
+
+    def win_open(file, mode="r", buffering=-1, encoding=None, errors=None,
+                 newline=None, closefd=True, opener=None):
+        if _is_text_write(mode) and newline is None:
+            newline = "\r\n"
+        return real_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+
+    def win_path_open(self, mode="r", buffering=-1, encoding=None, errors=None,
+                      newline=None):
+        return win_open(self, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(io, "open", win_open)
+    monkeypatch.setattr(builtins, "open", win_open)
+    # Path.open is what Path.write_text goes through on every supported
+    # Python; 3.10 bound io.open at import, so patching io alone misses it.
+    monkeypatch.setattr(pathlib.Path, "open", win_path_open)
+
+
+def test_the_windows_simulation_really_translates(tmp_path, windows_text_writes):
+    """Teeth for the tests below: an inert simulation would pass them vacuously."""
+    probe = tmp_path / "probe.md"
+    probe.write_text("x\n" * 1000, encoding="utf-8")
+    # The issue's own reproduction: 3000 bytes on Windows, 2000 on POSIX.
+    assert len(probe.read_bytes()) == 3000
+    with open(probe, "w", encoding="utf-8") as fh:
+        fh.write("a\n")
+    assert probe.read_bytes() == b"a\r\n"
+    probe.write_bytes(b"a\n")
+    assert probe.read_bytes() == b"a\n"
+    assert probe.read_text(encoding="utf-8") == "a\n", "reads must stay untouched"
+
+
+def _render_to_file(tmp_path: Path, report: dict, *extra: str) -> tuple[int, bytes]:
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(source), "--output", str(out), *extra])
+    return code, out.read_bytes()
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_windows_artifact_never_exceeds_the_consumer_cap(
+    tmp_path, windows_text_writes, offset
+):
+    """The boundary from #1076: 61,399 bytes on Windows before the fix."""
+    code, data = _render_to_file(
+        tmp_path,
+        report_rendering_to_exactly(render._MAX_BODY + offset),
+        "--max-functions",
+        "100000",
+    )
+    assert code == 0
+    assert b"\r" not in data
+    assert len(data) <= render._MAX_BODY, len(data)
+    assert b"Powered by [code-review-graph]" in data
+
+
+def test_windows_artifact_that_fits_is_written_whole(tmp_path, windows_text_writes):
+    """A 59,999-byte body is a 60,000-byte artifact on Windows too, not cut."""
+    code, data = _render_to_file(
+        tmp_path,
+        report_rendering_to_exactly(render._MAX_BODY - 1),
+        "--max-functions",
+        "100000",
+    )
+    assert code == 0
+    assert len(data) == render._MAX_BODY
+    assert b"*Report truncated.*" not in data
+
+
+def test_windows_truncated_multibyte_report_fits_the_cap(tmp_path, windows_text_writes):
+    """Non-ASCII names: the cap is UTF-8 bytes on disk, and the cut stays valid UTF-8."""
+    huge = {
+        "risk_score": 0.5,
+        "review_priorities": [
+            {
+                "qualified_name": f"src/café_日本.py::grüße_{i}_" + "é🚀" * 30,
+                "risk_score": 0.5,
+                "file_path": "src/café_日本.py",
+                "line_start": i,
+            }
+            for i in range(3000)
+        ],
+    }
+    code, data = _render_to_file(tmp_path, huge, "--max-functions", "3000")
+    assert code == 0
+    assert len(data) <= render._MAX_BODY, len(data)
+    assert b"\r" not in data
+    text = data.decode("utf-8")  # strict: a split code point would raise
+    assert "*Report truncated.*" in text
+    assert text.endswith(render.FOOTER + "\n")
+
+
+_NON_ASCII_REPORT = {
+    "risk_score": 0.5,
+    "changed_functions": [
+        {"qualified_name": "src/café.py::grüße", "file_path": "src/café.py",
+         "line_start": 3, "risk_score": 0.5},
+        {"qualified_name": "src/日本.py::関数_🚀", "file_path": "src/日本.py",
+         "line_start": 9, "risk_score": 0.4},
+    ],
+    "test_gaps": [
+        {"qualified_name": "src/café.py::grüße", "file_path": "src/café.py",
+         "line_start": 3},
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    ("input_bytes", "expected_body", "expected_code"),
+    [
+        pytest.param(
+            FIXTURE.read_bytes(),
+            lambda: render.render_markdown(
+                json.loads(FIXTURE.read_text(encoding="utf-8"))
+            ),
+            0,
+            id="analysis",
+        ),
+        pytest.param(
+            json.dumps(_NON_ASCII_REPORT, ensure_ascii=False).encode("utf-8"),
+            lambda: render.render_markdown(_NON_ASCII_REPORT),
+            0,
+            id="non-ascii-names",
+        ),
+        pytest.param(
+            # An older report shape: no review_priorities, no coverage counts.
+            json.dumps({"risk_score": 0.2, "changed_functions": [
+                {"qualified_name": "a.py::f", "file_path": "a.py", "line_start": 1}
+            ]}).encode("utf-8"),
+            lambda: render.render_markdown({"risk_score": 0.2, "changed_functions": [
+                {"qualified_name": "a.py::f", "file_path": "a.py", "line_start": 1}
+            ]}),
+            0,
+            id="legacy-report-shape",
+        ),
+        pytest.param(b"{}", lambda: render.render_markdown({}), 0, id="empty-report"),
+        pytest.param(
+            # detect-changes' clean-tree line as a Windows shell would save it.
+            b"No changes detected.\r\n",
+            render.render_no_changes,
+            0,
+            id="no-changes-crlf-input",
+        ),
+        pytest.param(
+            b"Error: could not determine the changes\r\n",
+            lambda: render.render_not_analyzed(
+                "Error: could not determine the changes\n"
+            ),
+            4,
+            id="not-analyzed",
+        ),
+    ],
+)
+def test_windows_output_file_is_the_measured_utf8_bytes(
+    tmp_path, windows_text_writes, input_bytes, expected_body, expected_code
+):
+    """Every body main() can write lands on disk as exactly the bytes it measured."""
+    source = tmp_path / "report.json"
+    source.write_bytes(input_bytes)
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(source), "--output", str(out)])
+    assert code == expected_code
+    assert out.read_bytes() == (expected_body() + "\n").encode("utf-8")
+
+
+def test_risk_gate_breach_still_writes_the_exact_artifact(tmp_path, windows_text_writes):
+    """Exit 3 is decided after the write; the file is complete and LF-only."""
+    out = tmp_path / "comment.md"
+    code = render.main(
+        ["--input", str(FIXTURE), "--output", str(out), "--fail-on-risk", "high"]
+    )
+    assert code == 3
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+def test_output_path_with_spaces_and_unicode(tmp_path, windows_text_writes):
+    out_dir = tmp_path / "runner temp é 日本"
+    out_dir.mkdir()
+    out = out_dir / "crg comment 🚀.md"
+    assert render.main(["--input", str(FIXTURE), "--output", str(out)]) == 0
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert out.read_bytes() == (expected + "\n").encode("utf-8")
+
+
+def test_rendering_twice_replaces_a_larger_artifact_exactly(tmp_path):
+    """A rerun into the same file leaves no tail of the previous, larger one."""
+    out = tmp_path / "comment.md"
+    out.write_bytes(b"stale\r\n" * 20_000)
+    args = ["--input", str(FIXTURE), "--output", str(out)]
+    assert render.main(args) == 0
+    first = out.read_bytes()
+    assert render.main(args) == 0
+    assert out.read_bytes() == first
+    expected = render.render_markdown(json.loads(FIXTURE.read_text(encoding="utf-8")))
+    assert first == (expected + "\n").encode("utf-8")
+
+
+@pytest.mark.parametrize("target", ["missing-dir", "is-a-directory"])
+def test_unwritable_output_returns_2(tmp_path, caplog, target):
+    """The byte write keeps the OSError path: exit 2 and a logged reason."""
+    if target == "missing-dir":
+        out = tmp_path / "no" / "such" / "dir" / "comment.md"
+    else:
+        out = tmp_path / "comment.md"
+        out.mkdir()
+    with caplog.at_level("ERROR", logger="render_pr_comment"):
+        code = render.main(["--input", str(FIXTURE), "--output", str(out)])
+    assert code == 2
+    assert "Cannot write output file" in caplog.text
+    if target == "missing-dir":
+        assert not out.exists()
+
+
+# The consumer itself: the validator step of the privileged workflow, read
+# straight out of pr-review-comment.yml together with the cap it enforces, so
+# a Windows-written artifact is judged by the real check rather than by a
+# restatement of it, and the renderer's budget cannot drift from that cap.
+COMMENT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "pr-review-comment.yml"
+
+
+def _trusted_validator() -> tuple[str, dict[str, str]]:
+    """The validator step's Python source and its declared environment."""
+    import yaml  # a runtime dependency, but only these tests need it
+
+    workflow = yaml.safe_load(COMMENT_WORKFLOW.read_text(encoding="utf-8"))
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            run = step.get("run") or ""
+            if "Report artifact is empty or too large" not in run:
+                continue
+            lines = run.split("\n")
+            start = lines.index("python - <<'PY'") + 1
+            end = next(i for i in range(start, len(lines)) if lines[i].strip() == "PY")
+            source = "\n".join(lines[start:end]) + "\n"
+            return source, {key: str(value) for key, value in step["env"].items()}
+    raise AssertionError("validator step not found in pr-review-comment.yml")
+
+
+def _run_trusted_validator(tmp_path: Path, download: Path) -> subprocess.CompletedProcess:
+    source, declared = _trusted_validator()
+    script = tmp_path / "validator.py"
+    script.write_bytes(source.encode("utf-8"))
+    env = dict(os.environ)
+    env.update(declared)
+    env.update(
+        {
+            "DOWNLOAD_DIR": str(download),
+            "COMMENT_BODY": str(tmp_path / "crg-comment-body.md"),
+            "VALIDATED_PR_NUMBER": str(tmp_path / "crg-pr-number.txt"),
+        }
+    )
+    return subprocess.run(
+        [sys.executable, str(script)],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def test_renderer_budget_is_the_cap_the_trusted_workflow_enforces():
+    _source, declared = _trusted_validator()
+    assert render._MAX_BODY == int(declared["MAX_REPORT_BYTES"])
+    assert render.MARKER == declared["TRUSTED_MARKER"]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_windows_artifact_at_the_cap_is_accepted_by_the_trusted_validator(
+    tmp_path, windows_text_writes, offset
+):
+    """#1076 end to end: the file main() writes on Windows passes the real check.
+
+    Before the fix all three were rejected ("Report artifact is empty or too
+    large"); the 59,999-byte body became the 61,399-byte artifact in the issue.
+    """
+    _source, declared = _trusted_validator()
+    cap = int(declared["MAX_REPORT_BYTES"])
+    source = tmp_path / "crg-report.json"
+    source.write_bytes(json.dumps(report_rendering_to_exactly(cap + offset)).encode("utf-8"))
+    download = tmp_path / "crg-report-download"
+    download.mkdir()
+    artifact = download / "crg-comment.md"
+    code = render.main(
+        ["--input", str(source), "--output", str(artifact), "--max-functions", "100000"]
+    )
+    assert code == 0
+    # pr-review.yml writes this on its Linux runner; bytes keep it exact here.
+    (download / "pr-number.txt").write_bytes(b"42\n")
+
+    completed = _run_trusted_validator(tmp_path, download)
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    wrapped = (tmp_path / "crg-comment-body.md").read_bytes().decode("utf-8")
+    assert wrapped.startswith(declared["TRUSTED_MARKER"] + "\n\n## code-review-graph review\n")
+    assert wrapped.rstrip("\n").endswith(render.FOOTER)
+
+
+@pytest.mark.parametrize(
+    "report_data",
+    [
+        pytest.param(json.loads(FIXTURE.read_text(encoding="utf-8")), id="analysis"),
+        pytest.param(_NON_ASCII_REPORT, id="non-ascii-names"),
+    ],
+)
+def test_windows_crlf_detect_changes_output_renders_the_exact_artifact(
+    tmp_path, windows_text_writes, report_data
+):
+    """The input the Action really gets on a Windows runner.
+
+    ``detect-changes`` prints ``json.dumps(result, indent=2)`` and the Action
+    redirects it into crg-report.json; Windows stdout is text mode, so that
+    file arrives ASCII-escaped with CRLF on every line. The artifact must be
+    the same LF-only bytes a Linux runner produces from the LF file.
+    """
+    printed = json.dumps(report_data, indent=2, default=str) + "\n"
+    lf_input = tmp_path / "lf.json"
+    lf_input.write_bytes(printed.encode("ascii"))
+    crlf_input = tmp_path / "crlf.json"
+    crlf_input.write_bytes(printed.replace("\n", "\r\n").encode("ascii"))
+    lf_out = tmp_path / "lf.md"
+    crlf_out = tmp_path / "crlf.md"
+
+    assert render.main(["--input", str(lf_input), "--output", str(lf_out)]) == 0
+    assert render.main(["--input", str(crlf_input), "--output", str(crlf_out)]) == 0
+
+    expected = (render.render_markdown(report_data) + "\n").encode("utf-8")
+    assert crlf_out.read_bytes() == expected
+    assert lf_out.read_bytes() == expected
+
+
+def test_a_body_that_still_fits_is_not_truncated(tmp_path):
+    """The reservation costs one byte, not a whole report.
+
+    A body of _MAX_BODY - 1 leaves exactly room for the newline, so it must
+    come through whole; truncating it would trade one bug for another.
+    """
+    report = report_rendering_to_exactly(render._MAX_BODY - 1)
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    ) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "*Report truncated.*" not in text
+    assert out.stat().st_size == render._MAX_BODY
+
+
+def test_a_body_that_only_fits_without_its_newline_is_truncated(tmp_path):
+    """And the byte on the other side of the line is cut.
+
+    A body of exactly _MAX_BODY would be a 60,001-byte artifact, which is
+    one byte over the cap the consumer enforces.
+    """
+    report = report_rendering_to_exactly(render._MAX_BODY)
+    source = tmp_path / "report.json"
+    source.write_text(json.dumps(report), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(source), "--output", str(out), "--max-functions", "100000"]
+    ) == 0
+    assert "*Report truncated.*" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_fit_to_budget_reserves_the_newline_the_artifact_carries(offset):
+    """The same boundary, straight at ``_fit_to_budget``."""
+    size = render._MAX_BODY + offset
+    body = ("line\n" * (size // 5)) + "x" * (size % 5)
+    assert len(body.encode("utf-8")) == size
+    fitted = render._fit_to_budget(body)
+    assert len((fitted + "\n").encode("utf-8")) <= render._MAX_BODY
+    if offset < 0:
+        assert fitted == body, "a body that already fits must not be cut"
+
+
+# ---------------------------------------------------------------------------
 # load_report / no-changes fallback
 # ---------------------------------------------------------------------------
 
@@ -325,6 +1063,47 @@ def test_main_no_changes_input(tmp_path):
     assert "No analyzable code changes" in out.read_text(encoding="utf-8")
 
 
+def test_is_clean_tree_only_matches_detect_changes_own_line():
+    """Anything else non-JSON is the analysis not having happened."""
+    assert render.is_clean_tree("No changes detected.\n")
+    assert not render.is_clean_tree("")
+    assert not render.is_clean_tree("Error: could not determine the changes: ...")
+    assert not render.is_clean_tree("No changes detected. Also: git exploded.")
+
+
+def test_main_not_analyzed_returns_4_and_says_so(tmp_path):
+    """A detect-changes failure must not render as an all-clear."""
+    src = tmp_path / "report.json"
+    src.write_text(
+        "Error: could not determine the changes: git could not be run.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "comment.md"
+    code = render.main(["--input", str(src), "--output", str(out)])
+    assert code == 4
+    body = out.read_text(encoding="utf-8")
+    assert body.startswith(render.MARKER)
+    assert "has not been reviewed" in body
+    assert "not an all-clear" in body
+    assert "No analyzable code changes" not in body
+
+
+def test_empty_detect_changes_output_is_not_an_all_clear(tmp_path):
+    """A command that died before printing anything is not a clean tree."""
+    src = tmp_path / "report.json"
+    src.write_text("", encoding="utf-8")
+    code = render.main(["--input", str(src), "--quiet"])
+    assert code == 4
+
+
+def test_not_analyzed_beats_fail_on_risk_none(tmp_path):
+    """An unknown risk is not a low one, so `none` cannot switch it off."""
+    src = tmp_path / "report.json"
+    src.write_text("Error: boom\n", encoding="utf-8")
+    code = render.main(["--input", str(src), "--quiet", "--fail-on-risk", "none"])
+    assert code == 4
+
+
 def test_main_missing_input_returns_2(tmp_path):
     code = render.main(["--input", str(tmp_path / "nope.json"), "--quiet"])
     assert code == 2
@@ -369,3 +1148,375 @@ def test_cli_subprocess_stdout():
     assert result.returncode == 0
     assert result.stdout.startswith(render.MARKER)
     assert "Powered by [code-review-graph]" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Opt-in graph context (issue #882)
+# ---------------------------------------------------------------------------
+#
+# ``detect-changes --details`` adds a ``details`` object to the report, and
+# ``--details`` on the renderer turns it into extra sections. Off by default:
+# the comment a workflow posts today must not change by a single byte.
+
+
+def _details() -> dict:
+    """A ``details`` object shaped like ``detect-changes --details all``."""
+    return {
+        "sections": [
+            "risk", "communities", "hubs", "coupling", "impact", "gaps", "graph",
+        ],
+        "risk": [
+            {
+                "qualified_name": "auth/session.py::rotate_token",
+                "file_path": "auth/session.py",
+                "line_start": 42,
+                "risk_score": 0.72,
+                "signals": {
+                    "flows": {"score": 0.17, "count": 2},
+                    "cross_community": {"score": 0.05, "count": 1},
+                    "tests": {"score": 0.3, "count": 0},
+                    "security": {"score": 0.2, "count": 1},
+                    "callers": {"score": 0.0, "count": 0},
+                    "churn": {"score": 0.0, "count": 0},
+                },
+            },
+        ],
+        "communities": {
+            "in_graph": 12,
+            "touched_total": 2,
+            "unassigned": 1,
+            "touched": [
+                {"id": 3, "name": "auth-session", "size": 14, "changed": 2},
+                {"id": 5, "name": "auth-display", "size": 4, "changed": 1},
+            ],
+        },
+        "hubs": {
+            "ranked": 340,
+            "total": 1,
+            "nodes": [
+                {
+                    "qualified_name": "auth/session.py::validate_session",
+                    "file_path": "auth/session.py",
+                    "line_start": 80,
+                    "degree": 31,
+                    "rank": 2,
+                    "communities_linked": 3,
+                },
+            ],
+        },
+        "coupling": {
+            "total": 4,
+            "cross_community": 4,
+            "cross_language": 1,
+            "edges": [
+                {
+                    "source": "web/client.ts::refresh",
+                    "target": "auth/session.py::rotate_token",
+                    "kind": "CALLS",
+                    "reasons": ["cross-language", "cross-community"],
+                    "source_language": "typescript",
+                    "target_language": "python",
+                    "source_community": "web-client",
+                    "target_community": "auth-session",
+                },
+            ],
+        },
+        "impact": {
+            "depth": 2,
+            "impacted_nodes": 37,
+            "impacted_files": 9,
+            "truncated": False,
+            "top_files": [{"file_path": "auth/routes.py", "nodes": 6}],
+            "callers": [
+                {
+                    "qualified_name": "auth/session.py::rotate_token",
+                    "total": 4,
+                    "callers": [
+                        "auth/routes.py::login_handler",
+                        "auth/routes.py::refresh_handler",
+                    ],
+                },
+            ],
+        },
+        "gaps": {
+            "total": 1,
+            "hotspots": [
+                {
+                    "qualified_name": "auth/session.py::rotate_token",
+                    "file_path": "auth/session.py",
+                    "line_start": 42,
+                    "callers": 4,
+                    "flows": 2,
+                    "coverage": "none",
+                },
+            ],
+        },
+        "graph": {
+            "nodes": 1234,
+            "edges": 5678,
+            "files": 90,
+            "languages": ["python", "typescript"],
+            "communities": 12,
+            "community_detector": "leiden",
+            "igraph_installed": True,
+            "flows": 30,
+            "last_updated": "2026-11-09T10:00:00",
+            "build_type": "incremental",
+            "version": "2.3.9",
+            "schema_version": 14,
+        },
+    }
+
+
+@pytest.fixture()
+def detailed(report) -> dict:
+    report = json.loads(json.dumps(report))
+    report["details"] = _details()
+    return report
+
+
+def _details_block(body: str) -> str:
+    start = body.index("<details>")
+    end = body.index("</details>") + len("</details>")
+    return body[start:end]
+
+
+def test_details_off_renders_the_exact_comment_of_today(report, detailed):
+    # The report carries graph context, but nobody asked for it: the comment
+    # is the one every existing workflow posts, byte for byte.
+    assert render.render_markdown(detailed) == render.render_markdown(report)
+    assert render.render_markdown(detailed, details=()) == render.render_markdown(report)
+
+
+def test_details_off_main_writes_the_same_bytes(tmp_path, report, detailed):
+    plain_in = tmp_path / "plain.json"
+    rich_in = tmp_path / "rich.json"
+    plain_in.write_text(json.dumps(report), encoding="utf-8")
+    rich_in.write_text(json.dumps(detailed), encoding="utf-8")
+    plain_out = tmp_path / "plain.md"
+    rich_out = tmp_path / "rich.md"
+    assert render.main(["--input", str(plain_in), "--output", str(plain_out)]) == 0
+    assert render.main(["--input", str(rich_in), "--output", str(rich_out)]) == 0
+    assert rich_out.read_bytes() == plain_out.read_bytes()
+    # An empty --details, which is what the Action passes through when the
+    # input is left alone, is the same as no flag at all.
+    empty_out = tmp_path / "empty.md"
+    assert render.main(
+        ["--input", str(rich_in), "--output", str(empty_out), "--details", ""]
+    ) == 0
+    assert empty_out.read_bytes() == plain_out.read_bytes()
+
+
+def test_details_all_renders_every_section(detailed):
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    for heading in (
+        "#### Why these risk scores",
+        "#### Communities touched",
+        "#### Hubs and chokepoints",
+        "#### Coupling across boundaries",
+        "#### Impact radius",
+        "#### Untested hotspots",
+        "#### Graph",
+    ):
+        assert heading in block, heading
+    # The extra sections sit after the report and before the footer.
+    assert body.index("</details>") < body.index(render.FOOTER)
+    assert body.index("### Test gaps") < body.index("<details>")
+
+
+def test_details_render_only_the_sections_asked_for(detailed):
+    body = render.render_markdown(detailed, details=("risk", "graph"))
+    block = _details_block(body)
+    assert "#### Why these risk scores" in block
+    assert "#### Graph" in block
+    assert "#### Hubs and chokepoints" not in block
+    assert "#### Impact radius" not in block
+
+
+def test_risk_section_names_the_signals_behind_the_score(detailed):
+    block = _details_block(render.render_markdown(detailed, details=("risk",)))
+    line = next(row for row in block.splitlines() if "rotate" in row)
+    assert "0.72" in line
+    assert "no tests +0.30" in line
+    assert "security-related name +0.20" in line
+    assert "in 2 flow(s) +0.17" in line
+    assert "1 caller(s) from other communities +0.05" in line
+    # A signal that added nothing is not listed as a reason.
+    assert "commit" not in line
+    # Largest contribution first.
+    assert line.index("no tests") < line.index("security-related")
+
+
+def test_risk_section_says_when_the_signals_hit_the_cap(detailed):
+    entry = detailed["details"]["risk"][0]
+    entry["risk_score"] = 1.0
+    entry["signals"]["callers"] = {"score": 0.1, "count": 9}
+    entry["signals"]["flows"] = {"score": 0.25, "count": 9}
+    entry["signals"]["churn"] = {"score": 0.15, "count": 30}
+    block = _details_block(render.render_markdown(detailed, details=("risk",)))
+    assert "capped at 1.00" in block
+
+
+def test_graph_section_names_the_community_detector(detailed):
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "Leiden" in block
+    assert "12 communities" in block
+    detailed["details"]["graph"]["community_detector"] = "file"
+    detailed["details"]["graph"]["igraph_installed"] = False
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "file-based grouping" in block
+    assert "igraph is not installed" in block
+    detailed["details"]["graph"]["community_detector"] = None
+    block = _details_block(render.render_markdown(detailed, details=("graph",)))
+    assert "not recorded" in block
+
+
+def test_details_rows_are_bounded(detailed):
+    details = detailed["details"]
+    details["risk"] = details["risk"] * 40
+    details["communities"]["touched"] = details["communities"]["touched"] * 40
+    details["hubs"]["nodes"] = details["hubs"]["nodes"] * 40
+    details["coupling"]["edges"] = details["coupling"]["edges"] * 40
+    details["impact"]["top_files"] = details["impact"]["top_files"] * 40
+    details["impact"]["callers"] = details["impact"]["callers"] * 40
+    details["gaps"]["hotspots"] = details["gaps"]["hotspots"] * 40
+    block = _details_block(render.render_markdown(detailed, details=render.DETAIL_SECTIONS))
+    rows = render._DETAIL_ROWS
+    risk = block.split("#### Why these risk scores", 1)[1].split("####", 1)[0]
+    assert risk.count("- **") == rows
+    # The list is the riskiest few, not all changed symbols: it claims no total.
+    assert "...and" not in risk
+    hubs = block.split("#### Hubs and chokepoints", 1)[1].split("####", 1)[0]
+    assert hubs.count("- **") == rows
+    touched = block.split("#### Communities touched", 1)[1].split("####", 1)[0]
+    assert touched.count("- **") == rows
+    coupling = block.split("#### Coupling across boundaries", 1)[1].split("####", 1)[0]
+    assert coupling.count("web/client.ts") == rows
+
+
+def test_details_never_exceed_the_hard_cap(detailed):
+    # Every row name at the cell limit, every list long: the block still
+    # fits its cap.
+    long = "pkg/" + "n" * 400 + ".py::" + "f" * 400
+    details = detailed["details"]
+    details["risk"] = [{**details["risk"][0], "qualified_name": long}] * 40
+    details["hubs"]["nodes"] = [
+        {**details["hubs"]["nodes"][0], "qualified_name": long}
+    ] * 40
+    details["coupling"]["edges"] = [
+        {**details["coupling"]["edges"][0], "source": long, "target": long}
+    ] * 40
+    details["impact"]["callers"] = [
+        {"qualified_name": long, "total": 99, "callers": [long] * 20}
+    ] * 40
+    details["gaps"]["hotspots"] = [
+        {**details["gaps"]["hotspots"][0], "qualified_name": long}
+    ] * 40
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    assert len(block.encode("utf-8")) <= render._MAX_DETAILS_BYTES
+    assert "Powered by [code-review-graph]" in body
+
+
+def test_details_cut_at_the_cap_say_so(detailed, monkeypatch):
+    monkeypatch.setattr(render, "_MAX_DETAILS_BYTES", 1200)
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    block = _details_block(body)
+    assert len(block.encode("utf-8")) <= 1200
+    assert "Graph context cut at 1,200 bytes" in block
+    # The note names what the reader is not seeing.
+    assert "graph" in block.split("Graph context cut at", 1)[1]
+    assert block.count("<details>") == block.count("</details>") == 1
+
+
+def test_details_fit_inside_the_body_budget(detailed):
+    # A report already near the 60,000-byte cap leaves the extra sections no
+    # room. They give way; the report, its footer and the HTML stay whole.
+    detailed["review_priorities"] = [
+        {"qualified_name": f"mod.py::fn_{i}" + "x" * 100, "risk_score": 0.5,
+         "file_path": "mod.py", "line_start": i}
+        for i in range(5000)
+    ]
+    body = render.render_markdown(
+        detailed, max_functions=5000, details=render.DETAIL_SECTIONS
+    )
+    assert len(render._artifact_text(body).encode("utf-8")) <= render._MAX_BODY
+    assert body.endswith(render.FOOTER)
+    assert body.count("<details>") == body.count("</details>")
+
+
+def test_details_asked_for_but_missing_from_the_report(report):
+    body = render.render_markdown(report, details=("risk",))
+    block = _details_block(body)
+    assert "has no graph context" in block
+    assert "--details" in block
+
+
+def test_a_section_missing_from_the_report_says_so(detailed):
+    del detailed["details"]["hubs"]
+    block = _details_block(render.render_markdown(detailed, details=("hubs", "graph")))
+    assert "#### Hubs and chokepoints" in block
+    assert "not in the report" in block
+    assert "#### Graph" in block
+
+
+def test_details_escape_hostile_names(detailed):
+    details = detailed["details"]
+    details["risk"][0]["qualified_name"] = "x|y`z<script>"
+    details["coupling"]["edges"][0]["source"] = "<img src=x onerror=alert(1)>"
+    details["communities"]["touched"][0]["name"] = "evil</details><b>"
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    assert "<script>" not in body
+    # Every "<" from the report is escaped, so none opens a tag.
+    assert "\\<img" in body
+    assert "<img" not in body.replace("\\<", "")
+    assert "evil</details>" not in body
+    assert body.count("</details>") == 1
+    assert "x\\|y\\`z" in body
+
+
+def test_details_relativize_runner_paths(detailed, monkeypatch):
+    ws = "/home/runner/work/repo/repo"
+    monkeypatch.setenv("GITHUB_WORKSPACE", ws)
+    details = detailed["details"]
+    details["risk"][0]["qualified_name"] = f"{ws}/auth/session.py::rotate_token"
+    details["risk"][0]["file_path"] = f"{ws}/auth/session.py"
+    details["impact"]["top_files"][0]["file_path"] = f"{ws}/auth/routes.py"
+    details["coupling"]["edges"][0]["source"] = f"{ws}/web/client.ts::refresh"
+    body = render.render_markdown(detailed, details=render.DETAIL_SECTIONS)
+    assert "/home/runner" not in body
+
+
+def test_parse_details_accepts_lists_and_all():
+    assert render.parse_details("") == ()
+    assert render.parse_details("all") == render.DETAIL_SECTIONS
+    assert render.parse_details(" graph , risk,graph ") == ("risk", "graph")
+    with pytest.raises(ValueError):
+        render.parse_details("risk,bogus")
+
+
+def test_main_rejects_an_unknown_section():
+    with pytest.raises(SystemExit) as exc:
+        render.main(["--input", str(FIXTURE), "--details", "bogus"])
+    assert exc.value.code == 2
+
+
+def test_main_renders_details_when_asked(tmp_path, detailed):
+    src = tmp_path / "report.json"
+    src.write_text(json.dumps(detailed), encoding="utf-8")
+    out = tmp_path / "comment.md"
+    assert render.main(
+        ["--input", str(src), "--output", str(out), "--details", "risk,graph"]
+    ) == 0
+    text = out.read_text(encoding="utf-8")
+    assert "#### Why these risk scores" in text
+    assert "#### Graph" in text
+
+
+def test_renderer_and_cli_agree_on_section_names():
+    from code_review_graph.change_details import DETAIL_SECTIONS, parse_detail_sections
+
+    assert render.DETAIL_SECTIONS == DETAIL_SECTIONS
+    for value in ("", "all", "risk", "graph, hubs", "impact,gaps,risk"):
+        assert render.parse_details(value) == parse_detail_sections(value)

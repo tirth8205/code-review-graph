@@ -2,9 +2,88 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
+
+logger = logging.getLogger(__name__)
+
+READ_ONLY_ENV = "CRG_READ_ONLY"
+
+
+def read_only_requested() -> bool:
+    """Return whether this process must avoid writes to graph state."""
+    return os.environ.get(READ_ONLY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Numeric environment overrides (#912)
+# ---------------------------------------------------------------------------
+#
+# Most of these are read at module scope, so a typo in a shell profile used to
+# abort the import with a bare ``ValueError: invalid literal for int()`` — a
+# traceback that never named the variable at fault and killed every command,
+# including the ones that do not use the setting. One helper, used by every
+# numeric override in the package, keeps that impossible: an unusable value
+# falls back to the documented default and says so once, by name.
+
+_warned_env_vars: set[str] = set()
+
+
+def _warn_invalid_env(name: str, raw: str, default: object) -> None:
+    """Warn once per variable that its value was ignored."""
+    if name in _warned_env_vars:
+        return
+    _warned_env_vars.add(name)
+    logger.warning(
+        "Ignoring invalid %s=%r (not a number); using the default %s.",
+        name,
+        raw,
+        default,
+    )
+
+
+def env_int(name: str, default: int) -> int:
+    """Read *name* as an int, falling back to *default* when it is unusable.
+
+    An unset variable is the default silently; a set-but-unparseable one
+    (empty string, word, version number) is the default *and* a warning
+    naming the variable, so the operator can find the typo.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except (TypeError, ValueError):
+        _warn_invalid_env(name, raw, default)
+        return default
+
+
+def env_float(name: str, default: float) -> float:
+    """Read *name* as a float. See :func:`env_int` for the fallback rules.
+
+    NaN and infinity are rejected alongside unparseable text: they are
+    accepted by ``float()`` but poison every comparison they reach.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):
+        _warn_invalid_env(name, raw, default)
+        return default
+    if not math.isfinite(value):
+        _warn_invalid_env(name, raw, default)
+        return default
+    return value
 
 
 def _bounded_float_env(
@@ -38,12 +117,121 @@ SECURITY_KEYWORDS: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
+# Version-control subprocess budgets
+# ---------------------------------------------------------------------------
+
+#: Seconds allowed for one Git or SVN subprocess. Build, incremental update and
+#: watch all inherit it, and they legitimately run long commands, so the
+#: default stays generous.
+#:
+#: Read once, at import: the value has to be stable for the life of a process
+#: so a long build cannot have the budget change underneath it. A test that
+#: sets ``CRG_GIT_TIMEOUT`` after import will not see it; set it in the child
+#: process's environment instead.
+#:
+#: Previously defined twice, byte-identically, at ``changes.py:35`` and
+#: ``incremental.py:731``. Two definitions of one budget is one too many —
+#: they cannot be told apart at a call site and they drift. Both modules now
+#: alias this one.
+GIT_TIMEOUT = env_int("CRG_GIT_TIMEOUT", 30)  # seconds
+
+#: Seconds allowed for one subprocess in the change-discovery chain when
+#: neither ``CRG_DISCOVERY_TIMEOUT`` nor ``CRG_GIT_TIMEOUT`` is set.
+DISCOVERY_TIMEOUT_DEFAULT = 5.0
+
+#: Name of the variable that sets :func:`discovery_timeout` directly.
+DISCOVERY_TIMEOUT_ENV = "CRG_DISCOVERY_TIMEOUT"
+
+#: Name of the general Git budget's variable. Read here as a *string* to tell
+#: "the operator set this" from "it defaulted to 30", which :data:`GIT_TIMEOUT`
+#: alone cannot express.
+GIT_TIMEOUT_ENV = "CRG_GIT_TIMEOUT"
+
+
+def discovery_timeout() -> float:
+    """Return the per-subprocess budget for read-only change discovery.
+
+    Discovery is what a review tool runs when the caller did **not** pass
+    ``changed_files``: ``resolve_review_base`` -> ``get_changed_files`` ->
+    ``get_staged_and_unstaged``, three or four Git subprocesses in series. At
+    the 30-second :data:`GIT_TIMEOUT` default that chain has a two-minute
+    worst case, which is how one MCP review call overruns a client's request
+    ceiling and comes back as MCP error -32001 (#262). All discovery is ever
+    answering is "what am I looking at?", so it gets its own, far shorter
+    budget by default, and build/update/watch keep the generous one.
+
+    A short budget is only safe because discovery runs with ``require_vcs``:
+    exhausting it raises
+    :class:`~code_review_graph.errors.ChangeDiscoveryError` rather than
+    returning an empty list. Shortening a budget that failed *silently* would
+    only make a wrong all-clear more likely; shortening one that fails *loudly*
+    trades a client-side -32001 for a message naming the knob.
+
+    Resolved on **every call**, deliberately. ``CRG_GIT_TIMEOUT`` is parsed
+    once at import into :data:`GIT_TIMEOUT`, so a test or a long-lived MCP
+    server that sets that variable afterwards never sees the new value.
+    Whatever these variables say when a discovery call starts is what that
+    call uses.
+
+    Precedence:
+
+    1. ``CRG_DISCOVERY_TIMEOUT``, when it parses as a number >= 0. Used as
+       given, including values above :data:`GIT_TIMEOUT` -- an explicit
+       override is an instruction, not a hint.
+    2. Otherwise ``CRG_GIT_TIMEOUT`` when the operator set it, verbatim.
+       Raising that variable is the documented answer to slow Git, and it
+       predates this one; a new default must not quietly cap it. Someone who
+       asked for 120 seconds of Git gets 120 seconds of discovery.
+    3. Otherwise :data:`DISCOVERY_TIMEOUT_DEFAULT`, capped at
+       :data:`GIT_TIMEOUT` so an unset-but-lowered general budget still wins.
+
+    An unparseable or negative value logs a warning and falls back to the next
+    rule rather than leaving discovery unbounded or raising inside a tool call.
+    """
+    explicit_git = os.environ.get(GIT_TIMEOUT_ENV)
+    if explicit_git is not None and explicit_git.strip():
+        fallback = float(GIT_TIMEOUT)
+    else:
+        fallback = min(DISCOVERY_TIMEOUT_DEFAULT, float(GIT_TIMEOUT))
+
+    raw = os.environ.get(DISCOVERY_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return fallback
+    value = env_float(DISCOVERY_TIMEOUT_ENV, fallback)
+    if value < 0:
+        logger.warning(
+            "Ignoring invalid %s=%r (negative); using %.3gs for change "
+            "discovery.", DISCOVERY_TIMEOUT_ENV, raw, fallback,
+        )
+        return fallback
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Configurable limits (override via environment variables)
 # ---------------------------------------------------------------------------
-MAX_IMPACT_NODES = int(os.environ.get("CRG_MAX_IMPACT_NODES", "500"))
-MAX_IMPACT_DEPTH = int(os.environ.get("CRG_MAX_IMPACT_DEPTH", "2"))
-MAX_BFS_DEPTH = int(os.environ.get("CRG_MAX_BFS_DEPTH", "15"))
-MAX_SEARCH_RESULTS = int(os.environ.get("CRG_MAX_SEARCH_RESULTS", "20"))
+MAX_IMPACT_NODES = env_int("CRG_MAX_IMPACT_NODES", 500)
+MAX_IMPACT_DEPTH = env_int("CRG_MAX_IMPACT_DEPTH", 2)
+MAX_BFS_DEPTH = env_int("CRG_MAX_BFS_DEPTH", 15)
+MAX_SEARCH_RESULTS = env_int("CRG_MAX_SEARCH_RESULTS", 20)
+
+# How far up the CALLS graph a test-gap report looks for a tested caller
+# before calling a changed symbol unreached. Measured on this repository's
+# staging..testing delta rather than picked: hop 1 accounts for 6 of the 7
+# recoverable symbols and hop 2 for the last one, while hops 3-5 recover
+# nothing and each one re-labels roughly another 8% of all production symbols
+# as "covered". Two hops is where the rule still discriminates. See #1047.
+CALLER_TEST_ROUTE_DEPTH = env_int("CRG_CALLER_TEST_ROUTE_DEPTH", 2)
+
+# A frontier node with more incoming CALLS than this is a hub, and is not
+# expanded when walking up for a tested caller. Two reasons, both measured on
+# this repository: "one of my 1,800 callers has a test" is no evidence about
+# this symbol, and expanding a hub is what makes the walk expensive. The
+# limit is per node, never a budget shared across the change set -- a shared
+# budget lets one hub in a pull request erase the routes of every other
+# symbol in it. 500 sits above this graph's 99.5th percentile of in-degree
+# (374) and excludes 10 of 3,415 call targets. See #1047.
+CALLER_TEST_ROUTE_MAX_CALLERS = env_int("CRG_CALLER_TEST_ROUTE_MAX_CALLERS", 500)
 
 # Impact traversal engine: "sql" (bounded SQLite relaxation) or "networkx".
 BFS_ENGINE = os.environ.get("CRG_BFS_ENGINE", "sql")
@@ -122,3 +310,117 @@ def crg_home() -> Path:
     if override:
         return Path(override).expanduser()
     return _DEFAULT_CRG_HOME
+
+
+# ---------------------------------------------------------------------------
+# Directory-scoped import targets
+# ---------------------------------------------------------------------------
+
+#: ``edges.extra`` key that marks an ``IMPORTS_FROM`` target as a DIRECTORY
+#: rather than a file. Two import forms name a directory: a Go import names a
+#: package, and Ruby's ``require_all`` names a tree. Fanning either one out to
+#: one edge per member file makes the edge count grow with imports times
+#: package size -- 73,507 of kubernetes' import edges came from a single such
+#: fan-out -- and makes an incremental update disagree with a rebuild, because
+#: the edge's target set then depends on which files were in the package when
+#: the importing file happened to be parsed. One edge names the directory and
+#: the read path expands it; see ``expand_import_scope`` in graph.py.
+IMPORT_SCOPE_KEY = "import_scope"
+
+#: ``edges.extra`` key holding the qualified name an edge endpoint was written
+#: with, once that name turned out to match no node. The endpoint itself goes
+#: back to the plain name the source wrote. See
+#: ``GraphStore._settle_unbound_endpoints``.
+CLAIMED_ENDPOINT_KEY = "claimed_endpoint"
+
+#: ``edges.extra`` key on an edge moved to the ancestor that declares the method
+#: it calls. It holds the endpoint as the parser wrote it (``<file>::Leaf.run``),
+#: so every later pass can check the move again from scratch. See
+#: ``GraphStore._resolve_inherited_endpoints``.
+INHERITED_ENDPOINT_KEY = "inherited_endpoint"
+
+#: ``edges.extra`` key naming the class a call went through when the bare-name
+#: resolver bound it to a method that class inherits.
+INHERITED_THROUGH_KEY = "inherited_through"
+
+#: The target directory's own files are the imported unit; subdirectories are
+#: separate packages and are NOT members. This is Go's rule.
+IMPORT_SCOPE_PACKAGE = "package"
+
+#: Every file below the target directory is a member, at any depth. This is
+#: what the ``require_all`` gem loads.
+IMPORT_SCOPE_TREE = "tree"
+
+IMPORT_SCOPES = (IMPORT_SCOPE_PACKAGE, IMPORT_SCOPE_TREE)
+
+
+# ---------------------------------------------------------------------------
+# Path identity & memory reclamation helpers
+# ---------------------------------------------------------------------------
+
+def normalize_file_path(path: "str | os.PathLike[str]") -> str:
+    """Return *path* as a forward-slash (POSIX) string for graph identity.
+
+    ``file_path`` values and the path component of qualified names are graph
+    identity: they must be separator-stable across operating systems so a
+    graph built on Windows produces the same identifiers as one built on
+    Linux/macOS, and so consumers that reconstruct identifiers from ``Path``
+    objects always agree with the parser. See issue #774.
+
+    Only apply this to file *paths* — never to symbol names: PHP namespace
+    identifiers (``App\\Domain\\Job``) legitimately contain backslashes.
+    """
+    if isinstance(path, str):
+        return path.replace("\\", "/") if "\\" in path else path
+    if isinstance(path, PurePath):
+        return path.as_posix()
+    return str(path).replace("\\", "/")
+
+
+_MALLOC_TRIM_FN: object | None = None
+_MALLOC_TRIM_PROBED = False
+
+
+def release_os_memory() -> None:
+    """Run garbage collection and return free heap pages to the OS where supported.
+
+    Python's pymalloc and glibc's ptmalloc retain freed arenas in the process
+    address space after large graph builds, AST parses, or NetworkX/embedding
+    operations. Calling ``malloc_trim(0)`` on Linux returns unused heap pages
+    to the kernel, directly lowering resident memory (RSS).
+    """
+    global _MALLOC_TRIM_FN, _MALLOC_TRIM_PROBED
+    import gc
+    import sys
+
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        if not _MALLOC_TRIM_PROBED:
+            _MALLOC_TRIM_PROBED = True
+            try:
+                import ctypes
+
+                _MALLOC_TRIM_FN = ctypes.CDLL("libc.so.6").malloc_trim
+            except Exception:
+                _MALLOC_TRIM_FN = None
+        if callable(_MALLOC_TRIM_FN):
+            try:
+                _MALLOC_TRIM_FN(0)
+            except Exception as exc:
+                logger.debug("malloc_trim(0) failed: %s", exc)
+
+
+#: ``edges.extra`` key on an ``IMPORTS_FROM`` edge whose import does not run as
+#: the importing file loads. No key means it does. Graphs built before this key
+#: existed have none, so they read every import as a load-time one until rebuilt.
+IMPORT_CONTEXT_KEY = "import_context"
+
+#: Never runs: ``if TYPE_CHECKING:`` in Python, ``import type`` in TypeScript.
+IMPORT_CONTEXT_TYPE_ONLY = "type_only"
+
+#: Runs late: inside a function, a JavaScript dynamic ``import()``, a Ruby ``autoload``.
+IMPORT_CONTEXT_DEFERRED = "deferred"
+
+#: Python ``from . import sibling``: the edge to the package is only the route to
+#: the sibling, and a file's own package is already loaded before the file is.
+IMPORT_CONTEXT_PARENT_PACKAGE = "parent_package"

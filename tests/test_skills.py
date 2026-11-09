@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,11 +17,13 @@ else:  # pragma: no cover - Python 3.10 backport
     import tomli as tomllib
 
 from code_review_graph import skills as skills_module
+from code_review_graph.codex_skill import install_codex_skill
 from code_review_graph.skills import (
     _CLAUDE_MD_SECTION_MARKER,
     PLATFORMS,
     _copilot_vscode_detected,
     _cursor_hook_scripts,
+    _detect_opencode_major_version,
     _detect_serve_command,
     _in_poetry_project,
     _in_uv_project,
@@ -170,13 +173,50 @@ class TestGenerateSkills:
         assert len(list(result.iterdir())) == 4
 
     def test_skill_content_includes_get_minimal_context(self, tmp_path):
-        """Every skill template must reference get_minimal_context."""
+        """Every skill template must reference get_minimal_context_tool."""
         skills_dir = generate_skills(tmp_path)
         for subdir in skills_dir.iterdir():
             content = (subdir / "SKILL.md").read_text()
-            assert "get_minimal_context" in content, (
-                f"{subdir.name} missing get_minimal_context reference"
+            assert "get_minimal_context_tool" in content, (
+                f"{subdir.name} missing get_minimal_context_tool reference"
             )
+
+    def test_skill_templates_use_exported_tool_names(self, tmp_path):
+        generated = generate_skills(tmp_path)
+        bundled = Path(__file__).parents[1] / "skills"
+
+        expected_tools = {
+            "explore-codebase": [
+                "get_minimal_context_tool",
+                "list_graph_stats_tool",
+                "get_community_tool",
+                "list_flows_tool",
+                "get_flow_tool",
+                "find_large_functions_tool",
+            ],
+            "review-changes": ["get_minimal_context_tool", "get_affected_flows_tool"],
+            "debug-issue": ["get_minimal_context_tool", "get_flow_tool"],
+            "refactor-safely": ["get_minimal_context_tool", "find_large_functions_tool"],
+        }
+        legacy_tools = [
+            "get_minimal_context",
+            "list_graph_stats",
+            "get_community",
+            "list_flows",
+            "get_flow",
+            "find_large_functions",
+        ]
+
+        for skill_name, tool_names in expected_tools.items():
+            for skill_file in (
+                generated / skill_name / "SKILL.md",
+                bundled / skill_name / "SKILL.md",
+            ):
+                content = skill_file.read_text(encoding="utf-8")
+                for tool_name in tool_names:
+                    assert tool_name in content, skill_file
+                for legacy_tool in legacy_tools:
+                    assert f"`{legacy_tool}`" not in content, skill_file
 
     def test_skill_content_includes_detail_level(self, tmp_path):
         """Every skill template must reference detail_level."""
@@ -207,8 +247,10 @@ class TestGenerateHooksConfig:
         assert entry["matcher"] == "Edit|Write"
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
-        assert "update" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        # The event JSON goes to hook-update, which reads the edited file's
+        # path from it; whatever is left is drained afterwards (#311, #493).
+        assert "code-review-graph hook-update" in inner["command"]
+        assert inner["command"].endswith("; cat >/dev/null || true")
         assert 0 < inner["timeout"] <= 600
 
     def test_has_session_start(self):
@@ -252,17 +294,16 @@ class TestGenerateHooksConfig:
     def test_hooks_use_dynamic_repo_root(self):
         """Regression test for #558: hooks must not embed absolute paths.
 
-        The repo root should be resolved at runtime via git rev-parse so
-        settings.json is shareable across collaborators.
+        The repo root should be resolved at runtime so settings.json is
+        shareable across collaborators: the session hook through git
+        rev-parse, the edit hook from the edited file in the event JSON (#311).
         """
         config = generate_hooks_config(Path("/my/specific/checkout/path"))
-        for hook_type, entries in config["hooks"].items():
-            for entry in entries:
-                for hook in entry["hooks"]:
-                    assert "git rev-parse --show-toplevel" in hook["command"], (
-                        f"{hook_type} hook should use git rev-parse --show-toplevel"
-                        " to resolve repo root dynamically"
-                    )
+        session = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        assert "git rev-parse --show-toplevel" in session
+        update = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+        assert "code-review-graph hook-update" in update
+        assert "--repo" not in update
 
     def test_hooks_no_absolute_path_embedded(self):
         """Regression test for #558: no absolute path should appear in commands."""
@@ -328,16 +369,144 @@ class TestShippedHooksFiles:
         )
         commands = [
             hook["command"]
-            for entries in data.values()
+            for entries in data["hooks"].values()
             for entry in entries
             for hook in entry.get("hooks", [])
             if hook.get("type") == "command"
         ]
         assert commands, "hooks/hooks.json should define at least one command hook"
         for command in commands:
-            assert command.startswith(self.STDIN_DRAIN), (
-                f"hooks.json command lacks the stdin drain prefix: {command!r}"
+            # The edit hook needs the event JSON, so it hands stdin to
+            # hook-update and drains the rest afterwards instead.
+            forwards = "code-review-graph hook-update;" in command and command.endswith(
+                "; cat >/dev/null || true"
             )
+            assert command.startswith(self.STDIN_DRAIN) or forwards, (
+                f"hooks.json command does not drain stdin: {command!r}"
+            )
+
+    def _shipped_hooks(self) -> dict:
+        data = json.loads((self.HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+        # Claude Code rejects a plugin hooks file with no top-level "hooks" key.
+        assert set(data) == {"hooks"}
+        return data["hooks"]
+
+    def test_hooks_json_update_hook_matches_edits_only(self):
+        """Matching Bash made ``git status`` run a full build with no graph."""
+        matchers = [entry["matcher"] for entry in self._shipped_hooks()["PostToolUse"]]
+        assert matchers == ["EnterWorktree", "Edit|Write"]
+
+    def test_hooks_json_commands_keep_the_generated_guards(self):
+        """The plugin hooks must guard like the hooks ``install`` writes (#549)."""
+        shipped = self._shipped_hooks()
+        generated = generate_hooks_config(Path("."))["hooks"]
+        assert (
+            shipped["SessionStart"][0]["hooks"][0]["command"]
+            == generated["SessionStart"][0]["hooks"][0]["command"]
+        )
+        assert (
+            shipped["PostToolUse"][1]["hooks"][0]["command"]
+            == generated["PostToolUse"][0]["hooks"][0]["command"]
+        )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+    @pytest.mark.parametrize(
+        ("in_git", "cli", "called"),
+        [
+            pytest.param(True, None, set(), id="cli-not-on-path"),
+            # hook-update decides for itself outside Git, from the event JSON.
+            pytest.param(False, "exit 0", {"hook-update"}, id="outside-git"),
+            pytest.param(True, "exit 7", {"status", "hook-update"}, id="cli-fails"),
+            # A CLI from before hook-update rejects the subcommand with 2.
+            pytest.param(True, "exit 2", {"status", "hook-update"}, id="older-cli"),
+        ],
+    )
+    def test_hooks_json_commands_never_report_an_error(self, tmp_path, in_git, cli, called):
+        """Without the guards Claude Code shows a hook error on every event."""
+        git = shutil.which("git")
+        assert git is not None
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").symlink_to(git)
+        (bin_dir / "cat").symlink_to(shutil.which("cat"))
+        log = tmp_path / "cli.log"
+        if cli is not None:
+            fake = bin_dir / "code-review-graph"
+            fake.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n{cli}\n', encoding="utf-8")
+            fake.chmod(0o755)
+        work = tmp_path / "work"
+        work.mkdir()
+        if in_git:
+            subprocess.run([git, "init", "-q"], cwd=work, check=True)
+
+        shipped = self._shipped_hooks()
+        for command, expected in (
+            (shipped["SessionStart"][0]["hooks"][0]["command"], "status"),
+            (shipped["PostToolUse"][1]["hooks"][0]["command"], "hook-update"),
+        ):
+            log.unlink(missing_ok=True)
+            proc = subprocess.run(
+                ["/bin/sh", "-c", command],
+                input="{}",
+                capture_output=True,
+                text=True,
+                cwd=work,
+                env={
+                    "PATH": str(bin_dir),
+                    "HOME": str(tmp_path),
+                    "GIT_CEILING_DIRECTORIES": str(tmp_path),
+                },
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stderr == ""
+            if expected in called:
+                assert log.read_text(encoding="utf-8").startswith(expected)
+            else:
+                assert not log.exists()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook commands")
+    @pytest.mark.parametrize(
+        "cli",
+        [
+            pytest.param(None, id="cli-not-on-path"),
+            pytest.param("exit 2", id="cli-reads-nothing"),
+            pytest.param("cat >/dev/null", id="cli-reads-everything"),
+        ],
+    )
+    def test_update_hook_takes_a_large_payload_without_a_broken_pipe(self, tmp_path, cli):
+        """The edit hook reads stdin itself now, so #493 must still hold."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        for tool in ("cat", "sh"):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+        if cli is not None:
+            fake = bin_dir / "code-review-graph"
+            fake.write_text(f"#!/bin/sh\n{cli}\n", encoding="utf-8")
+            fake.chmod(0o755)
+        command = generate_hooks_config(Path("."))["hooks"]["PostToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        payload = ("x" * 1024 + "\n") * 20000
+        proc = subprocess.Popen(
+            ["/bin/sh", "-c", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+            env={"PATH": str(bin_dir), "HOME": str(tmp_path)},
+        )
+        broken_pipe = None
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.close()
+        except BrokenPipeError as exc:  # pragma: no cover - regression guard
+            broken_pipe = exc
+        proc.stdin = None
+        _stdout, stderr = proc.communicate()
+        assert broken_pipe is None, f"hook command raised BrokenPipeError: {stderr}"
+        assert proc.returncode == 0, stderr
 
     def test_session_start_script_drains_stdin(self):
         script = (self.HOOKS_DIR / "session-start.sh").read_text(encoding="utf-8")
@@ -482,6 +651,38 @@ class TestInstallHooks:
         install_hooks(tmp_path)
         assert (tmp_path / ".claude").is_dir()
 
+    def test_reinstall_replaces_the_v2_3_9_edit_hook(self, tmp_path):
+        """One edit hook after the upgrade to hook-update (#311), not two."""
+        released = (
+            "cat >/dev/null || true; command -v code-review-graph >/dev/null 2>&1 || exit 0;"
+            " git rev-parse --git-dir >/dev/null 2>&1 && code-review-graph update"
+            ' --skip-flows --repo "$(git rev-parse --show-toplevel 2>/dev/null)" || true'
+        )
+        settings_path = tmp_path / ".claude" / "settings.json"
+        settings_path.parent.mkdir()
+        settings_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            {
+                                "matcher": "Edit|Write",
+                                "hooks": [
+                                    {"type": "command", "command": released, "timeout": 30}
+                                ],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        install_hooks(tmp_path)
+
+        hooks = json.loads(settings_path.read_text(encoding="utf-8"))["hooks"]
+        assert hooks == generate_hooks_config(tmp_path)["hooks"]
+
 
 class TestGenerateCodexHooksConfig:
     def test_returns_dict_with_hooks(self, tmp_path):
@@ -496,7 +697,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "update" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Updating code-review-graph"
 
     def test_has_session_start(self, tmp_path):
@@ -507,7 +708,7 @@ class TestGenerateCodexHooksConfig:
         inner = entry["hooks"][0]
         assert inner["type"] == "command"
         assert "status" in inner["command"]
-        assert inner["command"].startswith("cat >/dev/null || true; ")
+        assert inner["command"].startswith("cat | { if command -v code-review-graph")
         assert inner["statusMessage"] == "Checking code-review-graph status"
 
 
@@ -542,10 +743,11 @@ class TestGenerateCodexHooksConfig:
         config = generate_codex_hooks_config(tmp_path / "repo with spaces")
         post_cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
         session_cmd = config["hooks"]["SessionStart"][0]["hooks"][0]["command"]
-        assert "--repo" not in post_cmd
-        assert "--repo" not in session_cmd
-        assert "code-review-graph update --skip-flows" in post_cmd
-        assert "code-review-graph status" in session_cmd
+        for command, subcommand in ((post_cmd, "hook-update"), (session_cmd, "hook-status")):
+            assert command == (
+                "cat | { if command -v code-review-graph >/dev/null 2>&1; "
+                f"then code-review-graph {subcommand}; else cat >/dev/null; fi; }}"
+            )
 
 
 class TestInstallCodexHooks:
@@ -559,6 +761,119 @@ class TestInstallCodexHooks:
         assert "hooks" in data
         assert "PostToolUse" in data["hooks"]
         assert "SessionStart" in data["hooks"]
+
+    def test_installs_global_skill_under_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        destination = install_codex_skill()
+
+        assert destination == codex_home / "skills" / "code-review-graph"
+        assert (destination / "SKILL.md").is_file()
+        assert (destination / "scripts" / "crg_readonly.py").is_file()
+        assert (destination / "agents" / "openai.yaml").is_file()
+        assert (destination / ".code-review-graph-managed.json").is_file()
+
+    def test_global_skill_install_excludes_python_caches(self, tmp_path, monkeypatch):
+        from code_review_graph import codex_skill
+
+        resources = tmp_path / "resources"
+        shutil.copytree(codex_skill.bundled_skill_dir(), resources)
+        cache = resources / "scripts" / "__pycache__"
+        cache.mkdir(exist_ok=True)
+        (cache / "crg_readonly.cpython-313.pyc").write_bytes(b"compiled")
+        (cache / "other.txt").write_text("cache metadata", encoding="utf-8")
+        (resources / "scripts" / "crg_readonly.pyc").write_bytes(b"legacy compiled")
+        (resources / "scripts" / "crg_readonly.pyo").write_bytes(b"optimized")
+        monkeypatch.setattr(codex_skill, "_RESOURCE_ROOT", resources)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+        destination = install_codex_skill()
+
+        assert destination is not None
+        expected = {"SKILL.md", "agents/openai.yaml", "scripts/crg_readonly.py"}
+        manifest = json.loads(
+            (destination / ".code-review-graph-managed.json").read_text(encoding="utf-8")
+        )
+        assert set(manifest["files"]) == expected
+        assert {
+            p.relative_to(destination).as_posix()
+            for p in destination.rglob("*") if p.is_file()
+        } == expected | {".code-review-graph-managed.json"}
+
+    def test_global_skill_install_is_idempotent_and_preserves_unrelated_files(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        destination = install_codex_skill()
+        custom = destination / "notes.txt"
+        custom.write_text("keep\n", encoding="utf-8")
+        first = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+
+        install_codex_skill()
+
+        second = {
+            path.relative_to(destination): path.read_bytes()
+            for path in destination.rglob("*")
+            if path.is_file()
+        }
+        assert second == first
+        assert custom.read_text(encoding="utf-8") == "keep\n"
+
+    def test_unmarked_conflicting_skill_is_not_overwritten(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        skill = destination / "SKILL.md"
+        skill.write_text("user-owned\n", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_codex_skill()
+
+        assert skill.read_text(encoding="utf-8") == "user-owned\n"
+
+    def test_incomplete_manifest_does_not_overwrite_user_skill(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        skill = destination / "SKILL.md"
+        skill.write_text("user-owned instructions\n", encoding="utf-8")
+        manifest = destination / ".code-review-graph-managed.json"
+        manifest.write_text('{"version": 1, "files": {}}', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        assert install_codex_skill() is None
+        assert skill.read_text(encoding="utf-8") == "user-owned instructions\n"
+        assert json.loads(manifest.read_text(encoding="utf-8"))["files"] == {}
+        assert not (destination / "agents" / "openai.yaml").exists()
+
+    def test_symlinked_manifest_is_not_written(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        destination = codex_home / "skills" / "code-review-graph"
+        destination.mkdir(parents=True)
+        outside = tmp_path / "outside.json"
+        outside.write_text("keep\n", encoding="utf-8")
+        (destination / ".code-review-graph-managed.json").symlink_to(outside)
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_codex_skill()
+
+        assert outside.read_text(encoding="utf-8") == "keep\n"
+        assert not (destination / "SKILL.md").exists()
+
+    def test_codex_platform_config_honors_codex_home(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        install_platform_configs(tmp_path, target="codex")
+
+        assert (codex_home / "config.toml").is_file()
+        assert "[mcp_servers.code-review-graph]" in (
+            codex_home / "config.toml"
+        ).read_text(encoding="utf-8")
 
     def test_merges_with_existing(self, tmp_path, monkeypatch):
         # Path.home() ignores HOME on Windows; patch it like the cursor tests do.
@@ -606,6 +921,45 @@ class TestInstallCodexHooks:
         data = json.loads((tmp_path / ".codex" / "hooks.json").read_text())
         assert len(data["hooks"]["PostToolUse"]) == 1
         assert len(data["hooks"]["SessionStart"]) == 1
+
+    def test_reinstall_replaces_the_v2_3_9_hooks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.Path.home", lambda: tmp_path)
+        released = {
+            "PostToolUse": (
+                "Write|Edit|Bash",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph update --skip-flows || true",
+            ),
+            "SessionStart": (
+                "startup|resume",
+                "cat >/dev/null || true; git rev-parse --git-dir >/dev/null 2>&1"
+                " && code-review-graph status || echo 'Not a git repo, skipping'",
+            ),
+        }
+        hooks_path = tmp_path / ".codex" / "hooks.json"
+        hooks_path.parent.mkdir()
+        hooks_path.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        event: [
+                            {
+                                "matcher": matcher,
+                                "hooks": [{"type": "command", "command": command}],
+                            }
+                        ]
+                        for event, (matcher, command) in released.items()
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        install_codex_hooks(tmp_path / "repo")
+
+        assert json.loads(hooks_path.read_text(encoding="utf-8"))["hooks"] == (
+            generate_codex_hooks_config(tmp_path / "repo")["hooks"]
+        )
 
     def test_install_qoder_hooks(self, tmp_path):
         install_hooks(tmp_path, platform="qoder")
@@ -670,6 +1024,158 @@ class TestInjectClaudeMd:
 
         assert first_content == second_content
         assert second_content.count(_CLAUDE_MD_SECTION_MARKER) == 1
+
+
+def _legacy_sections(*, copilot: bool) -> list[str]:
+    """Recorded past blocks, longest first. Copilot ones carry YAML front matter."""
+    return [
+        block
+        for block in skills_module.LEGACY_INSTRUCTION_SECTIONS
+        if block.startswith("---\n") is copilot
+    ]
+
+
+class TestManagedBlockUpgrade:
+    """Reinstall must replace an older generated block, not silently skip it.
+
+    Regression test for #314: the injector only checked whether the opening
+    marker was present, so anyone who installed before the guardrails landed
+    kept the old text forever and reinstalling was a no-op.
+    """
+
+    OLDER = _legacy_sections(copilot=False)[0]
+
+    def test_reinstall_upgrades_an_older_generated_section(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(self.OLDER, encoding="utf-8")
+
+        assert inject_claude_md(tmp_path) == "updated"
+
+        content = claude_md.read_text(encoding="utf-8")
+        assert content == skills_module._CLAUDE_MD_SECTION
+        assert self.OLDER not in content
+        assert "### Verify in the source" in content
+        assert content.count(_CLAUDE_MD_SECTION_MARKER) == 1
+
+    def test_reinstall_over_current_section_is_byte_idempotent(self, tmp_path):
+        claude_md = tmp_path / "CLAUDE.md"
+        assert inject_claude_md(tmp_path) == "created"
+        first = claude_md.read_bytes()
+        stat_before = claude_md.stat().st_mtime_ns
+
+        assert inject_claude_md(tmp_path) == "unchanged"
+
+        assert claude_md.read_bytes() == first
+        # "unchanged" must not rewrite the file at all.
+        assert claude_md.stat().st_mtime_ns == stat_before
+
+    def test_hand_edited_block_is_preserved_and_reported(self, tmp_path):
+        edited = self.OLDER.replace("### Key Tools", "### Key Tools (our notes)")
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(edited, encoding="utf-8")
+
+        assert inject_claude_md(tmp_path) == "conflict"
+
+        assert claude_md.read_text(encoding="utf-8") == edited
+
+    def test_user_content_around_the_block_survives_an_upgrade(self, tmp_path):
+        head = "# House rules\n\nNever force push.\n\n"
+        tail = "\n## Deploy notes\n\nRun the migration first.\n"
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(head + self.OLDER + tail, encoding="utf-8")
+
+        assert inject_claude_md(tmp_path) == "updated"
+
+        content = claude_md.read_text(encoding="utf-8")
+        assert content == head + skills_module._CLAUDE_MD_SECTION + tail
+        assert content.startswith(head)
+        assert content.endswith(tail)
+
+    def test_duplicate_stale_blocks_collapse_to_one(self, tmp_path):
+        """#558 left repeat installs stacking blocks; upgrade must not keep both."""
+        older_two = _legacy_sections(copilot=False)[1]
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text(self.OLDER + "\n" + older_two, encoding="utf-8")
+
+        assert inject_claude_md(tmp_path) == "updated"
+
+        content = claude_md.read_text(encoding="utf-8")
+        assert content.count(_CLAUDE_MD_SECTION_MARKER) == 1
+        assert skills_module._CLAUDE_MD_SECTION in content
+
+    def test_missing_file_is_still_created(self, tmp_path):
+        assert not (tmp_path / "CLAUDE.md").exists()
+
+        assert inject_claude_md(tmp_path) == "created"
+
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == (
+            skills_module._CLAUDE_MD_SECTION
+        )
+
+    def test_new_sections_carry_an_end_marker(self, tmp_path):
+        end = skills_module._CLAUDE_MD_SECTION_END_MARKER
+        inject_claude_md(tmp_path)
+        skills_module.inject_platform_instructions(tmp_path, target="all")
+
+        names = ["CLAUDE.md", *skills_module._PLATFORM_INSTRUCTION_FILES]
+        for name in names:
+            content = (tmp_path / name).read_text(encoding="utf-8")
+            assert content.count(end) == 1, name
+            assert content.index(_CLAUDE_MD_SECTION_MARKER) < content.index(end), name
+
+    def test_every_platform_file_upgrades_from_its_older_section(self, tmp_path):
+        older_copilot = _legacy_sections(copilot=True)[0]
+        for name in skills_module._PLATFORM_INSTRUCTION_FILES:
+            path = tmp_path / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            custom = name in skills_module._PLATFORM_INSTRUCTION_CUSTOM_SECTIONS
+            path.write_text(older_copilot if custom else self.OLDER, encoding="utf-8")
+
+        outcomes = skills_module.inject_instruction_files(tmp_path, target="all")
+
+        for name in skills_module._PLATFORM_INSTRUCTION_FILES:
+            assert outcomes[name] == "updated", name
+            content = (tmp_path / name).read_text(encoding="utf-8")
+            assert "### Verify in the source" in content, name
+            assert "ALWAYS use the" not in content, name
+
+    def test_legacy_sections_are_exact_and_ordered_longest_first(self):
+        legacy = skills_module.LEGACY_INSTRUCTION_SECTIONS
+        assert len(set(legacy)) == len(legacy)
+        assert all(_CLAUDE_MD_SECTION_MARKER in block for block in legacy)
+        known = skills_module._known_instruction_sections()
+        assert list(known) == sorted(known, key=len, reverse=True)
+        assert skills_module._CLAUDE_MD_SECTION in known
+        assert skills_module._COPILOT_SECTION in known
+
+
+class TestInjectInstructionFilesOutcomes:
+    def test_reports_created_then_unchanged(self, tmp_path):
+        first = skills_module.inject_instruction_files(tmp_path, target="all")
+        assert set(first) == {"CLAUDE.md", *skills_module._PLATFORM_INSTRUCTION_FILES}
+        assert set(first.values()) == {"created"}
+
+        second = skills_module.inject_instruction_files(tmp_path, target="all")
+        assert set(second.values()) == {"unchanged"}
+
+    def test_reports_conflict_without_touching_the_file(self, tmp_path):
+        edited = _CLAUDE_MD_SECTION_MARKER + "\n## Our own rules\n"
+        (tmp_path / "CLAUDE.md").write_text(edited, encoding="utf-8")
+
+        outcomes = skills_module.inject_instruction_files(tmp_path, target="claude")
+
+        assert outcomes == {"CLAUDE.md": "conflict"}
+        assert (tmp_path / "CLAUDE.md").read_text(encoding="utf-8") == edited
+
+    def test_platform_wrapper_still_returns_written_filenames(self, tmp_path):
+        first = inject_platform_instructions(tmp_path, target="windsurf")
+        assert first == [".windsurfrules"]
+        assert inject_platform_instructions(tmp_path, target="windsurf") == []
+
+        (tmp_path / ".windsurfrules").write_text(
+            _legacy_sections(copilot=False)[0], encoding="utf-8"
+        )
+        assert inject_platform_instructions(tmp_path, target="windsurf") == [".windsurfrules"]
 
 
 class TestInjectPlatformInstructionsFiltering:
@@ -764,6 +1270,64 @@ class TestInjectPlatformInstructionsFiltering:
         assert not (tmp_path / "AGENTS.md").exists()
 
 
+class TestInstructionGuardrails:
+    """Every generated instruction file must carry the source-verification guardrails.
+
+    Regression test for #314: the generated text used to tell agents to ALWAYS use
+    the graph before reading source and to fall back to file search ONLY when the
+    graph did not cover the need, which made models act on graph summaries alone.
+    """
+
+    # Each guardrail is asserted by a fragment short enough to survive rewrapping.
+    GUARDRAIL_FRAGMENTS = (
+        "Do not change code from graph output alone",
+        "read the implementation and the relevant tests before concluding",
+        "migrations, retries, fallbacks",
+        "the source wins",
+        'can mean "not indexed" or "not statically visible"',
+    )
+
+    @staticmethod
+    def _instruction_files(tmp_path: Path) -> dict[str, str]:
+        inject_claude_md(tmp_path)
+        inject_platform_instructions(tmp_path, target="all")
+        names = ["CLAUDE.md", *skills_module._PLATFORM_INSTRUCTION_FILES]
+        return {
+            name: (tmp_path / name).read_text(encoding="utf-8") for name in names
+        }
+
+    def test_every_instruction_file_has_all_guardrails(self, tmp_path):
+        written = self._instruction_files(tmp_path)
+        assert len(written) == 9
+        for name, content in written.items():
+            assert "### Verify in the source" in content, name
+            for fragment in self.GUARDRAIL_FRAGMENTS:
+                assert fragment in content, f"{name} is missing: {fragment}"
+
+    def test_no_instruction_file_claims_the_graph_replaces_source(self, tmp_path):
+        for name, content in self._instruction_files(tmp_path).items():
+            assert "ALWAYS use the" not in content, name
+            assert "**only** when the graph" not in content, name
+
+    def test_shared_guardrail_text_is_identical_across_platforms(self, tmp_path):
+        written = self._instruction_files(tmp_path)
+        for name, content in written.items():
+            assert skills_module._INSTRUCTION_GUARDRAILS in content, name
+            assert skills_module._INSTRUCTION_INTRO in content, name
+
+    def test_guardrails_stay_small(self):
+        """The section ships in every user's context, so cap its growth."""
+        assert skills_module._INSTRUCTION_GUARDRAILS.count("\n") + 1 <= 9
+        assert skills_module._CLAUDE_MD_SECTION.count("\n") <= 46
+        assert skills_module._COPILOT_SECTION.count("\n") <= 53
+
+    def test_skill_templates_do_not_demand_graph_only_work(self):
+        for filename, skill in skills_module._SKILLS.items():
+            body = skill["body"]
+            assert "ALWAYS start with" not in body, filename
+            assert "Read the implementation and its tests before changing code." in body, filename
+
+
 class TestCodeBuddyPlatform:
     def test_platform_uses_official_project_mcp_contract(self):
         assert "codebuddy" in PLATFORMS
@@ -793,7 +1357,10 @@ class TestCodeBuddyPlatform:
         configured = install_platform_configs(tmp_path, target="codebuddy")
 
         assert configured == ["CodeBuddy Code"]
-        data = json.loads(mcp_path.read_text(encoding="utf-8"))
+        written = mcp_path.read_text(encoding="utf-8")
+        # The comment is the user's; merging our entry may not delete it.
+        assert "// CodeBuddy supports JSONC in project MCP files" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         assert data["dashboard"] == "https://example.test/a,b"
         assert data["mcpServers"]["existing"]["command"] == "existing"
         assert data["mcpServers"]["code-review-graph"]["type"] == "stdio"
@@ -907,7 +1474,10 @@ class TestCodeBuddyPlatform:
         for hook in installed:
             command = hook["command"]
             assert "command -v code-review-graph" in command
-            assert "git rev-parse --show-toplevel" in command
+            assert (
+                "git rev-parse --show-toplevel" in command
+                or "code-review-graph hook-update" in command
+            )
             assert str(repo_root) not in command
 
         crg_entry = next(
@@ -1098,7 +1668,9 @@ class TestInstallPlatformConfigs:
 
         install_platform_configs(tmp_path, target="opencode")
 
-        data = json.loads(config_path.read_text(encoding="utf-8"))
+        written = config_path.read_text(encoding="utf-8")
+        assert "// keep this server" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         assert "other" in data["mcp"]
         assert "code-review-graph" in data["mcp"]
         assert (tmp_path / "opencode.json").read_text(encoding="utf-8") == "{}"
@@ -1565,17 +2137,19 @@ class TestInstallCursorHooks:
             crg_hooks = [h for h in entries if "crg-" in h.get("command", "")]
             assert len(crg_hooks) == 1, f"{event} has {len(crg_hooks)} crg hooks after reinstall"
 
-    def test_handles_corrupt_existing_json(self, tmp_path):
+    def test_leaves_corrupt_existing_json_alone(self, tmp_path, capsys):
+        """Overwriting it would destroy whatever the user was part way through."""
         cursor_dir = tmp_path / ".cursor"
         cursor_dir.mkdir(parents=True)
-        (cursor_dir / "hooks.json").write_text("not valid json{{{")
+        hooks_path = cursor_dir / "hooks.json"
+        hooks_path.write_text("not valid json{{{")
 
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
             result = install_cursor_hooks()
 
-        assert result.exists()
-        data = json.loads(result.read_text())
-        assert data["version"] == 1
+        assert result is None
+        assert hooks_path.read_text() == "not valid json{{{"
+        assert "unparseable JSON" in capsys.readouterr().out
 
 
 class TestKiroPlatform:
@@ -2197,27 +2771,36 @@ class TestOpenCodePluginContent:
 
     def test_has_plugin_type_import(self):
         content = _opencode_plugin_content()
-        assert "import type" in content
-        assert "@opencode-ai/plugin" in content
+        assert 'import type { Plugin } from "@opencode/plugin"' in content
+        assert "satisfies Parameters<typeof Plugin.define>[0]" in content
+        assert "Plugin.define(" not in content
 
     def test_has_default_export(self):
         content = _opencode_plugin_content()
         assert "export default" in content
 
-    def test_hooks_file_edited_event(self):
+    def test_uses_v2_definition_shape(self):
+        """V2 loader requires an object with id + setup, not a function."""
         content = _opencode_plugin_content()
-        assert '"file.edited"' in content
-        assert "code-review-graph update --skip-flows" in content
+        assert 'id: "code-review-graph"' in content
+        assert "async setup(ctx" in content
+        assert "app.on(" not in content
+
+    def test_hooks_file_edits_via_tool_hook(self):
+        content = _opencode_plugin_content()
+        assert 'ctx.tool.hook("execute.after"' in content
+        assert '"update", "--skip-flows"' in content
 
     def test_hooks_session_created_event(self):
         content = _opencode_plugin_content()
         assert '"session.created"' in content
-        assert "code-review-graph status" in content
+        assert "ctx.event.subscribe" in content
+        assert '["status"]' in content
 
     def test_hooks_tool_execute_before_event(self):
         content = _opencode_plugin_content()
-        assert '"tool.execute.before"' in content
-        assert "code-review-graph detect-changes --brief" in content
+        assert 'ctx.tool.hook("execute.before"' in content
+        assert '"detect-changes", "--brief"' in content
 
     def test_has_git_commit_detection(self):
         """Pre-commit hook should match git commit commands."""
@@ -2230,6 +2813,77 @@ class TestOpenCodePluginContent:
         content = _opencode_plugin_content()
         # Count the three event registrations and ensure catch blocks
         assert content.count("} catch") >= 3
+
+    def test_v1_uses_returned_hooks_api(self):
+        content = _opencode_plugin_content(1)
+        assert 'import type { Plugin } from "@opencode-ai/plugin"' in content
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert "return {" in content
+        assert "event: async" in content
+        assert '"tool.execute.before": async' in content
+        assert "app.on(" not in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_v1_runs_commands_from_worktree_without_repo_override(self):
+        content = _opencode_plugin_content(1)
+        assert 'const baseDir = worktree && worktree !== "/" ? worktree : directory' in content
+        assert '--repo' not in content
+        assert 'execFileAsync("code-review-graph", args' in content
+        assert '["update", "--skip-flows"]' in content
+        assert '["status"]' in content
+        assert '["detect-changes", "--brief"]' in content
+
+    def test_rejects_unknown_legacy_major(self):
+        with pytest.raises(ValueError, match="Unsupported OpenCode major version"):
+            _opencode_plugin_content(0)
+
+
+class TestOpenCodeVersionDetection:
+    def test_detects_v1(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v1.19.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 1
+
+    def test_detects_v2(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="opencode v2.1.4\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == 2
+
+    @pytest.mark.parametrize(
+        ("output", "major"),
+        [
+            ("1.19.4-beta.1\n", 1),
+            ("1.19.4+build.7\n", 1),
+            ("opencode v1.19.4-rc.2+sha.5\n", 1),
+            ("2.1.4-next.3\n", 2),
+            ("2.1\n", 2),
+        ],
+    )
+    def test_detects_major_with_semver_suffix(self, monkeypatch, output, major):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout=output, stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() == major
+
+    def test_returns_none_when_binary_is_missing(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: None)
+        assert _detect_opencode_major_version() is None
+
+    def test_returns_none_for_unparseable_version(self, monkeypatch):
+        monkeypatch.setattr("code_review_graph.skills.shutil.which", lambda name: "opencode")
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "--version"], returncode=0, stdout="unknown\n", stderr=""
+        )
+        monkeypatch.setattr("code_review_graph.skills.subprocess.run", lambda *a, **kw: completed)
+        assert _detect_opencode_major_version() is None
 
 
 class TestInstallOpenCodePlugin:
@@ -2244,10 +2898,36 @@ class TestInstallOpenCodePlugin:
 
     def test_plugin_file_has_correct_content(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
-            result = install_opencode_plugin()
+            result = install_opencode_plugin(opencode_major=2)
         content = result.read_text(encoding="utf-8")
         assert "export default" in content
-        assert "file.edited" in content
+        assert "execute.after" in content
+
+    def test_installs_v1_template_for_opencode_1(self, tmp_path):
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin(opencode_major=1)
+        content = result.read_text(encoding="utf-8")
+        assert "const CodeReviewGraphPlugin: Plugin = async" in content
+        assert '"tool.execute.before": async' in content
+        assert 'id: "code-review-graph"' not in content
+
+    def test_auto_detects_installed_major(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: 1
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        assert "const CodeReviewGraphPlugin: Plugin = async" in result.read_text(encoding="utf-8")
+
+    def test_unknown_version_defaults_to_v2(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "code_review_graph.skills._detect_opencode_major_version", lambda: None
+        )
+        with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
+            result = install_opencode_plugin()
+        content = result.read_text(encoding="utf-8")
+        assert 'id: "code-review-graph"' in content
+        assert "defaulting to the OpenCode 2.x plugin template" in caplog.text
 
     def test_creates_parent_directories(self, tmp_path):
         with patch("code_review_graph.skills.Path.home", return_value=tmp_path):
@@ -2396,7 +3076,9 @@ class TestInstallConfigDataLoss:
         configured = self._run_zed(settings, tmp_path)
 
         assert "Zed" in configured
-        data = json.loads(settings.read_text(encoding="utf-8"))
+        written = settings.read_text(encoding="utf-8")
+        assert "// user theme preference" in written
+        data = json.loads(skills_module._strip_jsonc(written))
         # User's existing setting preserved AND our server added.
         assert data["theme"] == "One Dark"
         assert "code-review-graph" in data["context_servers"]
@@ -2443,14 +3125,35 @@ class TestGeneratedHooksGuardGitRepo:
     no-ops silently instead of erroring on every tool call.
     """
 
-    def test_post_tool_use_command_guarded_by_git_check(self):
-        config = generate_hooks_config(Path("/repo"))
-        cmd = config["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-        # Must short-circuit on the git check before calling update.
-        assert "git rev-parse --git-dir" in cmd
-        idx_guard = cmd.index("git rev-parse --git-dir")
-        idx_update = cmd.index("code-review-graph update")
-        assert idx_guard < idx_update, "git guard must precede the update call"
+    @pytest.mark.skipif(sys.platform == "win32", reason="runs the POSIX hook command")
+    def test_post_tool_use_command_is_silent_outside_git(self, tmp_path):
+        """hook-update does the Git check now, from the event JSON (#311)."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "code-review-graph"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m code_review_graph "$@"\n')
+        shim.chmod(0o755)
+        cmd = generate_hooks_config(Path("/repo"))["hooks"]["PostToolUse"][0]["hooks"][0][
+            "command"
+        ]
+        for tool_input in ({}, {"file_path": str(workspace / "x.py")}):
+            proc = subprocess.run(
+                ["/bin/sh", "-c", cmd],
+                input=json.dumps({"cwd": str(workspace), "tool_input": tool_input}),
+                capture_output=True,
+                text=True,
+                cwd=workspace,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "GIT_CEILING_DIRECTORIES": str(tmp_path),
+                },
+            )
+            assert proc.returncode == 0, proc.stderr
+            assert proc.stdout == "" and proc.stderr == ""
+        assert not (workspace / ".code-review-graph").exists()
 
     def test_session_start_command_guarded_by_git_check(self):
         config = generate_hooks_config(Path("/repo"))
@@ -2499,6 +3202,12 @@ class TestInstallSkillsRespectTargetPlatform:
 
     def test_all_target_creates_skills(self, tmp_path):
         assert self._run_install(tmp_path, "all") is True
+
+    def test_codex_install_creates_global_skill(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        self._run_install(tmp_path, "codex")
+        assert (codex_home / "skills" / "code-review-graph" / "SKILL.md").is_file()
 
 
 class TestNonAsciiConfigPreservation:

@@ -21,6 +21,23 @@ from .graph import GraphStore, _sanitize_name
 logger = logging.getLogger(__name__)
 
 
+def _md_cell(value: Any) -> str:
+    """Render a value as one line of Markdown: a table cell or a heading.
+
+    A ``|`` inside a table cell opens another column and a newline ends the
+    row, so a node or community name carrying either corrupts the table it
+    is written into (and a newline spills the tail of a heading into the
+    page body). Pipes become the ``&#124;`` character reference, which
+    renders as ``|`` without being read as a column separator; ``&`` is
+    escaped first so the substitution stays reversible, and line breaks
+    collapse to a space.
+    """
+    text = _sanitize_name(str(value))
+    text = text.replace("&", "&amp;").replace("|", "&#124;")
+    text = re.sub(r"\s*[\r\n]+\s*", " ", text)
+    return text.strip() or "-"
+
+
 def _slugify(name: str) -> str:
     """Convert a community name to a safe filename slug."""
     normalized = unicodedata.normalize("NFKD", name)
@@ -49,7 +66,7 @@ def _generate_community_page(store: GraphStore, community: dict[str, Any]) -> st
     description = community.get("description", "")
 
     lines: list[str] = []
-    lines.append(f"# {name}")
+    lines.append(f"# {_md_cell(name)}")
     lines.append("")
 
     # Overview section
@@ -64,8 +81,21 @@ def _generate_community_page(store: GraphStore, community: dict[str, Any]) -> st
         lines.append(f"- **Dominant Language**: {lang}")
     lines.append("")
 
-    # Members table (top 50)
+    # Members table (top 50).
+    #
+    # ``community["members"]`` is display data: get_communities() runs every
+    # member through _sanitize_name so the names are safe to hand to an MCP
+    # client, but nodes are stored under their raw qualified name, so a
+    # sanitised name is not a usable lookup key. Re-read the membership from
+    # the store, which holds the spellings get_node() understands; otherwise
+    # every node whose name carries a control character is silently dropped
+    # from this table while the Size above still counts it.
     member_qns = community.get("members", [])
+    community_id = community.get("id")
+    if community_id is not None:
+        lookup_qns = store.get_community_member_qns(community_id)
+    else:
+        lookup_qns = list(member_qns)
     lines.append("## Members")
     lines.append("")
     if member_qns:
@@ -74,13 +104,13 @@ def _generate_community_page(store: GraphStore, community: dict[str, Any]) -> st
 
         # Fetch node details for members (limit to 50)
         member_count = 0
-        for qn in member_qns[:50]:
+        for qn in lookup_qns[:50]:
             node = store.get_node(qn)
             if node and node.kind != "File":
-                node_name = _sanitize_name(node.name)
                 lines.append(
-                    f"| {node_name} | {node.kind} | {node.file_path} "
-                    f"| {node.line_start}-{node.line_end} |"
+                    f"| {_md_cell(node.name)} | {_md_cell(node.kind)} "
+                    f"| {_md_cell(node.file_path)} "
+                    f"| {_md_cell(f'{node.line_start}-{node.line_end}')} |"
                 )
                 member_count += 1
 
@@ -253,7 +283,9 @@ def generate_wiki(
     index_lines.append("| Community | Size | Link |")
     index_lines.append("|-----------|------|------|")
     for slug, name, size in sorted(page_entries, key=lambda x: x[1]):
-        index_lines.append(f"| {name} | {size} | [{slug}.md]({slug}.md) |")
+        index_lines.append(
+            f"| {_md_cell(name)} | {size} | [{slug}.md]({slug}.md) |"
+        )
     index_lines.append("")
 
     index_content = "\n".join(index_lines)

@@ -19,18 +19,17 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
-from . import skills
+from . import install_gitignore, install_plan, jsonc, skills
 
 _tomllib: Any = importlib.import_module(
     "tomllib" if sys.version_info >= (3, 11) else "tomli"
 )
 
 _ENTRY_NAME = "code-review-graph"
-_GIT_HOOK_MARKER = (
-    "# Installed by code-review-graph. Remove this file to disable pre-commit graph checks."
-)
+# Sourced from the installer so the two can never drift apart.
+_GIT_HOOK_MARKER = skills._GIT_HOOK_NOTE
 _GITIGNORE_BANNER = "# Added by code-review-graph"
 
 
@@ -48,28 +47,10 @@ class UninstallReport:
         return len(self.removed_paths) + len(self.edited_paths)
 
 
-@dataclass(frozen=True)
-class _Token:
-    kind: str
-    start: int
-    end: int
-    value: str | None = None
-
-
-@dataclass(frozen=True)
-class _Member:
-    key: str
-    key_index: int
-    value_index: int
-    value_end: int
-    comma_index: int | None
-
-
-@dataclass(frozen=True)
-class _Element:
-    value_index: int
-    value_end: int
-    comma_index: int | None
+# Comment-preserving JSONC edits live in ``jsonc`` so install and uninstall
+# splice a commented config exactly the same way. Re-serialising one would
+# delete every comment in it.
+_remove_jsonc_paths = jsonc.remove_paths
 
 
 def _absolute(path: Path) -> Path:
@@ -139,7 +120,10 @@ def _record_remove(report: UninstallReport, path: Path, detail: str, dry_run: bo
 
 def _read_text(path: Path, report: UninstallReport) -> str | None:
     try:
-        return path.read_text(encoding="utf-8")
+        # Through the install plan, so ``install --no-steering`` sees the
+        # hooks it planned a moment before (#173). Without a plan this is
+        # a plain read.
+        return install_plan.read_text(path, encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         report.errors.append(f"{path}: read failed ({exc})")
         return None
@@ -155,6 +139,11 @@ def _write_text(
 ) -> None:
     if dry_run:
         _record_edit(report, path, detail, True)
+        return
+    if install_plan.active() is not None:
+        # ``install --no-steering``: held with the rest of install's writes.
+        install_plan.write_bytes(path, text.encode("utf-8"))
+        _record_edit(report, path, detail, False)
         return
     temporary: Path | None = None
     try:
@@ -187,215 +176,11 @@ def _write_text(
     _record_edit(report, path, detail, False)
 
 
-def _tokenize_jsonc(raw: str) -> list[_Token]:
-    """Tokenize JSONC while retaining exact source offsets for safe splices."""
-    tokens: list[_Token] = []
-    i = 0
-    while i < len(raw):
-        char = raw[i]
-        if char.isspace():
-            i += 1
-            continue
-        if char == "/" and i + 1 < len(raw):
-            if raw[i + 1] == "/":
-                newline = raw.find("\n", i + 2)
-                i = len(raw) if newline < 0 else newline
-                continue
-            if raw[i + 1] == "*":
-                end = raw.find("*/", i + 2)
-                i = len(raw) if end < 0 else end + 2
-                continue
-        if char == '"':
-            start = i
-            i += 1
-            while i < len(raw):
-                if raw[i] == "\\":
-                    i += 2
-                    continue
-                if raw[i] == '"':
-                    i += 1
-                    break
-                i += 1
-            else:
-                raise ValueError("unterminated JSON string")
-            try:
-                value = json.loads(raw[start:i])
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid JSON string: {exc}") from exc
-            tokens.append(_Token("string", start, i, value))
-            continue
-        if char in "{}[]:,":
-            tokens.append(_Token(char, i, i + 1))
-            i += 1
-            continue
-        start = i
-        while i < len(raw):
-            if raw[i].isspace() or raw[i] in "{}[]:,":
-                break
-            if raw[i] == "/" and i + 1 < len(raw) and raw[i + 1] in "/*":
-                break
-            i += 1
-        if i == start:
-            raise ValueError(f"unexpected JSONC character at offset {i}")
-        tokens.append(_Token("literal", start, i, raw[start:i]))
-    return tokens
 
 
-def _skip_value(tokens: Sequence[_Token], index: int) -> int:
-    """Return the token index immediately after one JSON value."""
-    if index >= len(tokens):
-        raise ValueError("missing JSON value")
-    token = tokens[index]
-    if token.kind not in ("{", "["):
-        return index + 1
-    closing = "}" if token.kind == "{" else "]"
-    depth = 1
-    index += 1
-    while index < len(tokens):
-        kind = tokens[index].kind
-        if kind == token.kind:
-            depth += 1
-        elif kind == closing:
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        elif kind in ("{", "["):
-            index = _skip_value(tokens, index)
-            continue
-        index += 1
-    raise ValueError("unterminated JSON container")
 
 
-def _object_members(tokens: Sequence[_Token], index: int) -> list[_Member]:
-    if index >= len(tokens) or tokens[index].kind != "{":
-        raise ValueError("expected JSON object")
-    members: list[_Member] = []
-    cursor = index + 1
-    while cursor < len(tokens) and tokens[cursor].kind != "}":
-        if tokens[cursor].kind == ",":  # trailing comma
-            cursor += 1
-            continue
-        key_token = tokens[cursor]
-        if key_token.kind != "string" or not isinstance(key_token.value, str):
-            raise ValueError("expected JSON object key")
-        if cursor + 1 >= len(tokens) or tokens[cursor + 1].kind != ":":
-            raise ValueError("expected colon after JSON object key")
-        value_index = cursor + 2
-        value_end = _skip_value(tokens, value_index)
-        comma_index = value_end if (
-            value_end < len(tokens) and tokens[value_end].kind == ","
-        ) else None
-        members.append(
-            _Member(key_token.value, cursor, value_index, value_end, comma_index)
-        )
-        cursor = value_end + 1 if comma_index is not None else value_end
-    return members
 
-
-def _array_elements(tokens: Sequence[_Token], index: int) -> list[_Element]:
-    if index >= len(tokens) or tokens[index].kind != "[":
-        raise ValueError("expected JSON array")
-    elements: list[_Element] = []
-    cursor = index + 1
-    while cursor < len(tokens) and tokens[cursor].kind != "]":
-        if tokens[cursor].kind == ",":  # trailing comma
-            cursor += 1
-            continue
-        value_end = _skip_value(tokens, cursor)
-        comma_index = value_end if (
-            value_end < len(tokens) and tokens[value_end].kind == ","
-        ) else None
-        elements.append(_Element(cursor, value_end, comma_index))
-        cursor = value_end + 1 if comma_index is not None else value_end
-    return elements
-
-
-def _find_value(tokens: Sequence[_Token], path: Sequence[str | int]) -> int:
-    if not tokens:
-        raise ValueError("empty JSON document")
-    current = 0
-    for component in path:
-        if isinstance(component, str):
-            member = next(
-                (item for item in _object_members(tokens, current) if item.key == component),
-                None,
-            )
-            if member is None:
-                raise KeyError(component)
-            current = member.value_index
-        else:
-            elements = _array_elements(tokens, current)
-            if component < 0 or component >= len(elements):
-                raise IndexError(component)
-            current = elements[component].value_index
-    return current
-
-
-def _removal_ranges(tokens: Sequence[_Token], path: Sequence[str | int]) -> list[tuple[int, int]]:
-    if not path:
-        raise ValueError("refusing to remove the JSON document root")
-    parent_index = _find_value(tokens, path[:-1])
-    component = path[-1]
-    if isinstance(component, str):
-        members = _object_members(tokens, parent_index)
-        sibling_index = next(
-            (index for index, member in enumerate(members) if member.key == component),
-            None,
-        )
-        if sibling_index is None:
-            raise KeyError(component)
-        item = members[sibling_index]
-        start = tokens[item.key_index].start
-        end = tokens[item.value_end - 1].end
-        if item.comma_index is not None:
-            return [(start, tokens[item.comma_index].end)]
-        if sibling_index > 0:
-            previous = members[sibling_index - 1]
-            if previous.comma_index is not None:
-                return [
-                    (tokens[previous.comma_index].start, tokens[previous.comma_index].end),
-                    (start, end),
-                ]
-        return [(start, end)]
-
-    elements = _array_elements(tokens, parent_index)
-    if component < 0 or component >= len(elements):
-        raise IndexError(component)
-    element = elements[component]
-    start = tokens[element.value_index].start
-    end = tokens[element.value_end - 1].end
-    if element.comma_index is not None:
-        return [(start, tokens[element.comma_index].end)]
-    if component > 0:
-        previous_element = elements[component - 1]
-        if previous_element.comma_index is not None:
-            return [
-                (
-                    tokens[previous_element.comma_index].start,
-                    tokens[previous_element.comma_index].end,
-                ),
-                (start, end),
-            ]
-    return [(start, end)]
-
-
-def _remove_jsonc_paths(raw: str, paths: Iterable[Sequence[str | int]]) -> str:
-    """Remove paths against one token snapshot, then merge overlapping spans."""
-    tokens = _tokenize_jsonc(raw)
-    ranges = [
-        source_range
-        for path in paths
-        for source_range in _removal_ranges(tokens, tuple(path))
-    ]
-    merged: list[tuple[int, int]] = []
-    for start, end in sorted(set(ranges)):
-        if merged and start <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
-        else:
-            merged.append((start, end))
-    for start, end in reversed(merged):
-        raw = raw[:start] + raw[end:]
-    return raw
 
 
 def _parse_jsonc(path: Path, raw: str, report: UninstallReport) -> dict[str, Any] | None:
@@ -499,16 +284,18 @@ def _remove_toml_entry(
     except _tomllib.TOMLDecodeError as exc:
         report.skipped_paths.append(f"{path} (TOML parse failed; left unchanged: {exc})")
         return
-    header = f"[{key}.{_ENTRY_NAME}]"
     lines = raw.splitlines(keepends=True)
-    start = next((index for index, line in enumerate(lines) if line.strip() == header), None)
-    if start is None:
+    # The same span the installer replaces, so both stop short of the comment
+    # and blank lines that belong to whatever table comes next. Walking to the
+    # next ``[`` header instead would delete a "DO NOT REMOVE" note written
+    # above an unrelated server.
+    span = skills._toml_table_span(lines, (key, _ENTRY_NAME))
+    if span is None:
         return
-    end = start + 1
-    while end < len(lines):
-        stripped = lines[end].strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            break
+    start, end = span
+    # A blank line that only separated our table from the next one goes with
+    # it; a comment never does.
+    while end < len(lines) and not lines[end].strip():
         end += 1
     rewritten = "".join(lines[:start] + lines[end:])
     try:
@@ -521,6 +308,106 @@ def _remove_toml_entry(
         rewritten,
         report,
         detail=f"removed [{key}.{_ENTRY_NAME}]",
+        dry_run=dry_run,
+    )
+
+
+def _remove_yaml_entry(
+    path: Path,
+    key: str,
+    boundary: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Delete ``<key>.code-review-graph`` from a YAML config, text-surgically.
+
+    The rest of the document — comments, ordering, formatting — is preserved
+    byte-for-byte; the parsed document is used only to locate the entry and to
+    validate the result before writing.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    if not path.exists() or not _safe_path(path, boundary, report):
+        return
+    raw = _read_text(path, report)
+    if raw is None:
+        return
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        report.skipped_paths.append(f"{path} (YAML parse failed; left unchanged: {exc})")
+        return
+    if not isinstance(parsed, dict):
+        return
+    container = parsed.get(key)
+    if not isinstance(container, dict) or _ENTRY_NAME not in container:
+        return
+
+    lines = raw.splitlines(keepends=True)
+    bounds = skills._yaml_section_bounds(lines, key)
+    if bounds is None:
+        report.skipped_paths.append(
+            f"{path} ({key} is not a block mapping; left unchanged)"
+        )
+        return
+    header, section_end = bounds
+    child_indent = skills._yaml_block_indent(lines, header + 1, section_end)
+    entry_prefix = f"{' ' * child_indent}{_ENTRY_NAME}:"
+    start = next(
+        (
+            index
+            for index in range(header + 1, section_end)
+            if lines[index].rstrip("\n") == entry_prefix.rstrip()
+            or lines[index].startswith(entry_prefix)
+        ),
+        None,
+    )
+    if start is None:
+        report.skipped_paths.append(
+            f"{path} (could not locate {_ENTRY_NAME} block; left unchanged)"
+        )
+        return
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and (len(line) - len(line.lstrip())) <= child_indent:
+            break
+        end += 1
+    # Blank lines after the block separate it from what follows and belong to
+    # the user's formatting, not to our entry. Leave them in place.
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+
+    rewritten = "".join(lines[:start] + lines[end:])
+    try:
+        reparsed = yaml.safe_load(rewritten)
+    except yaml.YAMLError as exc:  # pragma: no cover - defensive validation
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged: {exc})")
+        return
+    if not isinstance(reparsed, dict):
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged)")
+        return
+    remaining = reparsed.get(key)
+    if _ENTRY_NAME in (remaining or {}):
+        report.skipped_paths.append(f"{path} (safe YAML edit failed; left unchanged)")
+        return
+    # Every other setting must survive the edit untouched.
+    expected = copy.deepcopy(parsed)
+    del expected[key][_ENTRY_NAME]
+    if not expected[key]:
+        # An emptied mapping is written as ``key:`` (None) rather than ``{}``.
+        expected[key] = None
+    if reparsed != expected:
+        report.skipped_paths.append(
+            f"{path} (safe YAML edit changed unrelated settings; left unchanged)"
+        )
+        return
+    _write_text(
+        path,
+        rewritten,
+        report,
+        detail=f"removed {key}.{_ENTRY_NAME}",
         dry_run=dry_run,
     )
 
@@ -540,9 +427,9 @@ def _commands(value: Any) -> set[str]:
 
 
 def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
-    """Exact project hook commands written by the source #491-era installer."""
+    """Exact project hook commands earlier releases wrote and install no longer does."""
     repo_arg = json.dumps(repo_root.resolve().as_posix())
-    return {
+    pinned = {
         (
             "git rev-parse --git-dir >/dev/null 2>&1"
             " && code-review-graph update --skip-flows"
@@ -555,28 +442,64 @@ def _legacy_repo_hook_commands(repo_root: Path) -> set[str]:
             " || echo 'Not a git repo, skipping'"
         ),
     }
+    # v2.3.4 - v2.3.6 drained stdin in front of the pinned commands.
+    drained = {"cat >/dev/null || true; " + command for command in pinned}
+    # v2.3.7 - v2.3.9 resolved the repository from the session's directory,
+    # which #311 replaced with the edited file's repository.
+    from_cwd = (
+        "cat >/dev/null || true; "
+        "command -v code-review-graph >/dev/null 2>&1 || exit 0; "
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        ' --repo "$(git rev-parse --show-toplevel 2>/dev/null)"'
+        " || true"
+    )
+    return pinned | drained | {from_cwd}
 
 
 def _legacy_codex_hook_commands() -> set[str]:
-    """Exact user hook commands written before the current stdin guard."""
-    return {
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph update --skip-flows"
-            " || true"
-        ),
-        (
-            "git rev-parse --git-dir >/dev/null 2>&1"
-            " && code-review-graph status"
-            " || echo 'Not a git repo, skipping'"
-        ),
-    }
+    """Exact user hook commands from before the payload-scoped subcommands."""
+    update = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph update --skip-flows"
+        " || true"
+    )
+    status = (
+        "git rev-parse --git-dir >/dev/null 2>&1"
+        " && code-review-graph status"
+        " || echo 'Not a git repo, skipping'"
+    )
+    stdin_guard = "cat >/dev/null || true; "
+    return {update, status, stdin_guard + update, stdin_guard + status}
+
+
+def _steering_hook_scopes() -> dict[str, tuple[str, Any]]:
+    """Map the steering hook's command to the one event and matcher it is written under.
+
+    Install writes it there and only there, so a copy anywhere else is the user's.
+    """
+    scopes: dict[str, tuple[str, Any]] = {}
+    for event, groups in skills.generate_steering_hooks_config()["hooks"].items():
+        for group in groups:
+            for hook in group["hooks"]:
+                scopes[hook["command"]] = (event, group.get("matcher"))
+    return scopes
 
 
 def _clean_hook_data(
     data: dict[str, Any],
     owned_commands: set[str],
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[tuple[str | int, ...]]]:
+    """Drop owned hooks: ``owned_commands`` anywhere, ``scoped_commands`` only
+    under their own ``(event, matcher)``."""
+    scoped = scoped_commands or {}
+
+    def owned(command: Any, event: str, matcher: Any) -> bool:
+        if not isinstance(command, str):
+            return False
+        return command in owned_commands or scoped.get(command) == (event, matcher)
+
     expected = copy.deepcopy(data)
     hooks_obj = data.get("hooks")
     if not isinstance(hooks_obj, dict):
@@ -593,8 +516,7 @@ def _clean_hook_data(
             if not isinstance(entry, dict):
                 new_entries.append(copy.deepcopy(entry))
                 continue
-            direct_command = entry.get("command")
-            if isinstance(direct_command, str) and direct_command in owned_commands:
+            if owned(entry.get("command"), event, entry.get("matcher")):
                 entry_paths.append(("hooks", event, entry_index))
                 continue
 
@@ -606,7 +528,7 @@ def _clean_hook_data(
             nested_paths: list[tuple[str | int, ...]] = []
             for nested_index, hook in enumerate(nested):
                 command = hook.get("command") if isinstance(hook, dict) else None
-                if isinstance(command, str) and command in owned_commands:
+                if owned(command, event, entry.get("matcher")):
                     nested_paths.append(("hooks", event, entry_index, "hooks", nested_index))
                 else:
                     kept_nested.append(copy.deepcopy(hook))
@@ -632,6 +554,20 @@ def _clean_hook_data(
     return expected, paths
 
 
+def remove_steering_hook(repo_root: Path, *, dry_run: bool = False) -> UninstallReport:
+    """Remove only the opt-in steering hook from the project's Claude Code settings."""
+    report = UninstallReport()
+    _remove_hooks(
+        repo_root / ".claude" / "settings.json",
+        set(),
+        repo_root,
+        report,
+        dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
+    )
+    return report
+
+
 def _remove_hooks(
     path: Path,
     owned_commands: set[str],
@@ -639,8 +575,9 @@ def _remove_hooks(
     report: UninstallReport,
     *,
     dry_run: bool,
+    scoped_commands: dict[str, tuple[str, Any]] | None = None,
 ) -> None:
-    if not path.exists() or not _safe_path(path, boundary, report):
+    if not install_plan.exists(path) or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
     if raw is None:
@@ -648,7 +585,7 @@ def _remove_hooks(
     data = _parse_jsonc(path, raw, report)
     if data is None:
         return
-    expected, paths = _clean_hook_data(data, owned_commands)
+    expected, paths = _clean_hook_data(data, owned_commands, scoped_commands)
     if not paths:
         return
     try:
@@ -739,34 +676,69 @@ def _remove_skill_file(
         _prune_empty_directory(path.parent, boundary)
 
 
+def _join_without_instruction(before: str, after: str) -> str:
+    """Close the gap a removed instruction block leaves behind.
+
+    The text on either side is kept. Only the whitespace at the seam is
+    normalised, so removing a block from the middle of a file does not leave a
+    pile of blank lines where it used to be.
+    """
+    if not after.strip():
+        # The block ran to the end, which is where install appends it.
+        return before.rstrip() + ("\n" if before.strip() else "")
+    if not before.strip():
+        return after.lstrip("\n")
+    return before.rstrip("\n") + "\n\n" + after.lstrip("\n")
+
+
 def _remove_instruction(
     path: Path,
-    section: str,
     boundary: Path,
     report: UninstallReport,
     *,
     dry_run: bool,
 ) -> None:
+    """Strip every generated instruction block from a file.
+
+    Only text that exactly equals a block this project generated is removed, so
+    a section someone edited by hand survives and is reported instead. Blocks
+    written before the closing marker existed have no end boundary, which is why
+    nothing here searches for one: their full recorded text is the boundary.
+    Matching every known variant means a block from any past release comes out,
+    not just one written by the running version (#314).
+    """
     if not path.exists() or not _safe_path(path, boundary, report):
         return
     raw = _read_text(path, report)
     if raw is None:
         return
-    exact_index = raw.find(section)
-    if exact_index >= 0:
-        start = exact_index
-        end = exact_index + len(section)
-        rewritten = raw[:start] + raw[end:]
-    else:
-        marker_index = raw.find(skills._CLAUDE_MD_SECTION_MARKER)
-        if marker_index < 0:
-            return
-        report.skipped_paths.append(
-            f"{path} (marked instruction section differs from a known installed section; "
-            "left unchanged)"
-        )
+
+    rewritten = raw
+    # Longest first, so removing a short variant cannot strand the tail of a
+    # longer one that contains it. The loop also clears duplicate blocks that
+    # older releases stacked up (#558).
+    for known in skills._known_instruction_sections():
+        while (index := rewritten.find(known)) >= 0:
+            rewritten = _join_without_instruction(
+                rewritten[:index], rewritten[index + len(known) :]
+            )
+
+    if rewritten == raw:
+        if skills._CLAUDE_MD_SECTION_MARKER in raw:
+            report.skipped_paths.append(
+                f"{path} (marked instruction section differs from a known installed section; "
+                "left unchanged)"
+            )
         return
-    rewritten = rewritten.rstrip() + ("\n" if rewritten.strip() else "")
+
+    if skills._CLAUDE_MD_SECTION_MARKER in rewritten:
+        # One block was generated and another was edited. Remove what this
+        # project owns and name the file so the user can deal with the rest.
+        report.skipped_paths.append(
+            f"{path} (a further marked instruction section differs from a known "
+            "installed section; left unchanged)"
+        )
+
     if rewritten:
         _write_text(
             path,
@@ -785,7 +757,7 @@ def _remove_instruction(
         )
 
 
-def _resolve_git_hook(repo_root: Path) -> Path:
+def _resolve_git_hook(repo_root: Path, name: str = "pre-commit") -> Path:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", "hooks"],
@@ -799,8 +771,40 @@ def _resolve_git_hook(repo_root: Path) -> Path:
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():
-        return repo_root / result.stdout.strip() / "pre-commit"
-    return repo_root / ".git" / "hooks" / "pre-commit"
+        return repo_root / result.stdout.strip() / name
+    return repo_root / ".git" / "hooks" / name
+
+
+def _strip_git_hook_blocks(raw: str) -> tuple[str, bool]:
+    """Cut out every pre-commit block this project has ever written.
+
+    Marked blocks are removed between their begin and end markers; blocks from
+    releases that predate the markers are matched by their full recorded text,
+    longest first. Nothing infers a block's extent from the shell inside it:
+    the body nests an ``if``/``elif``/``else`` in an outer ``if``, so a rule
+    such as "stop at the first ``fi``" leaves the outer ``fi`` behind and the
+    hook becomes a syntax error that breaks every later ``git commit``.
+
+    An unbalanced marker pair removes nothing at all: matching the body by its
+    legacy text there would strip it and leave the orphan marker line sitting
+    in the user's hook, which is neither a removal nor a refusal.
+    """
+    if (
+        skills._GIT_HOOK_BEGIN_MARKER in raw
+        and not skills._git_hook_markers_balanced(raw)
+    ):
+        return raw, False
+    text = raw
+    removed = False
+    while (span := skills._git_hook_block_span(text)) is not None:
+        begin, end = span
+        text = text[:begin] + text[end:]
+        removed = True
+    for block in skills._known_git_hook_blocks():
+        while block in text:
+            text = text.replace(block, "", 1)
+            removed = True
+    return text, removed
 
 
 def _remove_git_hook(
@@ -811,23 +815,58 @@ def _remove_git_hook(
 ) -> None:
     path = _resolve_git_hook(repo_root)
     if not path.exists() or not _safe_path(path, repo_root, report):
+        # A symlinked or out-of-boundary hook is reported by ``_safe_path`` and
+        # left exactly as it is; rewriting through a link is not ours to do.
         return
     raw = _read_text(path, report)
-    if raw is None or _GIT_HOOK_MARKER not in raw:
+    if raw is None:
         return
-    lines = raw.splitlines(keepends=True)
-    rewritten: list[str] = []
-    dropping = False
-    for line in lines:
-        if _GIT_HOOK_MARKER in line:
-            dropping = True
-            continue
-        if dropping:
-            if line.strip() == "fi":
-                dropping = False
-            continue
-        rewritten.append(line)
-    new_text = "".join(rewritten).rstrip() + "\n"
+    if _GIT_HOOK_MARKER not in raw and skills._GIT_HOOK_BEGIN_MARKER not in raw:
+        # The hook is entirely the user's own.
+        return
+    if (
+        skills._GIT_HOOK_BEGIN_MARKER in raw
+        and not skills._git_hook_markers_balanced(raw)
+    ):
+        # Refused, exactly as documented: with no end marker there is no
+        # trustworthy boundary, and stripping a guess leaves an orphan marker
+        # line behind. Reported once, as left unchanged, and nothing is written.
+        report.skipped_paths.append(
+            f"{path} (a code-review-graph begin marker has no matching end marker; "
+            "left unchanged)"
+        )
+        return
+
+    new_text, removed = _strip_git_hook_blocks(raw)
+    if not removed:
+        report.skipped_paths.append(
+            f"{path} (marked pre-commit block differs from a known installed block; "
+            "left unchanged)"
+        )
+        return
+    detail = "removed code-review-graph hook block"
+    if _GIT_HOOK_MARKER in new_text or skills._GIT_HOOK_BEGIN_MARKER in new_text:
+        # One block was generated and another was edited by hand. Take out what
+        # this project owns and say so on the edit itself: the file was changed,
+        # so listing it as "left unchanged" as well would contradict that.
+        detail = (
+            "removed code-review-graph hook block; a further block differs from "
+            "every known installed block and was kept"
+        )
+
+    _rewrite_or_remove_hook(path, new_text, repo_root, report, detail=detail, dry_run=dry_run)
+
+
+def _rewrite_or_remove_hook(
+    path: Path,
+    new_text: str,
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    detail: str,
+    dry_run: bool,
+) -> None:
+    """Write back what is left of a hook, or delete it when only a shebang remains."""
     meaningful = [
         line
         for line in new_text.splitlines()
@@ -836,9 +875,9 @@ def _remove_git_hook(
     if meaningful:
         _write_text(
             path,
-            new_text,
+            new_text.rstrip("\n") + "\n",
             report,
-            detail="removed code-review-graph hook block",
+            detail=detail,
             dry_run=dry_run,
         )
     else:
@@ -851,6 +890,42 @@ def _remove_git_hook(
         )
 
 
+def _remove_git_sync_hooks(
+    repo_root: Path,
+    report: UninstallReport,
+    *,
+    dry_run: bool,
+) -> None:
+    """Cut the marked sync block out of post-checkout, post-merge and post-rewrite."""
+    begin_marker = skills._GIT_SYNC_HOOK_BEGIN_MARKER
+    end_marker = skills._GIT_SYNC_HOOK_END_MARKER
+    for name in skills._GIT_SYNC_HOOK_NAMES:
+        path = _resolve_git_hook(repo_root, name)
+        if not path.exists() or not _safe_path(path, repo_root, report):
+            continue
+        raw = _read_text(path, report)
+        if raw is None or begin_marker not in raw:
+            continue
+        if not skills._git_hook_markers_balanced(raw, begin_marker, end_marker):
+            report.skipped_paths.append(
+                f"{path} (a code-review-graph begin marker has no matching end marker; "
+                "left unchanged)"
+            )
+            continue
+        text = raw
+        while (span := skills._git_hook_block_span(text, 0, begin_marker, end_marker)):
+            begin, end = span
+            text = text[:begin] + text[end:]
+        _rewrite_or_remove_hook(
+            path,
+            text,
+            repo_root,
+            report,
+            detail="removed code-review-graph hook block",
+            dry_run=dry_run,
+        )
+
+
 def _remove_gitignore(
     repo_root: Path,
     report: UninstallReport,
@@ -860,12 +935,22 @@ def _remove_gitignore(
     path = repo_root / ".gitignore"
     if not path.exists() or not _safe_path(path, repo_root, report):
         return
-    raw = _read_text(path, report)
-    if raw is None:
+    try:
+        # Bytes, not text mode, so CRLF line endings come back unchanged.
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report.errors.append(f"{path}: read failed ({exc})")
         return
-    lines = raw.splitlines(keepends=True)
+    # The block ``install --gitignore`` writes (#471). Only its own lines go.
+    without_block, block_state = install_gitignore.remove_block(raw)
+    if block_state == "edited":
+        report.skipped_paths.append(
+            f"{path} (code-review-graph install files block was edited by hand; "
+            "left unchanged)"
+        )
+    lines = without_block.splitlines(keepends=True)
     rewritten: list[str] = []
-    changed = False
+    changed = block_state == "removed"
     index = 0
     while index < len(lines):
         if (
@@ -899,11 +984,26 @@ def _remove_gitignore(
         )
 
 
-def _scope_for_config(path: Path, repo_root: Path, home: Path) -> tuple[str, Path] | None:
+def _scope_for_config(
+    path: Path,
+    repo_root: Path,
+    home: Path,
+    extra_user_boundaries: Sequence[Path] = (),
+) -> tuple[str, Path] | None:
     if _is_lexical_child(path, repo_root):
         return "repo", repo_root
     if _is_lexical_child(path, home):
         return "user", home
+    # ``HERMES_HOME`` may relocate the Hermes Agent config outside the user's
+    # home directory. That directory is then the user-scope boundary for its
+    # own config, otherwise install would write a file uninstall refuses to
+    # clean up.
+    hermes_home = _absolute(skills._hermes_home())
+    if _is_lexical_child(path, hermes_home):
+        return "user", hermes_home
+    for boundary in extra_user_boundaries:
+        if _is_lexical_child(path, boundary):
+            return "user", boundary
     return None
 
 
@@ -917,6 +1017,13 @@ def _process_platform_configs(
     platforms: frozenset[str] | None = None,
 ) -> None:
     seen: set[tuple[Path, str, str]] = set()
+    active_codex_home: Path | None = None
+    if platforms is None or "codex" in platforms:
+        from .codex_skill import codex_home
+
+        active_codex_home = codex_home()
+    else:
+        active_codex_home = None
     for platform_name, spec in skills.PLATFORMS.items():
         if platforms is not None and platform_name not in platforms:
             continue
@@ -929,7 +1036,12 @@ def _process_platform_configs(
                 f"{platform_name} config (invalid platform specification: {exc})"
             )
             continue
-        destination = _scope_for_config(path, repo_root, home)
+        destination = _scope_for_config(
+            path,
+            repo_root,
+            home,
+            (active_codex_home,) if platform_name == "codex" and active_codex_home else (),
+        )
         if destination is None:
             if path.exists():
                 report.skipped_paths.append(
@@ -947,6 +1059,10 @@ def _process_platform_configs(
             seen.add(identity)
             if format_name == "toml":
                 _remove_toml_entry(
+                    path, entry_key, boundary, report, dry_run=dry_run
+                )
+            elif format_name == "yaml":
+                _remove_yaml_entry(
                     path, entry_key, boundary, report, dry_run=dry_run
                 )
             elif format_name in {"object", "array"}:
@@ -967,6 +1083,37 @@ def _process_platform_configs(
 
 def _generated_skill_slugs() -> list[str]:
     return [filename.rsplit(".", 1)[0] for filename in skills._SKILLS]
+
+
+def _qoder_skill_names(repo_root: Path, report: UninstallReport) -> list[str]:
+    """Return every ``.qoder/skills`` name this project has ever installed.
+
+    Two shapes, because two releases wrote two different things:
+
+    * Current (#909): ``install`` copies the workflows bundled in the
+      distribution, so their names come from :func:`skills.bundled_skill_names`
+      — the same answer the installer acts on. A normal user repository has no
+      top-level ``skills/`` directory, so deriving the list from one removed
+      nothing at all.
+    * Before #909: ``install`` copied the *target project's* own top-level
+      ``skills/`` directory. Repositories set up by those releases still carry
+      those copies, and only that directory names them, so it is still read.
+
+    Union, not replacement: dropping the legacy source would strand the files
+    an older release installed.
+    """
+    names: list[str] = list(skills.bundled_skill_names())
+    source_skills = repo_root / "skills"
+    if source_skills.is_dir() and not source_skills.is_symlink():
+        try:
+            candidates = list(source_skills.iterdir())
+        except OSError as exc:
+            report.errors.append(f"{source_skills}: list failed ({exc})")
+        else:
+            for candidate in candidates:
+                if candidate.is_dir() and (candidate / "SKILL.md").is_file():
+                    names.append(candidate.name)
+    return list(dict.fromkeys(names))
 
 
 def _remove_legacy_mcp_configs(
@@ -1043,6 +1190,7 @@ def _process_repo(
         repo_root,
         report,
         dry_run=dry_run,
+        scoped_commands=_steering_hook_scopes(),
     )
     _remove_hooks(
         repo_root / ".qoder" / "settings.json",
@@ -1084,45 +1232,33 @@ def _process_repo(
                 report,
                 dry_run=dry_run,
             )
-    source_skills = repo_root / "skills"
-    if source_skills.is_dir() and not source_skills.is_symlink():
-        try:
-            candidates = list(source_skills.iterdir())
-        except OSError as exc:
-            report.errors.append(f"{source_skills}: list failed ({exc})")
-        else:
-            for candidate in candidates:
-                if candidate.is_dir() and (candidate / "SKILL.md").is_file():
-                    _remove_skill_file(
-                        repo_root / ".qoder" / "skills" / candidate.name / "SKILL.md",
-                        repo_root,
-                        report,
-                        dry_run=dry_run,
-                    )
+    for name in _qoder_skill_names(repo_root, report):
+        _remove_skill_file(
+            repo_root / ".qoder" / "skills" / name / "SKILL.md",
+            repo_root,
+            report,
+            dry_run=dry_run,
+        )
 
-    instruction_sections = {
-        "CLAUDE.md": skills._CLAUDE_MD_SECTION,
-        **{
-            relative: skills._PLATFORM_INSTRUCTION_CUSTOM_SECTIONS.get(
-                relative,
-                (skills._CLAUDE_MD_SECTION_MARKER, skills._CLAUDE_MD_SECTION),
-            )[1]
-            for relative in (
-                *skills._PLATFORM_INSTRUCTION_FILES,
-                *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
-            )
-        },
-    }
-    for relative, section in instruction_sections.items():
+    # Every variant is matched per file, so which section a given path was
+    # written with no longer has to be worked out here.
+    instruction_files = dict.fromkeys(
+        (
+            "CLAUDE.md",
+            *skills._PLATFORM_INSTRUCTION_FILES,
+            *skills._LEGACY_PLATFORM_INSTRUCTION_FILES,
+        )
+    )
+    for relative in instruction_files:
         _remove_instruction(
             repo_root / relative,
-            section,
             repo_root,
             report,
             dry_run=dry_run,
         )
 
     _remove_git_hook(repo_root, report, dry_run=dry_run)
+    _remove_git_sync_hooks(repo_root, report, dry_run=dry_run)
     _remove_gitignore(repo_root, report, dry_run=dry_run)
 
 
@@ -1156,14 +1292,34 @@ def _process_user(
     else:
         _remove_tree(user_data, home, report, dry_run=dry_run)
 
+    from .codex_skill import codex_home, codex_skill_dir, owned_skill_files
+
+    active_codex_home = codex_home()
+    # ``_process_platform_configs`` already handles the active CODEX_HOME via
+    # the live platform registry. Keep hook/skill cleanup in the same directory
+    # and use that directory itself as the deletion boundary.
     _remove_hooks(
-        home / ".codex" / "hooks.json",
+        active_codex_home / "hooks.json",
         _commands(skills.generate_codex_hooks_config(reference_repo))
         | _legacy_codex_hook_commands(),
-        home,
+        active_codex_home,
         report,
         dry_run=dry_run,
     )
+    skill_dir = codex_skill_dir()
+    for owned_path in owned_skill_files(skill_dir):
+        _remove_skill_file(
+            owned_path,
+            active_codex_home,
+            report,
+            dry_run=dry_run,
+        )
+    if not dry_run:
+        # install creates the skills root, so an empty one is ours to remove.
+        try:
+            skill_dir.parent.rmdir()
+        except OSError:
+            pass
     _remove_hooks(
         home / ".cursor" / "hooks.json",
         _commands(skills.generate_cursor_hooks_config()),
@@ -1184,6 +1340,15 @@ def _process_user(
         report,
         dry_run=dry_run,
     )
+
+    hermes_skills = skills._hermes_home() / "skills" / "code-review-graph"
+    for slug in _generated_skill_slugs():
+        _remove_skill_file(
+            hermes_skills / slug / "SKILL.md",
+            hermes_skills,
+            report,
+            dry_run=dry_run,
+        )
 
 
 def _registry_repo_paths(home: Path, report: UninstallReport) -> list[Path]:

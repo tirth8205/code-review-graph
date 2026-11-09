@@ -20,7 +20,14 @@ import subprocess
 import sys
 import time
 
+from .stdio import configure_utf8_stdio
+
 logger = logging.getLogger(__name__)
+
+
+def _process_already_gone(error: OSError) -> bool:
+    """Windows reports a vanished PID as ERROR_INVALID_PARAMETER (87)."""
+    return isinstance(error, ProcessLookupError) or getattr(error, "winerror", None) == 87
 
 
 # ---------------------------------------------------------------------------
@@ -30,11 +37,41 @@ logger = logging.getLogger(__name__)
 
 def _handle_start(args: argparse.Namespace) -> None:
     """Start the daemon process."""
-    from .daemon import WatchDaemon, is_daemon_running, load_config, write_pid
+    from .daemon import (
+        DaemonAlreadyRunningError,
+        WatchDaemon,
+        claim_daemon_lock,
+        is_daemon_running,
+        load_config,
+        reap_orphaned_watchers,
+        write_pid,
+    )
 
     if is_daemon_running():
         print("Error: Daemon is already running.")
         sys.exit(1)
+
+    # ``is_daemon_running`` above is a read, and two starts a millisecond apart
+    # both pass it. The lock is the decision, and it is taken here — before the
+    # fork, before any watcher is spawned — so the loser prints one line and
+    # exits instead of dying inside a detached child nobody is reading. flock
+    # belongs to the open file description, so the daemon this process goes on
+    # to fork inherits the claim and keeps it after these parents exit.
+    try:
+        claim_daemon_lock()
+    except DaemonAlreadyRunningError as exc:
+        print(f"Error: Daemon is already running: {exc}.")
+        sys.exit(1)
+
+    # A daemon that was killed leaves its watchers running. Starting on top of
+    # them would put two processes on every graph.db, one of them invisible,
+    # so they are cleared before anything new is spawned.
+    reaped = reap_orphaned_watchers()
+    for orphan in reaped:
+        print(
+            f"Reaped orphaned watcher for '{orphan['alias']}' "
+            f"(PID {orphan['pid']}) left by a previous daemon."
+        )
 
     config = load_config()
     daemon = WatchDaemon(config=config)
@@ -56,10 +93,29 @@ def _handle_start(args: argparse.Namespace) -> None:
 
 
 def _handle_stop(_args: argparse.Namespace) -> None:
-    """Stop the running daemon process."""
-    from .daemon import clear_pid, is_daemon_running, read_pid
+    """Stop the running daemon process, and anything it left behind."""
+    from .daemon import (
+        clear_pid,
+        is_daemon_running,
+        pid_alive,
+        read_pid,
+        reap_orphaned_watchers,
+    )
 
     if not is_daemon_running():
+        # "Not running" was never the whole story: a crashed daemon leaves its
+        # watchers alive, and refusing to act left them writing the graph
+        # forever with nothing able to stop them.
+        reaped = reap_orphaned_watchers()
+        if reaped:
+            for orphan in reaped:
+                print(
+                    f"Stopped orphaned watcher for '{orphan['alias']}' "
+                    f"(PID {orphan['pid']}) left by a crashed daemon."
+                )
+            clear_pid()
+            print("Daemon stopped.")
+            return
         print("Daemon is not running.")
         sys.exit(1)
 
@@ -69,33 +125,69 @@ def _handle_stop(_args: argparse.Namespace) -> None:
         sys.exit(1)
 
     print(f"Stopping daemon (PID {pid})...")
+    stopped = False
     try:
         os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        clear_pid()
-        print("Daemon stopped (process already gone).")
-        return
     except PermissionError:
         print(f"Error: Permission denied sending signal to PID {pid}.")
         sys.exit(1)
+    except OSError as exc:
+        if not _process_already_gone(exc):
+            raise
+        clear_pid()
+        _reap_watchers_left_behind()
+        print("Daemon stopped (process already gone).")
+        return
 
-    # Wait up to 5 seconds for process to die
-    for _ in range(50):
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.1)
-    else:
-        # Still alive after 5s — send SIGKILL
-        print("Daemon did not stop gracefully, sending SIGKILL...")
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    try:
+        # Wait up to 5 seconds for process to die.
+        for _ in range(50):
+            if not pid_alive(pid):
+                stopped = True
+                break
+            time.sleep(0.1)
+        else:
+            print("Daemon did not stop gracefully, force-stopping...")
+            force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+            try:
+                os.kill(pid, force_signal)
+            except OSError as exc:
+                if not _process_already_gone(exc):
+                    raise
+                stopped = True
+            else:
+                # Signal delivery does not prove that the process has exited.
+                for _ in range(50):
+                    if not pid_alive(pid):
+                        stopped = True
+                        break
+                    time.sleep(0.1)
+    finally:
+        if stopped:
+            clear_pid()
 
-    clear_pid()
+    if not stopped:
+        print(f"Error: Daemon PID {pid} is still running; refusing to clear its PID file.")
+        sys.exit(1)
+
+    _reap_watchers_left_behind()
     print("Daemon stopped.")
+
+
+def _reap_watchers_left_behind() -> None:
+    """Finish what a daemon that was killed could not.
+
+    The daemon terminates its own children on SIGTERM, but one that had to be
+    SIGKILLed did not get the chance, and on Windows ``os.kill`` is always
+    ``TerminateProcess``, so its shutdown code never runs at all.
+    """
+    from .daemon import reap_orphaned_watchers
+
+    for orphan in reap_orphaned_watchers():
+        print(
+            f"Stopped watcher for '{orphan['alias']}' (PID {orphan['pid']}) "
+            "that outlived the daemon."
+        )
 
 
 def _handle_restart(args: argparse.Namespace) -> None:
@@ -110,9 +202,32 @@ def _handle_restart(args: argparse.Namespace) -> None:
     _handle_start(args)
 
 
+def _format_age(seconds: float | None) -> str:
+    """Render an age in seconds compactly: ``12s``, ``4m``, ``3h``, ``2d``."""
+    if seconds is None:
+        return "-"
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m"
+    if seconds < 86400:
+        return f"{seconds / 3600:.0f}h"
+    return f"{seconds / 86400:.0f}d"
+
+
 def _handle_status(_args: argparse.Namespace) -> None:
     """Show daemon status and configuration."""
-    from .daemon import is_daemon_running, load_config, load_state, pid_alive, read_pid
+    from .daemon import (
+        find_orphaned_watchers,
+        is_daemon_running,
+        load_config,
+        load_state,
+        pid_alive,
+        read_pid,
+        read_watch_health,
+        watcher_status,
+    )
 
     config = load_config()
     running = is_daemon_running()
@@ -122,6 +237,10 @@ def _handle_status(_args: argparse.Namespace) -> None:
         print(f"Daemon:  running (PID {pid})")
     else:
         print("Daemon:  not running")
+
+    # Watchers outlive a crashed daemon. Reporting "not running" and stopping
+    # there hid live processes that were still writing graph.db.
+    orphans = [] if running else find_orphaned_watchers()
 
     print(f"Name:    {config.session_name}")
     print(f"Log dir: {config.log_dir}")
@@ -139,20 +258,84 @@ def _handle_status(_args: argparse.Namespace) -> None:
 
     if running:
         state = load_state()
-        print(f"  {'Alias':<{alias_width}}  {'Status':<8}  {'PID':<8}  Path")
-        print(f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 40}")
+        header = (
+            f"  {'Alias':<{alias_width}}  {'Status':<8}  {'Watcher':<8}  "
+            f"{'PID':<8}  {'Event':<6}  Path"
+        )
+        print(header)
+        print(
+            f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 8}  "
+            f"{'-' * 6}  {'-' * 40}"
+        )
+        stalled = False
+        degraded = False
         for repo in config.repos:
             entry = state.get(repo.alias, {})
             child_pid: int | None = entry.get("pid")
             alive = child_pid is not None and pid_alive(child_pid)
             status_str = "alive" if alive else "dead"
             pid_str = str(child_pid) if child_pid is not None else "-"
-            print(f"  {repo.alias:<{alias_width}}  {status_str:<8}  {pid_str:<8}  {repo.path}")
+            health = read_watch_health(repo.path)
+            watcher = watcher_status(alive, health)
+            stalled = stalled or watcher == "stalled"
+            degraded = degraded or watcher == "partial"
+            last_event = health.get("last_event_at") if health else None
+            event_str = (
+                _format_age(time.time() - last_event)
+                if isinstance(last_event, (int, float))
+                else "-"
+            )
+            print(
+                f"  {repo.alias:<{alias_width}}  {status_str:<8}  {watcher:<8}  "
+                f"{pid_str:<8}  {event_str:<6}  {repo.path}"
+            )
+        if stalled:
+            print()
+            print(
+                "  A stalled watcher means the process is up but its filesystem "
+                "observer is not;"
+            )
+            print(
+                "  the graph is no longer updating. Check the log, then: "
+                "crg-daemon restart"
+            )
+        if degraded:
+            print()
+            print(
+                "  A partial watcher is running with reduced coverage. The health "
+                "file's"
+            )
+            print(
+                "  failed_paths field lists directories the OS could not register;"
+            )
+            print(
+                "  when it is empty, watch slots ran out and one recursive watch"
+            )
+            print(
+                "  replaced the filtered plan; raise CRG_MAX_WATCH_SCHEDULES then."
+            )
     else:
-        print(f"  {'Alias':<{alias_width}}  Path")
-        print(f"  {'-' * alias_width}  {'-' * 40}")
+        by_alias = {orphan["alias"]: orphan for orphan in orphans}
+        print(f"  {'Alias':<{alias_width}}  {'Status':<8}  {'PID':<8}  Path")
+        print(f"  {'-' * alias_width}  {'-' * 8}  {'-' * 8}  {'-' * 40}")
         for repo in config.repos:
-            print(f"  {repo.alias:<{alias_width}}  {repo.path}")
+            orphan = by_alias.get(repo.alias)
+            status_str = "orphan" if orphan else "-"
+            pid_str = str(orphan["pid"]) if orphan else "-"
+            print(
+                f"  {repo.alias:<{alias_width}}  {status_str:<8}  {pid_str:<8}  "
+                f"{repo.path}"
+            )
+        if orphans:
+            print()
+            print(
+                f"  {len(orphans)} watcher(s) outlived the daemon and are still "
+                "writing their graph."
+            )
+            print(
+                "  Run 'crg-daemon stop' to reap them, or 'crg-daemon start' "
+                "which reaps them first."
+            )
 
 
 def _handle_logs(args: argparse.Namespace) -> None:
@@ -236,6 +419,7 @@ def _handle_remove(args: argparse.Namespace) -> None:
 
 def main() -> None:
     """Entry point for the crg-daemon CLI."""
+    configure_utf8_stdio()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     ap = argparse.ArgumentParser(

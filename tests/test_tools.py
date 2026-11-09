@@ -172,6 +172,301 @@ class TestTools:
         assert result["status"] == "ok"
         assert result["search_mode"] == "fts"
 
+    def test_include_source_returns_the_code(self, monkeypatch, tmp_path):
+        """include_source attaches the node's own lines, so a caller can
+        answer without opening the file itself."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text(
+            "import os\n"
+            "\n"
+            "def login(user):\n"
+            "    return check(user)\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=3, line_end=4, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        # Each call closes the store it is given, so hand out a fresh one.
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        plain = semantic_search_nodes("login")
+        assert "source" not in plain["results"][0]
+
+        withsrc = semantic_search_nodes("login", include_source=True)
+        hit = withsrc["results"][0]
+        assert hit["source"] == "def login(user):\n    return check(user)"
+        assert hit["source_lines"] == [3, 4]
+
+    def test_expand_neighbors_returns_caller_source(self, monkeypatch, tmp_path):
+        """One call answers "how does X work": the hit plus the code each side."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "app.py"
+        src.write_text(
+            "def wsgi_app(env):\n"
+            "    return dispatch(env)\n"
+            "\n"
+            "def dispatch(env):\n"
+            "    return 200\n",
+            encoding="utf-8",
+        )
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        for name, ls, le in (("wsgi_app", 1, 2), ("dispatch", 4, 5)):
+            store.upsert_node(NodeInfo(
+                kind="Function", name=name, file_path=str(src),
+                line_start=ls, line_end=le, language="python",
+            ))
+        store.upsert_edge(EdgeInfo(
+            # Qualified names hold the POSIX spelling, also on Windows (#774).
+            kind="CALLS",
+            source=f"{src.as_posix()}::wsgi_app",
+            target=f"{src.as_posix()}::dispatch",
+            file_path=str(src), line=2,
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+        hit = semantic_search_nodes(
+            "dispatch", include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert hit["name"] == "dispatch"
+        callers = hit.get("callers") or []
+        assert [c["name"] for c in callers] == ["wsgi_app"]
+        assert "return dispatch(env)" in callers[0]["source"]
+
+    def test_include_source_caps_long_nodes(self, monkeypatch, tmp_path):
+        """A huge node is truncated and says so rather than blowing the budget."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "big.py"
+        src.write_text("\n".join(f"line{i}" for i in range(500)), encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="sprawl", file_path=str(src),
+            line_start=1, line_end=500, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        hit = semantic_search_nodes("sprawl", include_source=True)["results"][0]
+        assert hit["source_truncated"] is True
+        assert len(hit["source"].splitlines()) <= 60
+
+    def test_include_source_ignored_for_minimal(self, monkeypatch, tmp_path):
+        """detail_level="minimal" stays minimal."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "auth.py"
+        src.write_text("def login(user):\n    return 1\n", encoding="utf-8")
+        store = GraphStore(tmp_path / "test.db")
+        store.upsert_node(NodeInfo(
+            kind="Function", name="login", file_path=str(src),
+            line_start=1, line_end=2, language="python",
+        ))
+        store.commit()
+        rebuild_fts_index(store)
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (store, tmp_path),
+        )
+
+        out = semantic_search_nodes(
+            "login", include_source=True, detail_level="minimal",
+        )
+        assert all("source" not in r for r in out["results"])
+
+    @staticmethod
+    def _search_store(monkeypatch, tmp_path, build):
+        """Fill a graph with *build*, and make searches open a fresh store on it."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.search import rebuild_fts_index
+
+        db = tmp_path / "test.db"
+        store = GraphStore(db)
+        build(store)
+        store.commit()
+        rebuild_fts_index(store)
+        store.close()
+        monkeypatch.setattr(
+            query_mod, "_get_store", lambda repo_root=None: (GraphStore(db), tmp_path),
+        )
+
+    @staticmethod
+    def _fn(src, name, start, end):
+        return NodeInfo(
+            kind="Function", name=name, file_path=str(src),
+            line_start=start, line_end=end, language="python",
+        )
+
+    def test_include_source_lines_match_the_parser(self, monkeypatch, tmp_path):
+        """A form feed is not a new line to the parser, so must not shift the slice."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "ff.py"
+        src.write_text("import os\n\x0c\ndef real():\n    return 1\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "real", 3, 4)),
+        )
+
+        hit = semantic_search_nodes("real", include_source=True)["results"][0]
+        assert hit["source"] == "def real():\n    return 1"
+
+    def test_include_source_skips_notebooks(self, monkeypatch, tmp_path):
+        """Notebook line numbers are not file line numbers: no snippet beats a wrong one."""
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        ipynb = tmp_path / "nb.ipynb"
+        ipynb.write_text('{\n "cells": [\n  1\n ]\n}\n', encoding="utf-8")
+        dbx = tmp_path / "dbx.py"
+        dbx.write_text(
+            "# Databricks notebook source\n# MAGIC %md\n# MAGIC x\n\n"
+            "def dbx_fn():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(ipynb, "nb_fn", 1, 2))
+            store.upsert_node(self._fn(dbx, "dbx_fn", 2, 3))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        for name in ("nb_fn", "dbx_fn"):
+            hit = semantic_search_nodes(name, include_source=True)["results"][0]
+            assert "source" not in hit
+
+    def test_include_source_caps_characters(self, monkeypatch, tmp_path):
+        """One minified line must not get past a budget counted in lines."""
+        from code_review_graph.tools.query import (
+            _MAX_SEARCH_SOURCE_CHARS_PER_NODE,
+            semantic_search_nodes,
+        )
+
+        src = tmp_path / "min.py"
+        src.write_text("huge = '" + "x" * 500_000 + "'\n", encoding="utf-8")
+        self._search_store(
+            monkeypatch, tmp_path, lambda s: s.upsert_node(self._fn(src, "huge", 1, 1)),
+        )
+
+        hit = semantic_search_nodes("huge", include_source=True)["results"][0]
+        assert len(hit["source"]) == _MAX_SEARCH_SOURCE_CHARS_PER_NODE
+        assert hit["source_truncated"] is True
+
+    def test_expand_neighbors_gets_budget_before_lower_hits(self, monkeypatch, tmp_path):
+        """Twelve long hits used to spend it all, so nothing got its callers."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "many.py"
+        src.write_text("\n".join(f"line{i}" for i in range(4000)), encoding="utf-8")
+
+        def build(store):
+            for i in range(20):
+                store.upsert_node(self._fn(src, f"widget_{i}", 1 + i * 100, 80 + i * 100))
+            store.upsert_node(self._fn(src, "caller_fn", 3000, 3010))
+            for i in range(20):
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::caller_fn",
+                    target=f"{src.as_posix()}::widget_{i}",
+                    file_path=str(src), line=3001 + i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        results = semantic_search_nodes(
+            "widget", include_source=True, expand_neighbors=True,
+        )["results"]
+        assert all(hit["callers"][0]["name"] == "caller_fn" for hit in results[:3])
+
+    def test_expand_neighbors_stops_when_budget_is_gone(self, monkeypatch, tmp_path):
+        """Thousands of edges must not mean thousands of lookups for no source."""
+        import code_review_graph.tools.query as query_mod
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        src = tmp_path / "hub.py"
+        src.write_text("\n".join(f"line{i}" for i in range(2000)), encoding="utf-8")
+
+        def build(store):
+            store.upsert_node(self._fn(src, "hub", 1, 60))
+            for i in range(200):
+                store.upsert_node(self._fn(src, f"c{i}", 100 + i, 101 + i))
+                store.upsert_edge(EdgeInfo(
+                    kind="CALLS",
+                    source=f"{src.as_posix()}::c{i}",
+                    target=f"{src.as_posix()}::hub",
+                    file_path=str(src), line=i,
+                ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+        monkeypatch.setattr(query_mod, "_MAX_EXPANDED_SOURCE_LINES", 60)
+        calls = []
+        real_get_node = GraphStore.get_node
+        monkeypatch.setattr(
+            GraphStore, "get_node", lambda s, q: calls.append(q) or real_get_node(s, q),
+        )
+
+        result = semantic_search_nodes(
+            "hub", include_source=True, expand_neighbors=True, limit=1,
+        )
+        assert calls == []
+        assert result["source_omitted"] == 1
+
+    def test_expand_neighbors_finds_edges_of_long_names(self, monkeypatch, tmp_path):
+        """Edges are keyed on the whole name, not the 256 characters a hit shows."""
+        from code_review_graph.graph import EdgeInfo
+        from code_review_graph.tools.query import semantic_search_nodes
+
+        long_name = "a" * 300
+        src = tmp_path / "long.py"
+        src.write_text(
+            f"def {long_name}():\n    return callee()\n\ndef callee():\n    return 1\n",
+            encoding="utf-8",
+        )
+
+        def build(store):
+            store.upsert_node(self._fn(src, long_name, 1, 2))
+            store.upsert_node(self._fn(src, "callee", 4, 5))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{src.as_posix()}::{long_name}",
+                target=f"{src.as_posix()}::callee",
+                file_path=str(src), line=2,
+            ))
+
+        self._search_store(monkeypatch, tmp_path, build)
+
+        hit = semantic_search_nodes(
+            long_name, include_source=True, expand_neighbors=True,
+        )["results"][0]
+        assert [c["name"] for c in hit["callees"]] == ["callee"]
+
     def test_search_edges_by_target_name(self):
         """Search for edges by unqualified target name."""
         # Add an edge with bare target name
@@ -368,6 +663,52 @@ class TestQueryGraphCallTargetFallbacks:
         }
         assert {edge["kind"] for edge in result["edges"]} == {"REFERENCES"}
 
+    @pytest.mark.parametrize("detail_level", ["standard", "minimal"])
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_references_to_includes_alias_imported_dependents(
+        self, monkeypatch, detail_level, ambiguous,
+    ):
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        port_path = self.root / "port.ts"
+        consumer_path = self.root / "consumer.ts"
+        port_path.write_text(
+            "export interface PortSpec { id: string }\n",
+            encoding="utf-8",
+        )
+        if ambiguous:
+            (self.root / "other_port.ts").write_text(
+                "export interface PortSpec { other: string }\n",
+                encoding="utf-8",
+            )
+        # The specifier goes through a workspace alias the parser cannot
+        # follow, so the REFERENCES edge keeps a bare target name.
+        consumer_path.write_text(
+            "import type { PortSpec } from '@core/ports';\n"
+            "export function usePort(spec: PortSpec): string { return spec.id; }\n",
+            encoding="utf-8",
+        )
+        with GraphStore(self.db_path) as store:
+            build = full_build(self.root, store)
+            assert build["errors"] == []
+
+        result = query_graph(
+            pattern="references_to",
+            target=f"{port_path.as_posix()}::PortSpec",
+            repo_root=str(self.root),
+            detail_level=detail_level,
+        )
+
+        assert result["status"] == "ok"
+        by_name = {node["name"]: node for node in result["results"]}
+        if ambiguous:
+            assert "usePort" not in by_name
+            return
+        assert "usePort" in by_name, (
+            "alias-imported dependent dropped; a bare-target REFERENCES edge "
+            "must not read as absence"
+        )
+        assert by_name["usePort"]["target_resolution"] == "unresolved"
+
     def test_callees_of_includes_resolved_and_bare_target_callees(self):
         result = query_graph(
             pattern="callees_of",
@@ -430,7 +771,8 @@ class TestQueryGraphCallTargetFallbacks:
         assert "tsxCaller" in names
         assert "apexCaller" not in names
 
-    def test_inheritors_of_bare_fallback_uses_js_family_without_apex(self):
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_inheritors_of_bare_fallback_uses_js_family_without_apex(self, ambiguous):
         """Bare INHERITS/IMPLEMENTS edges stay inside the JS language family."""
         base_file = (self.root / "base.js").as_posix()
         ts_file = (self.root / "child.ts").as_posix()
@@ -440,6 +782,15 @@ class TestQueryGraphCallTargetFallbacks:
             store.upsert_node(NodeInfo(
                 kind="Class", name="BaseWidget", file_path=base_file,
                 line_start=1, line_end=8, language="javascript",
+            ))
+            # Only a compatible type declaration should cause an ambiguity marker.
+            store.upsert_node(NodeInfo(
+                kind="Class", name="BaseWidget", file_path=apex_file,
+                line_start=1, line_end=8, language="apex",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Type" if ambiguous else "Function", name="BaseWidget", file_path=ts_file,
+                line_start=1, line_end=8, language="typescript",
             ))
             store.upsert_node(NodeInfo(
                 kind="Class", name="TsChild", file_path=ts_file,
@@ -487,6 +838,10 @@ class TestQueryGraphCallTargetFallbacks:
             "TsChild",
             "JsxImplementer",
         }
+        assert all(
+            item.get("inferred_by") == ("bare_name" if ambiguous else None)
+            for item in result["results"]
+        )
 
     def test_inheritors_of_bare_dart_class_ignores_member_matches(
         self,
@@ -519,6 +874,225 @@ class TestQueryGraphCallTargetFallbacks:
 
         assert result["status"] == "ok"
         assert {item["name"] for item in result["results"]} == {"Dog"}
+        assert all("inferred_by" not in item for item in result["results"])
+
+    @staticmethod
+    def _build_repo(tmp_path, monkeypatch, files):
+        for relative, source in files.items():
+            path = tmp_path / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(source, encoding="utf-8")
+        (tmp_path / ".code-review-graph").mkdir()
+        monkeypatch.setenv("CRG_SERIAL_PARSE", "1")
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            assert full_build(tmp_path, store)["errors"] == []
+
+    @pytest.mark.parametrize(
+        "base_source,other_source,child_source,extra_files",
+        [
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace B; public class Child : PlainBase {}",
+                {}, id="different-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace C; using A; public class Child : PlainBase {}",
+                {}, id="ordinary-using",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace C; public class Child : PlainBase {}",
+                {"Usings.cs": "global using A;"}, id="global-using",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "using PlainBase = A.PlainBase; namespace C; "
+                "public class Child : PlainBase {}",
+                {}, id="type-alias",
+            ),
+            pytest.param(
+                "namespace A.Models; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A.C { using Models; public class Child : PlainBase {} }",
+                {}, id="relative-using",
+            ),
+            pytest.param(
+                "public class PlainBase {} namespace Unrelated { class Marker {} }",
+                "namespace B; public class PlainBase {}",
+                "namespace C; public class Child : PlainBase {}",
+                {}, id="global-base-with-unrelated-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A.Sub; public class Child : PlainBase {}",
+                {}, id="enclosing-namespace",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace A.Sub; public class PlainBase {}",
+                "namespace A.Sub; public class Child : PlainBase {}",
+                {}, id="nearer-base-shadows-outer-base",
+            ),
+            pytest.param(
+                "namespace A; public class PlainBase {}",
+                "namespace B; public class PlainBase {}",
+                "namespace A { class Marker {} } "
+                "namespace B { public class Child : PlainBase {} }",
+                {}, id="unrelated-namespace-in-child-file",
+            ),
+            pytest.param(
+                "namespace A { public class PlainBase {} } "
+                "namespace B { public class Child : PlainBase {} }",
+                "namespace B; public class PlainBase {}",
+                "", {}, id="same-file-does-not-prove-binding",
+            ),
+        ],
+    )
+    def test_inheritors_of_caveats_ambiguous_bases_without_guessing_visibility(
+        self, tmp_path, monkeypatch, base_source, other_source, child_source, extra_files,
+    ):
+        """#940: file namespaces/imports prove neither binding nor absence."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "Base.cs": base_source,
+            "Other.cs": other_source,
+            "Child.cs": child_source,
+            **extra_files,
+        })
+        # C# identities include their lexical namespace; query the declaration
+        # stored for this fixture rather than its former namespace-free name.
+        with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+            bases = [
+                node for node in store.get_nodes_by_file(str(tmp_path / "Base.cs"))
+                if node.name == "PlainBase"
+            ]
+            assert len(bases) == 1
+            base_qualified = bases[0].qualified_name
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", base_qualified,
+                str(tmp_path), detail_level=detail_level,
+            )
+            assert result["status"] == "ok"
+            assert result["result_count"] == 1
+            assert result["results_omitted"] == 0
+            assert {item["name"]: item.get("inferred_by") for item in result["results"]} == {
+                "Child": "bare_name",
+            }
+
+    @pytest.mark.parametrize("with_import", [False, True])
+    def test_inheritors_of_caveats_java_package_matches_even_with_an_import(
+        self, tmp_path, monkeypatch, with_import,
+    ):
+        """Retain both candidates; an imported file does not prove type binding."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "ja/JBase.java": "package ja; public class JBase {}",
+            "ja/JSub.java": "package ja; public class JSub extends JBase {}",
+            "jb/JBase.java": "package jb; public class JBase {}",
+            "jc/Child.java": (
+                "package jc; " + ("import ja.JBase; " if with_import else "import jb.JBase; ")
+                + "public class Child extends JBase {}"
+            ),
+        })
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", f"{(tmp_path / 'ja' / 'JBase.java').as_posix()}::JBase",
+                str(tmp_path), detail_level=detail_level,
+            )
+            assert {item["name"]: item.get("inferred_by") for item in result["results"]} == {
+                "JSub": "bare_name", "Child": "bare_name",
+            }
+
+    @pytest.mark.parametrize("ambiguous", [False, True])
+    def test_inheritors_of_streams_bare_matches_and_keeps_counts(
+        self, monkeypatch, ambiguous,
+    ):
+        """The result cap must also bound live edges, for either declaration count."""
+        import weakref
+
+        with GraphStore(self.db_path) as store:
+            for name in ("Base", "Other.Base") if ambiguous else ("Base",):
+                store.upsert_node(NodeInfo(
+                    kind="Class", name="Base", file_path=self.target_file,
+                    parent_name="Other" if name == "Other.Base" else None,
+                    language="objc", line_start=1, line_end=2,
+                ))
+            for index in range(6):
+                name = f"Child{index}"
+                store.upsert_node(NodeInfo(
+                    kind="Class", name=name, file_path=self.cross_file,
+                    language="objc", line_start=1, line_end=2,
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="INHERITS" if index < 3 else "IMPLEMENTS",
+                    source=f"{self.cross_file}::{name}", target="Base",
+                    file_path=self.cross_file, line=1,
+                ))
+            store.commit()
+
+        original = GraphStore.iter_edges_by_target_name
+
+        def bounded_edges(store, *args, **kwargs):
+            previous = None
+            for edge in original(store, *args, **kwargs):
+                yield edge
+                # The consumer may hold the current edge, but must release its predecessor.
+                if previous is not None:
+                    assert previous() is None, "bare matches are being retained"
+                previous = weakref.ref(edge)
+
+        monkeypatch.setattr(GraphStore, "iter_edges_by_target_name", bounded_edges)
+        for detail_level in ("standard", "minimal"):
+            result = query_graph(
+                "inheritors_of", f"{self.target_file}::Base", str(self.root),
+                detail_level=detail_level, max_results=1,
+            )
+            assert result["result_count"] == 6
+            assert result["results_omitted"] == 5
+            assert len(result["results"]) == 1
+            assert result["results"][0].get("inferred_by") == (
+                "bare_name" if ambiguous else None
+            )
+            if detail_level == "standard":
+                assert len(result["edges"]) == 1
+                assert result["edges"][0]["source"] == result["results"][0]["qualified_name"]
+
+    @pytest.mark.parametrize("resolved", [False, True])
+    def test_inheritors_of_preserves_exact_and_single_declaration_matches(
+        self, tmp_path, monkeypatch, resolved,
+    ):
+        """The mitigation changes only ambiguous bare-name fallback responses."""
+        self._build_repo(tmp_path, monkeypatch, {
+            "Solo.java": "public class Solo {}\n",
+            "SoloChild.java": "public class SoloChild extends Solo {}\n",
+        })
+        target = f"{(tmp_path / 'Solo.java').as_posix()}::Solo"
+        if resolved:
+            with GraphStore(tmp_path / ".code-review-graph" / "graph.db") as store:
+                store.upsert_node(NodeInfo(
+                    kind="Class", name="Solo", file_path=(tmp_path / "Other.java").as_posix(),
+                    language="java", line_start=1, line_end=1,
+                ))
+                store.upsert_edge(EdgeInfo(
+                    kind="INHERITS",
+                    source=f"{(tmp_path / 'SoloChild.java').as_posix()}::SoloChild",
+                    target=target, file_path=(tmp_path / "SoloChild.java").as_posix(), line=1,
+                ))
+                store.commit()
+
+        result = query_graph(
+            pattern="inheritors_of",
+            target=target,
+            repo_root=str(tmp_path),
+        )
+
+        assert {item["name"] for item in result["results"]} == {"SoloChild"}
+        assert all("inferred_by" not in item for item in result["results"])
 
 
 def _seed_repo_relative_graph(root: Path) -> None:
@@ -869,7 +1443,7 @@ class TestEmbedGraphProviderErrors:
         (tmp_path / ".code-review-graph").mkdir()
         store = MagicMock()
         monkeypatch.setattr(
-            docs_module, "_get_store", lambda repo_root=None: (store, tmp_path),
+            docs_module, "_get_store", lambda repo_root=None, **_kw: (store, tmp_path),
         )
         result = docs_module.embed_graph(
             repo_root=str(tmp_path), provider="moonbase",
@@ -1163,14 +1737,13 @@ class TestFlowTools:
 
     def test_list_flows_kind_filter(self):
         result = list_flows(repo_root=str(self.root), kind="Function")
+
         assert result["status"] == "ok"
-        # All returned flows should have Function entry points
-        for f in result["flows"]:
-            ep_id = f["entry_point_id"]
-            row = self.store._conn.execute(
-                "SELECT kind FROM nodes WHERE id = ?", (ep_id,)
-            ).fetchone()
-            assert row["kind"] == "Function"
+        assert len(result["flows"]) == 1
+
+        flow = result["flows"][0]
+        assert flow["name"] == "handle_request"
+        assert self.store.get_node_kind_by_id(flow["entry_point_id"]) == "Function"
 
     def test_list_flows_kind_filter_no_match(self):
         result = list_flows(repo_root=str(self.root), kind="Class")
@@ -1265,6 +1838,61 @@ class TestFlowTools:
         )
         assert "flow(s) affected" in result["summary"]
         assert "changed_files" in result
+
+    def test_get_affected_flows_minimal_drops_steps(self):
+        """detail_level="minimal" strips per-flow step details (#849)."""
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            detail_level="minimal",
+        )
+        assert result["status"] == "ok"
+        assert len(result["affected_flows"]) == result["total"] == 1
+
+        flow = result["affected_flows"][0]
+        assert "steps" not in flow
+        assert "path" not in flow
+        assert "name" in flow
+        assert "criticality" in flow
+
+    def test_get_affected_flows_max_flows_truncates(self):
+        """max_flows bounds the list while total keeps the full count (#849)."""
+        app_py = (self.root / "app.py").as_posix()
+        auth_py = (self.root / "auth.py").as_posix()
+
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name="admin_handler",
+            file_path=app_py, line_start=26, line_end=35, language="python",
+        ))
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source=f"{app_py}::admin_handler",
+            target=f"{auth_py}::check_auth",
+            file_path=app_py, line=30,
+        ))
+        self.store.commit()
+        self._build_flows()
+
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            max_flows=1,
+        )
+        assert result["status"] == "ok"
+        assert result["total"] >= 2
+        assert len(result["affected_flows"]) == 1
+        assert result["truncated"] is True
+        assert "showing 1" in result["summary"]
+
+    def test_get_affected_flows_max_flows_zero_disables_limit(self):
+        result = get_affected_flows_func(
+            changed_files=["auth.py"],
+            repo_root=str(self.root),
+            max_flows=0,
+        )
+        assert result["status"] == "ok"
+        assert result["truncated"] is False
+        assert len(result["affected_flows"]) == result["total"]
 
 
 class TestCommunityTools:
@@ -1472,9 +2100,13 @@ class TestCommunityTools:
 
     def test_get_architecture_overview_defaults_to_compact_output(self):
         result = get_architecture_overview_func(repo_root=str(self.root))
+
         assert "community pairs" in result["summary"]
-        for c in result["communities"]:
-            assert "members" not in c
+
+        communities = result["communities"]
+        assert communities
+        assert all("members" not in community for community in communities)
+
         assert result["context_savings"]["estimated"] is True
         assert set(result["context_savings"]) == {
             "estimated",
@@ -1504,17 +2136,21 @@ class TestCommunityTools:
         minimal = get_architecture_overview_func(
             repo_root=str(self.root), detail_level="minimal"
         )
-        # Minimal edges are pair-aggregated, so count is <= standard's
-        # per-edge count.
-        assert len(minimal["cross_community_edges"]) <= len(
-            std["cross_community_edges"]
-        )
-        for pair in minimal["cross_community_edges"]:
-            assert "source_community" in pair
-            assert "target_community" in pair
-            assert "edge_count" in pair
-            assert pair["edge_count"] >= 1
-            assert isinstance(pair["top_kinds"], list)
+
+        # Minimal edges are pair-aggregated, so one pair stands for every
+        # standard edge in this fixture.
+        std_edges = std["cross_community_edges"]
+        pairs = minimal["cross_community_edges"]
+
+        assert std_edges
+        assert len(pairs) == 1
+
+        pair = pairs[0]
+        assert pair["source_community"]
+        assert pair["target_community"]
+        assert pair["edge_count"] == len(std_edges)
+        assert isinstance(pair["top_kinds"], list)
+        assert "CALLS" in pair["top_kinds"]
 
     def test_get_architecture_overview_minimal_summary_label(self):
         result = get_architecture_overview_func(
@@ -1608,7 +2244,6 @@ class TestBuildPostprocess:
             "fts_s",
             "flows_s",
             "communities_s",
-            "summaries_s",
         }
         assert all(
             isinstance(value, float) and value >= 0
@@ -1621,9 +2256,10 @@ class TestBuildPostprocessResolvesBareEndpoints:
     """Every explicit build/postprocess path applies safe endpoint resolution."""
 
     def setup_method(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()
-        self.db_path = Path(self.tmp.name)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.tmp.name)
+        self.db_path = self.repo / ".code-review-graph" / "graph.db"
+        self.db_path.parent.mkdir()
         self.store = GraphStore(self.db_path)
         app_file = "/repo/src/app.py"
         test_file = "/repo/tests/test_app.py"
@@ -1665,7 +2301,7 @@ class TestBuildPostprocessResolvesBareEndpoints:
             self.store.close()
         except Exception:
             pass
-        self.db_path.unlink(missing_ok=True)
+        self.tmp.cleanup()
 
     @staticmethod
     def _tested_by_source(store: GraphStore) -> str:
@@ -1693,19 +2329,15 @@ class TestBuildPostprocessResolvesBareEndpoints:
         assert "bare_edges_resolved" not in result
         assert self._tested_by_source(self.store) == "parse"
 
-    def test_manual_run_postprocess_resolves(self, monkeypatch):
+    def test_manual_run_postprocess_resolves(self):
         import code_review_graph.tools.build as build_module
 
-        monkeypatch.setattr(
-            build_module,
-            "_get_store",
-            lambda _repo_root: (self.store, Path("/repo")),
-        )
+        self.store.close()
         result = build_module.run_postprocess(
             flows=False,
             communities=False,
             fts=False,
-            repo_root="/repo",
+            repo_root=str(self.repo),
         )
 
         assert result["bare_edges_resolved"] == 1
@@ -1715,305 +2347,68 @@ class TestBuildPostprocessResolvesBareEndpoints:
         finally:
             reopened.close()
 
+    def _stored_build_state(self) -> str | None:
+        from code_review_graph.tools.build import BUILD_STATE_KEY
 
-class TestComputeSummaries:
-    """Tests for _compute_summaries: pins the contents of the three
-    summary tables so that the batch-aggregate refactor can't silently
-    change behavior.
-    """
-
-    def setup_method(self):
-        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-        self.tmp.close()  # release the handle before GraphStore reopens it on Windows
-        self.store = GraphStore(self.tmp.name)
-        self._seed_graph()
-
-    def teardown_method(self):
-        self.store.close()
-        Path(self.tmp.name).unlink(missing_ok=True)
-
-    def _seed_graph(self):
-        """Seed a small graph with two communities, some CALLS/TESTED_BY
-        edges, and a node name that triggers the security keyword check.
-
-        Shape (auth.py community, community_id=1):
-            login  ->  check_token   (CALLS, internal)
-            logout ->  check_token   (CALLS, internal)
-            test_login -> login      (TESTED_BY)
-            test_login -> logout     (TESTED_BY)
-            (login is called from db.py::query to force cross-community
-             edges into caller_counts)
-
-        Shape (db.py community, community_id=2):
-            query   -> connect       (CALLS, internal)
-            close   -> connect       (CALLS, internal)
-            (query also calls login across the community boundary)
-        """
-        # Auth cluster files / nodes
-        self.store.upsert_node(NodeInfo(
-            kind="File", name="auth.py", file_path="auth.py",
-            line_start=1, line_end=100, language="python",
-        ))
-        for fn in ("login", "logout", "check_token"):
-            self.store.upsert_node(NodeInfo(
-                kind="Function", name=fn, file_path="auth.py",
-                line_start=1, line_end=10, language="python",
-            ))
-        self.store.upsert_node(NodeInfo(
-            kind="Test", name="test_login", file_path="tests/test_auth.py",
-            line_start=1, line_end=5, language="python",
-        ))
-
-        # DB cluster files / nodes
-        self.store.upsert_node(NodeInfo(
-            kind="File", name="db.py", file_path="db.py",
-            line_start=1, line_end=100, language="python",
-        ))
-        for fn in ("connect", "query", "close"):
-            self.store.upsert_node(NodeInfo(
-                kind="Function", name=fn, file_path="db.py",
-                line_start=1, line_end=10, language="python",
-            ))
-
-        # Internal edges
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="auth.py::login",
-            target="auth.py::check_token", file_path="auth.py", line=5,
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="auth.py::logout",
-            target="auth.py::check_token", file_path="auth.py", line=10,
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="db.py::query",
-            target="db.py::connect", file_path="db.py", line=5,
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="db.py::close",
-            target="db.py::connect", file_path="db.py", line=10,
-        ))
-
-        # Cross-community CALLS — boosts login's caller_count.
-        self.store.upsert_edge(EdgeInfo(
-            kind="CALLS", source="db.py::query",
-            target="auth.py::login", file_path="db.py", line=3,
-        ))
-
-        # TESTED_BY edges from the Test node back to auth functions.
-        self.store.upsert_edge(EdgeInfo(
-            kind="TESTED_BY", source="auth.py::login",
-            target="tests/test_auth.py::test_login",
-            file_path="tests/test_auth.py", line=1,
-        ))
-        self.store.upsert_edge(EdgeInfo(
-            kind="TESTED_BY", source="auth.py::logout",
-            target="tests/test_auth.py::test_login",
-            file_path="tests/test_auth.py", line=1,
-        ))
-
-        self.store.commit()
-
-        # Create the two communities and stamp community_id on nodes.
-        conn = self.store._conn
-        conn.execute(
-            "INSERT INTO communities (name, level, cohesion, size, "
-            "dominant_language, description) "
-            "VALUES (?, 0, 1.0, 3, 'python', 'auth community')",
-            ("auth-cluster",),
-        )
-        conn.execute(
-            "INSERT INTO communities (name, level, cohesion, size, "
-            "dominant_language, description) "
-            "VALUES (?, 0, 1.0, 3, 'python', 'db community')",
-            ("db-cluster",),
-        )
-        # Assign community_id by looking up the auto-assigned ids.
-        auth_cid = conn.execute(
-            "SELECT id FROM communities WHERE name='auth-cluster'"
-        ).fetchone()[0]
-        db_cid = conn.execute(
-            "SELECT id FROM communities WHERE name='db-cluster'"
-        ).fetchone()[0]
-        conn.execute(
-            "UPDATE nodes SET community_id = ? WHERE file_path = 'auth.py'",
-            (auth_cid,),
-        )
-        conn.execute(
-            "UPDATE nodes SET community_id = ? WHERE file_path = 'db.py'",
-            (db_cid,),
-        )
-        conn.commit()
-        self._auth_cid = auth_cid
-        self._db_cid = db_cid
-
-    def test_risk_index_populated_with_correct_values(self):
-        """risk_index rows must match per-node caller counts, test
-        coverage, security flag, and risk scores derived from the
-        seeded graph."""
-        from code_review_graph.tools.build import _compute_summaries
-
-        _compute_summaries(self.store)
-
-        rows = self.store._conn.execute(
-            "SELECT qualified_name, caller_count, test_coverage, "
-            "security_relevant, risk_score FROM risk_index"
-        ).fetchall()
-        by_qn = {r[0]: r for r in rows}
-
-        # login: called once (by db.py::query), tested, security-keyword
-        # -> caller_count=1, coverage=tested, sec_relevant=1
-        # risk: caller_count<=3 (0) + tested (0) + sec (0.4) = 0.4
-        login = by_qn["auth.py::login"]
-        assert login[1] == 1  # caller_count
-        assert login[2] == "tested"  # test_coverage
-        assert login[3] == 1  # security_relevant
-        assert login[4] == pytest.approx(0.4)
-
-        # logout: not called by anyone, tested, security-keyword is false
-        #   ("logout" does not match any keyword)
-        # risk: untested(0)/tested(0) + sec(0) = 0 + 0 = 0
-        # Actually: coverage=tested (TESTED_BY edge exists), sec=0, caller=0
-        # risk = 0
-        logout = by_qn["auth.py::logout"]
-        assert logout[1] == 0
-        assert logout[2] == "tested"
-        assert logout[3] == 0
-        assert logout[4] == pytest.approx(0.0)
-
-        # check_token: called twice (login, logout), untested,
-        # "token" matches security keyword
-        # risk: caller<=3(0) + untested(0.3) + sec(0.4) = 0.7
-        ct = by_qn["auth.py::check_token"]
-        assert ct[1] == 2
-        assert ct[2] == "untested"
-        assert ct[3] == 1
-        assert ct[4] == pytest.approx(0.7)
-
-        # connect: called twice, untested, not security
-        # risk: 0 + 0.3 + 0 = 0.3
-        connect = by_qn["db.py::connect"]
-        assert connect[1] == 2
-        assert connect[2] == "untested"
-        assert connect[3] == 0
-        assert connect[4] == pytest.approx(0.3)
-
-        # query: not called, untested, not security
-        # risk: 0 + 0.3 + 0 = 0.3
-        query = by_qn["db.py::query"]
-        assert query[1] == 0
-        assert query[2] == "untested"
-        assert query[3] == 0
-        assert query[4] == pytest.approx(0.3)
-
-        # test_login (kind=Test): not called, untested, not security
-        # Test nodes are included in risk_index via the kind filter.
-        assert "tests/test_auth.py::test_login" in by_qn
-
-    def test_community_summaries_populated_with_correct_values(self):
-        """community_summaries rows must match per-community key
-        symbols, size, and dominant language."""
-        import json as _json
-
-        from code_review_graph.tools.build import _compute_summaries
-
-        _compute_summaries(self.store)
-
-        rows = self.store._conn.execute(
-            "SELECT community_id, name, key_symbols, size, "
-            "dominant_language FROM community_summaries"
-        ).fetchall()
-        assert len(rows) == 2
-        by_name = {r[1]: r for r in rows}
-
-        auth_row = by_name["auth-cluster"]
-        assert auth_row[0] == self._auth_cid
-        assert auth_row[3] == 3  # size
-        assert auth_row[4] == "python"
-
-        # Top symbols in auth cluster by in+out edge count:
-        #   login: 1 out (CALLS check_token) + 1 out (TESTED_BY test_login)
-        #          + 1 in (CALLS from db.query) = 3
-        #   logout: 1 out (CALLS) + 1 out (TESTED_BY) = 2
-        #   check_token: 2 in (CALLS from login, logout) = 2
-        auth_syms = _json.loads(auth_row[2])
-        assert auth_syms[0] == "login"
-        assert set(auth_syms[:3]) == {"login", "logout", "check_token"}
-
-        db_row = by_name["db-cluster"]
-        assert db_row[0] == self._db_cid
-        assert db_row[3] == 3
-        assert db_row[4] == "python"
-
-        # Top symbols in db cluster:
-        #   connect: 2 in (CALLS from query, close) = 2
-        #   query: 2 out (CALLS to connect, login) = 2
-        #   close: 1 out (CALLS to connect) = 1
-        db_syms = _json.loads(db_row[2])
-        assert set(db_syms[:2]) == {"connect", "query"}
-        assert db_syms[-1] == "close" or "close" in db_syms
-
-    def test_compute_summaries_does_not_scale_per_node(self):
-        """Regression guard: SELECT-with-single-row-WHERE-filter queries
-        (the per-row pattern that caused the Godot hang) must stay
-        bounded regardless of how many nodes the fixture has.
-
-        Uses ``sqlite3.Connection.set_trace_callback`` to count DML
-        statements that look like per-row lookups. Note that
-        ``set_trace_callback`` hands back the *expanded* SQL string
-        with parameters substituted as literals, so we match against
-        the expanded form (``= 'foo'`` or ``= 123``) rather than the
-        ``?`` placeholder.
-
-        The batched refactor issues aggregate GROUP BY queries once
-        up front, so this count stays at zero; the pre-refactor code
-        grew linearly with the number of Function/Class/Test nodes
-        and communities.
-        """
-        import re
-
-        from code_review_graph.tools.build import _compute_summaries
-
-        conn = self.store._conn
-        per_row_selects: list[str] = []
-
-        # Match SELECTs whose WHERE filter is a single equality against
-        # a qualified_name literal or an integer id literal — the shape
-        # of all three per-row patterns we refactored away:
-        #   WHERE target_qualified = 'some.qn'   (risk_index caller_count)
-        #   WHERE source_qualified = 'some.qn'   (risk_index test coverage)
-        #   WHERE community_id = 5               (community_summaries)
-        #   FROM nodes WHERE id = 42             (flow_snapshots node name)
-        per_row_re = re.compile(
-            r"\bwhere\s+(?:n\.)?"
-            r"(target_qualified|source_qualified|community_id|id)\s*=\s*"
-            r"(?:'[^']*'|\d+)",
-            re.IGNORECASE,
-        )
-
-        def trace(sql: str) -> None:
-            normalized = sql.strip().lower()
-            if not normalized.startswith("select"):
-                return
-            if per_row_re.search(normalized):
-                per_row_selects.append(sql)
-
-        conn.set_trace_callback(trace)
+        reopened = GraphStore(self.db_path)
         try:
-            _compute_summaries(self.store)
+            return reopened.get_metadata(BUILD_STATE_KEY)
         finally:
-            conn.set_trace_callback(None)
+            reopened.close()
 
-        # The batched refactor should emit zero per-row lookups.
-        # Pre-refactor, on this 6-Function/1-Test fixture with 2
-        # communities, we would have seen at least
-        # (7 risk nodes × 2 COUNT queries) + (2 comms × 2 setup
-        # queries) ≈ 18. A failure here prints the offending SQL so
-        # the regression is easy to spot.
-        assert not per_row_selects, (
-            f"_compute_summaries issued {len(per_row_selects)} per-row "
-            "SELECTs — the batch-aggregate refactor has regressed:\n"
-            + "\n".join(f"  - {s}" for s in per_row_selects[:5])
+    def test_manual_run_postprocess_clears_the_marker_after_a_repair(
+        self
+    ):
+        """A build that stored every file and died is what this command repairs.
+
+        Leaving the marker set after a successful repair would promote every
+        later update to a full rebuild of a graph that is already right.
+        """
+        import code_review_graph.tools.build as build_module
+        from code_review_graph.build_state import POSTPROCESS_PENDING
+        from code_review_graph.tools.build import BUILD_COMPLETE, BUILD_STATE_KEY
+
+        self.store.set_metadata(BUILD_STATE_KEY, POSTPROCESS_PENDING)
+        self.store.close()
+        result = build_module.run_postprocess(
+            flows=False,
+            communities=False,
+            fts=False,
+            repo_root=str(self.repo),
         )
+
+        assert result["status"] == "ok"
+        assert result.get("build_incomplete") is not True
+        assert self._stored_build_state() == BUILD_COMPLETE
+
+    def test_manual_run_postprocess_keeps_the_marker_when_files_are_missing(
+        self
+    ):
+        """Derived data over a graph missing files is not a complete graph.
+
+        Every stage reads the stored nodes, so all of them succeed and none
+        can notice the files the dead build never parsed. Clearing the marker
+        there hands back a half-built graph labelled healthy.
+        """
+        import code_review_graph.tools.build as build_module
+        from code_review_graph.tools.build import BUILD_IN_PROGRESS, BUILD_STATE_KEY
+
+        self.store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
+        self.store.close()
+        result = build_module.run_postprocess(
+            flows=False,
+            communities=False,
+            fts=False,
+            repo_root=str(self.repo),
+        )
+
+        # It still repairs what it can, and reports what it could not.
+        assert result["bare_edges_resolved"] == 1
+        assert result["status"] == "partial"
+        assert result["build_incomplete"] is True
+        assert any("stopped before every file was stored" in w
+                   for w in result["warnings"])
+        assert self._stored_build_state() == BUILD_IN_PROGRESS
 
 
 class TestGetMinimalContext:
@@ -2052,6 +2447,92 @@ class TestGetMinimalContext:
         assert "summary" in result
         assert "next_tool_suggestions" in result
 
+    def test_change_discovery_runs_once_on_the_discovery_budget(self, monkeypatch):
+        """The tool CLAUDE.md tells agents to call first cannot be the one
+        exception to #262's budget.
+
+        It used to run five git subprocesses of its own -- resolve_review_base
+        at 30s, two hardcoded 10s probes, then get_changed_files at another
+        30s -- for a ~130s worst case on the entry point. One
+        discover_review_changes call replaces all of them, and the base it
+        resolves is the one the analysis is scored against.
+        """
+        import code_review_graph.tools.context as context_module
+
+        discover = MagicMock(return_value=(["app.py"], "merge-base-sha"))
+        resolve = MagicMock(return_value="unused")
+        analyze = MagicMock(return_value={"risk_score": 0.2, "changed_functions": []})
+        monkeypatch.setattr(context_module, "discover_review_changes", discover)
+        monkeypatch.setattr(context_module, "resolve_review_base", resolve)
+        monkeypatch.setattr("code_review_graph.changes.analyze_changes", analyze)
+
+        result = context_module.get_minimal_context(
+            task="review changes",
+            repo_root=str(self.root),
+            base="origin/main",
+        )
+
+        assert result["status"] == "ok"
+        discover.assert_called_once_with(self.root.resolve(), "origin/main")
+        # No separate probe, and no second base resolution: both were git
+        # round trips this tool no longer makes.
+        resolve.assert_not_called()
+        assert analyze.call_args.kwargs["base"] == "merge-base-sha"
+
+    def test_a_discovery_failure_is_reported_not_read_as_no_changes(
+        self, monkeypatch,
+    ):
+        """Degraded, and it says so -- the same contract as the churn note.
+
+        An agent acts on this response. "I could not determine the changes"
+        must not render identically to "there are none".
+        """
+        import code_review_graph.tools.context as context_module
+        from code_review_graph.errors import ChangeDiscoveryError
+
+        monkeypatch.setattr(
+            context_module, "discover_review_changes",
+            MagicMock(side_effect=ChangeDiscoveryError(
+                "could not determine the changes: git timed out after 5s."
+            )),
+        )
+
+        result = context_module.get_minimal_context(
+            task="review changes",
+            repo_root=str(self.root),
+            base="origin/main",
+        )
+
+        # The other sections still answer; only the risk section degrades.
+        assert result["status"] == "ok"
+        assert "Degraded" in result["summary"]
+        assert "git timed out" in result["summary"]
+
+    def test_explicit_changed_files_skip_discovery_entirely(self, monkeypatch):
+        """A caller that already knows the files spends no git budget on them."""
+        import code_review_graph.tools.context as context_module
+
+        discover = MagicMock()
+        monkeypatch.setattr(context_module, "discover_review_changes", discover)
+        monkeypatch.setattr(
+            context_module, "resolve_review_base",
+            MagicMock(return_value="merge-base-sha"),
+        )
+        monkeypatch.setattr(
+            "code_review_graph.changes.analyze_changes",
+            MagicMock(return_value={"risk_score": 0.2, "changed_functions": []}),
+        )
+
+        result = context_module.get_minimal_context(
+            task="review changes",
+            changed_files=["app.py"],
+            repo_root=str(self.root),
+            base="origin/main",
+        )
+
+        assert result["status"] == "ok"
+        discover.assert_not_called()
+
     def test_missing_graph_returns_not_ready_without_creating_database(self, tmp_path):
         from code_review_graph.tools.context import get_minimal_context
 
@@ -2070,13 +2551,20 @@ class TestGetMinimalContext:
         assert not db_path.parent.exists()
 
     def test_mcp_wrapper_reports_missing_graph_without_creating_state(self, tmp_path):
+        import asyncio
+
         from code_review_graph.main import get_minimal_context_tool
 
         repo = tmp_path / "cold-worktree"
         repo.mkdir()
         (repo / ".git").write_text("gitdir: ../main/.git/worktrees/cold\n")
 
-        result = get_minimal_context_tool(repo_root=str(repo))
+        # The wrapper is a coroutine: it hands the blocking work to a worker
+        # thread so the stdio event loop stays answerable (#262).
+        underlying = (
+            getattr(get_minimal_context_tool, "fn", None) or get_minimal_context_tool
+        )
+        result = asyncio.run(underlying(repo_root=str(repo)))
 
         assert result["status"] == "not_ready"
         assert result["reason"] == "missing_graph"
@@ -2381,7 +2869,9 @@ class TestGraphProvenance:
         assert common_module.with_provenance(existing, str(repo)) is existing
         assert existing["_graph"] == {"updated_at": "existing"}
 
-    def test_registered_sync_tool_preserves_existing_fields(self, tmp_path):
+    def test_registered_tool_preserves_existing_fields(self, tmp_path):
+        import asyncio
+
         from code_review_graph.main import list_graph_stats_tool
 
         repo = self._make_repo(tmp_path, {
@@ -2390,7 +2880,7 @@ class TestGraphProvenance:
         })
         expected = list_graph_stats(repo_root=str(repo))
         underlying = getattr(list_graph_stats_tool, "fn", None) or list_graph_stats_tool
-        result = underlying(repo_root=str(repo))
+        result = asyncio.run(underlying(repo_root=str(repo)))
 
         envelope = result.pop("_graph")
         assert result == expected
