@@ -3268,9 +3268,17 @@ class TestElixirParsing:
             with GraphStore(tmp_path / f"clauses-{writer_name}.db") as store:
                 writer(store)
                 multi = store.get_node(f"{path.as_posix()}::T.multi")
+                stored = sorted(
+                    (node.line_start, node.line_end)
+                    for node in store.get_nodes_by_file(path.as_posix())
+                    if node.name == "multi"
+                )
 
+            # The clauses are one node (#979), so the same-name collision
+            # #585 guards against never happens here: one row, both lines.
             assert multi is not None
             assert (multi.line_start, multi.line_end) == (4, 5)
+            assert stored == [(4, 5)]
 
 
 class TestGDScriptParsing:
