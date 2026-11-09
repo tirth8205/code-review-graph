@@ -1772,6 +1772,9 @@ class _FollowedTree(NamedTuple):
     #: Real path of each followed folder outside the repository, mapped to
     #: the repository-relative path its files are stored under.
     outside: dict[str, str]
+    #: Followed folders inside the repository, as repository-relative real
+    #: paths. A file made there is in the graph only through a link.
+    inside: list[str]
 
 
 def _walk_symlinked_dirs(
@@ -1788,7 +1791,8 @@ def _walk_symlinked_dirs(
 
     A link is not followed when its own path is ignored, when its target is
     an ignored folder of the repository, or when it points at a folder that
-    holds it or holds the repository (a cycle). Each real folder is listed
+    holds it or holds the repository (a cycle). Below a link, an ignore rule
+    applies to the path through the link as well as the stored path. Each real folder is listed
     at most once, by device and inode, so links that point at each other
     cannot loop. At most ``CRG_MAX_FOLLOWED_FILES`` new files are taken, and
     the log says when that cap cuts the walk short. Symlinked files are
@@ -1800,23 +1804,31 @@ def _walk_symlinked_dirs(
     files: list[str] = []
     links: list[str] = []
     outside: dict[str, str] = {}
+    inside_dirs: list[str] = []
     seen_links: set[str] = set()
     listed: set[tuple[int, int]] = set()
     taken = 0
+    # Each link as (path on disk, path through the links that reached it).
     pending = deque(
-        sorted(
+        (path, path)
+        for path in sorted(
             normalize_file_path(candidate)
             for candidate in listed_names
             if os.path.islink(repo_root / candidate)
         )
     )
 
-    def _list(directory: Path, logical: str) -> bool:
+    def _ignored(logical: str, via: str) -> bool:
+        return _should_ignore(logical, ignore_patterns) or (
+            via != logical and _should_ignore(via, ignore_patterns)
+        )
+
+    def _list(directory: Path, logical: str, via: str) -> bool:
         """List one followed folder; return False once the cap is reached."""
         nonlocal taken
-        stack = [(directory, logical)]
+        stack = [(directory, logical, via)]
         while stack:
-            current, current_logical = stack.pop()
+            current, current_logical, current_via = stack.pop()
             try:
                 info = current.stat()
                 if (info.st_dev, info.st_ino) in listed:
@@ -1827,18 +1839,19 @@ def _walk_symlinked_dirs(
             except OSError as exc:
                 logger.debug("Cannot list %s: %s", current, exc)
                 continue
-            folders: list[tuple[Path, str]] = []
+            folders: list[tuple[Path, str, str]] = []
             for entry in entries:
                 entry_logical = f"{current_logical}/{entry.name}"
+                entry_via = f"{current_via}/{entry.name}"
                 try:
                     if entry.is_symlink() or _is_junction(entry):
                         # A link inside a followed folder gets the same checks.
-                        pending.append(entry_logical)
+                        pending.append((entry_logical, entry_via))
                     elif entry.is_dir(follow_symlinks=False):
-                        if not _should_ignore(entry_logical, ignore_patterns):
-                            folders.append((Path(entry.path), entry_logical))
+                        if not _ignored(entry_logical, entry_via):
+                            folders.append((Path(entry.path), entry_logical, entry_via))
                     elif entry.is_file(follow_symlinks=False):
-                        if _should_ignore(entry_logical, ignore_patterns):
+                        if _ignored(entry_logical, entry_via):
                             continue
                         files.append(entry_logical)
                         if entry_logical not in listed_names:
@@ -1852,11 +1865,11 @@ def _walk_symlinked_dirs(
 
     capped = False
     while pending and not capped:
-        link_rel = pending.popleft()
+        link_rel, link_via = pending.popleft()
         if link_rel in seen_links:
             continue
         seen_links.add(link_rel)
-        if _should_ignore(link_rel, ignore_patterns):
+        if _ignored(link_rel, link_via):
             continue
         link = root / link_rel
         target = Path(os.path.realpath(link))
@@ -1894,9 +1907,11 @@ def _walk_symlinked_dirs(
         links.append(link_rel)
         if (info.st_dev, info.st_ino) in listed:
             continue
-        if not inside:
+        if inside:
+            inside_dirs.append(logical)
+        else:
             outside[normalize_file_path(target)] = link_rel
-        if not _list(target, logical):
+        if not _list(target, logical, link_via):
             capped = True
     if capped:
         _report_once(
@@ -1905,7 +1920,7 @@ def _walk_symlinked_dirs(
             "(CRG_MAX_FOLLOWED_FILES); files past that point are left out of the graph",
             limit,
         )
-    return _FollowedTree(files, links, outside)
+    return _FollowedTree(files, links, outside, inside_dirs)
 
 
 def _path_key(rel_path: str) -> str:
@@ -2162,9 +2177,12 @@ def _followed_files_delta(
     Returns ``(new, gone, record, outside)``: repository-relative files a
     followed folder reaches that the graph does not hold yet; stored paths
     that were in the graph only through a followed folder and no longer are
-    (the link went, or the option is off); the new record, or ``None`` when
-    there is nothing to compare; and the followed folders outside the
-    repository. A graph that never used the option costs nothing.
+    (the link went, or the option is off), or that sit in a followed folder
+    inside the repository where a build would not take them (the watcher
+    indexes a new file by its own path, before any link rule is applied);
+    the new record, or ``None`` when there is nothing to compare; and the
+    followed folders outside the repository. A graph that never used the
+    option costs nothing.
     """
     recorded = _load_followed_files(store)
     if not follow and not recorded:
@@ -2176,9 +2194,11 @@ def _followed_files_delta(
     listed = {normalize_file_path(repo_root / candidate) for candidate in candidates}
     followed: list[str] = []
     outside: dict[str, str] = {}
+    inside: list[str] = []
     if follow:
         followed, tree = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
         outside = tree.outside
+        inside = [normalize_file_path(repo_root / folder) + "/" for folder in tree.inside]
     record = {normalize_file_path(repo_root / rel_path) for rel_path in followed}
     stored = set(store.get_all_files())
     new = [
@@ -2186,8 +2206,9 @@ def _followed_files_delta(
         if normalize_file_path(repo_root / rel_path) not in stored
     ]
     gone = sorted(
-        path for path in recorded
-        if path in stored and path not in record and path not in listed
+        path for path in stored
+        if path not in record and path not in listed
+        and (path in recorded or any(path.startswith(folder) for folder in inside))
     )
     return new, gone, record, outside
 
@@ -2641,7 +2662,8 @@ def incremental_update(
     longer reach, so it agrees with a full build. ``None`` falls back to
     ``CRG_FOLLOW_SYMLINKS``. *reconcile_followed* does only that part, and
     re-reads only the followed files: the watcher uses it when a link
-    changes or a file changes in a followed folder outside the repository.
+    changes, a file changes in a followed folder outside the repository, or
+    a file is added or removed in a followed folder inside it.
 
     A path that leaves the repository or goes through a symlink is parsed
     only when it is a file the followed folders reach; any other such path
@@ -4082,6 +4104,8 @@ def _create_watch_handler(
             # changes under their real paths, so the supervisor watches them
             # on top of the repository.
             self.outside_roots: set[str] = set()
+            # Followed folders inside the repository, by their own path.
+            self.inside_roots: set[str] = set()
             if follow:
                 self._remember_followed()
             self.failure: BaseException | None = None
@@ -4257,12 +4281,14 @@ def _create_watch_handler(
             tree = _followed_tree(repo_root, ignore_patterns)
             self.followed_links = set(tree.links)
             self.outside_roots = _outermost(tree.outside)
+            self.inside_roots = _outermost(tree.inside)
 
         def _touches_followed(self, events: list[FileSystemEvent]) -> tuple[bool, bool]:
             """Whether a batch changes a symlinked folder, and whether it
-            changes a file in a followed folder outside the repository."""
+            changes a file in a followed folder outside the repository or
+            adds or removes one in a followed folder inside it."""
             links_changed = False
-            outside_changed = False
+            contents_changed = False
             for event in events:
                 for raw in (event.src_path, getattr(event, "dest_path", "")):
                     if not raw:
@@ -4276,7 +4302,7 @@ def _create_watch_handler(
                             spelled == root or spelled.startswith(root.rstrip("/") + "/")
                             for root in self.outside_roots
                         ):
-                            outside_changed = True
+                            contents_changed = True
                             if os.path.islink(candidate):
                                 links_changed = True
                         continue
@@ -4285,6 +4311,13 @@ def _create_watch_handler(
                     if os.path.islink(candidate):
                         links_changed = True
                         continue
+                    if event.event_type in {"created", "deleted", "moved"} and any(
+                        relative == root or relative.startswith(root + "/")
+                        for root in self.inside_roots
+                    ):
+                        # The file is in the graph only through the link, so
+                        # the record must hold it for it to go with the link.
+                        contents_changed = True
                     prefix = relative + "/"
                     if any(
                         link == relative or link.startswith(prefix)
@@ -4294,7 +4327,7 @@ def _create_watch_handler(
                         and _holds_symlink(candidate, relative, ignore_patterns)
                     ):
                         links_changed = True
-            return links_changed, outside_changed
+            return links_changed, contents_changed
 
         def _reconcile_followed(self) -> int:
             # The files behind a link raise no events under the link's path,
@@ -4334,9 +4367,9 @@ def _create_watch_handler(
                         _raise_watch_update_errors(result, "incremental update")
                         files_updated += result["files_updated"]
                     if follow:
-                        links_changed, outside_changed = self._touches_followed(events)
+                        links_changed, contents_changed = self._touches_followed(events)
                         links_changed = links_changed or ignore_patterns is not patterns_before
-                        if links_changed or outside_changed:
+                        if links_changed or contents_changed:
                             files_updated += self._reconcile_followed()
                     if files_updated > 0 and on_files_updated is not None:
                         postprocess_result = on_files_updated(store)

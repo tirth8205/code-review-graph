@@ -273,8 +273,8 @@ When it is on:
 - At most `CRG_MAX_FOLLOWED_FILES` files (default 10,000) are taken through links. When the
   cap is reached, a warning names it and the rest are left out.
 - Files reached through a link are indexed even when Git ignores them. `.code-review-graphignore`
-  and the default ignore list still apply, to the path inside the repository, so use them to
-  leave files out.
+  and the default ignore list still apply, both to the file's own path and to its path through
+  the link, so use them to leave files out.
 - Symlinked files are still never followed.
 - `update` and `watch` add files when a link appears or a file appears behind one, and drop
   them when they go, the same as a full build. `watch` also watches each followed folder

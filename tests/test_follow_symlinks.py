@@ -234,6 +234,17 @@ def test_ignored_link_and_ignored_target_are_not_followed(repo: Path) -> None:
     assert "other/extra.py" not in files
 
 
+def test_ignore_rule_on_the_link_path_applies_inside_the_link(repo: Path) -> None:
+    # Files behind app/shared are stored under shared/, but a rule written
+    # for the path the user sees through the link still keeps them out.
+    (repo / "shared" / "private").mkdir()
+    (repo / "shared" / "private" / "secret.py").write_text("def hidden():\n    pass\n")
+    (repo / ".code-review-graphignore").write_text("/app/shared/private/**\n")
+    files = collect_all_files(repo, follow_symlinks=True)
+    assert "shared/util.py" in files
+    assert "shared/private/secret.py" not in files
+
+
 def test_edges_into_an_outside_folder_use_the_in_repo_path(
     tmp_path: Path, outside: Path,
 ) -> None:
@@ -464,6 +475,56 @@ def test_watch_follows_a_new_link_and_drops_a_removed_one(
         handler.process([FileDeletedEvent(str(link))])
         handler.raise_if_failed()
         assert _files(store, repo) == {"app/main.py", "app/outside/secret.py"}
+    finally:
+        store.close()
+
+
+def test_watch_new_file_in_a_followed_folder_goes_with_the_link(
+    repo: Path, tmp_path: Path,
+) -> None:
+    from watchdog.events import FileCreatedEvent, FileDeletedEvent
+
+    store = GraphStore(tmp_path / "graph.db")
+    try:
+        full_build(repo, store, follow_symlinks=True)
+        handler = _create_watch_handler(repo, store, None, follow_symlinks=True)
+        fresh = repo / "shared" / "fresh.py"
+        fresh.write_text("def fresh():\n    pass\n")
+        handler.process([FileCreatedEvent(str(fresh))])
+        handler.raise_if_failed()
+        assert "shared/fresh.py" in _files(store, repo)
+
+        link = repo / "app" / "shared"
+        link.unlink()
+        handler.process([FileDeletedEvent(str(link))])
+        handler.raise_if_failed()
+        assert "shared/fresh.py" not in _files(store, repo)
+        assert _files(store, repo) == _build(
+            repo, tmp_path / "check.db", follow_symlinks=True
+        )[1]
+    finally:
+        store.close()
+
+
+def test_watch_keeps_out_a_new_file_ignored_through_the_link(
+    repo: Path, tmp_path: Path,
+) -> None:
+    from watchdog.events import FileCreatedEvent
+
+    (repo / "shared" / "private").mkdir()
+    (repo / ".code-review-graphignore").write_text("/app/shared/private/**\n")
+    store = GraphStore(tmp_path / "graph.db")
+    try:
+        full_build(repo, store, follow_symlinks=True)
+        handler = _create_watch_handler(repo, store, None, follow_symlinks=True)
+        fresh = repo / "shared" / "private" / "new.py"
+        fresh.write_text("def new():\n    pass\n")
+        handler.process([FileCreatedEvent(str(fresh))])
+        handler.raise_if_failed()
+        assert "shared/private/new.py" not in _files(store, repo)
+        assert _files(store, repo) == _build(
+            repo, tmp_path / "check.db", follow_symlinks=True
+        )[1]
     finally:
         store.close()
 
