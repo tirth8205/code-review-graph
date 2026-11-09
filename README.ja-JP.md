@@ -539,6 +539,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` のコミット数を数える期間 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden のコミュニティ検出のシード | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`、`true`、`yes` のとき git サブモジュールを含める | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`、`true`、`yes`、`on` のとき、リポジトリ内を指すシンボリックリンクのフォルダをたどる。`--follow-symlinks` と同じ。[シンボリックリンクのフォルダ](docs/USAGE.md#symlinked-folders) を参照 | - |
 | `CRG_TOOLS` | サーバー起動時に公開する MCP ツールのカンマ区切り許可リスト | - |
 | `GOOGLE_API_KEY` | Google Gemini 埋め込みの API キー | - |
 | `MINIMAX_API_KEY` | MiniMax 埋め込みの API キー | - |

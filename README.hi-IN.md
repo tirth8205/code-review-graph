@@ -539,6 +539,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` की कमिट गिनती की अवधि | `90` |
 | `CRG_LEIDEN_SEED` | Leiden कम्युनिटी पहचान का सीड | `42` |
 | `CRG_RECURSE_SUBMODULES` | `1`, `true` या `yes` होने पर git सबमॉड्यूल शामिल करें | - |
+| `CRG_FOLLOW_SYMLINKS` | `1`, `true`, `yes` या `on` होने पर रिपॉज़िटरी के अंदर इशारा करने वाले symlink फ़ोल्डरों में जाएँ; `--follow-symlinks` जैसा। देखें [Symlink फ़ोल्डर](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_TOOLS` | सर्व करते समय दिखाए जाने वाले MCP टूल की अल्पविराम से अलग सूची | - |
 | `GOOGLE_API_KEY` | Google Gemini एम्बेडिंग की API कुंजी | - |
 | `MINIMAX_API_KEY` | MiniMax एम्बेडिंग की API कुंजी | - |

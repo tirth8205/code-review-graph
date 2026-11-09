@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -1625,21 +1626,43 @@ def _get_svn_all_tracked_files(repo_root: Path) -> list[str]:
     return []
 
 
-def collect_all_files(
+#: Opt-in switch for following symlinked folders inside the repository (#269).
+#: Off unless set to ``1``, ``true``, ``yes`` or ``on``. The CLI flag
+#: ``--follow-symlinks`` / ``--no-follow-symlinks`` overrides it for one run.
+FOLLOW_SYMLINKS_ENV = "CRG_FOLLOW_SYMLINKS"
+
+# Graph files that are in the graph only because a followed symlinked folder
+# reached them, as a JSON list of stored paths. An update compares it with
+# what the links reach now, so a file drops out when its link goes away (or
+# the option is turned off), the same way a full build would leave it out.
+_FOLLOWED_FILES_KEY = "symlink_followed_files"
+
+
+def follow_symlinks_enabled(explicit: bool | None = None) -> bool:
+    """Return whether symlinked folders inside the repository are followed.
+
+    *explicit* (the CLI flag) wins when given; otherwise ``CRG_FOLLOW_SYMLINKS``
+    decides. It is read on every call so tests and long-lived processes see
+    the value in force when the work starts.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    return os.environ.get(FOLLOW_SYMLINKS_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _inventory_candidates(
     repo_root: Path,
     recurse_submodules: bool | None = None,
 ) -> list[str]:
-    """Collect all parseable files in the repo, respecting ignore patterns.
+    """Return the repository-relative paths a build considers, unfiltered.
 
-    Args:
-        repo_root: Repository root directory.
-        recurse_submodules: If True, include files from git submodules.
-            When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+    Git's tracked files plus its untracked, non-ignored files; SVN's versioned
+    files; or, when neither answers, a walk of the directory. Symlinks are
+    listed as entries of their own (Git never looks inside a symlinked
+    folder), which is how followed folders are found.
     """
-    ignore_patterns = _load_ignore_patterns(repo_root)
-    parser = CodeParser(repo_root)
-    files = []
-
     # Prefer Git's tracked-file inventory, augmented with untracked files so
     # a full build and an incremental update see the same source tree.
     vcs = detect_vcs(repo_root)
@@ -1649,37 +1672,324 @@ def collect_all_files(
     else:
         candidates = tracked
     if not candidates:
-        # Fallback: walk directory
-        candidates = [str(p.relative_to(repo_root)) for p in repo_root.rglob("*") if p.is_file()]
+        # Fallback: walk directory. ``rglob`` never descends into a symlinked
+        # folder; the link itself is kept so it can be followed when asked.
+        candidates = [
+            str(p.relative_to(repo_root))
+            for p in repo_root.rglob("*")
+            if p.is_file() or p.is_symlink()
+        ]
+    return candidates
 
-    for rel_path in candidates:
-        if _should_ignore(rel_path, ignore_patterns):
+
+def _keep_candidate(
+    repo_root: Path,
+    rel_path: str,
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> bool:
+    """Return whether one inventory path is a file the graph should hold."""
+    if _should_ignore(rel_path, ignore_patterns):
+        return False
+    # Skip paths that would exceed OS filename limits (macOS: 255 bytes
+    # per component, ~1024 total; Windows: 260 total).
+    try:
+        # ``os.fsdecode`` preserves undecodable POSIX filename bytes as
+        # surrogate escapes. Graph paths are stored as UTF-8, so reject
+        # those before the component-length checks call ``encode()``.
+        rel_path.encode("utf-8")
+        full_path = repo_root / rel_path
+    except (OSError, UnicodeEncodeError, ValueError):
+        logger.debug("Skipping path that cannot be represented safely")
+        return False
+    if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
+        logger.debug("Skipping overlong path: %s", rel_path[:120])
+        return False
+    if not full_path.is_file():
+        return False
+    if full_path.is_symlink():
+        return False
+    if parser.detect_language(full_path) is None:
+        return False
+    if _is_binary(full_path):
+        return False
+    return True
+
+
+_reported_skipped_links: set[tuple[str, str]] = set()
+
+
+def _report_skipped_link(root: Path, link_rel: str, reason: str) -> None:
+    """Say once per process why a link is not followed; a watcher re-checks often."""
+    key = (str(root), link_rel)
+    level = logging.DEBUG if key in _reported_skipped_links else logging.INFO
+    _reported_skipped_links.add(key)
+    logger.log(level, "Not following %s: it points %s", link_rel, reason)
+
+
+def _is_junction(entry: os.DirEntry) -> bool:
+    """Whether *entry* is a Windows junction, which can point anywhere.
+
+    ``DirEntry.is_junction`` only exists from Python 3.12; before that a
+    folder whose real path is not its own path is treated the same way.
+    """
+    if os.name != "nt":
+        return False
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    return os.path.normcase(os.path.realpath(entry.path)) != os.path.normcase(
+        os.path.abspath(entry.path)
+    )
+
+
+def _walk_symlinked_dirs(
+    repo_root: Path,
+    candidates: Iterable[str],
+    ignore_patterns: list[str],
+) -> tuple[list[str], list[str]]:
+    """Follow the symlinked folders among *candidates* (#269).
+
+    Returns ``(files, links)``. ``files`` are the regular files found, as
+    paths relative to the resolved repository root: the place each file
+    really lives, so a file reached by two links has one path. ``links`` are
+    the symlinked folders that were followed, relative to the root.
+
+    A link is not followed when its own path is ignored, when it points
+    outside the repository root, when it points at a folder that holds it
+    (a cycle), or when its target is ignored. Each real folder is listed at
+    most once, so links that point at each other cannot loop. Symlinked
+    files are never followed, here or anywhere else.
+    """
+    root = Path(repo_root).resolve()
+    files: list[str] = []
+    links: list[str] = []
+    seen_links: set[str] = set()
+    # Real folders already listed, by device and inode: the same folder
+    # spelled two ways (a case-insensitive disk) is still listed once.
+    listed: set[tuple[int, int]] = set()
+    pending = sorted(
+        {
+            normalize_file_path(candidate)
+            for candidate in candidates
+            if os.path.islink(repo_root / candidate)
+        }
+    )
+
+    def _list(directory: Path) -> None:
+        stack = [directory]
+        while stack:
+            current = stack.pop()
+            try:
+                info = current.stat()
+                if (info.st_dev, info.st_ino) in listed:
+                    continue
+                listed.add((info.st_dev, info.st_ino))
+                with os.scandir(current) as scan:
+                    entries = sorted(scan, key=lambda entry: entry.name)
+            except OSError as exc:
+                logger.debug("Cannot list %s: %s", current, exc)
+                continue
+            relative = current.relative_to(root).as_posix()
+            prefix = "" if relative == "." else relative + "/"
+            for entry in entries:
+                entry_rel = prefix + entry.name
+                try:
+                    if entry.is_symlink() or _is_junction(entry):
+                        # A link inside a followed folder gets the same checks.
+                        pending.append(entry_rel)
+                    elif entry.is_dir(follow_symlinks=False):
+                        if not _should_ignore(entry_rel, ignore_patterns):
+                            stack.append(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        files.append(entry_rel)
+                except OSError:  # pragma: no cover - vanished mid-scan
+                    continue
+
+    while pending:
+        link_rel = pending.pop(0)
+        if link_rel in seen_links:
             continue
-        # Skip paths that would exceed OS filename limits (macOS: 255 bytes
-        # per component, ~1024 total; Windows: 260 total).
+        seen_links.add(link_rel)
+        if _should_ignore(link_rel, ignore_patterns):
+            continue
+        link = root / link_rel
+        target = Path(os.path.realpath(link))
         try:
-            # ``os.fsdecode`` preserves undecodable POSIX filename bytes as
-            # surrogate escapes. Graph paths are stored as UTF-8, so reject
-            # those before the component-length checks call ``encode()``.
-            rel_path.encode("utf-8")
-            full_path = repo_root / rel_path
-        except (OSError, UnicodeEncodeError, ValueError):
-            logger.debug("Skipping path that cannot be represented safely")
+            target_rel = target.relative_to(root).as_posix()
+        except ValueError:
+            _report_skipped_link(root, link_rel, "outside the repository")
             continue
-        if len(str(full_path)) > 1000 or any(len(p.encode()) > 255 for p in full_path.parts):
-            logger.debug("Skipping overlong path: %s", rel_path[:120])
+        if not target.is_dir():
+            # A symlinked file, or a broken link: neither is followed.
             continue
-        if not full_path.is_file():
+        holder = Path(os.path.realpath(link.parent))
+        if target == holder or target in holder.parents:
+            _report_skipped_link(root, link_rel, "at a folder that holds it")
             continue
-        if full_path.is_symlink():
+        if target_rel != "." and _should_ignore(target_rel, ignore_patterns):
             continue
-        if parser.detect_language(full_path) is None:
-            continue
-        if _is_binary(full_path):
-            continue
-        files.append(rel_path)
+        links.append(link_rel)
+        _list(target)
 
-    return files
+    return files, links
+
+
+def _path_key(rel_path: str) -> str:
+    """Spelling-blind key: case and Unicode form differ on some disks."""
+    return unicodedata.normalize("NFC", rel_path).casefold()
+
+
+def _followed_extra_files(
+    repo_root: Path,
+    candidates: list[str],
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> tuple[list[str], list[str]]:
+    """Return ``(files, links)``: parseable files only symlinked folders reach.
+
+    A file the inventory already lists, or one already taken under another
+    spelling, is left out, so each file is stored once.
+    """
+    listed = {normalize_file_path(candidate) for candidate in candidates}
+    by_key: dict[str, list[str]] = {}
+    for candidate in listed:
+        by_key.setdefault(_path_key(candidate), []).append(candidate)
+    reached, links = _walk_symlinked_dirs(repo_root, candidates, ignore_patterns)
+    extra: list[str] = []
+    taken: set[tuple[int, int]] = set()
+    for rel_path in sorted(set(reached)):
+        if rel_path in listed:
+            continue
+        full_path = repo_root / rel_path
+        try:
+            if any(
+                os.path.samefile(full_path, repo_root / other)
+                for other in by_key.get(_path_key(rel_path), [])
+            ):
+                continue
+            info = full_path.stat()
+        except OSError:
+            continue
+        if (info.st_dev, info.st_ino) in taken:
+            continue
+        if not _keep_candidate(repo_root, rel_path, ignore_patterns, parser):
+            continue
+        taken.add((info.st_dev, info.st_ino))
+        extra.append(rel_path)
+    return extra, links
+
+
+def _followed_link_paths(repo_root: Path, ignore_patterns: list[str]) -> set[str]:
+    """Return the symlinked folders inside the repository that are followed."""
+    candidates = _inventory_candidates(repo_root)
+    return set(_walk_symlinked_dirs(repo_root, candidates, ignore_patterns)[1])
+
+
+def _collect_files(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+    follow_symlinks: bool | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return ``(files, followed)``: the inventory, and the part of it that
+    is there only because a symlinked folder was followed."""
+    ignore_patterns = _load_ignore_patterns(repo_root)
+    parser = CodeParser(repo_root)
+    candidates = _inventory_candidates(repo_root, recurse_submodules)
+    files = [
+        rel_path
+        for rel_path in candidates
+        if _keep_candidate(repo_root, rel_path, ignore_patterns, parser)
+    ]
+    if not follow_symlinks_enabled(follow_symlinks):
+        return files, []
+    followed, _links = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
+    return files + followed, followed
+
+
+def collect_all_files(
+    repo_root: Path,
+    recurse_submodules: bool | None = None,
+    follow_symlinks: bool | None = None,
+) -> list[str]:
+    """Collect all parseable files in the repo, respecting ignore patterns.
+
+    Args:
+        repo_root: Repository root directory.
+        recurse_submodules: If True, include files from git submodules.
+            When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        follow_symlinks: If True, also collect files in symlinked folders
+            that point inside the repository, under their real paths. When
+            *None*, falls back to ``CRG_FOLLOW_SYMLINKS``. Default: off.
+    """
+    return _collect_files(repo_root, recurse_submodules, follow_symlinks)[0]
+
+
+def _load_followed_files(store: GraphStore) -> set[str]:
+    """Stored paths a followed symlinked folder put in the graph."""
+    raw = store.get_metadata(_FOLLOWED_FILES_KEY)
+    if not raw:
+        return set()
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        logger.warning("Ignoring unreadable %s metadata", _FOLLOWED_FILES_KEY)
+        return set()
+    if not isinstance(value, list):
+        return set()
+    return {path for path in value if isinstance(path, str)}
+
+
+def _store_followed_files(store: GraphStore, paths: set[str]) -> None:
+    """Record *paths* as in the graph only through followed folders.
+
+    Nothing is written for a graph that never used the option.
+    """
+    if store.get_metadata(_FOLLOWED_FILES_KEY) is None:
+        if not paths:
+            return
+    elif _load_followed_files(store) == paths:
+        return
+    store.set_metadata(_FOLLOWED_FILES_KEY, json.dumps(sorted(paths)))
+
+
+def _followed_files_delta(
+    repo_root: Path,
+    store: GraphStore,
+    follow: bool,
+    ignore_patterns: list[str],
+    parser: CodeParser,
+) -> tuple[list[str], list[str], set[str] | None]:
+    """Compare what symlinked folders reach now with what the graph holds.
+
+    Returns ``(new, gone, record)``: repository-relative files a followed
+    folder reaches that the graph does not hold yet; stored paths that were
+    in the graph only through a followed folder and no longer are (the link
+    went, or the option is off); and the new record, or ``None`` when there
+    is nothing to compare. A graph that never used the option costs nothing.
+    """
+    recorded = _load_followed_files(store)
+    if not follow and not recorded:
+        return [], [], None
+    candidates = _inventory_candidates(repo_root)
+    if not candidates:
+        # No inventory to compare with: leave the graph as it is.
+        return [], [], None
+    listed = {normalize_file_path(repo_root / candidate) for candidate in candidates}
+    followed: list[str] = []
+    if follow:
+        followed, _links = _followed_extra_files(repo_root, candidates, ignore_patterns, parser)
+    record = {normalize_file_path(repo_root / rel_path) for rel_path in followed}
+    stored = set(store.get_all_files())
+    new = [
+        rel_path for rel_path in followed
+        if normalize_file_path(repo_root / rel_path) not in stored
+    ]
+    gone = sorted(
+        path for path in recorded
+        if path in stored and path not in record and path not in listed
+    )
+    return new, gone, record
 
 
 def _reconcile_stale_files(
@@ -1948,6 +2258,7 @@ def full_build(
     repo_root: Path,
     store: GraphStore,
     recurse_submodules: bool | None = None,
+    follow_symlinks: bool | None = None,
 ) -> dict:
     """Full rebuild of the entire graph.
 
@@ -1956,11 +2267,19 @@ def full_build(
         store: Graph database store.
         recurse_submodules: If True, include files from git submodules.
             When *None*, falls back to ``CRG_RECURSE_SUBMODULES`` env var.
+        follow_symlinks: If True, also index files in symlinked folders that
+            point inside the repository. When *None*, falls back to the
+            ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
     """
     repo_root = _canonical_repo_root(repo_root)
     parser = CodeParser(repo_root)
-    files = collect_all_files(repo_root, recurse_submodules)
+    files, followed = _collect_files(repo_root, recurse_submodules, follow_symlinks)
     stale_files = _reconcile_stale_files(repo_root, store, files)
+    # Recorded before parsing: a record ahead of the graph is harmless, one
+    # behind it would let a file outlive the link that brought it in.
+    _store_followed_files(
+        store, {normalize_file_path(repo_root / rel_path) for rel_path in followed}
+    )
 
     total_nodes = 0
     total_edges = 0
@@ -2103,9 +2422,18 @@ def incremental_update(
     base: str = "HEAD~1",
     changed_files: list[str] | None = None,
     reconcile_stale: bool = True,
+    follow_symlinks: bool | None = None,
 ) -> dict:
-    """Incremental update: re-parse changed + dependent files only."""
+    """Incremental update: re-parse changed + dependent files only.
+
+    *follow_symlinks* matches :func:`full_build`: when on (or when the graph
+    holds files a followed folder brought in), a reconciling update also
+    adds files that symlinked folders now reach and drops the ones they no
+    longer reach, so it agrees with a full build. ``None`` falls back to
+    ``CRG_FOLLOW_SYMLINKS``.
+    """
     repo_root = _canonical_repo_root(repo_root)
+    follow = follow_symlinks_enabled(follow_symlinks)
     if reconcile_stale:
         _assert_graph_matches_root(repo_root, store)
     parser = CodeParser(repo_root)
@@ -2127,7 +2455,7 @@ def incremental_update(
         logger.info(
             "C++ identity format changed; rebuilding the graph before incremental update",
         )
-        rebuilt = full_build(repo_root, store)
+        rebuilt = full_build(repo_root, store, follow_symlinks=follow)
         return {
             "files_updated": rebuilt["files_parsed"],
             "total_nodes": rebuilt["total_nodes"],
@@ -2164,11 +2492,28 @@ def incremental_update(
             repo_root,
             store,
         )
+    followed_new: list[str] = []
+    followed_gone: list[str] = []
+    if reconcile_stale:
+        followed_new, followed_gone, followed_record = _followed_files_delta(
+            repo_root, store, follow, ignore_patterns, parser,
+        )
+        if followed_record is not None:
+            # Written before parsing, as in full_build.
+            _store_followed_files(store, followed_record)
     changed_files = list(
         dict.fromkeys(
-            [_relative_update_input(repo_root, p) for p in [*changed_files, *content_mismatches]]
+            [
+                _relative_update_input(repo_root, p)
+                for p in [*changed_files, *content_mismatches, *followed_new]
+            ]
         )
     )
+    if followed_gone:
+        gone = set(followed_gone)
+        changed_files = [
+            p for p in changed_files if normalize_file_path(repo_root / p) not in gone
+        ]
     # Defer permanent stale removal until after flow/community capture (#569).
     stale_files = (
         _reconcile_stale_files(
@@ -2177,6 +2522,8 @@ def incremental_update(
         if reconcile_stale
         else []
     )
+    if followed_gone:
+        stale_files = sorted(set(stale_files) | set(followed_gone))
 
     # Authoritative empty syncs (``base`` equals the last-stored HEAD) must
     # still fall through to the freshness write below — otherwise an empty
@@ -3417,11 +3764,29 @@ class _WatchSupervisor:
             pass
 
 
+def _holds_symlink(directory: Path, relative: str, ignore_patterns: list[str]) -> bool:
+    """Return whether a symlink that is not ignored sits below *directory*."""
+    for current, dirnames, filenames in os.walk(directory):
+        current_rel = Path(relative, os.path.relpath(current, directory)).as_posix()
+        kept = []
+        for name in [*dirnames, *filenames]:
+            entry_rel = f"{current_rel}/{name}"
+            if _should_ignore(entry_rel, ignore_patterns):
+                continue
+            if os.path.islink(os.path.join(current, name)):
+                return True
+            if name in dirnames:
+                kept.append(name)
+        dirnames[:] = kept
+    return False
+
+
 def _create_watch_handler(
     repo_root: Path,
     store: GraphStore,
     on_files_updated: Optional[Callable],
     on_directory_changed: Optional[Callable[[], None]] = None,
+    follow_symlinks: bool | None = None,
 ):
     """Create the debounced watchdog handler for one repository."""
     from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -3431,9 +3796,15 @@ def _create_watch_handler(
     lexical_root = Path(os.path.abspath(repo_root))
     resolved_root = lexical_root.resolve()
     manifest_names = set().union(*NESTED_OUTPUT_DIR_MARKERS.values())
+    follow = follow_symlinks_enabled(follow_symlinks)
 
     class WatchBatchProcessor:
         def __init__(self) -> None:
+            # Followed symlinked folders, known before any of them can go:
+            # once a link is deleted nothing on disk says it was one.
+            self.followed_links: set[str] = (
+                _followed_link_paths(repo_root, ignore_patterns) if follow else set()
+            )
             self.failure: BaseException | None = None
             self.last_event_at: float | None = None
             self.events_seen: int = 0
@@ -3523,7 +3894,7 @@ def _create_watch_handler(
                 # Relaxed exclusions need an inventory, even without source events.
                 # Only previously excluded files join this batch's update inputs.
                 newly_included = {
-                    path for path in collect_all_files(repo_root)
+                    path for path in collect_all_files(repo_root, follow_symlinks=follow)
                     if _should_ignore(path, previous)
                     and self._relative_path(str(repo_root / path)) is not None
                 }
@@ -3603,6 +3974,45 @@ def _create_watch_handler(
                     paths.add(destination)
             return paths
 
+        def _touches_followed_links(self, events: list[FileSystemEvent]) -> bool:
+            """Whether a batch adds, removes or moves a symlinked folder."""
+            for event in events:
+                for raw in (event.src_path, getattr(event, "dest_path", "")):
+                    if not raw:
+                        continue
+                    candidate = Path(os.path.abspath(os.fsdecode(raw)))
+                    try:
+                        relative = candidate.relative_to(lexical_root).as_posix()
+                    except ValueError:
+                        continue
+                    if relative == "." or _should_ignore(relative, ignore_patterns):
+                        continue
+                    if os.path.islink(candidate):
+                        return True
+                    prefix = relative + "/"
+                    if any(
+                        link == relative or link.startswith(prefix)
+                        for link in self.followed_links
+                    ):
+                        return True
+                    if event.is_directory and _holds_symlink(
+                        candidate, relative, ignore_patterns
+                    ):
+                        return True
+            return False
+
+        def _reconcile_followed_links(self) -> int:
+            # The files behind a link raise no events of their own when the
+            # link comes or goes, so run the reconciliation ``update`` runs:
+            # it adds what the links reach now and drops what they no longer
+            # reach, which is what a full build would hold.
+            result = incremental_update(
+                repo_root, store, changed_files=[], follow_symlinks=True,
+            )
+            _raise_watch_update_errors(result, "symlinked folder reconciliation")
+            self.followed_links = _followed_link_paths(repo_root, ignore_patterns)
+            return int(result["files_updated"])
+
         def process(self, events: list[FileSystemEvent]) -> None:
             # Recorded before the work so a stalled watcher is distinguishable
             # from a watcher whose repository is simply quiet.
@@ -3610,6 +4020,7 @@ def _create_watch_handler(
             self.events_seen += len(events)
             with self.lock:
                 try:
+                    patterns_before = ignore_patterns
                     files_updated, newly_included = self._refresh_ignore_patterns(events)
                     changed_files = sorted(
                         newly_included
@@ -3621,9 +4032,15 @@ def _create_watch_handler(
                             store,
                             changed_files=changed_files,
                             reconcile_stale=False,
+                            follow_symlinks=follow,
                         )
                         _raise_watch_update_errors(result, "incremental update")
                         files_updated += result["files_updated"]
+                    if follow and (
+                        ignore_patterns is not patterns_before
+                        or self._touches_followed_links(events)
+                    ):
+                        files_updated += self._reconcile_followed_links()
                     if files_updated > 0 and on_files_updated is not None:
                         postprocess_result = on_files_updated(store)
                         _raise_watch_postprocess_warnings(postprocess_result)
@@ -3728,6 +4145,7 @@ def watch(
     store: GraphStore,
     on_files_updated: Optional[Callable] = None,
     stop_event: threading.Event | None = None,
+    follow_symlinks: bool | None = None,
 ) -> None:
     """Watch for file changes and auto-update the graph.
 
@@ -3747,6 +4165,9 @@ def watch(
             (FTS, flows, communities) after watch updates.
         stop_event: Optional event that ends the loop cleanly, for callers
             that run ``watch`` on a thread they need to shut down.
+        follow_symlinks: Follow symlinked folders inside the repository, as
+            :func:`full_build` does. When *None*, falls back to the
+            ``CRG_FOLLOW_SYMLINKS`` env var. Default: off.
 
     Raises:
         RuntimeError: if a watch update fails, or if the filesystem observer
@@ -3779,7 +4200,8 @@ def watch(
     observer = Observer()
     supervisor.attach(observer)
     handler = _create_watch_handler(
-        repo_root, store, on_files_updated, supervisor.request_replan
+        repo_root, store, on_files_updated, supervisor.request_replan,
+        follow_symlinks=follow_symlinks,
     )
     supervisor.schedule_initial(handler)
     handler.start()
@@ -3795,7 +4217,9 @@ def watch(
         with handler.serialized():
             observer.start()
             observer_started = True
-            initial = incremental_update(repo_root, store, changed_files=[])
+            initial = incremental_update(
+                repo_root, store, changed_files=[], follow_symlinks=follow_symlinks,
+            )
             _raise_watch_update_errors(initial, "initial watch reconciliation")
             if initial["files_updated"] > 0 and on_files_updated is not None:
                 postprocess_result = on_files_updated(store)

@@ -248,3 +248,27 @@ vendor/**
 ```
 
 In git repositories, indexing is based on tracked files (`git ls-files`), so gitignored files are skipped. Use `.code-review-graphignore` to exclude tracked files or when git is not available.
+
+## Symlinked Folders
+
+By default, symlinks are not followed: a symlinked file or folder adds nothing to the graph.
+
+To follow symlinked folders, pass `--follow-symlinks` to `build`, `update` or `watch`, or set
+`CRG_FOLLOW_SYMLINKS=1`. Set the variable where hooks, the MCP server and the daemon run too,
+so every update makes the same choice. `--no-follow-symlinks` turns it off for one run.
+
+When it is on:
+
+- Only links that point inside the repository are followed. A link that points outside it
+  is skipped, and the build log says so.
+- A link that points at a folder holding it (such as `app/up -> ..`) is skipped, and each
+  real folder is read once, so links that point at each other cannot loop.
+- Each file is stored once, under its real path inside the repository, so a link to a
+  folder the graph already indexes adds no copies. A link to a folder Git does not list (an
+  ignored folder, or a nested clone) adds that folder's files.
+- Files reached through a link are indexed even when Git ignores them. `.code-review-graphignore`
+  and the default ignore list still apply, to the link's path and to the real path, so use
+  them to leave files out.
+- Symlinked files are still never followed.
+- `update` and `watch` add files when a link appears and drop them when it goes, the same
+  as a full build. Turning the option off and running `update` drops them as well.

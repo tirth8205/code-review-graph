@@ -708,6 +708,7 @@ def build_or_update_graph(
     embedding_model: str | None = None,
     wait_for_lock: bool = False,
     recover_corrupt: bool = False,
+    follow_symlinks: bool | None = None,
 ) -> dict[str, Any]:
     """Build or incrementally update the code knowledge graph.
 
@@ -750,6 +751,10 @@ def build_or_update_graph(
 
         recover_corrupt: Discard an unusable graph before an explicit full rebuild.
             Used by the CLI build command; ignored for incremental updates.
+        follow_symlinks: If True, also index files in symlinked folders that
+            point inside the repository (never outside it). When None
+            (default), falls back to the CRG_FOLLOW_SYMLINKS environment
+            variable. Default: disabled.
 
     Returns:
         Summary with files_parsed/updated, node/edge counts, and errors. A run
@@ -802,7 +807,9 @@ def build_or_update_graph(
         store.set_metadata(BUILD_STATE_KEY, BUILD_IN_PROGRESS)
 
         if full_rebuild:
-            result = full_build(root, store, recurse_submodules)
+            result = full_build(
+                root, store, recurse_submodules, follow_symlinks=follow_symlinks,
+            )
             failed = [str(item.get("file", "?")) for item in result["errors"]]
             summary = (
                 f"Full build complete: parsed {result['files_parsed']} files, "
@@ -822,7 +829,9 @@ def build_or_update_graph(
                 build_result["recovery_reason"] = recovery_reason
         else:
             try:
-                result = incremental_update(root, store, base=base_resolved)
+                result = incremental_update(
+                    root, store, base=base_resolved, follow_symlinks=follow_symlinks,
+                )
             except RuntimeError as exc:
                 # Change discovery or root validation failed before anything was
                 # stored; report it the way every other failure is reported.

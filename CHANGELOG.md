@@ -4,6 +4,17 @@
 
 ### Added
 
+- Symlinked folders can be followed, as an opt-in (part of #269). Pass
+  `--follow-symlinks` to `build`, `update` or `watch`, or set
+  `CRG_FOLLOW_SYMLINKS=1`; it is off by default, so nothing changes unless you
+  ask. Only links that point inside the repository are followed: a link that
+  points outside it, or at a folder that holds it, is skipped and the log says
+  so, and each real folder is read once, so links cannot loop. Each file is
+  stored once, under its real path, so a link to a folder the graph already
+  holds adds no copies; a link to a folder Git does not list (an ignored
+  folder, a nested clone) adds its files. `.code-review-graphignore` still
+  applies. `update` and `watch` add and drop those files as links come and
+  go, matching a full build. Symlinked files are still never followed.
 - Python modules that replace themselves in `sys.modules` are followed to the
   module they install. A compatibility shim such as
   `sys.modules[__name__] = importlib.import_module("app.services.billing")`

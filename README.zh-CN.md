@@ -539,6 +539,7 @@ pip install "code-review-graph[all]"                 # All optional dependencies
 | `CRG_CHURN_WINDOW_DAYS` | `detect-changes --churn` 统计提交数的时间窗口 | `90` |
 | `CRG_LEIDEN_SEED` | Leiden 社区检测的随机种子 | `42` |
 | `CRG_RECURSE_SUBMODULES` | 设为 `1`、`true` 或 `yes` 时包含 git 子模块 | - |
+| `CRG_FOLLOW_SYMLINKS` | 设为 `1`、`true`、`yes` 或 `on` 时跟随指向仓库内部的符号链接文件夹，与 `--follow-symlinks` 相同。见 [符号链接文件夹](docs/USAGE.md#symlinked-folders) | - |
 | `CRG_TOOLS` | 提供服务时暴露的 MCP 工具白名单，逗号分隔 | - |
 | `GOOGLE_API_KEY` | Google Gemini 嵌入的 API 密钥 | - |
 | `MINIMAX_API_KEY` | MiniMax 嵌入的 API 密钥 | - |
